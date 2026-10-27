@@ -1,5827 +1,1421 @@
+# =====================================================
+# APRIL IMAGES GENERATION
+# =====================================================
+"""Canonical April image-generation engine backed by OpenAI GPT Image 2.
+
+Route:
+    April Bot -> Interpretation -> Provider -> C_APRIL_IMAGES_GENERATOR
+      -> C_ARTIFACT_CONTRACT -> GalleryBlock / April Web
+
+Contract rules:
+    * OpenAI Provider remains the semantic authority.
+    * C_APRIL_IMAGES_GENERATOR is the sole image producer for this route.
+    * The image generator receives the same-turn user request together with the
+      OpenAI structured visual plan and sends that combined semantic payload to
+      ``gpt-image-2`` without adding local artistic styles or unrelated scene
+      content.
+    * GPT Image 2 returns base64 image data; this module decodes the bytes,
+      normalizes the requested Web size when necessary, validates the PNG and
+      forwards the resulting bytes through the existing C_ARTIFACT_CONTRACT.
+    * Diagnostic logging is observer-only and never changes image bytes.
+"""
+
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from copy import deepcopy
-import uuid
-import time
+
+import asyncio
+import base64
 import hashlib
+import io
+import json
+import math
+import os
 import re
+import time
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Optional
 
-# =====================================================
-# ARTIFACT METADATA
-# =====================================================
+from PIL import Image, ImageOps
 
-@dataclass
-class ArtifactMetadata:
-
-    artifact_id: str = field(
-        default_factory=lambda: str(uuid.uuid4())
-    )
-
-    artifact_version: str = "1.0"
-
-    created_at: float = field(
-        default_factory=time.time
-    )
-
-    room_source: str = ""
-
-    artifact_type: str = ""
-
-# =====================================================
-# ARTIFACT CONTEXT
-# =====================================================
-
-@dataclass
-class ArtifactContext:
-
-    goal: Optional[str] = None
-
-    purpose: Optional[str] = None
-
-    role: Optional[str] = None
-
-    active_scene: Optional[str] = None
-
-    dependencies: List[str] = field(
-        default_factory=list
-    )
-
-    # =================================================
-    # PROFESSIONAL ROOM PROFILE
-    # =================================================
-
-    domain: Optional[str] = None
-
-    specialization: Optional[str] = None
-
-    knowledge_class: Optional[str] = None
-
-    knowledge_scope: List[str] = field(
-        default_factory=list
-    )
-
-    capabilities: List[str] = field(
-        default_factory=list
-    )
-
-    research_capabilities: List[str] = field(
-        default_factory=list
-    )
-
-    experiment_capabilities: List[str] = field(
-        default_factory=list
-    )
-
-    artifact_outputs: List[str] = field(
-        default_factory=list
-    )
-
-    # =================================================
-    # COGNITIVE CONTRIBUTIONS
-    # =================================================
-
-    scene_contributions: List[Dict] = field(
-        default_factory=list
-    )
-
-    focus_contributions: List[Dict] = field(
-        default_factory=list
-    )
-
-    memory_contributions: List[Dict] = field(
-        default_factory=list
-    )
-
-    trajectory_hints: List[str] = field(
-        default_factory=list
-    )
-
-    scene_hints: List[str] = field(
-        default_factory=list
-    )
-
-
-# =====================================================
-# ARTIFACT QUALITY
-# =====================================================
-
-@dataclass
-class ArtifactQuality:
-
-    quality_score: float = 0.0
-
-    confidence_score: float = 0.0
-
-    completeness_score: float = 0.0
-
-    validation_passed: bool = False
-
-    warnings: List[str] = field(
-        default_factory=list
-    )
-
-
-# =====================================================
-# CANONICAL TEXT / PAYLOAD NORMALIZATION
-# =====================================================
-
-_CANONICAL_TEXT_KEYS = (
-    "answer",
-    "content",
-    "summary",
-    "text",
-    "response",
-    "explanation",
-    "display_text",
-    "title",
-    "message",
+from blocks.C_ARTIFACT_CONTRACT import (
+    UniversalArtifactContract,
+    build_universal_contract,
+    create_artifact,
 )
 
-_STRUCTURED_PAYLOAD_KEYS = (
-    "domain",
-    "topic",
-    "analysis",
-    "capabilities",
-    "knowledge_scope",
-    "research_capabilities",
-    "experiment_capabilities",
-    "artifact_outputs",
-    "scene_contributions",
-    "focus_contributions",
-    "memory_contributions",
-    "trajectory_hints",
-    "scene_hints",
-    "room_identity",
-)
-
-def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
-    """Return a safe human-readable string without stringifying raw dicts."""
-    if value is None:
-        return ""
-
-    if isinstance(value, str):
-        return value.strip()
-
-    if isinstance(value, (int, float, bool)):
-        return str(value).strip()
-
-    if isinstance(value, dict):
-        for key in _CANONICAL_TEXT_KEYS:
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
-
-        if allow_topic:
-            topic = value.get("topic")
-            if isinstance(topic, str) and topic.strip():
-                return topic.strip()
-
-        for key in ("label", "name", "kind", "type", "renderer", "viewer"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
-
-        return ""
-
-    if isinstance(value, (list, tuple, set)):
-        parts = []
-        for item in value:
-            candidate = _extract_text_candidate(item, allow_topic=allow_topic)
-            if candidate:
-                parts.append(candidate)
-        return ", ".join(parts)
-
-    try:
-        return str(value).strip()
-    except Exception:
-        return ""
-
-
-def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize table cells without selecting a route or changing semantics."""
-    payload = dict(payload or {})
-    columns = payload.get("columns") or payload.get("headers") or []
-    if isinstance(columns, str):
-        columns = [x.strip() for x in columns.split("|")] if "|" in columns else [columns.strip()]
-    columns = [x for x in columns if x is not None]
-
-    rows = payload.get("rows") or []
-    if isinstance(rows, dict):
-        rows = list(rows.values())
-    elif not isinstance(rows, (list, tuple)):
-        rows = [rows]
-
-    normalized_rows = []
-    for row in rows:
-        if isinstance(row, dict):
-            values = [row.get(column, "") for column in columns] if columns else list(row.values())
-        elif isinstance(row, (list, tuple)):
-            values = list(row)
-        elif isinstance(row, str):
-            if "|" in row:
-                values = [part.strip() for part in row.split("|")]
-            elif "\t" in row:
-                values = [part.strip() for part in row.split("\t")]
-            else:
-                values = [row.strip()]
-        else:
-            values = [row]
-        normalized_rows.append(values)
-
-    width = len(columns) or max((len(row) for row in normalized_rows), default=0)
-    if not columns and width:
-        columns = [f"Column {i + 1}" for i in range(width)]
-    for row in normalized_rows:
-        if len(row) < width:
-            row.extend([""] * (width - len(row)))
-        elif len(row) > width:
-            del row[width:]
-
-    payload["columns"] = columns
-    payload["rows"] = normalized_rows
-    payload["table_schema"] = "april.table.canonical.v2"
-    payload["presentation"] = {
-        **dict(payload.get("presentation") or {}),
-        "renderer": "TableBlock",
-        "engine": "McDowell",
-        "math_engine": "KaTeX",
-        "payload_unchanged": True,
-    }
-    return payload
-
-
-def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Canonicalize supplied structure and make concrete diagrams readable on mobile."""
-    payload = dict(payload or {})
-    nodes = payload.get("nodes") or payload.get("components") or payload.get("vertices") or []
-    edges = payload.get("edges") or []
-    connections = payload.get("connections") or []
-    relations = payload.get("relations") or []
-
-    if not isinstance(nodes, list):
-        nodes = list(nodes.values()) if isinstance(nodes, dict) else [nodes]
-    if not isinstance(edges, list):
-        edges = list(edges.values()) if isinstance(edges, dict) else [edges]
-    if not isinstance(connections, list):
-        connections = list(connections.values()) if isinstance(connections, dict) else [connections]
-    if not isinstance(relations, list):
-        relations = list(relations.values()) if isinstance(relations, dict) else [relations]
-
-    canonical_nodes = []
-    for i, node in enumerate(nodes):
-        if isinstance(node, dict):
-            item = dict(node)
-            item.setdefault("id", str(item.get("name") or item.get("label") or f"node_{i + 1}"))
-            item.setdefault("label", str(item.get("name") or item.get("id") or ""))
-            canonical_nodes.append(item)
-        else:
-            label = str(node).strip()
-            if label:
-                canonical_nodes.append({"id": f"node_{i + 1}", "label": label, "type": "node"})
-
-    canonical_edges = []
-    for edge in edges + connections + relations:
-        if not isinstance(edge, dict):
-            continue
-        source = edge.get("from") or edge.get("source") or edge.get("start")
-        target = edge.get("to") or edge.get("target") or edge.get("end")
-        if source and target:
-            canonical_edges.append({
-                "from": str(source),
-                "to": str(target),
-                **({"label": str(edge["label"])} if edge.get("label") is not None else {}),
-            })
-
-    payload["nodes"] = canonical_nodes
-    payload["edges"] = canonical_edges
-    payload["components"] = payload.get("components") or deepcopy(canonical_nodes)
-    payload["layout"] = payload.get("layout") or {"direction": "TB", "rankdir": "TB", "responsive": True}
-    payload["diagram_schema"] = "april.diagram.canonical.v2"
-    existing_presentation = dict(payload.get("presentation") or {})
-    concrete_renderer = (
-        payload.get("renderer")
-        or existing_presentation.get("renderer")
-        or "DiagramRenderer"
-    )
-    payload["representation"] = payload.get("representation") or (
-        "geometric_figure"
-        if concrete_renderer in {"GalleryBlock", "SvgBlock", "ArithmeticDiagram"}
-        else "schematic"
-    )
-    payload["presentation"] = {
-        **existing_presentation,
-        "renderer": concrete_renderer,
-        "engine": "McDowell",
-        "payload_unchanged": True,
-        "text_companion_required": True,
-    }
-    # Use the existing C_DIAGRAM_ROOM as the single SVG builder. This is a local
-    # import to avoid a module import cycle (C_DIAGRAM_ROOM uses this contract).
-    try:
-        from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
-        has_svg = any(str(payload.get(key) or "").strip() for key in ("svg", "svg_payload", "drawing"))
-        if (canonical_nodes and canonical_edges) or has_svg:
-            normalized = ensure_readable_diagram_payload(
-                payload,
-                title=str(payload.get("title") or payload.get("description") or "Схема"),
-            )
-            if isinstance(normalized, dict) and normalized:
-                payload.update(normalized)
-                if payload.get("svg") or payload.get("svg_payload"):
-                    if str(payload.get("renderer") or concrete_renderer) in {"", "DiagramRenderer", "diagram"}:
-                        payload["renderer"] = "SvgBlock"
-                    presentation = dict(payload.get("presentation") or {})
-                    presentation["renderer"] = payload.get("renderer") or presentation.get("renderer") or "SvgBlock"
-                    presentation["responsive"] = True
-                    payload["presentation"] = presentation
-    except Exception:
-        # A rendering repair failure must not drop or mutate the original source.
-        pass
-    return payload
-
-
-def _normalize_image_gallery_payload(structured_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize one image source into the exact GalleryBlock image-item contract."""
-    payload = dict(structured_payload or {})
-    existing = payload.get("images") or payload.get("items") or payload.get("gallery") or payload.get("sources")
-    if isinstance(existing, list) and existing:
-        return payload
-
-    direct = (
-        payload.get("src")
-        or payload.get("url")
-        or payload.get("image")
-        or payload.get("image_data_uri")
-        or payload.get("data_uri")
-        or ""
-    )
-    base64_value = payload.get("image_base64") or payload.get("base64") or ""
-    mime = str(payload.get("mime_type") or "image/png").strip() or "image/png"
-    if not direct and base64_value:
-        direct = f"data:{mime};base64,{base64_value}"
-    if not direct:
-        return payload
-
-    item = {
-        "src": direct,
-        "url": direct,
-        "image": direct,
-        "mime_type": mime,
-        "width": payload.get("width"),
-        "height": payload.get("height"),
-        "title": payload.get("title") or "Image",
-        "alt": payload.get("alt") or payload.get("prompt") or payload.get("description") or "April image",
-        "caption": payload.get("caption") or payload.get("prompt") or payload.get("description") or "",
-    }
-    payload["images"] = [item]
-    return payload
-
-
-def _canonicalize_artifact_data(
-    data: Dict[str, Any],
-    *,
-    artifact_type: str = "",
-    room_source: str = "",
-) -> Dict[str, Any]:
-    """Keep internal payloads structured while preserving visible text fields."""
-    payload = dict(data or {})
-
-    structured_payload = payload.get("payload")
-    if structured_payload is None:
-        structured_payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in _CANONICAL_TEXT_KEYS
-            and key not in ("presentation", "machine_only", "human_visible")
-        }
-
-    canonical_text = ""
-    for key in _CANONICAL_TEXT_KEYS:
-        canonical_text = _extract_text_candidate(payload.get(key))
-        if canonical_text:
-            break
-
-    if not isinstance(structured_payload, dict):
-        structured_payload = {}
-    if artifact_type in {"image", "gallery", "scene", "visual_context"}:
-        structured_payload = _normalize_image_gallery_payload(structured_payload)
-    elif artifact_type == "table":
-        structured_payload = _normalize_table_payload(structured_payload)
-    elif artifact_type == "diagram":
-        structured_payload = _normalize_diagram_payload(structured_payload)
-
-    machine_only = bool(payload.get("machine_only", False))
-    human_visible = payload.get("human_visible")
-    if human_visible is None:
-        human_visible = not machine_only
-
-    # If the payload is purely structural, default it to machine-only before
-    # any topic/title fallback can leak internal payloads into the UI.
-    if not canonical_text and structured_payload and payload.get("human_visible") is None and payload.get("machine_only") is None:
-        machine_only = True
-        human_visible = False
-
-    if not canonical_text and not human_visible and _extract_text_candidate(payload.get("display_text")):
-        canonical_text = _extract_text_candidate(payload.get("display_text"))
-
-    if not canonical_text and human_visible and not machine_only:
-        canonical_text = _extract_text_candidate(payload.get("topic"), allow_topic=True)
-        if not canonical_text:
-            canonical_text = _extract_text_candidate(payload.get("title"))
-
-    normalized = dict(payload)
-    normalized["artifact_type"] = artifact_type or normalized.get("artifact_type", "")
-    normalized["room_source"] = room_source or normalized.get("room_source", "")
-    normalized["machine_only"] = machine_only
-    normalized["human_visible"] = bool(human_visible)
-    normalized["payload"] = structured_payload
-
-    normalized["answer"] = canonical_text
-    normalized["content"] = canonical_text
-    normalized["summary"] = canonical_text
-    normalized["text"] = canonical_text
-    normalized.setdefault("display_text", canonical_text)
-
-    normalized.setdefault(
-        "signal",
-        {
-            "artifact_type": normalized["artifact_type"],
-            "room_source": normalized["room_source"],
-            "machine_only": normalized["machine_only"],
-            "human_visible": normalized["human_visible"],
-        },
-    )
-
-    return normalized
-
-
-def _scene_is_internal_only(scene: Any) -> bool:
-    metadata = {}
-    if hasattr(scene, "metadata"):
-        metadata = getattr(scene, "metadata") or {}
-    elif isinstance(scene, dict):
-        metadata = scene.get("metadata", {}) or {}
-
-    return bool(metadata.get("machine_only")) or metadata.get("human_visible") is False
-
-
-def _scene_text_fallback(scene: Any) -> str:
-    for attr in ("answer", "content", "summary"):
-        if hasattr(scene, attr):
-            candidate = _extract_text_candidate(getattr(scene, attr))
-            if candidate:
-                return candidate
-    if isinstance(scene, dict):
-        for key in ("answer", "content", "summary"):
-            candidate = _extract_text_candidate(scene.get(key))
-            if candidate:
-                return candidate
-    return ""
-
-# =====================================================
-# RENDER CONTRACT
-# =====================================================
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
 
 
 @dataclass
-class ArtifactRenderContract:
-
-    web_block: str = ""
-
-    viewer: str = ""
-
-    editable: bool = True
-
-    responsive: bool = True
-
-    exportable: bool = True
-
-    machine_only: bool = False
-
-    human_visible: bool = True
-
-    # Stage 1 transport hints
-    payload_type: str = ""
-    scene_block: str = ""
-    renderer: str = ""
-    priority: int = 100
-    complexity: str = "balanced"
-    layout: str = "single"
-
-    # Canonical render-signal identity.
-    # The payload itself remains in BaseArtifact.data["payload"]; this field
-    # only describes how that payload must travel to April Web.
-    signal_version: str = "1.0"
-    signal_type: str = ""
-    # Canonical presentation contract transported with the same Fiber signal.
-    presentation: Dict[str, Any] = field(default_factory=dict)
-
-# =====================================================
-# BASE ARTIFACT
-# =====================================================
-
-@dataclass
-class BaseArtifact:
-
-    metadata: ArtifactMetadata
-
-    context: ArtifactContext
-
-    quality: ArtifactQuality
-
-    render: ArtifactRenderContract
-
-    data: Dict[str, Any] = field(
-        default_factory=dict
-    )
-
-# =====================================================
-# BLOCK MAP
-# =====================================================
-
-# Renderer capability map.
-# artifact_type identifies the produced representation; renderer identifies
-# the concrete Web viewer for this particular artifact. One room may therefore
-# produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.4"
-
-# Exact renderer contract mirrored from the actual April Web RenderMessage
-# registry. This describes the destination component; it never performs routing.
-WEB_RENDERER_REGISTRY = {
-    "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
-    "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
-    "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid"]},
-    "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
-    "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
-    "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
-    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
-    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "components", "vertices", "connections", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
-    "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
-    "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
-    "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects", "nodes", "edges", "title", "description"]},
-    "layout": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "title", "description", "direction"]},
-    "visual": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "images", "title", "description"]},
-    "renderer_scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "images", "title", "description"]},
-    "visual_context": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context", "title", "description"]},
-    "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language", "filename"]},
-    "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description", "links", "markdown", "preview", "domain", "icon", "preview_image"]},
-    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
-    "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
-    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
-    "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
-    "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
-    # C rooms may emit function/domain artifacts. They remain in the same SceneContract
-    # and use the canonical text renderer when they do not request a specialized visual.
-    "function": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["function", "expression", "description", "analysis", "summary", "content", "text"]},
-    # Domain rooms travel inside the same SceneContract. They use the normal
-    # text renderer unless they emit a registered structured artifact type.
-    "biology": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
-    "it": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "code"]},
-    "literature": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
-    "mathematics": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "formula", "expression"]},
-    "news": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "sources", "links"]},
-    "politics": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "sources", "links"]},
-    "social": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text"]},
-    "trigonometry": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "analysis", "summary", "content", "text", "formula", "expression"]},
-    "utc": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["description", "summary", "content", "text", "datetime", "timezone"]},
-}
-
-ARTIFACT_BLOCK_MAP = {kind: spec["renderer"] for kind, spec in WEB_RENDERER_REGISTRY.items()}
-ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
-
-# Concrete renderers that are allowed to cross the artifact/Fiber boundary.
-SUPPORTED_RENDERERS = {
-    "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
-    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
-    "DiagramRenderer",
-    "SvgBlock", "ArithmeticDiagram",
-}
-
-# Data-driven renderer aliases. They refine a produced representation; they do
-# not perform lexical routing.
-ARTIFACT_RENDERER_ALIASES = {
-    "text": "MessageTextBlock",
-    "markdown": "MessageTextBlock",
-    "message": "MessageTextBlock",
-    "message_text": "MessageTextBlock",
-    # These are implementation-level diagram names. They are normalized to the
-    # actual Web renderer while the payload (including SVG/geometry) is untouched.
-    "diagram": "DiagramRenderer",
-    "diagramblock": "DiagramRenderer",
-    "schematic": "DiagramRenderer",
-    "svgblock": "DiagramRenderer",
-    "svg": "DiagramRenderer",
-    "arithmeticdiagram": "DiagramRenderer",
-    "arithmetic_diagram": "DiagramRenderer",
-    "gallery": "GalleryBlock",
-    "image": "GalleryBlock",
-    "figure": "GalleryBlock",
-    "geometry": "DiagramRenderer",
-    "geometric_figure": "DiagramRenderer",
-}
-
-# =====================================================
-# CANONICAL APRIL ROOM REGISTRY
-# =====================================================
-# Registration lives here as metadata only.
-#
-# Important:
-#   * This registry DOES NOT import room modules.
-#   * This registry DOES NOT create alternate routes.
-#   * Executor remains responsible for selecting/activating rooms.
-#   * Room implementations remain in their existing blocks/*.py files.
-#   * C_ARTIFACT_CONTRACT is the single source of truth for room identity,
-#     capabilities and artifact expectations.
-#
-# Infrastructure components such as bot.ru, Exkrutor and the 12h memory
-# subsystem are NOT rooms and therefore are intentionally not registered here.
-
-ROOM_REGISTRY_VERSION = "1.0"
-
-@dataclass(frozen=True)
-class RoomRegistration:
-    room_id: str
-    module: str
-    class_name: str = ""
-    artifact_type: str = ""
-    room_type: str = ""
-    role: str = ""
-    capabilities: tuple[str, ...] = ()
-    enabled: bool = True
-    is_engine: bool = False
+class ImageGenerationResult:
+    image_bytes: bytes
+    mime_type: str
+    width: int
+    height: int
+    backend: str
+    prompt: str
+    artifact: dict[str, Any]
+    contract: UniversalArtifactContract
 
 
-ROOM_REGISTRY: Dict[str, RoomRegistration] = {
-    "C_APRIL_IMAGES_GENERATOR": RoomRegistration(
-        room_id="APRIL_IMAGES_GENERATION",
-        module="blocks.C_APRIL_IMAGES_GENERATOR",
-        class_name="AprilImagesGenerator",
-        artifact_type="image",
-        room_type="generator",
-        role="canonical image generation engine",
-        capabilities=("image_generation", "png", "gallery"),
-        is_engine=True,
-    ),
-    "C_BIOLOGY_ROOM": RoomRegistration(
-        room_id="biology",
-        module="blocks.C_BIOLOGY_ROOM",
-        class_name="BiologyRoom",
-        room_type="knowledge",
-        role="biology knowledge and research",
-        capabilities=("biology", "research", "knowledge"),
-    ),
-    "C_DIAGRAM_ROOM": RoomRegistration(
-        room_id="C_DIAGRAM_ROOM",
-        module="blocks.C_DIAGRAM_ROOM",
-        class_name="DiagramRoom",
-        artifact_type="diagram",
-        room_type="diagram_renderer",
-        role="canonical diagram structure",
-        capabilities=("diagram", "svg", "geometry"),
-    ),
-    "C_FORMULA_ROOM": RoomRegistration(
-        room_id="FORMULA_ROOM",
-        module="blocks.C_FORMULA_ROOM",
-        class_name="FormulaRoom",
-        artifact_type="formula",
-        room_type="visual",
-        role="formula rendering",
-        capabilities=("formula", "latex", "math"),
-    ),
-    "C_FUNCTION_ROOM": RoomRegistration(
-        room_id="FUNCTION_ROOM",
-        module="blocks.C_FUNCTION_ROOM",
-        class_name="FunctionRoom",
-        artifact_type="function",
-        room_type="visual",
-        role="function representation",
-        capabilities=("function", "mathematical_function"),
-    ),
-    "C_GALLERY_ROOM": RoomRegistration(
-        room_id="GALLERY_ROOM",
-        module="blocks.C_GALLERY_ROOM",
-        class_name="GalleryRoom",
-        artifact_type="gallery",
-        room_type="visual",
-        role="gallery composition",
-        capabilities=("gallery", "image_collection"),
-    ),
-    "C_GRAPH_ROOM": RoomRegistration(
-        room_id="C_GRAPH_ROOM",
-        module="blocks.C_GRAPH_ROOM",
-        class_name="GraphRoom",
-        artifact_type="graph",
-        room_type="graph_renderer",
-        role="canonical graph structure",
-        capabilities=("graph", "series", "data_visualization"),
-    ),
-    "C_IT_ROOM": RoomRegistration(
-        room_id="it",
-        module="blocks.C_IT_ROOM",
-        class_name="ITRoom",
-        room_type="knowledge",
-        role="software and code analysis",
-        capabilities=("software", "code", "git", "analysis", "site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"),
-    ),
-    "C_LINK_ROOM": RoomRegistration(
-        room_id="LINK_ROOM",
-        module="blocks.C_LINK_ROOM",
-        class_name="LinkRoom",
-        artifact_type="link",
-        room_type="visual",
-        role="link/card representation",
-        capabilities=("link", "url", "preview"),
-    ),
-    "C_LITERATURE_ROOM": RoomRegistration(
-        room_id="LITERATURE_ROOM",
-        module="blocks.C_LITERATURE_ROOM",
-        class_name="LiteratureRoom",
-        artifact_type="function",
-        room_type="knowledge",
-        role="literature knowledge and analysis",
-        capabilities=("literature", "authors", "literary_analysis"),
-    ),
-    "C_MATHEMATICS_ROOM": RoomRegistration(
-        room_id="MATHEMATICS_ROOM",
-        module="blocks.C_MATHEMATICS_ROOM",
-        class_name="MathematicsRoom",
-        artifact_type="function",
-        room_type="science",
-        role="mathematical reasoning",
-        capabilities=("mathematics", "calculation", "reasoning"),
-    ),
-    "C_NEWS_ROOM": RoomRegistration(
-        room_id="NEWS_ROOM",
-        module="blocks.C_NEWS_ROOM",
-        class_name="NewsRoom",
-        artifact_type="function",
-        room_type="professional",
-        role="news domain processing",
-        capabilities=("news", "current_events"),
-    ),
-    "C_POLITICS_ROOM": RoomRegistration(
-        room_id="POLITICS_ROOM",
-        module="blocks.C_POLITICS_ROOM",
-        class_name="PoliticsRoom",
-        artifact_type="function",
-        room_type="professional",
-        role="politics domain processing",
-        capabilities=("politics", "current_events"),
-    ),
-    "C_SOCIAL_ROOM": RoomRegistration(
-        room_id="SOCIAL_ROOM",
-        module="blocks.C_SOCIAL_ROOM",
-        class_name="SocialRoom",
-        artifact_type="function",
-        room_type="professional",
-        role="social domain processing",
-        capabilities=("social", "communication"),
-    ),
-    "C_TABLE_ROOM": RoomRegistration(
-        room_id="C_TABLE_ROOM",
-        module="blocks.C_TABLE_ROOM",
-        class_name="TableRoom",
-        artifact_type="table",
-        room_type="table_renderer",
-        role="canonical table structure",
-        capabilities=("table", "structured_data", "tabular"),
-    ),
-    "C_TRIGONOMETRY_ROOM": RoomRegistration(
-        room_id="TRIGONOMETRY_ROOM",
-        module="blocks.C_TRIGONOMETRY_ROOM",
-        class_name="TrigonometryRoom",
-        artifact_type="function",
-        room_type="science",
-        role="trigonometry reasoning",
-        capabilities=("trigonometry", "calculation", "geometry"),
-    ),
-    "C_UTC_ROOM": RoomRegistration(
-        room_id="UTC_ROOM",
-        module="blocks.C_UTC_ROOM",
-        class_name="UTCRoom",
-        artifact_type="function",
-        room_type="service",
-        role="UTC/time service",
-        capabilities=("utc", "time", "datetime"),
-    ),
-    "C_WEB_ROOM": RoomRegistration(
-        room_id="WEB_ROOM",
-        module="blocks.C_WEB_ROOM",
-        class_name="WebRoom",
-        artifact_type="link",
-        room_type="service",
-        role="web service/artifact representation",
-        capabilities=("web", "links", "retrieval"),
-    ),
-}
+class AprilImagesGenerator:
+    """The only image producer between Provider and C_ARTIFACT_CONTRACT."""
 
-# Compatibility map for existing Factory code.  It contains module paths only;
-# it does not import or execute rooms and does not create a second routing path.
-FACTORY_ROOM_MAP: Dict[str, str] = {
-    key: registration.module
-    for key, registration in ROOM_REGISTRY.items()
-}
+    ENGINE_NAME = "GPT Image 2.0"
+    ENGINE_VERSION = "2.0.1-prompt-refinement"
+    MODEL = "gpt-image-2"
+    BACKEND = "openai_gpt_image_2"
 
+    DEFAULT_SIZE = (512, 512)
+    MIN_SIZE = 256
+    MAX_SIZE = 1536
 
-def register_room(registration: RoomRegistration) -> RoomRegistration:
-    """Register one room in the canonical C-ARTIFACT registry."""
-    if not isinstance(registration, RoomRegistration):
-        raise TypeError("registration must be RoomRegistration")
-    key = registration.module.rsplit(".", 1)[-1]
-    ROOM_REGISTRY[key] = registration
-    FACTORY_ROOM_MAP[key] = registration.module
-    return registration
+    # GPT Image 2 minimum output area is 655,360 pixels.  April's Web route
+    # remains 512x512 by decoding the model's compliant raster and then
+    # downsampling it to the requested canonical Web size.
+    API_MIN_PIXELS = 655_360
+    API_MAX_PIXELS = 8_294_400
+    API_MAX_EDGE = 3_840
 
+    # Official GPT Image 2 standard rates used for local cost diagnostics.
+    TEXT_INPUT_USD_PER_MILLION = 2.50
+    IMAGE_INPUT_USD_PER_MILLION = 4.00
+    IMAGE_OUTPUT_USD_PER_MILLION = 15.00
+    LOW_1024_IMAGE_ESTIMATE_USD = 0.006
 
-def get_room_registration(room_key: str) -> Optional[RoomRegistration]:
-    """Resolve a room registration without importing or executing the room."""
-    key = str(room_key or "").strip()
-    if not key:
+    MAX_SEMANTIC_PROMPT_TOKENS = 12_000
+
+    def __init__(self) -> None:
+        self.engine_name = self.ENGINE_NAME
+        self.engine_version = self.ENGINE_VERSION
+
+    # -------------------------------------------------
+    # OpenAI client / configuration
+    # -------------------------------------------------
+
+    @classmethod
+    def _api_key(cls) -> str:
+        return os.getenv("OPENAI_API_KEY", "").strip()
+
+    @classmethod
+    def _client(cls):
+        if OpenAI is None:
+            raise RuntimeError("APRIL_IMAGES_OPENAI_SDK_NOT_INSTALLED")
+        api_key = cls._api_key()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
+        # Do not cache a client globally: the existing Provider path and the
+        # generator use the same environment-backed key without sharing state.
+        return OpenAI(api_key=api_key)
+
+    @classmethod
+    def _model_source(cls) -> str:
+        return cls.MODEL
+
+    @classmethod
+    def _model_path(cls) -> str:
+        """Compatibility accessor kept for old callers; GPT Image 2 is API-backed."""
+        return ""
+
+    @classmethod
+    def _device(cls) -> str:
+        return "openai_api"
+
+    @classmethod
+    def _dtype(cls):
         return None
-    return ROOM_REGISTRY.get(key)
 
+    @classmethod
+    def _can_initialize(cls) -> bool:
+        return OpenAI is not None and bool(cls._api_key())
 
-def list_registered_rooms(*, include_engines: bool = True) -> List[RoomRegistration]:
-    """Return the canonical room list in stable registration order."""
-    values = list(ROOM_REGISTRY.values())
-    if include_engines:
-        return values
-    return [item for item in values if not item.is_engine]
+    @classmethod
+    def _require_backend(cls) -> None:
+        if OpenAI is None:
+            raise RuntimeError("APRIL_IMAGES_OPENAI_SDK_NOT_INSTALLED")
+        if not cls._api_key():
+            raise RuntimeError("OPENAI_API_KEY_NOT_CONFIGURED")
 
+    # -------------------------------------------------
+    # Semantic input normalization
+    # -------------------------------------------------
 
-def is_room_registered(room_key: str) -> bool:
-    return get_room_registration(room_key) is not None
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if value is None:
+            return ""
+        return str(value)
 
+    @classmethod
+    def _extract_semantic_prompt(cls, value: Any, *, _depth: int = 0) -> str:
+        """Extract text without passing serialized artifacts or data URIs."""
+        if _depth > 5 or value is None:
+            return ""
 
-
-# =====================================================
-# CANONICAL RENDER SIGNAL
-# =====================================================
-UNIFIED_RENDER_SIGNAL_VERSION = "3.0"
-
-
-def _render_signal_metadata(
-    artifact_type: str,
-    room_source: str,
-    renderer: str,
-    *,
-    content: str = "",
-    priority: int = 100,
-    complexity: str = "balanced",
-    layout: str = "single",
-    presentation: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Return only transport metadata; payload stays structured and untouched."""
-    registration = WEB_RENDERER_REGISTRY.get(
-        str(artifact_type or "").strip().lower(),
-        WEB_RENDERER_REGISTRY["text"],
-    )
-    exact_renderer = str(registration.get("renderer") or renderer or "MessageTextBlock")
-    fallback_renderer = str(registration.get("fallback_renderer") or "MessageTextBlock")
-    candidates = [exact_renderer]
-    return {
-        "type": artifact_type,
-        "payload_type": artifact_type,
-        "renderer": exact_renderer,
-        "viewer": str(registration.get("viewer") or exact_renderer),
-        "web_renderer": exact_renderer,
-        "fallback_renderer": fallback_renderer,
-        "renderer_candidates": candidates,
-        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
-        "signal_channel": "canonical_web_render_signal_v2",
-        "source_room": room_source,
-        "version": UNIFIED_RENDER_SIGNAL_VERSION,
-        "content_present": bool(content),
-        "priority": priority,
-        "complexity": complexity,
-        "layout": layout,
-        "scene_contract": True,
-        "presentation": dict(presentation or {}),
-        "payload_contract_keys": list(registration.get("payload_keys") or []),
-    }
-
-
-def _build_artifact_render_signal(
-    *,
-    artifact_type: str,
-    room_source: str,
-    renderer: str,
-    payload: Dict[str, Any],
-    content: str = "",
-    priority: int = 100,
-    complexity: str = "balanced",
-    layout: str = "single",
-    presentation: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Canonical room -> Fiber render signal.
-
-    The structured payload is carried once at top-level ``payload``.
-    ``signal`` contains identity/routing metadata only, so no payload is
-    duplicated or rewritten while crossing the single route.
-    """
-    return {
-        "type": artifact_type,
-        "payload_type": artifact_type,
-        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
-        "signal": _render_signal_metadata(
-            artifact_type,
-            room_source,
-            renderer,
-            content=content,
-            priority=priority,
-            complexity=complexity,
-            layout=layout,
-            presentation=presentation,
-        ),
-        "renderer": renderer,
-        "viewer": renderer,
-        "source_room": room_source,
-        "content": content,
-        "text": content,
-        "payload": payload,
-        "priority": priority,
-        "complexity": complexity,
-        "layout": layout,
-        "presentation": dict(presentation or {}),
-        "scene_contract": True,
-    }
-
-# =====================================================
-# CREATE ARTIFACT
-# =====================================================
-
-
-def build_room_route_contract(
-    request: Any,
-    *,
-    origin: str = "executor",
-    destination: str = "rooms_registry",
-    pipeline_stage: str = "artifact_route",
-    context: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> UniversalArtifactContract:
-    """Build the C-ARTIFACT transport envelope used before room execution.
-
-    This is a routing envelope, not a human-visible artifact.  It carries the
-    already-resolved semantic request, dialogue continuity and provider result
-    into Room Register without asking Executor to call a concrete room/engine.
-    """
-    contract = UniversalArtifactContract()
-
-    transport = contract.transport
-    # TransportContract is intentionally lightweight in this project.  These
-    # attributes are attached dynamically so existing consumers remain compatible.
-    transport.origin = str(origin or "executor")
-    transport.destination = str(destination or "rooms_registry")
-    transport.pipeline_stage = str(pipeline_stage or "artifact_route")
-    transport.route_authority = "INTERPRETATION"
-
-    intent = deepcopy(getattr(request, "intent", {}) or {})
-    conversation = deepcopy(getattr(request, "conversation", {}) or {})
-    memory = deepcopy(getattr(request, "memory", {}) or {})
-    visual_context = deepcopy(getattr(request, "visual_context", {}) or {})
-    routing = deepcopy(getattr(request, "routing", {}) or {})
-    constraints = deepcopy(getattr(request, "constraints", {}) or {})
-    requested_outputs = list(getattr(request, "requested_outputs", []) or [])
-    required_artifacts = list(getattr(request, "required_artifacts", []) or [])
-
-    route_context = deepcopy(context or {})
-    route_context.setdefault("current_user_request", conversation.get("current_request", ""))
-    route_context.setdefault("resolved_request", conversation.get("resolved_request", ""))
-    route_context.setdefault("semantic_request", intent.get("semantic_request", ""))
-    route_context.setdefault("conversation", conversation)
-    route_context.setdefault("memory", memory)
-    route_context.setdefault("visual_context", visual_context)
-
-    contract.payload.intent = intent
-    contract.payload.context = route_context
-    contract.payload.knowledge = memory
-    contract.payload.scene = deepcopy(conversation.get("live_scene") or {})
-    contract.payload.executor_notes = {
-        "request_id": str(getattr(request, "request_id", "") or ""),
-        "goal": str(getattr(request, "goal", "") or ""),
-        "requested_outputs": requested_outputs,
-        "required_artifacts": required_artifacts,
-        "routing": routing,
-        "constraints": constraints,
-        "current_user_request": conversation.get("current_request", ""),
-        "resolved_request": conversation.get("resolved_request", ""),
-        "semantic_authority": "INTERPRETATION",
-        "room_registry": "rooms_registry",
-    }
-    contract.metadata = {
-        "contract_type": "ROOM_ROUTE_ENVELOPE",
-        "route_authority": "INTERPRETATION",
-        "source": str(origin or "executor"),
-        "destination": str(destination or "rooms_registry"),
-        "pipeline_stage": str(pipeline_stage or "artifact_route"),
-        **deepcopy(metadata or {}),
-    }
-
-    return contract
-
-
-def create_artifact(
-    artifact_type: str,
-    room_source: str,
-    data: Dict[str, Any]
-):
-    """Create a BaseArtifact with one canonical, lossless render signal."""
-    normalized_data = _canonicalize_artifact_data(
-        data,
-        artifact_type=artifact_type,
-        room_source=room_source,
-    )
-
-    room_identity = normalized_data.get("room_identity", {})
-    if not isinstance(room_identity, dict):
-        room_identity = {}
-
-    explicit_renderer = (
-        normalized_data.get("renderer")
-        or (normalized_data.get("presentation") or {}).get("renderer")
-        or normalized_data.get("viewer")
-    )
-    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
-        str(explicit_renderer or "").strip().lower(),
-        str(explicit_renderer or "").strip(),
-    )
-    render_block = (
-        explicit_renderer
-        if explicit_renderer in SUPPORTED_RENDERERS
-        else ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
-    )
-
-    priority = normalized_data.get("priority", 100)
-    complexity = normalized_data.get("complexity", "balanced")
-    layout = normalized_data.get("layout", "single")
-    presentation = dict(normalized_data.get("presentation") or {})
-    canonical_text = _extract_text_candidate(normalized_data)
-
-    structured_payload = normalized_data.get("payload")
-    if not isinstance(structured_payload, dict):
-        structured_payload = {}
-
-    render_signal = _build_artifact_render_signal(
-        artifact_type=artifact_type,
-        room_source=room_source,
-        renderer=render_block,
-        payload=structured_payload,
-        content=canonical_text,
-        priority=priority,
-        complexity=complexity,
-        layout=layout,
-        presentation=presentation,
-    )
-    normalized_data["render_signal"] = render_signal
-
-    artifact = BaseArtifact(
-        metadata=ArtifactMetadata(
-            artifact_type=artifact_type,
-            room_source=room_source
-        ),
-        context=ArtifactContext(
-            domain=normalized_data.get("domain"),
-            specialization=room_identity.get("specialization"),
-            knowledge_class=room_identity.get("knowledge_class"),
-            knowledge_scope=normalized_data.get("knowledge_scope", []),
-            capabilities=normalized_data.get("capabilities", []),
-            research_capabilities=normalized_data.get("research_capabilities", []),
-            experiment_capabilities=normalized_data.get("experiment_capabilities", []),
-            artifact_outputs=normalized_data.get("artifact_outputs", []),
-            scene_contributions=normalized_data.get("scene_contributions", []),
-            focus_contributions=normalized_data.get("focus_contributions", []),
-            memory_contributions=normalized_data.get("memory_contributions", []),
-            trajectory_hints=normalized_data.get("trajectory_hints", []),
-            scene_hints=normalized_data.get("scene_hints", [])
-        ),
-        quality=ArtifactQuality(),
-        render=ArtifactRenderContract(
-            web_block=render_block,
-            viewer=render_block,
-            renderer=render_block,
-            scene_block=artifact_type,
-            payload_type=artifact_type,
-            priority=priority,
-            complexity=complexity,
-            layout=layout,
-            machine_only=bool(normalized_data.get("machine_only", False)),
-            human_visible=bool(normalized_data.get("human_visible", True)),
-            signal_version=UNIFIED_RENDER_SIGNAL_VERSION,
-            signal_type=artifact_type,
-            presentation=presentation,
-        ),
-        data=normalized_data
-    )
-
-    # Make artifact identity observable without changing the payload.
-    try:
-        artifact.data["render_signal"]["artifact_id"] = artifact.metadata.artifact_id
-        artifact.data["render_signal"]["signal"]["artifact_id"] = artifact.metadata.artifact_id
-    except Exception:
-        pass
-
-    return artifact
-
-
-# =====================================================
-# FIBER INSPECTION API
-# =====================================================
-
-TRACE_STAGES = [
-    "CONTRACT","REGISTRY","ROOM","OPENAI_REQUEST",
-    "OPENAI_RESPONSE","EXECUTOR","SCENE","WEB","DONE"
-]
-
-def build_trace_snapshot(trace: TraceContract) -> Dict[str, Any]:
-    return {
-        "trace_id": trace.trace_id,
-        "lane": trace.lane,
-        "stage": trace.stage,
-        "room": trace.room,
-        "elapsed_ms": trace.elapsed_ms,
-        "status": trace.status,
-    }
-
-def build_metrics_snapshot(metrics: MetricsContract) -> Dict[str, Any]:
-    return {
-        "payload_size": metrics.payload_size,
-        "block_count": metrics.block_count,
-        "attachment_count": metrics.attachment_count,
-        "elapsed_ms": metrics.elapsed_ms,
-        "lane": metrics.lane,
-    }
-
-def build_identity_snapshot(identity: IdentityContract) -> Dict[str, Any]:
-    return {
-        "user_id": identity.user_id,
-        "subscription": identity.subscription,
-        "capabilities": list(identity.capabilities),
-        "limits": dict(identity.limits),
-    }
-
-def build_capability_snapshot(cap: CapabilityContract) -> Dict[str, Any]:
-    return {
-        "tools": list(cap.tools),
-        "renderers": list(cap.renderers),
-        "viewers": list(cap.viewers),
-        "permissions": list(cap.permissions),
-    }
-
-def build_diagnostic_snapshot(diag: DiagnosticContract) -> Dict[str, Any]:
-    return {
-        "stage": diag.stage,
-        "status": diag.status,
-        "message": diag.message,
-    }
-
-
-# =====================================================
-# FIBER FACTORY INTEGRATION
-# =====================================================
-
-
-
-def _text_companion_blocks(
-    artifact_type: str,
-    content: str,
-    data: Dict[str, Any],
-    presentation: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    """Legacy compatibility hook. Scene-level composition owns text nodes now."""
-    return []
-
-def _artifact_canonical_render_blocks(artifact: BaseArtifact) -> List[Dict[str, Any]]:
-    """Project one artifact into lossless canonical render blocks.
-
-    Concrete renderer identity is preserved from the artifact/presentation.
-    Every human-visible specialized result gets a MessageTextBlock companion
-    so narrative content is never forced into the specialized renderer.
-    """
-    if artifact is None:
-        return []
-
-    data = dict(getattr(artifact, "data", {}) or {})
-    artifact_type = getattr(getattr(artifact, "metadata", None), "artifact_type", "") or data.get("artifact_type", "")
-    room_source = getattr(getattr(artifact, "metadata", None), "room_source", "") or data.get("room_source", "")
-    render = getattr(artifact, "render", None)
-
-    explicit_renderer = (
-        data.get("renderer")
-        or (data.get("presentation") or {}).get("renderer")
-        or data.get("viewer")
-    )
-    explicit_renderer = ARTIFACT_RENDERER_ALIASES.get(
-        str(explicit_renderer or "").strip().lower(),
-        str(explicit_renderer or "").strip(),
-    )
-    renderer = (
-        explicit_renderer
-        if explicit_renderer in SUPPORTED_RENDERERS
-        else getattr(render, "web_block", "")
-        or ARTIFACT_BLOCK_MAP.get(artifact_type, "FunctionBlock")
-    )
-    artifact_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
-    if artifact_type == "diagram" and str(artifact_payload.get("svg") or artifact_payload.get("svg_payload") or "").strip() and renderer in {"", "DiagramRenderer", "MessageTextBlock", "TextBlock", "MarkdownBlock"}:
-        renderer = "SvgBlock"
-
-    priority = getattr(render, "priority", data.get("priority", 100))
-    complexity = getattr(render, "complexity", data.get("complexity", "balanced"))
-    layout = getattr(render, "layout", data.get("layout", "single"))
-    content = _extract_text_candidate(data)
-
-    structured_payload = data.get("payload")
-    if not isinstance(structured_payload, dict):
-        structured_payload = {
-            key: value for key, value in data.items()
-            if key not in _CANONICAL_TEXT_KEYS
-            and key not in {"render_signal", "presentation", "machine_only", "human_visible"}
-        }
-
-    signal = data.get("render_signal")
-    if not isinstance(signal, dict):
-        signal = _build_artifact_render_signal(
-            artifact_type=artifact_type, room_source=room_source, renderer=renderer,
-            payload=structured_payload, content=content, priority=priority,
-            complexity=complexity, layout=layout, presentation=dict(data.get("presentation") or {}),
-        )
-    signal = dict(signal)
-    presentation = data.get("presentation")
-    if not isinstance(presentation, dict):
-        presentation = dict(signal.get("presentation") or {})
-
-    signal.update({
-        "renderer": renderer,
-        "viewer": data.get("viewer") or renderer,
-        "type": artifact_type,
-        "payload_type": artifact_type,
-        "source_room": room_source,
-        "payload": structured_payload,
-        "presentation": presentation,
-        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
-        "artifact_id": signal.get("artifact_id") or getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
-    })
-
-    specialized_block = {
-        "type": artifact_type,
-        "artifact_type": artifact_type,
-        "renderer": renderer,
-        "viewer": data.get("viewer") or renderer,
-        "content": content,
-        "text": content,
-        "payload": structured_payload,
-        # `signal` keeps the compact renderer metadata expected by existing Web
-        # blocks. `render_signal` is the complete canonical signal envelope,
-        # including the lossless payload, and follows the artifact to Web.
-        "signal": dict(signal.get("signal") or {}),
-        "render_signal": dict(signal),
-        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
-        "source_room": room_source,
-        "artifact_id": getattr(getattr(artifact, "metadata", None), "artifact_id", ""),
-        "priority": priority,
-        "complexity": complexity,
-        "layout": layout,
-        "presentation": presentation,
-        "scene_contract": True,
-        "provider_payload": True,
-        "canonical_provider_payload": True,
-        "executor_generated": False,
-        "text_companion_required": bool(data.get("text_companion_required", True)),
-    }
-
-    # A room artifact is exactly one scene node. Narrative text is composed once
-    # at SceneContract level, so an artifact never manufactures duplicate text
-    # companions of its own.
-    return [specialized_block]
-
-def _ensure_artifact_render_signal(artifact: BaseArtifact) -> BaseArtifact:
-    """Ensure a room artifact has exactly one lossless render signal."""
-    blocks = _artifact_canonical_render_blocks(artifact)
-    if blocks:
-        specialized = next(
-            (block for block in blocks if str(block.get("renderer") or "") not in {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}),
-            blocks[-1],
-        )
-        artifact.data["render_signal"] = dict(specialized.get("signal") or blocks[-1].get("signal") or {})
-        artifact.data["render_signal"]["payload"] = specialized.get("payload") if specialized.get("payload") is not None else blocks[-1].get("payload")
-        artifact.data["render_signal"]["renderer"] = specialized.get("renderer") or blocks[-1].get("renderer") or "MessageTextBlock"
-        artifact.data["render_signal"]["viewer"] = specialized.get("viewer") or blocks[-1].get("viewer") or "MessageTextBlock"
-        artifact.data.setdefault("render_blocks", [])
-        artifact.data["render_blocks"] = blocks
-        artifact.render.signal_version = UNIFIED_RENDER_SIGNAL_VERSION
-        artifact.render.signal_type = specialized.get("type", blocks[-1].get("type", ""))
-        artifact.render.web_block = specialized.get("renderer") or blocks[-1].get("renderer", artifact.render.web_block)
-        artifact.render.viewer = specialized.get("viewer") or artifact.render.web_block
-        artifact.render.renderer = artifact.render.web_block
-    return artifact
-
-def build_universal_contract(
-    artifact: Optional[BaseArtifact] = None,
-    user_id: str = "",
-    subscription: str = "Free",
-) -> UniversalArtifactContract:
-    contract = UniversalArtifactContract()
-    contract.artifact = artifact
-    contract.fiber.identity.user_id = user_id
-    contract.fiber.identity.subscription = subscription
-
-    if artifact is not None:
-        artifact = _ensure_artifact_render_signal(artifact)
-        artifact_payload = _canonicalize_artifact_data(
-            dict(artifact.data or {}),
-            artifact_type=getattr(artifact.metadata, "artifact_type", ""),
-            room_source=getattr(artifact.metadata, "room_source", ""),
-        )
-        presentation = artifact_payload.get("presentation")
-        if not isinstance(presentation, dict):
-            presentation = build_presentation_hint(
-                artifact.metadata.artifact_type,
-                artifact_payload.get("complexity", "balanced")
+        if isinstance(value, dict):
+            # Prefer fields explicitly meant for image generation. A broad
+            # user-facing description or answer must not shadow a more specific
+            # visual prompt and send the wrong scene to the image model.
+            preferred = (
+                "openai_structured_visual_plan_semantic",
+                "visual_generation_prompt",
+                "image_prompt",
+                "visual_prompt",
+                "scene_prompt",
+                "image_description",
+                "visual_description",
+                "prompt",
+                "scene",
+                "subject",
+                "visual",
+                "visual_context",
+                "image",
+                "request",
+                "description",
+                "title",
+                "summary",
+                "alt",
+                "answer",
+                "content",
             )
-            presentation = {
-                "version": "1.0",
-                "engine": "APRIL-QUANTUM-PRESENTATION-V1",
-                "enabled": True,
-                "decision_owner": "QUANTUM_PROCESSOR",
-                "single_route": True,
-                "mode": "semantic_presentation",
-                "primary_role": "normal",
-                "spans": [],
-                "formulas": [],
-                "key_points": [],
-                "by_block": {},
-                "math": {
-                    "markdown": "react-markdown",
-                    "markdown_extensions": ["remark-gfm"],
-                    "math_parse": "remark-math",
-                    "math_render": "rehype-katex",
-                    "math_css": "katex/dist/katex.min.css",
-                    "structural_only": True,
-                },
-                **presentation,
-            }
-            artifact_payload["presentation"] = presentation
-
-        canonical_text = _extract_text_candidate(
-            artifact_payload,
-            allow_topic=not artifact_payload.get("machine_only", False),
-        )
-
-        artifact_payload["answer"] = canonical_text
-        artifact_payload["content"] = canonical_text
-        artifact_payload["summary"] = canonical_text
-        canonical_artifact_blocks = _artifact_canonical_render_blocks(artifact)
-        existing_room_blocks = list(artifact_payload.get("render_blocks", []) or [])
-        artifact_payload["render_blocks"] = canonical_artifact_blocks or existing_room_blocks
-        artifact_payload.setdefault("scene", artifact_payload.get("scene", {}))
-        artifact_payload["presentation"] = presentation
-
-        contract.payload.artifacts.append(artifact_payload)
-        contract.payload.scene.update({
-            "presentation": presentation,
-            "answer": artifact_payload.get("answer", ""),
-            "content": artifact_payload.get("content", ""),
-            "summary": artifact_payload.get("summary", ""),
-            "render_blocks": artifact_payload.get("render_blocks", []),
-            "machine_only": artifact_payload.get("machine_only", False),
-            "human_visible": artifact_payload.get("human_visible", True),
-        })
-
-        machine_response = MachineResponse(
-            answer=canonical_text,
-            content=canonical_text,
-            response=canonical_text,
-            summary=canonical_text,
-            render_blocks=list(artifact_payload.get("render_blocks", []) or []),
-            artifacts=[artifact],
-            metadata={
-                "artifact_contract_stage": "stage4_final",
-                "room_source": artifact.metadata.room_source,
-                "artifact_type": artifact.metadata.artifact_type,
-                "presentation": presentation,
-                "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
-                "machine_only": artifact_payload.get("machine_only", False),
-                "human_visible": artifact_payload.get("human_visible", True),
-            },
-        )
-        machine_response.executor_hints["presentation"] = presentation
-        contract.machine_response = machine_response
-
-        machine_scene = build_machine_scene(machine_response)
-        machine_scene.metadata.update({
-            "artifact_contract_stage": "stage4_final",
-            "presentation": presentation,
-            "presentation_engine": "APRIL-QUANTUM-PRESENTATION-V1",
-            "machine_only": artifact_payload.get("machine_only", False),
-            "human_visible": artifact_payload.get("human_visible", True),
-        })
-        machine_scene.answer = canonical_text
-        machine_scene.content = canonical_text
-        machine_scene.summary = canonical_text
-        machine_scene.blocks = list(machine_response.render_blocks or [])
-        machine_scene.contract.blocks = list(machine_scene.blocks)
-        contract.machine_scene = machine_scene
-
-        scene_contract = build_scene_contract(machine_scene)
-        scene_contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
-        scene_contract.metadata.setdefault("presentation", presentation)
-        scene_contract.metadata.setdefault("answer", canonical_text)
-        scene_contract.metadata.setdefault("content", canonical_text)
-        scene_contract.metadata.setdefault("summary", canonical_text)
-        contract.scene_contract = scene_contract
-
-        contract.fiber.metrics.block_count = max(1, len(machine_response.render_blocks or []) or 1)
-        contract.fiber.metrics.payload_size = len(str(artifact_payload))
-        contract.fiber.trace.room = artifact.metadata.room_source
-        contract.fiber.renderer.supported_blocks = list(dict.fromkeys(
-            str(block.get("renderer") or "")
-            for block in canonical_artifact_blocks
-            if isinstance(block, dict) and block.get("renderer")
-        )) or [artifact.render.web_block or "MessageTextBlock"]
-        contract.metadata.setdefault("artifact_contract_stage", "stage4_final")
-
-    return contract
-
-
-def create_transport_contract(
-    artifact_type: str,
-    room_source: str,
-    data: Dict[str, Any],
-    user_id: str = "",
-    subscription: str = "Free",
-) -> UniversalArtifactContract:
-    """Canonical transport factory used by artifact callers.
-
-    The function accepts a plain artifact payload, converts it into a
-    BaseArtifact, and materializes the single Fiber transport envelope
-    used throughout the April pipeline.
-    """
-    payload = dict(data or {})
-    payload.setdefault("artifact_type", artifact_type)
-    payload.setdefault("room_source", room_source)
-
-    artifact = create_artifact(
-        artifact_type=artifact_type,
-        room_source=room_source,
-        data=payload,
-    )
-
-    contract = build_universal_contract(
-        artifact=artifact,
-        user_id=user_id,
-        subscription=subscription,
-    )
-
-    # Preserve room-level payload for downstream processors.
-    contract.payload.context = {
-        "artifact_type": artifact_type,
-        "room_source": room_source,
-        "user_id": user_id,
-        "subscription": subscription,
-    }
-    contract.payload.intent = dict(payload.get("intent", {}) or {})
-    contract.payload.context.update(dict(payload.get("context", {}) or {}))
-    contract.payload.knowledge = dict(payload.get("knowledge", {}) or {})
-    contract.payload.attachments = list(payload.get("attachments", []) or [])
-    contract.payload.media = dict(payload.get("media", {}) or contract.payload.media)
-    contract.payload.executor_notes = dict(payload.get("executor_notes", {}) or {})
-
-    # Keep the canonical machine response in sync with the transport payload.
-    if contract.machine_response is None:
-        contract.machine_response = MachineResponse(
-            answer=payload.get("answer", ""),
-            content=payload.get("content", payload.get("answer", "")),
-            response=payload.get("response", payload.get("answer", "")),
-            summary=payload.get("summary", payload.get("answer", "")),
-            explanation=payload.get("explanation", payload.get("summary", payload.get("answer", ""))),
-            render_blocks=list(payload.get("render_blocks", []) or []),
-            scene=dict(payload.get("scene", {}) or {}),
-            metadata=dict(payload.get("metadata", {}) or {}),
-        )
-
-    # Ensure scene payload is exposed for compatibility checks.
-    contract.payload.scene.setdefault("answer", payload.get("answer", ""))
-    contract.payload.scene.setdefault("content", payload.get("content", payload.get("answer", "")))
-    contract.payload.scene.setdefault("summary", payload.get("summary", payload.get("answer", "")))
-    contract.payload.scene.setdefault("render_blocks", list(payload.get("render_blocks", []) or []))
-
-    return contract
-
-
-
-# =====================================================
-# FACTORY INSPECTION API
-# =====================================================
-# FACTORY INSPECTION API
-# =====================================================
-
-def extract_room_profile(
-    artifact
-):
-
-    if not artifact:
-
-        return {}
-
-    return {
-
-        "domain":
-            artifact.context.domain,
-
-        "specialization":
-            artifact.context.specialization,
-
-        "knowledge_class":
-            artifact.context.knowledge_class,
-
-        "knowledge_scope":
-            artifact.context.knowledge_scope,
-
-        "capabilities":
-            artifact.context.capabilities,
-
-        "research_capabilities":
-            artifact.context.research_capabilities,
-
-        "experiment_capabilities":
-            artifact.context.experiment_capabilities,
-
-        "artifact_outputs":
-            artifact.context.artifact_outputs,
-
-        "room_source":
-            artifact.metadata.room_source
-    }
-
-# =====================================================
-# FACTORY CAPABILITY API
-# =====================================================
-
-def artifact_has_capability(
-    artifact,
-    capability: str
-):
-
-    if not artifact:
-
-        return False
-
-    return capability in (
-
-        artifact.context.capabilities
-        or []
-    )
-
-# =====================================================
-# FACTORY KNOWLEDGE API
-# =====================================================
-
-def artifact_has_knowledge(
-    artifact,
-    knowledge_area: str
-):
-
-    if not artifact:
-
-        return False
-
-    return knowledge_area in (
-
-        artifact.context.knowledge_scope
-        or []
-    )
-
-# =====================================================
-# FACTORY OUTPUT API
-# =====================================================
-
-def artifact_can_output(
-    artifact,
-    output_type: str
-):
-
-    if not artifact:
-
-        return False
-
-    return output_type in (
-
-        artifact.context.artifact_outputs
-        or []
-    )
-
-
-
-# =====================================================
-# FIBER CORE FOUNDATION
-# =====================================================
-
-@dataclass
-class FiberLaneContract:
-    lane_id: str = "A"
-    lane_name: str = "Lane A"
-    active: bool = True
-    current_load: int = 0
-    max_parallel_jobs: int = 1
-    status: str = "ready"
-
-@dataclass
-class FiberRouteContract:
-    route_id: str = "APRIL_FIBER_ROUTE"
-    route_version: str = "1.0"
-    dispatcher: str = "default"
-    active_lane: str = "A"
-    lane_count: int = 3
-    transport_policy: str = "single_route_multi_lane"
-    scaling_policy: str = "horizontal_lane_scaling"
-
-@dataclass
-class DispatcherContract:
-    selected_lane: str = "A"
-    selection_reason: str = "available"
-    queue_position: int = 0
-    dispatch_time: float = field(default_factory=time.time)
-
-@dataclass
-class TraceContract:
-    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    lane: str = "A"
-    stage: str = "CONTRACT"
-    room: str = ""
-    elapsed_ms: float = 0.0
-    payload_size: int = 0
-    block_count: int = 0
-    attachment_count: int = 0
-    status: str = "ACTIVE"
-
-@dataclass
-class MetricsContract:
-    payload_size: int = 0
-    block_count: int = 0
-    attachment_count: int = 0
-    elapsed_ms: float = 0.0
-    lane: str = "A"
-
-@dataclass
-class IdentityContract:
-    user_id: str = ""
-    subscription: str = "Free"
-    capabilities: list = field(default_factory=list)
-    limits: dict = field(default_factory=dict)
-
-@dataclass
-class CapabilityContract:
-    tools: list = field(default_factory=list)
-    renderers: list = field(default_factory=list)
-    viewers: list = field(default_factory=list)
-    permissions: list = field(default_factory=list)
-
-@dataclass
-class MemoryContract:
-    working_memory: dict = field(default_factory=dict)
-    persistent_memory: dict = field(default_factory=dict)
-    scene_memory: dict = field(default_factory=dict)
-    visual_memory: dict = field(default_factory=dict)
-
-@dataclass
-class VisualContract:
-    active_images: list = field(default_factory=list)
-    anchors: list = field(default_factory=list)
-    gallery: list = field(default_factory=list)
-    focus: dict = field(default_factory=dict)
-
-@dataclass
-class RendererContract:
-    scene_renderer: str = "default"
-    supported_blocks: list = field(default_factory=list)
-    responsive: bool = True
-
-@dataclass
-class DiagnosticContract:
-    stage: str = "CONTRACT"
-    status: str = "OK"
-    message: str = ""
-
-
-@dataclass
-class FiberCoreContract:
-    route: FiberRouteContract = field(default_factory=FiberRouteContract)
-    dispatcher: DispatcherContract = field(default_factory=DispatcherContract)
-    lane: FiberLaneContract = field(default_factory=FiberLaneContract)
-    trace: TraceContract = field(default_factory=TraceContract)
-    metrics: MetricsContract = field(default_factory=MetricsContract)
-    identity: IdentityContract = field(default_factory=IdentityContract)
-    capabilities: CapabilityContract = field(default_factory=CapabilityContract)
-    memory: MemoryContract = field(default_factory=MemoryContract)
-    visual: VisualContract = field(default_factory=VisualContract)
-    renderer: RendererContract = field(default_factory=RendererContract)
-    diagnostics: DiagnosticContract = field(default_factory=DiagnosticContract)
-
-# =====================================================
-# UNIVERSAL TRANSPORT CONTRACT (APRIL FIBER CHANNEL)
-# =====================================================
-
-@dataclass
-class TransportContract:
-    """Payload envelope only. All routing belongs to FiberCore."""
-    transport_version: str = "2.0"
-
-@dataclass
-class MachinePayload:
-    intent: Dict[str, Any] = field(default_factory=dict)
-    context: Dict[str, Any] = field(default_factory=dict)
-    knowledge: Dict[str, Any] = field(default_factory=dict)
-    artifacts: List[Dict[str, Any]] = field(default_factory=list)
-    scene: Dict[str, Any] = field(default_factory=dict)
-    attachments: List[Dict[str, Any]] = field(default_factory=list)
-    media: Dict[str, Any] = field(default_factory=lambda:{
-        "text":[],
-        "markdown":[],
-        "tables":[],
-        "graphs":[],
-        "formulas":[],
-        "images":[],
-        "gallery":[],
-        "files":[],
-        "audio":[],
-        "video":[],
-        "code":[],
-        "links":[],
-        "diagrams":[],
-        "actions":[]
-    })
-    executor_notes: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class UniversalArtifactContract:
-    # FiberCore is the single owner of routing state.
-    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
-    transport: TransportContract = field(default_factory=TransportContract)
-    payload: MachinePayload = field(default_factory=MachinePayload)
-    artifact: Optional[BaseArtifact] = None
-    machine_response: Optional["MachineResponse"] = None
-    machine_scene: Optional["MachineScene"] = None
-    scene_contract: Optional["SceneContract"] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-
-# =====================================================
-# STAGE 2 PRESENTATION TRANSPORT
-# =====================================================
-# STAGE 2 PRESENTATION TRANSPORT (TEST)
-# =====================================================
-# Canonical presentation helper.
-
-
-def build_presentation_hint(artifact_type: str, complexity: str = "balanced") -> dict:
-    registration = get_web_renderer_registration(artifact_type)
-    renderer = registration.get("renderer", "MessageTextBlock")
-    fallback = registration.get("fallback_renderer", "MessageTextBlock")
-    return {
-        "payload_type": artifact_type,
-        "scene_block": artifact_type,
-        "renderer": renderer,
-        "viewer": registration.get("viewer", renderer),
-        "web_renderer": renderer,
-        "fallback_renderer": "",
-        "renderer_candidates": [renderer],
-        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
-        "signal_channel": "canonical_web_render_signal_v2",
-        "priority": 100,
-        "complexity": complexity,
-        "layout": "flow" if complexity != "compact" else "flow",
-        "frames": False,
-        "cards": False,
-    }
-
-
-# =====================================================
-# UNIVERSAL PAYLOAD REGISTRY
-# =====================================================
-
-SUPPORTED_PAYLOAD_TYPES = {
-    "text",
-    "markdown",
-    "table",
-    "formula",
-    "graph",
-    "diagram",
-    "image",
-    "gallery",
-    "code",
-    "link",
-    "file",
-    "audio",
-    "video",
-    "action",
-    "memory",
-    "visual_context",
-    "scene"
-}
-
-SCENE_BLOCK_REGISTRY = {
-    kind: spec["renderer"]
-    for kind, spec in WEB_RENDERER_REGISTRY.items()
-}
-
-@dataclass
-class SceneContract:
-    """Canonical one-response scene. All visible renderers are children of it."""
-    scene_version: str = "3.0"
-    scene_id: str = ""
-    turn_id: str = ""
-    flow_id: str = ""
-    topic_group: str = ""
-    continuation: bool = False
-    user_id: str = ""
-    conversation_id: str = ""
-    dialogue_sequence_id: str = ""
-    sequence_turn_index: int = 0
-    active_task: Dict[str, Any] = field(default_factory=dict)
-    dialogue_state: Dict[str, Any] = field(default_factory=dict)
-    dialogue_development: Dict[str, Any] = field(default_factory=dict)
-    result_event: Dict[str, Any] = field(default_factory=dict)
-    open_loops: List[Dict[str, Any]] = field(default_factory=list)
-    pending_obligations: List[Dict[str, Any]] = field(default_factory=list)
-    authenticated_scope: Dict[str, Any] = field(default_factory=dict)
-    blocks: List[Dict[str, Any]] = field(default_factory=list)
-    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
-    relations: List[Dict[str, Any]] = field(default_factory=list)
-    order: List[str] = field(default_factory=list)
-    active_scene: str = ""
-    space_continuity: Dict[str, Any] = field(default_factory=dict)
-    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
-    signal: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    supported_payloads: List[str] = field(
-        default_factory=lambda: sorted(SUPPORTED_PAYLOAD_TYPES)
-    )
-
-def register_payload_type(payload_type: str) -> None:
-    SUPPORTED_PAYLOAD_TYPES.add(payload_type)
-
-def register_scene_block(payload_type: str, renderer: str) -> None:
-    SCENE_BLOCK_REGISTRY[payload_type] = renderer
-
-# =====================================================
-# UNIVERSAL MACHINE PIPELINE CONTRACTS
-# =====================================================
-
-@dataclass
-class MachineRequest:
-    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
-    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    goal: str = ""
-    intent: Dict[str, Any] = field(default_factory=dict)
-    conversation: Dict[str, Any] = field(default_factory=dict)
-    memory: Dict[str, Any] = field(default_factory=dict)
-    visual_context: Dict[str, Any] = field(default_factory=dict)
-    available_tools: List[str] = field(default_factory=list)
-    requested_outputs: List[str] = field(default_factory=list)
-    required_competencies: List[str] = field(default_factory=list)
-    required_artifacts: List[str] = field(default_factory=list)
-    routing: Dict[str, Any] = field(default_factory=dict)
-    constraints: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class MachineResponse:
-    # Canonical transport fields
-    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
-    artifacts: List[BaseArtifact] = field(default_factory=list)
-    diagnostics: Dict[str, Any] = field(default_factory=dict)
-    quality: Dict[str, Any] = field(default_factory=dict)
-    confidence: float = 0.0
-    contributions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    recommendations: List[str] = field(default_factory=list)
-    executor_hints: Dict[str, Any] = field(default_factory=dict)
-    routing_decision: Dict[str, Any] = field(default_factory=dict)
-
-    answer: str = ""
-    content: str = ""
-    response: str = ""
-    summary: str = ""
-    explanation: str = ""
-
-    # One scene identity follows the complete route.
-    scene_id: str = ""
-    turn_id: str = ""
-    flow_id: str = ""
-    topic_group: str = ""
-    continuation: bool = False
-    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
-    artifacts_payload: List[Dict[str, Any]] = field(default_factory=list)
-    scene: Dict[str, Any] = field(default_factory=dict)
-    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
-    scene_relations: List[Dict[str, Any]] = field(default_factory=list)
-    scene_order: List[str] = field(default_factory=list)
-    scene_plan: List[str] = field(default_factory=lambda:["text"])
-    render_priority: List[str] = field(default_factory=lambda:["text"])
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
-    """Return the registered RenderMessage component and its full payload contract."""
-    key = str(payload_type or "").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph",
-        "table_data": "table", "generated_image": "image", "image_artifact": "image",
-        "image_data": "image", "figure": "image", "math": "formula", "latex": "formula",
-        "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
-        "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
-        "message": "text", "message_text": "text", "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
-        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
-        "experimental_diagram": "diagram", "mermaid": "diagram",
-        "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
-        "generated_image": "image", "image_data": "image", "image_artifact": "image", "figure": "image",
-    }
-    canonical = aliases.get(key, key)
-    registration = WEB_RENDERER_REGISTRY.get(canonical) or WEB_RENDERER_REGISTRY["text"]
-    result = dict(registration)
-    result.update({
-        "representation": canonical,
-        "requested_representation": key,
-        "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
-        "payload_keys": list(registration.get("payload_keys") or []),
-    })
-    return result
-
-
-@dataclass
-class MachineScene:
-    fiber: FiberCoreContract = field(default_factory=FiberCoreContract)
-    scene_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    scene_version: str = "3.1"
-    active_scene: str = ""
-    turn_id: str = ""
-    flow_id: str = ""
-    topic_group: str = ""
-    continuation: bool = False
-    user_id: str = ""
-    conversation_id: str = ""
-    dialogue_sequence_id: str = ""
-    sequence_turn_index: int = 0
-    active_task: Dict[str, Any] = field(default_factory=dict)
-    dialogue_state: Dict[str, Any] = field(default_factory=dict)
-    dialogue_development: Dict[str, Any] = field(default_factory=dict)
-    result_event: Dict[str, Any] = field(default_factory=dict)
-    open_loops: List[Dict[str, Any]] = field(default_factory=list)
-    pending_obligations: List[Dict[str, Any]] = field(default_factory=list)
-    blocks: List[Dict[str, Any]] = field(default_factory=list)
-    relations: List[Dict[str, Any]] = field(default_factory=list)
-    order: List[str] = field(default_factory=list)
-    scene_blueprint: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    contract: SceneContract = field(default_factory=SceneContract)
-
-
-# =====================================================
-# FIBER CORE FINALIZATION
-# =====================================================
-
-# Stage 4: finalized canonical transport contract
-FIBER_CORE_VERSION = "1.0"
-FIBER_CORE_SINGLE_ROUTE = True
-FIBER_ROUTE_NAME = "APRIL_FIBER_ROUTE"
-
-DEFAULT_FIBER_LANES = (
-    "A",
-    "B",
-    "C",
-)
-
-DEFAULT_TRACE_SEQUENCE = (
-    "CONTRACT",
-    "REGISTRY",
-    "ROOM",
-    "OPENAI_REQUEST",
-    "OPENAI_RESPONSE",
-    "EXECUTOR",
-    "SCENE",
-    "WEB",
-    "DONE",
-)
-
-def create_default_scene_contract() -> SceneContract:
-    return SceneContract()
-
-def create_default_machine_request() -> MachineRequest:
-    return MachineRequest()
-
-def create_default_machine_response() -> MachineResponse:
-    return MachineResponse()
-
-def create_default_machine_scene() -> MachineScene:
-    return MachineScene()
-
-def validate_universal_contract(
-    contract: UniversalArtifactContract,
-) -> Dict[str, bool]:
-    return {
-        "has_fiber": contract.fiber is not None,
-        "has_route": contract.fiber.route is not None,
-        "has_trace": contract.fiber.trace is not None,
-        "has_payload": contract.payload is not None,
-        "has_identity": contract.fiber.identity is not None,
-        "has_renderer": contract.fiber.renderer is not None,
-        "has_artifact": contract.artifact is not None,
-    }
-
-__all__ = [
-    "ArtifactMetadata",
-    "ArtifactContext",
-    "ArtifactQuality",
-    "ArtifactRenderContract",
-    "BaseArtifact",
-    "TransportContract",
-    "MachinePayload",
-    "UniversalArtifactContract",
-    "MachineRequest",
-    "MachineResponse",
-    "MachineScene",
-    "SceneContract",
-    "FiberRouteContract",
-    "FiberLaneContract",
-    "DispatcherContract",
-    "TraceContract",
-    "MetricsContract",
-    "IdentityContract",
-    "CapabilityContract",
-    "MemoryContract",
-    "VisualContract",
-    "RendererContract",
-    "DiagnosticContract",
-    "build_universal_contract",
-    "create_transport_contract",
-    "validate_universal_contract",
-    "build_machine_scene",
-    "build_presentation_hint",
-    "get_web_renderer_registration",
-    "prepare_render_blocks_for_room_dispatch",
-    "SUPPORTED_RENDERERS",
-    "WEB_RENDERER_REGISTRY",
-    "WEB_RENDERER_REGISTRY_VERSION",
-    "ARTIFACT_RENDERER_ALIASES",
-    "UNIFIED_RENDER_SIGNAL_VERSION",
-    "build_scene_contract",
-    "build_scene_signal",
-    "CANONICAL_SCENE_VERSION",
-    "ANSWER_RENDER_POLICY",
-    "FactoryRoomContribution",
-    "QuantumFactoryState",
-    "bind_request_to_fiber",
-    "create_quantum_factory_state",
-    "quantum_factory_room_begin",
-    "quantum_factory_accept_artifact",
-    "quantum_factory_accept_response",
-    "quantum_factory_finalize",
-    "coordinate_factory_response",
-    "validate_quantum_factory_result",
-]
-
-
-# =====================================================
-# FIBER CORE ACCESS API
-# =====================================================
-
-def get_fiber_core(contract: UniversalArtifactContract) -> FiberCoreContract:
-    """Canonical access point for the single Fiber Route."""
-    return contract.fiber
-
-
-# =====================================================
-# FIBER ROUTE API
-# =====================================================
-
-def dispatch_lane(contract: UniversalArtifactContract) -> str:
-    """Return the active lane from the single Fiber Route."""
-    return contract.fiber.route.active_lane
-
-def current_trace_id(contract: UniversalArtifactContract) -> str:
-    """Canonical trace identifier for the entire pipeline."""
-    return contract.fiber.trace.trace_id
-
-
-# =====================================================
-# FIBER CORE FINAL VALIDATION
-# =====================================================
-
-def validate_fiber_core(contract: UniversalArtifactContract) -> dict:
-    """Validate that the transport is centered on the single Fiber Core."""
-    return {
-        "single_route": True,
-        "route_policy_ok": contract.fiber.route.transport_policy == "single_route_multi_lane",
-        "single_trace": bool(current_trace_id(contract)),
-        "lane": dispatch_lane(contract),
-        "scene_contract": hasattr(contract, "payload"),
-        "artifact_contract": contract.artifact is not None or True,
-    }
-
-
-# =====================================================
-# CANONICAL CONTRIBUTION API
-# =====================================================
-
-def add_room_contribution(response: MachineResponse, room: str, payload: Dict[str, Any]) -> None:
-    """Canonical API: each room writes its named contribution."""
-    response.contributions[room] = payload
-
-
-
-
-# =====================================================
-# CANONICAL MACHINE SCENE BUILDER
-# =====================================================
-
-
-CANONICAL_SCENE_VERSION = "3.0"
-CANONICAL_SCENE_SIGNAL_TYPE = "scene"
-ANSWER_RENDER_POLICY = "render_from_scene_blocks_only"
-
-
-def _scene_dict(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
-
-
-def _scene_list(value: Any) -> List[Any]:
-    if isinstance(value, list):
-        return list(value)
-    if isinstance(value, tuple):
-        return list(value)
-    return []
-
-
-def _scene_text(value: Any) -> str:
-    for key in ("answer", "content", "summary", "text", "display_text"):
-        candidate = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    return ""
-
-
-def _scene_hash(value: Any) -> str:
-    try:
-        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    except Exception:
-        raw = repr(value)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-
-
-def _scene_block_type(block: Dict[str, Any]) -> str:
-    """Resolve the artifact type from the whole canonical signal envelope.
-
-    Providers/rooms may carry the representation on the block, the artifact,
-    or a render signal. Reading only the top-level `type` made otherwise valid
-    Table/Code/Link/Diagram signals silently become text blocks.
-    """
-    if not isinstance(block, dict):
-        return "text"
-
-    candidates: List[Any] = [
-        block.get("type"), block.get("artifact_type"), block.get("representation"),
-        block.get("payload_type"),
-    ]
-    for key in ("presentation", "presentation_signal", "render_signal", "room_signal", "signal"):
-        envelope = block.get(key)
-        if isinstance(envelope, dict):
-            candidates.extend((
-                envelope.get("representation"), envelope.get("artifact_type"),
-                envelope.get("payload_type"), envelope.get("type"), envelope.get("kind"),
-            ))
-            presentation = envelope.get("presentation")
-            if isinstance(presentation, dict):
-                candidates.extend((presentation.get("representation"), presentation.get("kind"), presentation.get("type")))
-    artifact = block.get("artifact")
-    if isinstance(artifact, dict):
-        candidates.extend((artifact.get("type"), artifact.get("artifact_type"), artifact.get("representation")))
-        metadata = artifact.get("metadata")
-        if isinstance(metadata, dict):
-            candidates.append(metadata.get("artifact_type"))
-        payload = artifact.get("payload")
-        if isinstance(payload, dict):
-            candidates.extend((payload.get("artifact_type"), payload.get("representation"), payload.get("type"), payload.get("payload_type")))
-    payload = block.get("payload")
-    if isinstance(payload, dict):
-        candidates.extend((payload.get("artifact_type"), payload.get("representation"), payload.get("payload_type"), payload.get("type")))
-
-    aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph",
-        "table_data": "table", "math": "formula", "latex": "formula",
-        "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
-        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
-        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
-        "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
-        "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
-        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
-        "message": "text", "message_text": "text",
-    }
-    normalized = [
-        aliases.get(str(item).strip().lower().replace("-", "_"), str(item).strip().lower().replace("-", "_"))
-        for item in candidates if isinstance(item, str) and item.strip()
-    ]
-    generic = {"text", "markdown", "message", "message_text", "unknown"}
-    # Prefer a known specialist signal when the outer block only says text.
-    known_types = set(WEB_RENDERER_REGISTRY) | {"function", "biology", "it", "literature", "mathematics", "news", "politics", "social", "trigonometry", "utc"}
-    for item in normalized:
-        if item not in generic and item in known_types:
-            return item
-    return next((item for item in normalized if item not in generic), "text")
-
-
-def _scene_block_renderer(block: Dict[str, Any]) -> str:
-    block_type = _scene_block_type(block)
-    renderer = str(block.get("renderer") or block.get("viewer") or "").strip()
-    canonical = ARTIFACT_BLOCK_MAP.get(block_type, "MessageTextBlock")
-    generic = {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}
-    # A visual artifact has exactly one specialized viewer in the SceneContract.
-    if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"} and renderer in generic:
-        return canonical
-    if renderer:
-        return renderer
-    return canonical
-
-
-def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
-    """Keep only the actual visual payload; ignore transient renderer metadata."""
-    block_type = _scene_block_type(block)
-    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-    for candidate in (
-        block.get("artifact", {}).get("payload") if isinstance(block.get("artifact"), dict) else None,
-        block.get("signal", {}).get("payload") if isinstance(block.get("signal"), dict) else None,
-        block.get("presentation", {}).get("payload_contract", {}).get("payload")
-        if isinstance(block.get("presentation"), dict)
-        and isinstance(block.get("presentation", {}).get("payload_contract"), dict)
-        else None,
-    ):
-        if isinstance(candidate, dict):
-            merged = dict(candidate)
-            merged.update({k: v for k, v in payload.items() if v not in (None, "", [], {})})
-            payload = merged
-
-    if block_type in {"image", "gallery"}:
-        images = payload.get("images") or payload.get("gallery") or []
-        if isinstance(images, list):
-            sources = []
-            for item in images:
-                if isinstance(item, str):
-                    src = item
-                elif isinstance(item, dict):
-                    src = item.get("src") or item.get("url") or item.get("image") or item.get("asset_url")
-                else:
-                    src = ""
-                if src:
-                    sources.append(str(src).strip())
-            if sources:
-                return {"sources": sorted(set(sources))}
-        src = str(
-            block.get("src") or block.get("url") or block.get("asset_url")
-            or payload.get("src") or payload.get("url") or payload.get("image_url") or ""
-        ).strip()
-        return {"sources": [src]} if src else {"sources": []}
-
-    if block_type == "formula":
-        formulas = payload.get("formulas") or payload.get("latex_formulas")
-        if isinstance(formulas, list):
-            normalized = [str(item.get("latex") if isinstance(item, dict) else item).strip() for item in formulas if str(item.get("latex") if isinstance(item, dict) else item).strip()]
-            if normalized:
-                return {"formulas": normalized}
-        return {
-            "formula": str(
-                payload.get("formula") or payload.get("latex") or payload.get("equation")
-                or payload.get("expression") or block.get("content") or ""
-            ).strip()
-        }
-
-    if block_type == "diagram":
-        svg = str(payload.get("svg") or payload.get("drawing") or payload.get("svg_payload") or "").strip()
-        if svg:
-            return {"svg": " ".join(svg.split())}
-        return {
-            "nodes": payload.get("nodes") or [],
-            "edges": payload.get("edges") or [],
-            "elements": payload.get("elements") or payload.get("shapes") or [],
-            "points": payload.get("points") or [],
-        }
-
-    if block_type in {"graph", "table"}:
-        return payload
-
-    if block_type in {"link", "file"}:
-        links = payload.get("links")
-        if isinstance(links, list) and links:
-            urls = []
-            for item in links:
-                if isinstance(item, dict):
-                    value = str(item.get("url") or item.get("href") or "").strip()
-                    if value:
-                        urls.append(value.split("#", 1)[0].rstrip("/").lower())
-            if urls:
-                return {"urls": sorted(set(urls))}
-        url = str(block.get("url") or block.get("href") or payload.get("url") or payload.get("href") or "").strip()
-        return {"url": url.split("#", 1)[0].rstrip("/").lower()} if url else payload
-
-    return {}
-
-
-def _canonical_visual_dedupe_key(block: Dict[str, Any]) -> str:
-    block_type = _scene_block_type(block)
-    if block_type == "graph_data":
-        return f"internal:graph_data:{str(block.get('name') or '')}"
-    if block_type in {"link", "file", "formula", "graph", "table", "diagram", "image", "gallery"}:
-        return f"visual:{block_type}:{_scene_hash(_canonical_visual_payload_for_dedupe(block))}"
-    return ""
-
-
-def _prefer_canonical_visual_block(existing: Dict[str, Any], candidate: Dict[str, Any]) -> Dict[str, Any]:
-    rank = {
-        "messagetextblock": 0,
-        "textblock": 0,
-        "markdownblock": 0,
-        "formularenderer": 100,
-        "formulablock": 100,
-        "graphblock": 100,
-        "tableblock": 100,
-        "diagramrenderer": 100,
-        "galleryblock": 100,
-        "linkcard": 100,
-    }
-    existing_renderer = str(existing.get("renderer") or "").lower()
-    candidate_renderer = str(candidate.get("renderer") or "").lower()
-    if rank.get(candidate_renderer, 20) > rank.get(existing_renderer, 20):
-        return candidate
-    return existing
-
-def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id: str, flow_id: str) -> List[Dict[str, Any]]:
-    nodes = []
-    for index, raw in enumerate(_scene_list(blueprint.get("nodes"))):
-        if not isinstance(raw, dict):
-            continue
-        block = dict(raw)
-        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
-        block_type = _scene_block_type(block)
-        block["block_id"] = block_id
-        block["type"] = block_type
-        block["renderer"] = _scene_block_renderer(block)
-        block["viewer"] = str(block.get("viewer") or block["renderer"])
-        block["scene_id"] = scene_id
-        block["turn_id"] = turn_id
-        block["flow_id"] = flow_id
-        block.setdefault("payload", {})
-        block["sequence_index"] = index
-        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene_id, 'block': block_id, 'renderer': block['renderer']})}")
-        block["scene_contract"] = True
-        nodes.append(block)
-    return nodes
-
-
-def _render_requested_outputs(values: Any) -> set[str]:
-    if not isinstance(values, (list, tuple, set)):
-        return set()
-    aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
-        "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
-        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
-        "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
-        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
-        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link",
-    }
-    return {aliases.get(str(value or "").strip().lower().replace("-", "_"), str(value or "").strip().lower().replace("-", "_")) for value in values if str(value or "").strip()}
-
-
-def _split_markdown_table_row(line: str) -> List[str]:
-    text = str(line or "").strip()
-    if not text.startswith("|") or "|" not in text[1:]:
-        return []
-    text = text.strip("|")
-    cells: List[str] = []
-    current: List[str] = []
-    escaped = False
-    for char in text:
-        if char == "|" and not escaped:
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-        escaped = (char == "\\") and not escaped
-        if char != "\\":
-            escaped = False
-    cells.append("".join(current).strip())
-    return cells
-
-
-def _markdown_table_payload(answer: str) -> Dict[str, Any]:
-    """Read explicit same-turn Markdown table values without inventing cells."""
-    lines = str(answer or "").replace("\r", "").split("\n")
-    for index in range(len(lines) - 1):
-        headers = _split_markdown_table_row(lines[index])
-        sep = _split_markdown_table_row(lines[index + 1])
-        if len(headers) < 2 or len(sep) != len(headers):
-            continue
-        if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in sep):
-            continue
-        rows: List[List[str]] = []
-        for line in lines[index + 2:]:
-            if not line.strip():
-                if rows:
-                    break
-                continue
-            cells = _split_markdown_table_row(line)
-            if len(cells) != len(headers):
-                break
-            rows.append(cells)
-        if rows:
-            return {"columns": headers, "headers": headers, "rows": rows, "title": "", "source": "same_turn_markdown_table"}
-    return {}
-
-
-def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
-    """Remove a Markdown table from prose only after a TableBlock was created."""
-    if not answer or not expected:
-        return answer
-    lines = str(answer).replace("\r", "").split("\n")
-    expected_columns = list(expected.get("columns") or expected.get("headers") or [])
-    expected_rows = [list(row) for row in (expected.get("rows") or []) if isinstance(row, (list, tuple))]
-    for index in range(len(lines) - 1):
-        headers = _split_markdown_table_row(lines[index])
-        separator = _split_markdown_table_row(lines[index + 1])
-        if headers != expected_columns or len(separator) != len(headers):
-            continue
-        if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator):
-            continue
-        table_rows: List[List[str]] = []
-        end = index + 2
-        while end < len(lines) and lines[end].strip():
-            cells = _split_markdown_table_row(lines[end])
-            if len(cells) != len(headers):
-                break
-            table_rows.append(cells)
-            end += 1
-        if table_rows != expected_rows:
-            continue
-        remaining = lines[:index] + lines[end:]
-        cleaned = "\n".join(remaining)
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-        return cleaned.strip()
-    return answer
-
-
-def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
-    """Turn an explicit ASCII battery wiring sketch into a structural diagram.
-
-    Components and their order are read only from the fenced sketch returned in
-    this turn; the adapter does not add a component that the sketch did not show.
-    """
-    match = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", str(answer or ""), re.IGNORECASE)
-    if not match:
-        return {}
-    drawing = match.group(1)
-    if not re.search(r"аккумулятор|battery", drawing, re.IGNORECASE):
-        return {}
-    if not re.search(r"(?:предохранител|\bF\d+\b)", drawing, re.IGNORECASE):
-        return {}
-    if not re.search(r"(?:выключател|\bS\d+\b)", drawing, re.IGNORECASE):
-        return {}
-    if not re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", drawing, re.IGNORECASE):
-        return {}
-
-    components: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for line in drawing.splitlines():
-        clean = line.strip()
-        if not clean:
-            continue
-        found: List[tuple[str, str]] = []
-        if re.search(r"(?:плюс\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*\+|\+\s*12\s*в|positive\s+(?:battery|terminal))", clean, re.IGNORECASE):
-            found.append(("positive", "Плюс аккумулятора (+12 В)"))
-        if re.search(r"(?:предохранител|\bF\d+\b|fuse)", clean, re.IGNORECASE):
-            found.append(("fuse", "Предохранитель (F1)"))
-        if re.search(r"(?:выключател|\bS\d+\b|switch)", clean, re.IGNORECASE):
-            found.append(("switch", "Выключатель (S1)"))
-        if re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", clean, re.IGNORECASE):
-            if re.search(r"двигател|\bM\d+\b|motor", clean, re.IGNORECASE):
-                found.append(("load", "Электродвигатель 12 В"))
-            elif re.search(r"светодиод|\bLED\b", clean, re.IGNORECASE):
-                found.append(("load", "Светодиод"))
-            else:
-                found.append(("load", "Лампочка"))
-        if re.search(r"(?:минус\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*-|negative\s+(?:battery|terminal)|-\s*12\s*в)", clean, re.IGNORECASE):
-            found.append(("negative", "Минус аккумулятора (−)"))
-        for key, label in found:
-            # ASCII art usually repeats each component's ID and its caption on
-            # adjacent lines. Keep one node per component in the drawn order.
-            if key in seen:
-                continue
-            seen.add(key)
-            components.append({"id": key, "label": label, "level": len(components)})
-
-    order = [item["id"] for item in components]
-    if len(components) < 4 or not {"positive", "fuse", "switch", "load", "negative"}.issubset(set(order)):
-        return {}
-    edges = [{"from": left["id"], "to": right["id"], "label": "подключение"}
-             for left, right in zip(components, components[1:])]
-    return {
-        "representation": "diagram",
-        "layout": "hierarchical",
-        "direction": "TB",
-        "title": "Схема подключения аккумулятора 12 В",
-        "description": "Компоненты расположены в том же порядке, что и в текстовой схеме.",
-        "nodes": components,
-        "edges": edges,
-        "source": "same_turn_ascii_electrical_schematic",
-    }
-
-
-def _is_ascii_line_chart_fence(text: str) -> bool:
-    """Identify a text-only line chart that should be represented by GraphBlock."""
-    value = str(text or "")
-    if not re.search(r"[┤│]", value):
-        return False
-    row_pattern = re.compile(
-        r"(?im)^\s*-?\d+(?:[.,]\d+)?\s*[┤│|]\s*.*?"
-        r"(?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|"
-        r"\bпн\b|\bвт\b|\bср\b|\bчт\b|\bпт\b|\bсб\b|\bвс\b|"
-        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
-        re.IGNORECASE,
-    )
-    return len(row_pattern.findall(value)) >= 2
-
-def _graph_payload_from_answer(answer: str, graph_policy: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    """Promote an explicit 2D ASCII chart or listed 3D spheres to GraphBlock data."""
-    text = str(answer or "")
-    policy = graph_policy if isinstance(graph_policy, dict) else {}
-    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
-    is_3d = preferred in {"scene3d", "scene_3d", "surface3d", "surface_3d", "scatter3d", "scatter_3d", "3d"} or bool(re.search(
-        r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*)", text, re.IGNORECASE
-    ))
-    if is_3d:
-        sphere_pattern = re.compile(
-            r"(?im)^\s*[-*•]?\s*(?:сфера|sphere)\s*(\d+)?\s*:\s*"
-            r"(?:центр|center)\s*\(([^)]{3,90})\)\s*,?\s*"
-            r"(?:радиус|radius)\s*[:=]?\s*([-+]?\d+(?:[.,]\d+)?)"
-        )
-        objects: List[Dict[str, Any]] = []
-        for index, match in enumerate(sphere_pattern.finditer(text), 1):
-            coordinates = [_number_for_render(part) for part in re.split(r"\s*[,;]\s*", match.group(2).strip())]
-            radius = _number_for_render(match.group(3))
-            if len(coordinates) != 3 or any(value is None for value in coordinates) or radius is None or radius <= 0:
-                continue
-            x, y, z = coordinates
-            sphere_number = match.group(1) or str(index)
-            objects.append({
-                "id": f"sphere-{sphere_number}",
-                "shape": "sphere",
-                "label": f"Сфера {sphere_number}",
-                "x": x, "y": y, "z": z,
-                "center": {"x": x, "y": y, "z": z},
-                "radius": radius,
-            })
-        if objects:
-            return {
-                "representation": "scene3d",
-                "graph_type": "scene3d",
-                "dimensions": 3,
-                "three_d": True,
-                "title": "3D-график: сферы",
-                "description": "Сферы построены по указанным центрам и радиусам.",
-                "objects_3d": objects,
-                "x_axis": {"title": "X"},
-                "y_axis": {"title": "Y"},
-                "z_axis": {"title": "Z"},
-                "source": "same_turn_answer_explicit_sphere_coordinates",
-            }
-        # An explicit 3D request without usable 3D data must not silently become 2D.
-        return {}
-
-    # Parse common ASCII trend charts (e.g. "20 ┤ ● Понедельник"). These values
-    # are verbatim values already written by the Provider, not generated data.
-    weekday_aliases = {
-        "понедельник": (0, "Понедельник"), "пн": (0, "Понедельник"),
-        "вторник": (1, "Вторник"), "вт": (1, "Вторник"),
-        "среда": (2, "Среда"), "ср": (2, "Среда"),
-        "четверг": (3, "Четверг"), "чт": (3, "Четверг"),
-        "пятница": (4, "Пятница"), "пт": (4, "Пятница"),
-        "суббота": (5, "Суббота"), "сб": (5, "Суббота"),
-        "воскресенье": (6, "Воскресенье"), "вс": (6, "Воскресенье"),
-    }
-    day_pattern = re.compile(r"(?<![\w])(" + "|".join(sorted(map(re.escape, weekday_aliases), key=len, reverse=True)) + r")(?![\w])", re.IGNORECASE)
-    found_points: Dict[int, Dict[str, Any]] = {}
-    for line in text.splitlines():
-        value_match = re.match(r"^\s*(-?\d+(?:[.,]\d+)?)\s*[┤│|]\s*(.*)$", line)
-        if not value_match:
-            continue
-        day_match = day_pattern.search(value_match.group(2))
-        if not day_match:
-            continue
-        day_key = day_match.group(1).lower()
-        day_index, day_label = weekday_aliases[day_key]
-        numeric_value = _number_for_render(value_match.group(1))
-        if numeric_value is not None:
-            found_points[day_index] = {"x": day_label, "y": numeric_value}
-    if len(found_points) >= 2:
-        points = [found_points[key] for key in sorted(found_points)]
-        xs = [point["x"] for point in points]
-        ys = [point["y"] for point in points]
-        title_match = re.search(r"(?im)^\s*(?:график|graph)\s+[^\n]{3,140}", text)
-        title = re.sub(r"[`*_]+", "", title_match.group(0)).strip().rstrip(":.;") if title_match else "График изменения значения"
-        axis_match = re.search(r"(?im)^\s*([^\n]{2,60}(?:грн|uah|цена|price)[^\n]{0,25})\s*$", text)
-        y_title = axis_match.group(1).strip() if axis_match else "Цена / значение"
-        return {
-            "representation": "line",
-            "chart_type": "line",
-            "graph_type": "line",
-            "title": title[:140],
-            "series": [{"label": "Значение", "type": "line", "points": points, "x": xs, "y": ys}],
-            "points": points,
-            "x_values": xs,
-            "y_values": ys,
-            "x_axis": {"title": "День недели"},
-            "y_axis": {"title": y_title[:80]},
-            "source": "same_turn_ascii_chart_values",
-        }
-    return {}
-
-
-def _is_redundant_schematic_paragraph(paragraph: str) -> bool:
-    text = str(paragraph or "").strip().lower()
-    if not text or not re.search(r"схем|подключени|wiring|schematic", text):
-        return False
-    terms = [
-        r"аккумулятор|батаре", r"предохранител|fuse", r"выключател|switch",
-        r"двигател|мотор|лампоч|ламп[аыуе]|светодиод|motor|lamp|bulb",
-    ]
-    if sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in terms) < 3:
-        return False
-    return bool(re.search(r"(?:→|➜|->|-->|\bзатем\b|\bпосле\s+него\b|\bчерез\b)", text, re.IGNORECASE))
-
-def _rendered_link_urls(render_blocks: Any) -> set[str]:
-    """Return URLs which are definitely represented by a visible link renderer."""
-    urls: set[str] = set()
-    if not isinstance(render_blocks, list):
-        return urls
-
-    for block in render_blocks:
-        if not isinstance(block, dict):
-            continue
-        block_type = _scene_block_type(block)
-        if block_type not in {"link", "file"}:
-            continue
-        payload = _payload_for_render_block(block, block_type)
-        candidates: List[Any] = [payload.get("url"), payload.get("href"), block.get("url"), block.get("href")]
-        for key in ("links", "items", "sources"):
-            values = payload.get(key)
-            if isinstance(values, list):
-                for item in values:
-                    if isinstance(item, dict):
-                        candidates.extend((item.get("url"), item.get("href")))
-                    elif isinstance(item, str):
-                        candidates.append(item)
-        for candidate in candidates:
-            value = str(candidate or "").strip().rstrip(".,;:!?)\"'}]")
-            if value.startswith(("http://", "https://")):
-                urls.add(value)
-                urls.add(value.rstrip("/"))
-    return urls
-
-
-def _strip_rendered_link_urls(text: str, render_blocks: Any) -> str:
-    """Remove only URL strings already carried by a visible link renderer.
-
-    Human-readable labels and surrounding explanation are retained. Inline and
-    fenced code are protected because URLs inside code are source content, not
-    prose citations.
-    """
-    rendered_urls = _rendered_link_urls(render_blocks)
-    if not rendered_urls or not text:
+            for key in preferred:
+                if key not in value:
+                    continue
+                candidate = cls._extract_semantic_prompt(value.get(key), _depth=_depth + 1)
+                if candidate:
+                    return candidate
+            return ""
+
+        if isinstance(value, (list, tuple)):
+            parts: list[str] = []
+            for item in value[:24]:
+                candidate = cls._extract_semantic_prompt(item, _depth=_depth + 1)
+                if candidate:
+                    parts.append(candidate)
+            return " ".join(dict.fromkeys(parts)).strip()
+
+        text = cls._safe_text(value).strip()
+        if not text:
+            return ""
+        text = re.sub(r"^```(?:json|text|xml)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+        if re.match(r"^data:image/[^;]+;base64,", text, flags=re.IGNORECASE):
+            return ""
+        return " ".join(text.split())
+
+    @classmethod
+    def _clean_prompt(cls, prompt: Any) -> str:
+        text = cls._extract_semantic_prompt(prompt)
+        if not text:
+            raise ValueError("APRIL_IMAGES_EMPTY_PROMPT")
+        if len(text.split()) > cls.MAX_SEMANTIC_PROMPT_TOKENS:
+            raise ValueError(
+                f"APRIL_IMAGES_PROMPT_TOO_LONG:{len(text.split())}>{cls.MAX_SEMANTIC_PROMPT_TOKENS}"
+            )
         return text
 
-    def is_rendered_url(raw: str) -> bool:
-        value = str(raw or "").strip().rstrip(".,;:!?)\"'}]")
-        return value in rendered_urls or value.rstrip("/") in rendered_urls
+    @classmethod
+    def _compact_json(cls, value: Any, limit: int = 12_000) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        try:
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        except Exception:
+            text = cls._safe_text(value)
+        return text[:limit]
 
-    # Split off code first, and only process the non-code segments.
-    segments = re.split(r"(```[\s\S]*?```|`[^`\n]*`)", str(text))
-    for index in range(0, len(segments), 2):
-        prose = segments[index]
-
-        def markdown_link(match: re.Match[str]) -> str:
-            label, url = match.group(1), match.group(2)
-            if not is_rendered_url(url):
-                return match.group(0)
-            label = label.strip()
-            return "" if is_rendered_url(label) else label
-
-        prose = re.sub(r"\[([^\]]{1,300})\]\((https?://[^\s)]+)\)", markdown_link, prose, flags=re.IGNORECASE)
-
-        def bare_url(match: re.Match[str]) -> str:
-            raw = match.group(0)
-            return "" if is_rendered_url(raw) else raw
-
-        prose = re.sub(r"https?://[^\s<>\]\[()]+", bare_url, prose, flags=re.IGNORECASE)
-        # Remove list markers left with no content; preserve list items whose
-        # labels/descriptions remain after the URL itself is moved to the card.
-        prose_lines = []
-        for line in prose.splitlines():
-            if re.fullmatch(r"\s*(?:[-*•]|\d+[.)])\s*", line):
-                continue
-            prose_lines.append(line)
-        segments[index] = "\n".join(prose_lines)
-
-    cleaned = "".join(segments)
-    cleaned = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", cleaned)
-    return cleaned.strip()
-
-
-def _strip_rendered_segments(
-    text: str,
-    rendered_types: set[str],
-    render_blocks: Any = None,
-    suppress_unrequested_table: bool = False,
-) -> str:
-    """Keep narrative text while moving or suppressing structured fragments.
-
-    Unrequested Markdown tables may also be removed when a concrete requested
-    GraphBlock already represents their values. This prevents duplicate output
-    without discarding the data needed to construct the graph.
-    """
-    cleaned = str(text or "")
-    if not cleaned or not rendered_types:
-        return cleaned.strip()
-
-    if "table" in rendered_types or suppress_unrequested_table:
-        # Match Markdown data to an actual TableBlock payload before removing it.
-        # The source-derived fallback is retained for legacy payloads that expose
-        # a table type but omit its normalized columns/rows.
-        expected_tables: List[Dict[str, Any]] = []
-        if isinstance(render_blocks, list):
-            for block in render_blocks:
-                if not isinstance(block, dict) or _scene_block_type(block) != "table":
-                    continue
-                payload = _payload_for_render_block(block, "table")
-                columns = payload.get("columns") or payload.get("headers")
-                rows = payload.get("rows") or payload.get("data")
-                if isinstance(columns, list) and columns and isinstance(rows, list) and rows:
-                    normalized_rows = []
-                    for row in rows:
-                        if isinstance(row, (list, tuple)):
-                            normalized_rows.append([str(value).strip() for value in row])
-                    if normalized_rows:
-                        expected_tables.append({
-                            "columns": [str(value).strip() for value in columns],
-                            "headers": [str(value).strip() for value in columns],
-                            "rows": normalized_rows,
-                        })
-        if not expected_tables:
-            source_table = _markdown_table_payload(cleaned)
-            if source_table:
-                expected_tables = [source_table]
-        for table in expected_tables:
-            updated = _strip_first_markdown_table(cleaned, table)
-            if updated != cleaned:
-                cleaned = updated
-
-    if "diagram" in rendered_types:
-        match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
-        if match and _mermaid_payload(match.group(1).strip()):
-            # Only remove the Mermaid source when a concrete DiagramRenderer is
-            # present in this scene; its explanatory prose remains untouched.
-            if not isinstance(render_blocks, list) or any(
-                isinstance(block, dict) and _scene_block_type(block) == "diagram"
-                and _has_render_payload("diagram", _payload_for_render_block(block, "diagram"), block)
-                for block in render_blocks
-            ):
-                cleaned = cleaned.replace(match.group(0), "", 1)
-        else:
-            schematic_payload = _electrical_schematic_payload(cleaned)
-            if schematic_payload and (not isinstance(render_blocks, list) or any(
-                isinstance(block, dict) and _scene_block_type(block) == "diagram"
-                and _has_render_payload("diagram", _payload_for_render_block(block, "diagram"), block)
-                for block in render_blocks
-            )):
-                sketch = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
-                if sketch:
-                    cleaned = cleaned.replace(sketch.group(0), "", 1)
-                paragraphs = re.split(r"\n\s*\n", cleaned)
-                paragraphs = [paragraph for paragraph in paragraphs if not _is_redundant_schematic_paragraph(paragraph)]
-                cleaned = "\n\n".join(paragraphs)
-
-    if "graph" in rendered_types:
-        # Only remove an ASCII chart when the graph renderer was built from this
-        # exact chart source; otherwise keep the source text rather than risk loss.
-        graph_from_same_answer = False
-        if isinstance(render_blocks, list):
-            for block in render_blocks:
-                if not isinstance(block, dict) or _scene_block_type(block) != "graph":
-                    continue
-                payload = _payload_for_render_block(block, "graph")
-                if str(payload.get("source") or "") == "same_turn_ascii_chart_values":
-                    graph_from_same_answer = True
-                    break
-        if graph_from_same_answer:
-            for chart in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
-                if _is_ascii_line_chart_fence(chart.group(2)):
-                    cleaned = cleaned.replace(chart.group(0), "", 1)
-                    break
-
-    if "code" in rendered_types:
-        rendered_code: List[str] = []
-        if isinstance(render_blocks, list):
-            for block in render_blocks:
-                if not isinstance(block, dict) or _scene_block_type(block) != "code":
-                    continue
-                payload = _payload_for_render_block(block, "code")
-                value = payload.get("code") or payload.get("content") or block.get("code")
-                if isinstance(value, str) and value.strip():
-                    rendered_code.append(value.strip().replace("\r\n", "\n"))
-        for match in list(re.finditer(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", cleaned)):
-            if match.group(1).strip().lower() in {"mermaid", "diagram"}:
-                continue
-            fence_content = match.group(2).strip().replace("\r\n", "\n")
-            if rendered_code and fence_content in rendered_code:
-                cleaned = cleaned.replace(match.group(0), "", 1)
-
-    if "formula" in rendered_types:
-        rendered_formulas: set[str] = set()
-        if isinstance(render_blocks, list):
-            for block in render_blocks:
-                if not isinstance(block, dict) or _scene_block_type(block) != "formula":
-                    continue
-                payload = _payload_for_render_block(block, "formula")
-                values = payload.get("formulas") or payload.get("latex_formulas")
-                if isinstance(values, list):
-                    for value in values:
-                        formula = value.get("latex") if isinstance(value, dict) else value
-                        if isinstance(formula, str) and formula.strip():
-                            rendered_formulas.add(formula.strip())
-                for key in ("formula", "latex", "equation", "expression"):
-                    value = payload.get(key)
-                    if isinstance(value, str) and value.strip():
-                        rendered_formulas.add(value.strip())
-        formula_pattern = re.compile(r"\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)")
-        for match in list(formula_pattern.finditer(cleaned)):
-            formula = (match.group(1) or match.group(2) or "").strip()
-            if rendered_formulas and formula in rendered_formulas:
-                cleaned = cleaned.replace(match.group(0), "", 1)
-
-    if "link" in rendered_types:
-        cleaned = _strip_rendered_link_urls(cleaned, render_blocks)
-
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
-
-def _number_for_render(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    text = str(value or "").strip().replace("\u00a0", "").replace(" ", "")
-    if not text:
-        return None
-    text = re.sub(r"[^0-9,.-]", "", text)
-    if not text or text in {"-", ".", ","}:
-        return None
-    if "," in text and "." in text:
-        # When both separators appear, use the last one as the decimal mark.
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
-        text = text.replace(",", ".")
-    try:
-        result = float(text)
-        return result if result == result and abs(result) != float("inf") else None
-    except (TypeError, ValueError):
-        return None
-
-
-
-
-def _graph_payload_from_request(
-    current_request: str,
-    answer: str = "",
-    graph_policy: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    """Build only a graph that is grounded in the current request/answer.
-
-    Explicit equations are kept verbatim. For a stated start/end range, the
-    graph contains those two endpoints only; it never fabricates intermediate
-    measurements. Common 3D surfaces are allowed as labelled illustrative
-    defaults when the user names the surface but supplies no equation.
-    """
-    request_text = str(current_request or "").strip()
-    answer_text = str(answer or "").strip()
-    text = "\n".join(part for part in (request_text, answer_text) if part)
-    if not text:
-        return {}
-
-    policy = graph_policy if isinstance(graph_policy, dict) else {}
-    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
-    is_3d = preferred in {
-        "scene3d", "scene_3d", "surface3d", "surface_3d",
-        "scatter3d", "scatter_3d", "mesh3d", "mesh_3d", "3d",
-    } or bool(re.search(r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*|3-мерн\w*)", text, re.IGNORECASE))
-
-    if is_3d:
-        equation_match = re.search(
-            r"(?im)(?:^|[\s;])(?:z|f\s*\(\s*x\s*,\s*y\s*\))\s*=\s*([^\n;]+)",
-            text,
-        )
-        expression = ""
-        illustrative = False
-        if equation_match:
-            expression = equation_match.group(1).strip().strip("`$ ")
-            expression = re.sub(r"\s+(?:в|in)\s*(?:3\s*[- ]?d|3д|3d)\b.*$", "", expression, flags=re.IGNORECASE).strip()
-            expression = re.sub(r"[.!?]+$", "", expression).strip()
-        elif re.search(r"парабол|paraboloid|parabola", text, re.IGNORECASE):
-            expression = "x^2 + y^2"
-            illustrative = True
-        elif re.search(r"седлов|saddle", text, re.IGNORECASE):
-            expression = "x^2 - y^2"
-            illustrative = True
-        elif re.search(r"волнообраз|волнов|wave surface|waveform surface", text, re.IGNORECASE):
-            expression = "sin(sqrt(x^2 + y^2))"
-            illustrative = True
-        if expression:
-            return {
-                "representation": "surface3d",
-                "graph_type": "surface3d",
-                "chart_type": "surface3d",
-                "dimensions": 3,
-                "three_d": True,
-                "title": "Иллюстративная 3D-поверхность" if illustrative else "3D-график функции",
-                "description": (
-                    "Показана стандартная иллюстративная поверхность; уравнение не задавалось явно."
-                    if illustrative else "Поверхность построена по уравнению из текущего запроса."
-                ),
-                "equation": f"z = {expression}",
-                "expression": expression,
-                "surface_function": expression,
-                "z_function": expression,
-                "x_domain": [-5, 5],
-                "y_domain": [-5, 5],
-                "source": "current_request_equation" if not illustrative else "labelled_illustrative_shape_default",
-            }
-        return {}
-
-    # Require a semantically explicit endpoint relation; arbitrary numbers in
-    # prose are not enough to be treated as chart data.
-    range_pattern = re.compile(
-        r"(?i)(?:\b(?:с|от|from)\s*)"
-        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|uah|usd|eur|€|\$)?\s*"
-        r"(?:до|to|по|through)\s*"
-        r"(-?\d+(?:[.,]\d+)?)\s*(грн\.?|uah|usd|eur|€|\$)?"
-    )
-    range_match = range_pattern.search(text)
-    if not range_match:
-        # Equation-only 2D function: preserve the user/model's actual expression.
-        equation_match = re.search(
-            r"(?im)(?:^|[\s;])(?:y|f\s*\(\s*x\s*\))\s*=\s*([^\n;]+)",
-            text,
-        )
-        if equation_match and re.search(r"\bx\b", equation_match.group(1), re.IGNORECASE):
-            expression = equation_match.group(1).strip().strip("`$ ")
-            expression = re.sub(r"[.!?]+$", "", expression).strip()
-            if expression:
-                return {
-                    "representation": "function2d",
-                    "graph_type": "function",
-                    "chart_type": "line",
-                    "dimensions": 2,
-                    "title": "График функции",
-                    "equation": f"y = {expression}",
-                    "expression": expression,
-                    "series": [{
-                        "label": f"y = {expression}",
-                        "type": "function",
-                        "fn": expression,
-                        "equation": f"y = {expression}",
-                        "expression": expression,
-                    }],
-                    "x_axis": {"title": "x"},
-                    "y_axis": {"title": "y"},
-                    "source": "current_request_equation",
-                }
-        return {}
-
-    start_value = _number_for_render(range_match.group(1))
-    end_value = _number_for_render(range_match.group(2))
-    if start_value is None or end_value is None:
-        return {}
-
-    combined_low = text.lower()
-    if re.search(r"недел|week", combined_low):
-        x_labels = ["Начало недели", "Конец недели"]
-        x_title = "Период недели"
-    elif re.search(r"месяц|month", combined_low):
-        x_labels = ["Начало месяца", "Конец месяца"]
-        x_title = "Период месяца"
-    elif re.search(r"год|year", combined_low):
-        x_labels = ["Начало года", "Конец года"]
-        x_title = "Период года"
-    elif re.search(r"день|дня|дней|day|daily", combined_low):
-        x_labels = ["Начало периода", "Конец периода"]
-        x_title = "Период"
-    else:
-        x_labels = ["Начальное значение", "Конечное значение"]
-        x_title = "Период"
-
-    currency = range_match.group(3) or ""
-    if not currency:
-        currency_match = re.search(r"(?i)(грн\.?|uah|usd|eur|€|\$)", text)
-        currency = currency_match.group(1) if currency_match else ""
-    y_title = f"Значение, {currency}" if currency else "Значение"
-    title_match = re.search(
-        r"(?i)(?:построй|построить|покажи|нарисуй|построить)\s+(?:мне\s+)?(?:график|диаграмму)\s+(.{3,150})",
-        request_text,
-    )
-    title = title_match.group(1).strip() if title_match else "Изменение значения за период"
-    title = re.sub(r"\s*(?:с|от)\s*-?\d+(?:[.,]\d+)?[\w\s.,]*$", "", title, flags=re.IGNORECASE).strip(" .,:;-") or "Изменение значения за период"
-    points = [
-        {"x": x_labels[0], "y": start_value},
-        {"x": x_labels[1], "y": end_value},
-    ]
-    return {
-        "representation": "line",
-        "chart_type": "line",
-        "graph_type": "line",
-        "dimensions": 2,
-        "title": title[:140],
-        "description": "Показаны только заданные начальное и конечное значения; линия соединяет их без выдумывания промежуточных измерений.",
-        "series": [{
-            "label": y_title,
-            "type": "line",
-            "points": points,
-            "x": x_labels,
-            "y": [start_value, end_value],
-        }],
-        "points": points,
-        "x_values": x_labels,
-        "y_values": [start_value, end_value],
-        "x_axis": {"title": x_title, "values": x_labels},
-        "y_axis": {"title": y_title},
-        "source": "explicit_current_request_range",
-        "data_semantics": {"kind": "endpoint_range", "interpolation": "visual_line_only"},
-    }
-
-
-def _geometry_diagram_payload_from_request(
-    current_request: str,
-    answer: str = "",
-) -> Dict[str, Any]:
-    """Create small SVG drawings for explicitly named elementary geometry.
-
-    Shape identity comes from the current request. Dimension labels are shown
-    only when the user supplies them; no unspecified side lengths are invented.
-    """
-    request_text = str(current_request or "").strip()
-    text = "\n".join(part for part in (request_text, str(answer or "").strip()) if part)
-    if not text:
-        return {}
-    low = text.lower()
-
-    if re.search(r"треугол|triangle", low):
-        shape = "triangle"
-    elif re.search(r"квадрат|square", low):
-        shape = "square"
-    elif re.search(r"прямоугольник|прямоугольн|rectangle", low):
-        shape = "rectangle"
-    elif re.search(r"окружност|круг|circle", low):
-        shape = "circle"
-    else:
-        return {}
-
-    measures = re.findall(
-        r"(?<![\w])(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|meter|meters|m)\b",
-        request_text,
-        re.IGNORECASE,
-    )
-    def label_measure(item: tuple[str, str]) -> str:
-        value = item[0].replace(",", ".")
-        unit = item[1].lower()
-        unit_map = {"cm": "см", "mm": "мм", "m": "м", "meter": "м", "meters": "м"}
-        return f"{value} {unit_map.get(unit, unit)}"
-
-    side_labels: list[str] = []
-    per_each_match = re.search(
-        r"(?i)(?:по|each|every side(?: is)?)\s*(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|m)\b",
-        request_text,
-    )
-    if per_each_match and shape in {"triangle", "square"}:
-        side_labels = [label_measure((per_each_match.group(1), per_each_match.group(2)))] * (3 if shape == "triangle" else 4)
-    elif measures:
-        side_labels = [label_measure(item) for item in measures[:4]]
-
-    if shape == "triangle":
-        polygon = '<polygon points="260,48 78,318 442,318" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3" stroke-linejoin="round"/>'
-        labels = ""
-        if side_labels:
-            labels_data = [
-                (160, 172, side_labels[0]),
-                (360, 172, side_labels[min(1, len(side_labels)-1)]),
-                (260, 342, side_labels[min(2, len(side_labels)-1)]),
-            ]
-            labels = "".join(
-                f'<text x="{x}" y="{y}" text-anchor="middle" fill="#e5e7eb" font-size="18" font-family="Arial,sans-serif">{value}</text>'
-                for x, y, value in labels_data
-            )
-        svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="370" viewBox="0 0 520 370">'
-            '<title>Чертёж треугольника</title>'
-            '<line x1="260" y1="48" x2="78" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            '<line x1="260" y1="48" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            '<line x1="78" y1="318" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            f'{labels}'
-            '<text x="260" y="25" text-anchor="middle" fill="#e5e7eb" font-size="16" font-family="Arial,sans-serif">Треугольник</text>'
-            '</svg>'
-        )
-        equilateral = len(side_labels) >= 3 and len(set(side_labels[:3])) == 1
-        return {
-            "representation": "diagram",
-            "shape": "equilateral_triangle" if equilateral else "triangle",
-            "diagram_type": "geometry",
-            "title": "Чертёж равностороннего треугольника" if equilateral else "Чертёж треугольника",
-            "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематический треугольник; размеры сторон не задавались.",
-            "svg": svg,
-            "source": "current_request_geometry_fallback",
+    @classmethod
+    def _compact_visual_plan(cls, value: Any, *, _depth: int = 0) -> dict[str, Any]:
+        """Extract only visual-direction fields; never copy answer/content/history JSON."""
+        if _depth > 4 or not isinstance(value, dict):
+            return {}
+        allowed = {
+            "image_prompt", "visual_prompt", "visual_generation_prompt", "image_description",
+            "visual_description", "scene_prompt", "scene", "subject", "composition", "setting",
+            "foreground", "background", "objects", "clothing", "facial_features", "camera",
+            "lighting", "color_palette", "palette", "aspect_ratio", "negative_prompt",
+            "visual_constraints", "image_spec", "visual_spec", "render_profile",
         }
+        excluded = {"answer", "content", "summary", "internal_answer_en", "internal_request_en",
+                    "dialogue_memory_record"}
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in excluded:
+                continue
+            if name in allowed and item not in (None, "", [], {}):
+                if isinstance(item, (str, int, float, bool)):
+                    result[name] = item
+                elif isinstance(item, dict):
+                    nested = cls._compact_visual_plan(item, _depth=_depth + 1)
+                    if nested:
+                        result[name] = nested
+                elif isinstance(item, list):
+                    clean_items = []
+                    for child in item[:12]:
+                        if isinstance(child, (str, int, float, bool)):
+                            clean_items.append(child)
+                        elif isinstance(child, dict):
+                            nested = cls._compact_visual_plan(child, _depth=_depth + 1)
+                            if nested:
+                                clean_items.append(nested)
+                    if clean_items:
+                        result[name] = clean_items
+                continue
+            if isinstance(item, dict) and _depth < 4:
+                nested = cls._compact_visual_plan(item, _depth=_depth + 1)
+                if nested:
+                    result[name] = nested
+            elif isinstance(item, list) and _depth < 4:
+                nested_items = []
+                for child in item[:12]:
+                    if isinstance(child, dict):
+                        nested = cls._compact_visual_plan(child, _depth=_depth + 1)
+                        if nested:
+                            nested_items.append(nested)
+                if nested_items:
+                    result[name] = nested_items
+        return result
 
-    if shape == "square":
-        side = side_labels[0] if side_labels else ""
-        svg_shape = (
-            '<rect x="135" y="65" width="250" height="250" rx="1" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+    @classmethod
+    def _appearance_excerpt(cls, raw_plan: Any, request_anchor: str) -> str:
+        """Extract only a relevant appearance/portrait section, never the full answer."""
+        request_low = cls._safe_text(request_anchor).lower().replace("ё", "е")
+        if not re.search(r"(?:выгляд\w*|внешност\w*|портрет\w*|лиц\w*|appearance|portrait|look(?:ed)? like)", request_low):
+            return ""
+        if not isinstance(raw_plan, dict):
+            return ""
+        answer = cls._safe_text(raw_plan.get("answer") or raw_plan.get("content") or "")
+        if not answer:
+            return ""
+        lines = answer.splitlines()
+        heading_pattern = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:\*\*)?[^\n]*(?:как\s+[^\n]*выглядел|внешност|портрет|appearance|physical description|look(?:ed)? like)[^\n]*(?:\*\*)?\s*$",
+            re.IGNORECASE,
         )
-        labels = f'<text x="260" y="52" text-anchor="middle" fill="#e5e7eb" font-size="18">{side}</text>' if side else ""
-        title = "Чертёж квадрата"
-        shape_name = "square"
-    elif shape == "rectangle":
-        left = side_labels[0] if side_labels else ""
-        right = side_labels[1] if len(side_labels) > 1 else ""
-        svg_shape = '<rect x="90" y="95" width="340" height="190" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
-        labels = (
-            (f'<text x="260" y="82" text-anchor="middle" fill="#e5e7eb" font-size="18">{left}</text>' if left else "")
-            + (f'<text x="448" y="196" text-anchor="middle" fill="#e5e7eb" font-size="18">{right}</text>' if right else "")
-        )
-        title = "Чертёж прямоугольника"
-        shape_name = "rectangle"
-    else:
-        radius = side_labels[0] if side_labels else ""
-        svg_shape = '<circle cx="260" cy="190" r="120" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
-        labels = f'<text x="260" y="190" text-anchor="middle" fill="#e5e7eb" font-size="18">{radius}</text>' if radius else ""
-        title = "Чертёж окружности"
-        shape_name = "circle"
-
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">'
-        f'<title>{title}</title>{svg_shape}{labels}</svg>'
-    )
-    return {
-        "representation": "diagram",
-        "shape": shape_name,
-        "diagram_type": "geometry",
-        "title": title,
-        "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематическая геометрическая фигура; размеры не задавались.",
-        "svg": svg,
-        "source": "current_request_geometry_fallback",
-    }
-
-
-def _graph_payload_from_table(table: Dict[str, Any]) -> Dict[str, Any]:
-    columns = table.get("columns") or table.get("headers") or []
-    rows = table.get("rows") or []
-    if not isinstance(columns, list) or len(columns) < 2 or not isinstance(rows, list) or len(rows) < 2:
-        return {}
-    # Choose the first column as x and first numeric column with >=2 values as y.
-    x_index = 0
-    best_y = None
-    best_values: List[float] = []
-    for col_index in range(1, len(columns)):
-        values = [_number_for_render(row[col_index] if isinstance(row, (list, tuple)) and len(row) > col_index else None) for row in rows]
-        valid = [value for value in values if value is not None]
-        if len(valid) >= 2:
-            best_y = col_index
-            best_values = values
-            break
-    if best_y is None:
-        return {}
-    points = []
-    x_values = []
-    y_values = []
-    for row_index, row in enumerate(rows):
-        if not isinstance(row, (list, tuple)) or len(row) <= best_y:
-            continue
-        y_value = _number_for_render(row[best_y])
-        if y_value is None:
-            continue
-        x_raw = row[x_index] if len(row) > x_index else row_index + 1
-        x_num = _number_for_render(x_raw)
-        x_value = x_num if x_num is not None else str(x_raw)
-        points.append({"x": x_value, "y": y_value})
-        x_values.append(x_value)
-        y_values.append(y_value)
-    if len(points) < 2:
-        return {}
-    return {
-        "representation": "line",
-        "chart_type": "line",
-        "title": str(table.get("title") or "Graph"),
-        "series": [{"label": str(columns[best_y]), "type": "points", "points": points, "x": x_values, "y": y_values}],
-        "points": points,
-        "x_values": x_values,
-        "y_values": y_values,
-        "x_axis": {"title": str(columns[x_index])},
-        "y_axis": {"title": str(columns[best_y])},
-        "data_table": {"columns": list(columns), "rows": deepcopy(rows)},
-        "source": "same_turn_markdown_table",
-    }
-
-
-def _mermaid_payload(source: str) -> Dict[str, Any]:
-    """Parse the limited flowchart syntax already emitted by a structured plan."""
-    text = str(source or "").strip()
-    if not re.search(r"(?im)^\s*(?:flowchart|graph)\s+(?:LR|RL|TB|TD|BT)\b", text):
-        return {}
-    node_labels: Dict[str, str] = {}
-    edges: List[Dict[str, Any]] = []
-    # Node declaration/edge forms: A[Label] --> B[Label], A --> B.
-    edge_pattern = re.compile(r"([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))?\s*(?:-->|---|-.+?\.->|==>|--\s*[^-]+\s*-->)\s*([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))?")
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("flowchart", "graph", "%%")):
-            continue
-        match = edge_pattern.search(line)
-        if match:
-            left, left_square, left_round, right, right_square, right_round = match.groups()
-            node_labels.setdefault(left, (left_square or left_round or left).replace("<br/>", " ").replace("<br>", " ").strip())
-            node_labels.setdefault(right, (right_square or right_round or right).replace("<br/>", " ").replace("<br>", " ").strip())
-            edges.append({"from": left, "to": right})
-            continue
-        declaration = re.match(r"^([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))$", line)
-        if declaration:
-            node_id, square, round_label = declaration.groups()
-            node_labels.setdefault(node_id, (square or round_label or node_id).strip())
-    nodes = [{"id": key, "label": value} for key, value in node_labels.items()]
-    if len(nodes) < 2 or not edges:
-        return {}
-    return {"source": text, "mermaid": text, "format": "mermaid", "nodes": nodes, "edges": edges, "direction": re.search(r"(?im)^\s*(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b", text).group(1)}
-
-
-def _experiment_steps_payload(answer: str) -> Dict[str, Any]:
-    """Convert explicit experiment/procedure steps in the answer into a diagram.
-
-    This only restructures steps already written in the answer; it does not add
-    scientific steps, measurements, or claims.
-    """
-    lines = str(answer or "").splitlines()
-    section_pattern = re.compile(r"(?:опыт|эксперимент|ход\s+работ|процедур|experiment|procedure)", re.IGNORECASE)
-    item_pattern = re.compile(r"^\s*(?:\d{1,2}[.)]|[-*•])\s+(.{3,180})\s*$")
-    for index, line in enumerate(lines):
-        if not section_pattern.search(line):
-            continue
-        items: List[str] = []
-        started = False
-        for candidate in lines[index + 1:index + 18]:
-            match = item_pattern.match(candidate)
-            if match:
-                items.append(re.sub(r"\s+", " ", match.group(1)).strip())
-                started = True
-                if len(items) >= 8:
+        start = next((i for i, line in enumerate(lines) if heading_pattern.search(line)), None)
+        excerpt_lines: list[str] = []
+        if start is not None:
+            for line in lines[start + 1:]:
+                if re.match(r"^\s*#{1,6}\s+", line) or re.match(r"^\s*\*\*[^*]{2,100}\*\*\s*$", line):
                     break
-            elif started and not candidate.strip():
-                break
-            elif started and re.match(r"^\s*#{1,6}\s+", candidate):
-                break
-            elif started and candidate.strip() and not candidate.startswith(("  ", "\t")):
-                break
-        if len(items) >= 2:
-            nodes = [{"id": f"step_{n+1}", "label": label} for n, label in enumerate(items)]
-            edges = [{"from": f"step_{n+1}", "to": f"step_{n+2}"} for n in range(len(items)-1)]
-            return {"nodes": nodes, "edges": edges, "direction": "TB", "layout": "hierarchical", "source": "same_turn_experiment_steps"}
-    return {}
-
-
-def _section_outline_rows(answer: str, limit: int = 10) -> Dict[str, Any]:
-    """Extract a grounded section outline from this turn for table/network views.
-
-    Only headings and the first visible paragraph below them are reused. This is
-    a formatting transform over the current answer, not a knowledge-generation
-    step and not a lookup into dialogue history.
-    """
-    lines = str(answer or "").replace("\r", "").split("\n")
-    headings: List[Dict[str, str]] = []
-    current: Dict[str, Any] | None = None
-    in_fence = False
-    for raw_line in lines:
-        line = raw_line.strip()
-        if line.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence or not line:
-            continue
-        match = re.match(r"^#{1,4}\s+(.+?)\s*$", line)
-        if match:
-            if current:
-                summary = re.sub(r"\s+", " ", " ".join(current.pop("_body", []))).strip()
-                current["summary"] = summary[:260]
-                headings.append(current)
-            current = {"heading": re.sub(r"[*_`]", "", match.group(1)).strip(), "_body": []}
-            continue
-        if current is None:
-            continue
-        if line.startswith(("|", "!", ">", "<")):
-            continue
-        # Ignore repeated decorative separators and preserve only answer prose.
-        if re.fullmatch(r"[-*_]{3,}", line):
-            continue
-        current["_body"].append(line)
-    if current:
-        summary = re.sub(r"\s+", " ", " ".join(current.pop("_body", []))).strip()
-        current["summary"] = summary[:260]
-        headings.append(current)
-
-    if not headings:
-        return {}
-    title = headings[0].get("heading", "")
-    # A single top-level title with no content is the graph root, not a data row.
-    rows = [item for item in headings if item.get("summary")]
-    if len(rows) < 2:
-        return {"title": title, "sections": rows} if rows else {}
-    rows = rows[:max(2, min(12, int(limit)))]
-    return {"title": title, "sections": rows}
-
-
-def _section_outline_table(outline: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a two-column table from visible answer headings and their summaries."""
-    sections = outline.get("sections") if isinstance(outline, dict) else []
-    if not isinstance(sections, list) or len(sections) < 2:
-        return {}
-    rows = [
-        [str(item.get("heading") or "Раздел")[:120], str(item.get("summary") or "")[:240]]
-        for item in sections if isinstance(item, dict) and str(item.get("heading") or "").strip() and str(item.get("summary") or "").strip()
-    ]
-    if len(rows) < 2:
-        return {}
-    return {
-        "title": str(outline.get("title") or "Структура ответа"),
-        "columns": ["Раздел", "Краткое содержание"],
-        "headers": ["Раздел", "Краткое содержание"],
-        "rows": rows,
-        "source": "same_turn_answer_section_outline",
-    }
-
-
-def _section_outline_graph(outline: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a non-numeric concept map from the answer's own section headings."""
-    sections = outline.get("sections") if isinstance(outline, dict) else []
-    if not isinstance(sections, list) or len(sections) < 2:
-        return {}
-    title = str(outline.get("title") or "Структура ответа").strip()[:140]
-    nodes = [{"id": "answer_topic", "label": title or "Тема ответа", "level": 0}]
-    edges = []
-    for index, item in enumerate(sections[:10], 1):
-        if not isinstance(item, dict):
-            continue
-        label = str(item.get("heading") or "").strip()
-        if not label:
-            continue
-        node_id = f"answer_section_{index}"
-        nodes.append({"id": node_id, "label": label[:100], "level": 1, "description": str(item.get("summary") or "")[:220]})
-        edges.append({"from": "answer_topic", "to": node_id, "label": "содержит раздел", "relation": "section_of"})
-    if len(nodes) < 3 or not edges:
-        return {}
-    return {
-        "representation": "network",
-        "graph_type": "network",
-        "chart_type": "network",
-        "title": f"Карта разделов: {title}"[:180],
-        "description": "Связи отражают только структуру текущего ответа, а не количественные измерения.",
-        "nodes": nodes,
-        "edges": edges,
-        "source": "same_turn_answer_section_outline",
-    }
-
-
-def _section_outline_diagram(outline: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a structural (not causal) diagram from the current answer headings."""
-    sections = outline.get("sections") if isinstance(outline, dict) else []
-    if not isinstance(sections, list) or len(sections) < 2:
-        return {}
-    title = str(outline.get("title") or "Структура ответа").strip()[:120]
-    nodes = [{"id": "answer_start", "label": title or "Тема", "level": 0}]
-    edges: List[Dict[str, Any]] = []
-    for index, item in enumerate(sections[:10], 1):
-        if not isinstance(item, dict):
-            continue
-        heading = str(item.get("heading") or "").strip()
-        if not heading:
-            continue
-        node_id = f"outline_section_{index}"
-        nodes.append({
-            "id": node_id,
-            "label": heading[:90],
-            "level": 1,
-            "description": str(item.get("summary") or "")[:180],
-        })
-        edges.append({
-            "from": "answer_start",
-            "to": node_id,
-            "label": "раздел ответа",
-            "relation": "outline_membership",
-        })
-    if len(nodes) < 3 or not edges:
-        return {}
-    return {
-        "representation": "diagram",
-        "layout": "hierarchical",
-        "direction": "TB",
-        "title": f"Структурная схема: {title}"[:160],
-        "description": "Показан порядок и состав разделов ответа; связи не обозначают причинно-следственные зависимости.",
-        "nodes": nodes,
-        "edges": edges,
-        "source": "same_turn_answer_section_outline",
-    }
-
-
-def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[str, Any]:
-    """Merge structured payload sources with the explicit block payload winning.
-
-    A signal may carry the table rows/code/URL while the envelope carries identity
-    metadata. Returning only the first dictionary discarded complementary fields.
-    """
-    candidates: List[Any] = []
-    artifact = block.get("artifact")
-    if isinstance(artifact, dict):
-        artifact_data = artifact.get("data")
-        if isinstance(artifact_data, dict):
-            candidates.append(artifact_data.get("payload"))
-        candidates.extend((artifact.get("payload"), artifact_data))
-    presentation = block.get("presentation")
-    if isinstance(presentation, dict):
-        payload_contract = presentation.get("payload_contract")
-        if isinstance(payload_contract, dict):
-            candidates.append(payload_contract.get("payload"))
-    for key in ("signal", "room_signal", "render_signal", "presentation_signal"):
-        envelope = block.get(key)
-        if isinstance(envelope, dict):
-            candidates.append(envelope.get("payload"))
-            nested_presentation = envelope.get("presentation")
-            if isinstance(nested_presentation, dict):
-                nested_contract = nested_presentation.get("payload_contract")
-                if isinstance(nested_contract, dict):
-                    candidates.append(nested_contract.get("payload"))
-    candidates.extend((
-        block.get("data"), block.get("artifact_payload"), block.get("table"),
-        block.get("graph"), block.get("diagram"), block.get("link"),
-        block.get("content") if isinstance(block.get("content"), dict) else None,
-        block.get("payload"),
-    ))
-    merged: Dict[str, Any] = {}
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
-
-    if block_type == "diagram" and not str(merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or "").strip():
-        # Provider responses sometimes put a concrete SVG directly in `content`
-        # rather than `payload.svg`. _has_render_payload only examines structured
-        # payload fields, so the old path discarded a valid diagram between the
-        # Provider and SceneContract. Recover the exact SVG verbatim here.
-        candidates_text = [
-            block.get("content"), block.get("text"), block.get("markdown"),
-            block.get("code"), block.get("drawing"), block.get("svg"),
-            merged.get("content"), merged.get("text"), merged.get("markdown"),
-            merged.get("code"), merged.get("drawing"),
-        ]
-        for candidate_text in candidates_text:
-            if not isinstance(candidate_text, str) or "<svg" not in candidate_text.lower():
-                continue
-            svg_match = re.search(r"<svg\b[\s\S]*?</svg\s*>", candidate_text, re.IGNORECASE)
-            if svg_match:
-                merged["svg"] = svg_match.group(0)
-                break
-    # Normalize common provider aliases before validation. The Web renderers
-    # consume typed canonical keys, so payload data must not be rejected just
-    # because a provider called it `source`, `mermaid`, or Markdown links.
-    if block_type == "code" and not str(merged.get("code") or merged.get("content") or "").strip():
-        source_code = merged.get("source") or block.get("source")
-        if isinstance(source_code, str) and source_code.strip():
-            merged["code"] = source_code
-    if block_type == "link":
-        link_markdown = str(merged.get("markdown") or block.get("markdown") or "")
-        if link_markdown:
-            found_links = [
-                {"title": label.strip(), "url": url.rstrip(".,;:!?"), "href": url.rstrip(".,;:!?" )}
-                for label, url in re.findall(r"\[([^\]]{1,300})\]\((https?://[^\s)]+)\)", link_markdown, re.IGNORECASE)
-            ]
-            if found_links:
-                existing = merged.get("links") if isinstance(merged.get("links"), list) else []
-                merged["links"] = [*existing, *found_links]
-        if isinstance(merged.get("links"), list):
-            merged["links"] = [
-                ({"url": item, "href": item} if isinstance(item, str) and item.strip().lower().startswith(("http://", "https://")) else item)
-                for item in merged["links"]
-            ]
-    if block_type == "diagram" and not (merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or merged.get("nodes")):
-        mermaid_source = str(merged.get("mermaid") or merged.get("source") or block.get("mermaid") or "").strip()
-        if mermaid_source and re.search(r"(?im)^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|mindmap|timeline)\b", mermaid_source):
-            parsed_mermaid = _mermaid_payload(mermaid_source)
-            if isinstance(parsed_mermaid, dict) and parsed_mermaid:
-                merged.update(parsed_mermaid)
-    # Some older render blocks placed transfer data directly on the envelope.
-    # Preserve actual content/URLs but never treat a filename alone as file data.
-    for key in ("file_data_uri", "data_uri", "file_base64", "base64", "download_url", "file_url", "source", "content"):
-        value = block.get(key)
-        if key not in merged and value not in (None, "", [], {}):
-            merged[key] = deepcopy(value)
-    if merged:
-        return merged
-    keys = (WEB_RENDERER_REGISTRY.get(block_type) or {}).get("payload_keys") or []
-    fallback = {key: deepcopy(block[key]) for key in keys if key in block and block[key] not in (None, "", [], {})}
-    if block_type == "code" and not fallback.get("code") and isinstance(block.get("source"), str):
-        fallback["code"] = block["source"]
-    return fallback
-
-
-def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
-    p = payload if isinstance(payload, dict) else {}
-    if block_type == "table":
-        cols = p.get("columns") or p.get("headers")
-        rows = p.get("rows") or p.get("data")
-        return isinstance(cols, list) and bool(cols) and isinstance(rows, list) and bool(rows)
-    if block_type in {"graph", "knowledge_graph", "relation_graph", "relations"}:
-        series = p.get("series") or p.get("datasets") or p.get("traces")
-        nested_scene = p.get("scene") if isinstance(p.get("scene"), dict) else {}
-        nested_geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
-        nested_surface = p.get("surface") if isinstance(p.get("surface"), dict) else {}
-        has_nested_surface_expression = any(
-            str(candidate or "").strip()
-            for candidate in (
-                nested_surface.get("surface_function"), nested_surface.get("z_function"),
-                nested_surface.get("expression"), nested_surface.get("formula"),
-                nested_surface.get("function"),
-            )
-        )
-        has_nested_3d_objects = any(
-            isinstance(candidate, list) and bool(candidate)
-            for candidate in (
-                nested_scene.get("objects"), nested_geometry.get("objects"),
-                nested_geometry.get("spheres"),
-            )
-        )
-        representation = str(p.get("representation") or p.get("graph_type") or p.get("chart_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
-        explicit_surface_expression = representation in {"surface3d", "surface_3d", "3d_surface", "surface", "mesh3d", "mesh_3d", "3d"} and bool(
-            p.get("equation") or p.get("expression") or p.get("formula") or p.get("fn")
-        )
-        return bool(
-            (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
-            or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
-            or (isinstance(p.get("x"), list) and isinstance(p.get("y"), list) and min(len(p["x"]), len(p["y"])) >= 2)
-            or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
-            or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
-            or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
-            or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
-            or explicit_surface_expression
-            or (
-                representation in {"function", "function2d", "function_2d", "line", "line_chart", "scatter", "2d"}
-                and bool(p.get("equation") or p.get("expression") or p.get("fn") or p.get("function") or p.get("function_expression"))
-            )
-            or has_nested_surface_expression
-            or has_nested_3d_objects
-            or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
-        )
-    if block_type == "diagram":
-        diagram_nodes = p.get("nodes") or p.get("components") or p.get("vertices")
-        diagram_edges = p.get("edges") or p.get("connections") or p.get("relations")
-        return bool(
-            str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip()
-            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and isinstance(diagram_edges, list) and bool(diagram_edges))
-            or (isinstance(p.get("elements"), list) and bool(p["elements"]))
-            or (isinstance(p.get("shapes"), list) and bool(p["shapes"]))
-        )
-    if block_type in {"image", "gallery"}:
-        images = p.get("images") or p.get("items") or p.get("gallery") or p.get("sources")
-        if isinstance(images, list):
-            return any((isinstance(item, str) and item.strip()) or (isinstance(item, dict) and any(str(item.get(key) or "").strip() for key in ("src", "url", "image", "asset_url", "image_data_uri", "image_base64", "base64"))) for item in images)
-        return any(str(p.get(key) or "").strip() for key in ("src", "url", "image", "image_data_uri", "image_base64", "base64"))
-    if block_type == "formula":
-        return bool(str(p.get("formula") or p.get("latex") or p.get("equation") or p.get("expression") or p.get("markdown") or "").strip() or (isinstance(p.get("formulas"), list) and bool(p["formulas"])) or (isinstance(p.get("latex_formulas"), list) and bool(p["latex_formulas"])))
-    if block_type == "code":
-        return bool(str(p.get("code") or p.get("content") or (block or {}).get("code") or "").strip())
-    if block_type == "link":
-        links = p.get("links")
-        has_link_item = isinstance(links, list) and any(
-            (isinstance(item, str) and item.strip().lower().startswith(("http://", "https://")))
-            or (isinstance(item, dict) and str(item.get("url") or item.get("href") or "").strip().lower().startswith(("http://", "https://")))
-            for item in links
-        )
-        markdown_urls = re.findall(r"https?://[^\s)<>]+", str(p.get("markdown") or ""), re.IGNORECASE)
-        return bool(str(p.get("url") or p.get("href") or "").strip() or has_link_item or markdown_urls)
-    if block_type == "file":
-        # A file renderer needs a real content/transfer reference, not just an
-        # empty filename shell. Inline text files and encoded files are valid.
-        return bool(any(
-            str(p.get(key) or (block or {}).get(key) or "").strip()
-            for key in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code")
-        ))
-    return bool(p)
-
-
-def prepare_render_blocks_for_room_dispatch(
-    render_blocks: Any,
-    answer: str = "",
-    requested_outputs: Any = None,
-    graph_policy: Any = None,
-    current_request: str = "",
-) -> List[Dict[str, Any]]:
-    """Bind same-turn structured content to the canonical Web renderer types.
-
-    This is a deterministic adapter, not a second route. It promotes a structure
-    only when Interpretation requested it OR the same-turn answer already contains
-    an unambiguous representation (Markdown table, fenced source code, Mermaid
-    flowchart, delimited math, or literal URL). It never invents data or assets.
-    """
-    requested = _render_requested_outputs(requested_outputs)
-    interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
-    source_answer = str(answer or "")
-    section_outline = _section_outline_rows(source_answer)
-    section_table_from_answer = _section_outline_table(section_outline)
-    section_graph_from_answer = _section_outline_graph(section_outline)
-    # The answer may already contain a structured representation even when the
-    # user did not name its renderer explicitly. Reuse that evidence rather than
-    # forcing a valid table/code/diagram to remain trapped inside a text block.
-    table_from_answer = _markdown_table_payload(source_answer)
-    mermaid_match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
-    mermaid_from_answer = mermaid_match.group(1).strip() if mermaid_match else ""
-    diagram_from_answer = _mermaid_payload(mermaid_from_answer) if mermaid_from_answer else {}
-    experiment_steps_from_answer = _experiment_steps_payload(source_answer) if "diagram" in requested else {}
-    code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
-    if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
-        code_match = None
-    electrical_diagram_from_answer = _electrical_schematic_payload(source_answer) if "diagram" in requested else {}
-    diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
-    if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
-        # This code fence is a visual representation of the graph, not source code.
-        # Values are transferred to GraphBlock below; don't render it a second time.
-        code_match = None
-    if code_match and electrical_diagram_from_answer:
-        # The ASCII sketch is source evidence for the diagram, not a separate code artifact.
-        code_match = None
-    formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
-    formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
-    # Also promote standalone equation lines that the Provider returned as plain
-    # Markdown text. Values are extracted verbatim; no formula or measurement is invented.
-    equation_pattern = re.compile(
-        r"^\s*(?:[-*•]\s*)?([A-Za-zА-Яа-яΑ-ω][^\n]{0,100}?(?:=|≈|≠|≤|≥|∝|↔|→)[^\n]{1,150})\s*$"
-    )
-    for line in source_answer.splitlines():
-        clean_line = re.sub(r"[`*_]", "", line).strip()
-        equation_match = equation_pattern.match(clean_line)
-        if equation_match:
-            equation = equation_match.group(1).strip()
-            # Avoid converting ordinary prose containing a comparison into math.
-            if re.search(r"\d|[+*/^_]|\b(?:sin|cos|tan|sqrt|frac|mc|E|H|P|F|v|m|c)\b|[Α-ω]", equation, re.IGNORECASE):
-                if equation not in formulas_from_answer:
-                    formulas_from_answer.append(equation)
-        if len(formulas_from_answer) >= 12:
-            break
-    for math_match in re.finditer(r"\$\$([\s\S]+?)\$\$|(?<!\$)\$([^$\n]{1,180})\$(?!\$)", source_answer):
-        candidate = (math_match.group(1) or math_match.group(2) or "").strip()
-        if candidate and candidate not in formulas_from_answer:
-            formulas_from_answer.append(candidate)
-    urls_from_answer = list(dict.fromkeys(re.findall(r"https?://[^\s<>\]\[()]+", source_answer, re.IGNORECASE)))
-    # Explicit Markdown image embeds are already concrete visual evidence from
-    # this answer. Promote them to the same gallery contract when the user asked
-    # for source images, even if Provider omitted the separate gallery block.
-    markdown_images = [
-        {"src": str(url).rstrip(".,;:!?"), "url": str(url).rstrip(".,;:!?"),
-         "alt": str(alt or "").strip(), "title": str(alt or "").strip(),
-         "source_url": str(url).rstrip(".,;:!?")}
-        for alt, url in re.findall(r"!\[([^\]]{0,180})\]\((https?://[^\s)]+)(?:\s+['\"][^)]*?)?\)", source_answer, re.IGNORECASE)
-    ]
-    source_blocks = [deepcopy(item) for item in render_blocks if isinstance(item, dict)] if isinstance(render_blocks, list) else []
-    aliases = {
-        "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
-        "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
-        "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
-        "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
-        "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
-        "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
-        "svgblock": "diagram", "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
-        "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
-        "message": "text", "message_text": "text",
-    }
-    prepared: List[Dict[str, Any]] = []
-    for block in source_blocks:
-        raw_type = _scene_block_type(block)
-        block_type = aliases.get(raw_type, raw_type)
-        block["type"] = block_type
-        block["artifact_type"] = str(block.get("artifact_type") or block_type)
-        payload = _payload_for_render_block(block, block_type)
-
-        # Room payloads are hydrated only from evidence already returned for this turn.
-        if block_type == "table" and not _has_render_payload("table", payload):
-            if table_from_answer:
-                payload = deepcopy(table_from_answer)
-                block["source_room"] = block.get("source_room") or "C_TABLE_ROOM"
-        elif block_type == "graph" and not _has_render_payload("graph", payload):
-            if "graph" in requested and table_from_answer:
-                candidate_graph = _graph_payload_from_table(table_from_answer)
-                if candidate_graph:
-                    payload = candidate_graph
-                    block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
-            if "graph" in requested and not _has_render_payload("graph", payload):
-                candidate_graph = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-                if not candidate_graph:
-                    candidate_graph = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
-                if candidate_graph:
-                    payload = candidate_graph
-                    block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
-        elif block_type == "diagram" and not _has_render_payload("diagram", payload):
-            source = str(payload.get("source") or payload.get("mermaid") or block.get("source") or block.get("mermaid") or "")
-            if not source and mermaid_from_answer:
-                source = mermaid_from_answer
-            parsed = _mermaid_payload(source)
-            if parsed:
-                payload = {**payload, **parsed}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif electrical_diagram_from_answer:
-                payload = {**payload, **deepcopy(electrical_diagram_from_answer)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif experiment_steps_from_answer:
-                payload = {**payload, **deepcopy(experiment_steps_from_answer)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif diagram_from_request:
-                payload = {**payload, **deepcopy(diagram_from_request)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-        elif block_type == "gallery" and not _has_render_payload("gallery", payload):
-            if markdown_images:
-                payload = {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"}
-                block["source_room"] = block.get("source_room") or "GALLERY_ROOM"
-        elif block_type == "link":
-            if not _has_render_payload("link", payload) and urls_from_answer:
-                payload = {"url": urls_from_answer[0], "links": [{"url": url} for url in urls_from_answer], "source": "same_turn_answer"}
-                block["source_room"] = block.get("source_room") or "C_LINK_ROOM"
-            elif _has_render_payload("link", payload) and urls_from_answer:
-                # Merge grounded URLs from the answer into the provider's link block.
-                # This retains provider metadata while preventing all-but-first links
-                # from being lost when the response's dedicated block is incomplete.
-                existing_links = payload.get("links") if isinstance(payload.get("links"), list) else []
-                links: List[Dict[str, Any]] = [deepcopy(item) for item in existing_links if isinstance(item, dict)]
-                seen_urls = {str(item.get("url") or item.get("href") or "").strip().rstrip(".,;:!?") for item in links}
-                markdown_links = re.findall(r"\[([^\]]{1,180})\]\((https?://[^\s)]+)\)", source_answer, re.IGNORECASE)
-                grounded = [{"url": str(url).rstrip(".,;:!?"), "title": str(title).strip()} for title, url in markdown_links]
-                grounded.extend({"url": str(url).rstrip(".,;:!?")} for url in urls_from_answer)
-                for item in grounded:
-                    url = str(item.get("url") or "").strip()
-                    if url and url not in seen_urls:
-                        links.append(item)
-                        seen_urls.add(url)
-                if links:
-                    payload["links"] = links
-                    payload.setdefault("url", str(links[0].get("url") or links[0].get("href") or ""))
-        elif block_type == "code" and not _has_render_payload("code", payload, block):
-            if code_match:
-                payload = {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}
-        elif block_type == "formula" and not _has_render_payload("formula", payload):
-            if formulas_from_answer:
-                payload = {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}
-
-        if block_type == "graph" and payload and interpreted_graph_policy:
-            # Carry Interpretation's decision to the Web renderer. The renderer
-            # validates data integrity; it does not rediscover dialogue intent.
-            payload_policy = payload.get("graph_policy") if isinstance(payload.get("graph_policy"), dict) else {}
-            payload["graph_policy"] = {**payload_policy, **interpreted_graph_policy}
-            payload.setdefault(
-                "fallback_representation",
-                interpreted_graph_policy.get("fallback_representation")
-                or interpreted_graph_policy.get("preferred_representation")
-                or "line",
-            )
-        if payload:
-            block["payload"] = payload
-        if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "link", "file"}:
-            if not _has_render_payload(block_type, payload, block):
-                # Keep no empty visual shell; RenderMessage must never mount a fake card.
-                continue
-        prepared.append(block)
-
-    existing_types = {str(b.get("type") or "").lower() for b in prepared if isinstance(b, dict)}
-    if "diagram" in requested and experiment_steps_from_answer and "diagram" not in existing_types:
-        prepared.append({
-            "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
-            "viewer": "DiagramRenderer", "payload": deepcopy(experiment_steps_from_answer),
-            "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_experiment_steps",
-        })
-        existing_types.add("diagram")
-    # For a broad educational answer without explicit experiment-step bullets,
-    # render the answer's own headings as a structure diagram. This is an index
-    # of the answer's sections, not an invented scientific process or causal model.
-    if "diagram" in requested and "diagram" not in existing_types:
-        outline_diagram = _section_outline_diagram(section_outline)
-        if outline_diagram and _has_render_payload("diagram", outline_diagram):
-            prepared.append({
-                "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
-                "viewer": "DiagramRenderer", "payload": outline_diagram,
-                "source_room": "C_ARTIFACT_CONTRACT", "source": "same_turn_answer_section_outline",
-            })
-            existing_types.add("diagram")
-    # A requested source gallery may be absent as a separate block even though
-    # the same answer contains explicit Markdown image embeds. Reuse only those
-    # URLs; never convert ordinary source links into guessed image URLs.
-    if "gallery" in requested and "gallery" not in existing_types and markdown_images:
-        prepared.append({
-            "type": "gallery", "artifact_type": "gallery", "renderer": "GalleryBlock",
-            "viewer": "GalleryBlock", "payload": {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"},
-            "source_room": "GALLERY_ROOM",
-        })
-        existing_types.add("gallery")
-
-    # A requested table may be absent as a block even though the model returned
-    # its literal Markdown table. Promote that same table, without changing cells.
-    table_candidate = table_from_answer or section_table_from_answer
-    # A Markdown table may be useful as source data for a requested graph, but it
-    # must not become a second standalone TableBlock unless the user requested a
-    # table too. Keep the parsed table available above for graph-data extraction.
-    allow_answer_table_block = "table" in requested or (bool(table_from_answer) and "graph" not in requested)
-    if allow_answer_table_block and "table" not in existing_types and table_candidate and _has_render_payload("table", table_candidate):
-        prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_candidate, "source_room": "C_TABLE_ROOM" if table_from_answer else "C_ARTIFACT_CONTRACT"})
-        existing_types.add("table")
-    if "graph" in requested and "graph" not in existing_types:
-        graph_payload = _graph_payload_from_table(table_from_answer) if table_from_answer else {}
-        if not graph_payload and section_graph_from_answer:
-            graph_payload = deepcopy(section_graph_from_answer)
-        if not graph_payload:
-            graph_payload = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-        if not graph_payload:
-            graph_payload = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
-        if graph_payload and interpreted_graph_policy:
-            graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
-            graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
-            graph_payload.setdefault(
-                "fallback_representation",
-                interpreted_graph_policy.get("fallback_representation")
-                or interpreted_graph_policy.get("preferred_representation")
-                or "line",
-            )
-        if graph_payload and _has_render_payload("graph", graph_payload):
-            prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
-            existing_types.add("graph")
-    if ("link" in requested or urls_from_answer) and "link" not in existing_types:
-        if urls_from_answer:
-            # Preserve every source URL from the same-turn answer. Previously only
-            # urls_from_answer[0] reached LinkRenderer, silently dropping citations.
-            markdown_links = re.findall(
-                r"\[([^\]]{1,180})\]\((https?://[^\s)]+)\)",
-                source_answer,
+                excerpt_lines.append(line)
+        if not excerpt_lines:
+            appearance_terms = re.compile(
+                r"(?:ус\w*|бород\w*|волос\w*|лоб\w*|нос\w*|лиц\w*|глаз\w*|одежд\w*|сюртук\w*|beard|moustache|hair|forehead|face|clothing|coat)",
                 re.IGNORECASE,
             )
-            links: List[Dict[str, Any]] = []
-            seen_urls: set[str] = set()
-            for title, url in markdown_links:
-                clean_url = str(url or "").rstrip(".,;:!?")
-                if clean_url and clean_url not in seen_urls:
-                    links.append({"url": clean_url, "title": str(title or "").strip()})
-                    seen_urls.add(clean_url)
-            for url in urls_from_answer:
-                clean_url = str(url or "").rstrip(".,;:!?")
-                if clean_url and clean_url not in seen_urls:
-                    links.append({"url": clean_url})
-                    seen_urls.add(clean_url)
-            prepared.append({
-                "type": "link", "artifact_type": "link", "renderer": "LinkCard",
-                "viewer": "LinkCard", "payload": {"url": links[0]["url"], "links": links, "source": "same_turn_answer"},
-                "source_room": "C_LINK_ROOM",
-            })
-            existing_types.add("link")
-    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer or diagram_from_request) and "diagram" not in existing_types:
-        diagram_payload = diagram_from_answer or electrical_diagram_from_answer or diagram_from_request
-        if diagram_payload:
-            prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
-            existing_types.add("diagram")
-    if ("code" in requested or code_match) and "code" not in existing_types:
-        if code_match:
-            prepared.append({"type": "code", "artifact_type": "code", "renderer": "CodeBlock", "viewer": "CodeBlock", "payload": {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}})
-            existing_types.add("code")
-    if ("formula" in requested or formulas_from_answer) and "formula" not in existing_types:
-        if formulas_from_answer:
-            prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}})
+            paragraphs = re.split(r"\n\s*\n", answer)
+            excerpt_lines = [para for para in paragraphs if appearance_terms.search(para)][:2]
+        excerpt = re.sub(r"\s+", " ", " ".join(excerpt_lines)).strip()
+        excerpt = re.sub(r"\*\*|__|`", "", excerpt)
+        return excerpt[:900]
 
-    # Adaptive diagrams complement substantial structured explanations only when
-    # no different visual form was explicitly requested. The outline is derived
-    # from this turn's real headings/paragraphs, never from fixed topic templates.
-    try:
-        from blocks.C_DIAGRAM_ROOM import (
-            build_answer_outline_payload as _build_answer_outline_payload,
-            ensure_readable_diagram_payload as _ensure_readable_diagram_payload,
-            should_add_adaptive_diagram as _should_add_adaptive_diagram,
+    @classmethod
+    def _dialogue_generation_prompt_for_history(cls, spec: dict[str, Any]) -> str:
+        """Preserve the former full generator prompt as 12-hour dialogue evidence.
+
+        This is intentionally *not* sent to GPT Image 2. It is the exact richer
+        semantic/constraint envelope that the previous generator path assembled,
+        retained so Interpretation can use it when a later turn continues the
+        same authenticated visual task.
+        """
+        raw_plan = spec.get("openai_structured_visual_plan_raw")
+        plan_semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
         )
-        present_diagrams = [
-            item for item in prepared
-            if isinstance(item, dict) and _scene_block_type(item) == "diagram"
-        ]
-        if not present_diagrams and _should_add_adaptive_diagram(current_request, source_answer, requested):
-            adaptive_payload = _build_answer_outline_payload(source_answer)
-            if adaptive_payload:
-                prepared.append({
-                    "type": "diagram", "artifact_type": "diagram",
-                    "renderer": "DiagramRenderer", "viewer": "DiagramRenderer",
-                    "title": adaptive_payload.get("title"), "payload": adaptive_payload,
-                    "description": adaptive_payload.get("description"),
-                    "source_room": "C_ARTIFACT_CONTRACT",
-                    "source": "same_turn_adaptive_answer_outline",
-                    "adaptive_visual": True,
-                })
-        # The canonical web diagram renderer was receiving node/edge-only graphs.
-        # On mobile those could collapse to tiny labels in the corner. Convert all
-        # concrete node/edge diagrams to a readable portrait SVG before the shared
-        # SceneContract sees them; preserve supplied SVG and all original fields.
-        for visual_block in prepared:
-            if not isinstance(visual_block, dict) or _scene_block_type(visual_block) != "diagram":
-                continue
-            direct_payload = visual_block.get("payload") if isinstance(visual_block.get("payload"), dict) else {}
-            raw_payload = direct_payload or _payload_for_render_block(visual_block, "diagram")
-            if not isinstance(raw_payload, dict) or not raw_payload:
-                continue
-            readable_payload = _ensure_readable_diagram_payload(
-                raw_payload,
-                title=str(visual_block.get("title") or raw_payload.get("title") or ""),
-            )
-            if readable_payload:
-                visual_block["payload"] = readable_payload
-                if readable_payload.get("svg") or readable_payload.get("svg_payload"):
-                    renderer = str(readable_payload.get("renderer") or visual_block.get("renderer") or "SvgBlock")
-                    if renderer in {"", "DiagramRenderer", "diagram"}:
-                        renderer = "SvgBlock"
-                    visual_block["renderer"] = renderer
-                    visual_block["viewer"] = renderer
-                    visual_block["diagram_layout_repaired"] = True
-    except Exception as _diagram_quality_error:
-        # Visual repair must never make the text response fail. SceneContract's
-        # existing payload validation remains the fallback if an unusual payload
-        # cannot be converted by this optional layout helper.
-        try:
-            print("[APRIL_DIAGRAM_LAYOUT_REPAIR] " + json.dumps({
-                "status": "fallback_to_existing_contract",
-                "error_type": type(_diagram_quality_error).__name__,
-            }, ensure_ascii=False, separators=(",", ":")), flush=True)
-        except Exception:
-            pass
+        visual_context = spec.get("visual_context")
 
-    # Remove duplicates based on actual payload, not renderer metadata. Keep text
-    # and each different selected representation in the same ordered response.
-    result: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for block in prepared:
-        block_type = str(block.get("type") or "text").lower()
-        signature_payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        signature = f"{block_type}:{hashlib.sha256(repr(signature_payload).encode('utf-8')).hexdigest()[:16]}"
-        if block_type in {"text", "markdown"}:
-            signature = f"{block_type}:{hashlib.sha256(str(block.get('content') or block.get('text') or '').encode('utf-8')).hexdigest()[:16]}"
-        if signature in seen:
-            continue
-        seen.add(signature)
-        result.append(block)
+        parts: list[str] = []
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        if request_anchor:
+            parts.append(f"User request: {request_anchor}")
 
-    # If the user asked for a graph but not a table, the graph owns the requested
-    # visual output. Do not expose a second table merely because the model included
-    # Markdown rows in its prose. The parsed rows above remain available for graph
-    # construction; explicit graph+table requests are unaffected.
-    suppress_unrequested_table = "graph" in requested and "table" not in requested and any(
-        isinstance(item, dict)
-        and _scene_block_type(item) == "graph"
-        and _has_render_payload("graph", _payload_for_render_block(item, "graph"), item)
-        for item in result
-    )
-    if suppress_unrequested_table:
-        result = [item for item in result if not (isinstance(item, dict) and _scene_block_type(item) == "table")]
+        parts.append(f"OpenAI visual meaning: {plan_semantic}")
 
-    # The visual representation now owns its exact table/code/diagram/math body.
-    # Keep only surrounding narrative in the text node to avoid rendering the
-    # same content twice while still preserving explanatory prose.
-    rendered_types = {str(item.get("type") or "").lower() for item in result if isinstance(item, dict)}
-    if rendered_types & {"table", "code", "diagram", "formula", "graph"}:
-        for item in result:
-            if not isinstance(item, dict) or str(item.get("type") or "").lower() not in {"text", "markdown"}:
-                continue
-            original_text = str(item.get("content") or item.get("text") or "")
-            cleaned_text = _strip_rendered_segments(original_text, rendered_types, result, suppress_unrequested_table=suppress_unrequested_table)
-            if original_text.strip() and not cleaned_text.strip():
-                # Do not produce an empty text bubble if the entire source answer
-                # was a table/code/diagram; the structured renderer now owns it.
-                cyrillic = bool(re.search(r"[А-Яа-яІіЇїЄєҐґ]", original_text))
-                if "table" in rendered_types:
-                    cleaned_text = "Данные представлены в таблице." if cyrillic else "The data is shown in the table."
-                elif "diagram" in rendered_types:
-                    cleaned_text = "Схема представлена ниже." if cyrillic else "The diagram is shown below."
-                elif "code" in rendered_types:
-                    cleaned_text = "Код представлен отдельным блоком." if cyrillic else "The code is shown in a separate block."
-                else:
-                    cleaned_text = "Формула представлена отдельным блоком." if cyrillic else "The formula is shown in a separate block."
-            item["content"] = cleaned_text
-            item["text"] = cleaned_text
-            payload = item.get("payload")
-            if isinstance(payload, dict):
-                for key in ("content", "text", "markdown", "display_text"):
-                    if isinstance(payload.get(key), str):
-                        payload[key] = cleaned_text
+        if isinstance(visual_context, dict) and visual_context:
+            encoded_context = cls._compact_json(visual_context, 8_000)
+            if encoded_context:
+                parts.append(f"OpenAI visual constraints: {encoded_context}")
 
-    # Preserve a substantial narrative alongside visual artifacts. The current
-    # full answer is the source of truth; the 60% threshold protects against a
-    # renderer-cleanup pass accidentally replacing prose with a one-line caption.
-    canonical_text = _strip_rendered_segments(source_answer, rendered_types, result, suppress_unrequested_table=suppress_unrequested_table).strip()
-    text_indices = [
-        index for index, item in enumerate(result)
-        if isinstance(item, dict) and str(item.get("type") or "").lower() in {"text", "markdown", "message", "message_text"}
-    ]
-    text_chars = sum(
-        len(str(result[index].get("content") or result[index].get("text") or result[index].get("markdown") or "").strip())
-        for index in text_indices
-    )
-    retention_target = int(len(canonical_text) * 0.60)
-    if canonical_text and text_chars < retention_target:
-        if text_indices:
-            target_index = max(text_indices, key=lambda idx: len(str(result[idx].get("content") or result[idx].get("text") or "")))
-            result[target_index]["content"] = canonical_text
-            result[target_index]["text"] = canonical_text
-            result[target_index]["text_integrity_repaired"] = True
-            action = "restored_full_answer_to_text_block"
-        else:
-            result.insert(0, {
-                "type": "text", "artifact_type": "text",
-                "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
-                "content": canonical_text, "text_integrity_repaired": True,
-            })
-            action = "inserted_full_answer_text_block"
-        text_chars = len(canonical_text)
-        try:
-            print("[APRIL_RENDER_TEXT_RETENTION] " + json.dumps({
-                "action": action,
-                "answer_chars": len(canonical_text),
-                "text_chars_after": text_chars,
-                "retention_ratio": round(text_chars / max(1, len(canonical_text)), 3),
-            }, ensure_ascii=False, separators=(",", ":")), flush=True)
-        except Exception:
-            pass
-
-    render_aliases = {"gallery": "image", "image_gallery": "image", "generated_image": "image", "svg": "diagram", "math": "formula", "latex": "formula", "chart": "graph", "plot": "graph", "links": "link", "hyperlink": "link"}
-    rendered_types = {
-        render_aliases.get(str(item.get("type") or item.get("artifact_type") or "").strip().lower(), str(item.get("type") or item.get("artifact_type") or "").strip().lower())
-        for item in result if isinstance(item, dict)
-    }
-    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "file"}))
-    present_visual = sorted(set(requested_visual).intersection(rendered_types))
-    missing_visual = sorted(set(requested_visual) - set(present_visual))
-    coverage = round(len(present_visual) / max(1, len(requested_visual)), 3) if requested_visual else 1.0
-    try:
-        print("[APRIL_RENDER_COVERAGE] " + json.dumps({
-            "requested_outputs": sorted(requested),
-            "requested_visual_outputs": requested_visual,
-            "rendered_types": sorted(rendered_types),
-            "rendered_requested_types": present_visual,
-            "missing_requested_types": missing_visual,
-            "requested_renderer_coverage": coverage,
-            "text_chars": text_chars,
-            "answer_chars": len(canonical_text),
-            "text_retention_ratio": round(text_chars / max(1, len(canonical_text)), 3) if canonical_text else 0.0,
-            "minimum_text_retention": 0.60,
-            "minimum_renderer_coverage": 0.50,
-        }, ensure_ascii=False, separators=(",", ":")), flush=True)
-    except Exception:
-        pass
-    return result
-
-def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
-    return _has_render_payload(block_type, payload, block)
-
-
-_EXPLAINED_RENDER_TYPES = {
-    "formula", "graph", "table", "diagram", "image", "gallery", "code", "link", "file", "audio", "video"
-}
-
-
-def _explanation_language(answer: str, language_hint: Any = "") -> str:
-    """Resolve a user-facing fallback language, normalizing browser and legacy aliases."""
-    hint = str(language_hint or "").strip().lower().replace("_", "-")
-    code = hint.split("-", 1)[0]
-    if code in {"ua"}:
-        code = "uk"
-    if code in {"ru", "uk", "en", "es", "de", "fr", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
-        return code
-
-    low = (answer or "").lower()
-    if any(ch in low for ch in "їєґ") or re.search(r"\b(це|який|яка|формула|посилання|зображення|таблиця|графік|схема|рівняння|пояснює)\b", low):
-        return "uk"
-    if re.search(r"[а-яё]", low):
-        return "ru"
-    if re.search(r"[\u3040-\u30ff]", answer or ""):
-        return "ja"
-    if re.search(r"[\u4e00-\u9fff]", answer or ""):
-        return "zh"
-    if re.search(r"[\uac00-\ud7af]", answer or ""):
-        return "ko"
-    if re.search(r"[\u0600-\u06ff]", answer or ""):
-        return "ar"
-    if re.search(r"[\u0900-\u097f]", answer or ""):
-        return "hi"
-    if re.search(r"[\u0370-\u03ff]", answer or ""):
-        return "el"
-    if any(ch in low for ch in "éèàçùœ") or re.search(r"\b(la formule|ce lien|ce graphique|ce tableau|cette image|ce schéma|bonjour|merci)\b", low):
-        return "fr"
-    if any(ch in low for ch in "ñ¿¡") or re.search(r"\b(hola|gracias|necesito|por favor|explicación)\b", low):
-        return "es"
-    if any(ch in low for ch in "ßäöü") or re.search(r"\b(hallo|danke|bitte|erklärung)\b", low):
-        return "de"
-    if any(ch in low for ch in "ãõ") or re.search(r"\b(olá|obrigado|obrigada|explicação)\b", low):
-        return "pt"
-    if any(ch in low for ch in "łśźżąćęńó") or re.search(r"\b(cześć|dziękuję|wyjaśnienie)\b", low):
-        return "pl"
-    if re.search(r"\b(ciao|grazie|spiegazione|formula|immagine)\b", low):
-        return "it"
-    if re.search(r"\b(hallo|bedankt|uitleg|deze|het|een)\b", low):
-        return "nl"
-    return "en"
-
-
-def _render_payload(block: Dict[str, Any]) -> Dict[str, Any]:
-    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-    if not payload and isinstance(block.get("data"), dict):
-        payload = block.get("data")
-    return payload
-
-
-def _render_block_field(block: Dict[str, Any], payload: Dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = block.get(key)
-        if value not in (None, "", [], {}):
-            return value
-        value = payload.get(key)
-        if value not in (None, "", [], {}):
-            return value
-    return None
-
-
-def _answer_sections_for_explanation(answer: str) -> List[tuple[str, str]]:
-    text = str(answer or "").strip()
-    if not text:
-        return []
-    matches = list(re.finditer(r"(?m)^\s{0,3}#{1,4}\s+([^\n#][^\n]*)\s*$", text))
-    sections: List[tuple[str, str]] = []
-    if not matches:
-        # Treat paragraph-sized passages as separate candidates. Returning the
-        # entire answer here would cause the full response to repeat under every
-        # renderer when an answer has no Markdown headings.
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-        return [("", part) for part in paragraphs[:80]]
-    if matches[0].start() > 0 and text[:matches[0].start()].strip():
-        sections.append(("", text[:matches[0].start()].strip()))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections.append((match.group(1).strip(), text[match.end():end].strip()))
-    return sections
-
-
-def _clean_render_explanation_context(value: str, block_type: str) -> str:
-    text = str(value or "")
-    text = re.sub(r"```[\s\S]*?```", " ", text)
-    text = re.sub(r"\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|(?<!\$)\$[^$\n]{1,220}\$(?!\$)", " ", text)
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text, flags=re.IGNORECASE)
-    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
-    cleaned_lines: List[str] = []
-    for line in text.splitlines():
-        candidate = line.strip()
-        if not candidate or re.match(r"^#{1,4}\s", candidate):
-            continue
-        if candidate.startswith("|") and candidate.endswith("|"):
-            continue
-        # When an equation and its meaning share one line, retain the prose after
-        # the separator instead of repeating the equation beneath the renderer.
-        equation_explanation = re.split(r"\s+[—–]\s+", candidate, maxsplit=1)
-        if len(equation_explanation) == 2 and any(mark in equation_explanation[0] for mark in ("=", "≈", "→", "↔")) and len(equation_explanation[1].split()) >= 4:
-            candidate = equation_explanation[1].strip()
-        if re.match(r"^\s*[-*•]?\s*`{0,1}[A-Za-zА-Яа-яΑ-ω_\\{}^0-9().,+*/ =<>≤≥≠≈:-]{2,90}`?\s*$", candidate) and any(mark in candidate for mark in ("=", "≈", "→", "↔")) and len(candidate.split()) <= 8:
-            continue
-        cleaned_lines.append(candidate)
-    text = re.sub(r"\s+", " ", " ".join(cleaned_lines)).strip(" \t\n-–—:;,.•")
-    text = re.sub(r"\s+", " ", text)
-    return text[:850]
-
-
-def _render_section_context(block_type: str, block: Dict[str, Any], answer: str) -> tuple[str, str]:
-    sections = _answer_sections_for_explanation(answer)
-    payload = _render_payload(block)
-    title = str(_render_block_field(block, payload, "step_title", "title", "section", "filename") or "").strip()
-    title_low = title.lower()
-    patterns = {
-        "formula": r"формул|рівнян|уравнен|equation|formula|math|mathemat|релят|relativ|mass.?energy",
-        "link": r"посилан|ссылк|джерел|источник|ресурс|source|reference|resource|links?|bibliograph|фотоелектр",
-        "image": r"зображ|зображенн|картин|портрет|ілюстрац|иллюстрац|фото|image|picture|portrait|illustration|photo",
-        "gallery": r"зображ|картин|портрет|ілюстрац|иллюстрац|фото|image|picture|portrait|illustration|photo",
-        "code": r"код|скрипт|реаліза|реализац|implementation|source code|code|script|change|змін|измен",
-        "table": r"таблиц|порівня|сравнен|comparison|table|data",
-        "graph": r"графік|график|залежн|діаграм|chart|graph|plot|function|функці|функци",
-        "diagram": r"схем|діаграм|диаграм|експеримент|эксперимент|дослід|опыт|experiment|diagram|flow|process",
-        "file": r"файл|документ|document|file|attachment|вміст|содерж",
-        "audio": r"аудіо|голос|audio|voice|sound|звук",
-        "video": r"відео|видео|video|сцена|кадр|frame",
-    }
-    pattern = patterns.get(block_type, r"$^")
-    ranked: List[tuple[int, str, str]] = []
-    for heading, body in sections:
-        hlow = heading.lower()
-        score = 0
-        if title_low and hlow:
-            title_terms = {term for term in re.findall(r"[\wА-Яа-яІіЇїЄєҐґ]{3,}", title_low) if term not in {"the", "and", "для", "про", "this", "that"}}
-            heading_terms = set(re.findall(r"[\wА-Яа-яІіЇїЄєҐґ]{3,}", hlow))
-            overlap = len(title_terms & heading_terms)
-            if hlow == title_low:
-                score += 6
-            elif overlap:
-                score += min(5, overlap * 2)
-        if re.search(pattern, hlow, re.IGNORECASE):
-            score += 4
-        if re.search(pattern, body, re.IGNORECASE):
-            score += 2
-        if title_low and re.search(re.escape(title_low), body.lower(), re.IGNORECASE):
-            score += 3
-        cleaned = _clean_render_explanation_context(body, block_type)
-        if len(cleaned) >= 45:
-            score += 1
-        if cleaned:
-            ranked.append((score, heading, cleaned))
-    if not ranked:
-        return "", ""
-    ranked.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
-    score, heading, context = ranked[0]
-    if score <= 1 and len(sections) > 1:
-        # Do not associate an artifact with an unrelated section merely because
-        # it happens to be the longest paragraph.
-        return "", ""
-    # Prefer two concise paragraphs from a well-matched section when available.
-    if score >= 4 and len(sections) > 1:
-        selected = next((body for h, body in sections if h == heading), "")
-        cleaned_selected = _clean_render_explanation_context(selected, block_type)
-        if cleaned_selected:
-            context = cleaned_selected
-    return heading, context[:720]
-
-
-def _localized_explanation_prefix(language: str, block_type: str) -> str:
-    """Human-facing labels for system-generated render explanations."""
-    labels = {
-        "ru": {"formula": "Пояснение к формуле", "link": "Зачем нужна ссылка", "image": "Что показывает изображение", "gallery": "Что показывает изображение", "code": "Что делает код", "table": "Как читать таблицу", "graph": "Что показывает график", "diagram": "Что показывает схема", "file": "Что содержит файл", "audio": "Что содержит аудиоблок", "video": "Что показывает видеоблок"},
-        "uk": {"formula": "Пояснення до формули", "link": "Для чого потрібне посилання", "image": "Що показує зображення", "gallery": "Що показує зображення", "code": "Що робить код", "table": "Як читати таблицю", "graph": "Що показує графік", "diagram": "Що показує схема", "file": "Що містить файл", "audio": "Що містить аудіоблок", "video": "Що показує відеоблок"},
-        "fr": {"formula": "Explication de la formule", "link": "Utilité du lien", "image": "Ce que montre l’image", "gallery": "Ce que montre l’image", "code": "Rôle du code", "table": "Lecture du tableau", "graph": "Ce que montre le graphique", "diagram": "Ce que montre le schéma", "file": "Contenu du fichier", "audio": "Contenu du bloc audio", "video": "Contenu du bloc vidéo"},
-        "en": {"formula": "Formula explanation", "link": "Why this link is included", "image": "What the image shows", "gallery": "What the image shows", "code": "What the code does", "table": "How to read the table", "graph": "What the graph shows", "diagram": "What the diagram shows", "file": "What the file contains", "audio": "What the audio block contains", "video": "What the video block shows"},
-        "es": {"formula": "Explicación de la fórmula", "link": "Para qué sirve el enlace", "image": "Qué muestra la imagen", "gallery": "Qué muestra la imagen", "code": "Qué hace el código", "table": "Cómo leer la tabla", "graph": "Qué muestra el gráfico", "diagram": "Qué muestra el diagrama", "file": "Qué contiene el archivo", "audio": "Qué contiene el bloque de audio", "video": "Qué muestra el vídeo"},
-        "de": {"formula": "Erläuterung der Formel", "link": "Wozu dieser Link dient", "image": "Was das Bild zeigt", "gallery": "Was das Bild zeigt", "code": "Was der Code bewirkt", "table": "So lesen Sie die Tabelle", "graph": "Was das Diagramm zeigt", "diagram": "Was das Schema zeigt", "file": "Was die Datei enthält", "audio": "Was der Audioblock enthält", "video": "Was das Video zeigt"},
-        "it": {"formula": "Spiegazione della formula", "link": "A cosa serve il collegamento", "image": "Cosa mostra l’immagine", "gallery": "Cosa mostra l’immagine", "code": "Cosa fa il codice", "table": "Come leggere la tabella", "graph": "Cosa mostra il grafico", "diagram": "Cosa mostra lo schema", "file": "Cosa contiene il file", "audio": "Contenuto del blocco audio", "video": "Cosa mostra il video"},
-        "pl": {"formula": "Objaśnienie wzoru", "link": "Do czego służy link", "image": "Co przedstawia obraz", "gallery": "Co przedstawia obraz", "code": "Co robi kod", "table": "Jak czytać tabelę", "graph": "Co przedstawia wykres", "diagram": "Co przedstawia schemat", "file": "Co zawiera plik", "audio": "Co zawiera blok audio", "video": "Co przedstawia wideo"},
-        "pt": {"formula": "Explicação da fórmula", "link": "Para que serve o link", "image": "O que a imagem mostra", "gallery": "O que a imagem mostra", "code": "O que o código faz", "table": "Como ler a tabela", "graph": "O que o gráfico mostra", "diagram": "O que o diagrama mostra", "file": "O que o ficheiro contém", "audio": "O que contém o bloco de áudio", "video": "O que o vídeo mostra"},
-        "nl": {"formula": "Uitleg bij de formule", "link": "Waarvoor deze link dient", "image": "Wat de afbeelding laat zien", "gallery": "Wat de afbeelding laat zien", "code": "Wat de code doet", "table": "De tabel lezen", "graph": "Wat de grafiek laat zien", "diagram": "Wat het schema laat zien", "file": "Wat het bestand bevat", "audio": "Wat het audioblok bevat", "video": "Wat de video laat zien"},
-        "ja": {"formula": "数式の説明", "link": "リンクの目的", "image": "画像の内容", "gallery": "画像の内容", "code": "コードの動作", "table": "表の読み方", "graph": "グラフの内容", "diagram": "図の内容", "file": "ファイルの内容", "audio": "音声ブロックの内容", "video": "動画の内容"},
-        "zh": {"formula": "公式说明", "link": "链接用途", "image": "图像内容", "gallery": "图像内容", "code": "代码的作用", "table": "表格读法", "graph": "图表内容", "diagram": "示意图内容", "file": "文件内容", "audio": "音频块内容", "video": "视频内容"},
-        "ko": {"formula": "수식 설명", "link": "링크의 용도", "image": "이미지 설명", "gallery": "이미지 설명", "code": "코드의 기능", "table": "표 읽는 방법", "graph": "그래프 설명", "diagram": "도식 설명", "file": "파일 내용", "audio": "오디오 블록 내용", "video": "동영상 설명"},
-        "ar": {"formula": "شرح المعادلة", "link": "الغرض من الرابط", "image": "ما الذي توضحه الصورة", "gallery": "ما الذي توضحه الصورة", "code": "وظيفة الشيفرة", "table": "كيفية قراءة الجدول", "graph": "ما الذي يوضحه الرسم البياني", "diagram": "ما الذي يوضحه المخطط", "file": "محتوى الملف", "audio": "محتوى المقطع الصوتي", "video": "ما الذي يعرضه الفيديو"},
-        "hi": {"formula": "सूत्र की व्याख्या", "link": "लिंक का उद्देश्य", "image": "चित्र क्या दिखाता है", "gallery": "चित्र क्या दिखाता है", "code": "कोड क्या करता है", "table": "तालिका कैसे पढ़ें", "graph": "ग्राफ़ क्या दिखाता है", "diagram": "आरेख क्या दिखाता है", "file": "फ़ाइल में क्या है", "audio": "ऑडियो खंड में क्या है", "video": "वीडियो क्या दिखाता है"},
-        "el": {"formula": "Επεξήγηση τύπου", "link": "Χρήση του συνδέσμου", "image": "Τι δείχνει η εικόνα", "gallery": "Τι δείχνει η εικόνα", "code": "Τι κάνει ο κώδικας", "table": "Πώς διαβάζεται ο πίνακας", "graph": "Τι δείχνει το γράφημα", "diagram": "Τι δείχνει το διάγραμμα", "file": "Περιεχόμενο αρχείου", "audio": "Περιεχόμενο ήχου", "video": "Τι δείχνει το βίντεο"},
-    }
-    generic = {"ru": "Пояснение", "uk": "Пояснення", "fr": "Explication", "en": "Explanation", "es": "Explicación", "de": "Erklärung", "it": "Spiegazione", "pl": "Objaśnienie", "pt": "Explicação", "nl": "Uitleg", "ja": "説明", "zh": "说明", "ko": "설명", "ar": "شرح", "hi": "व्याख्या", "el": "Επεξήγηση"}
-    selected = labels.get(language) or labels["en"]
-    return selected.get(block_type, generic.get(language, "Explanation"))
-
-
-def _fallback_render_explanation_extended(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
-    """Localized source-grounded fallback text for the remaining UI languages."""
-    payload = _render_payload(block)
-    section, context = _render_section_context(block_type, block, answer)
-    block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
-    title = str(section or block_title).strip()
-    title_ref = f" «{title[:100]}»" if title else ""
-
-    templates = {
-        "es": {
-            "link_plain": "Este enlace se incluye como fuente para comprobar o ampliar el tema{title}.",
-            "formula": "Esta fórmula se relaciona con la sección{title}. Explica: {context}", "link": "Este enlace lleva a una fuente asociada con la sección{title}. Contexto: {context}", "image": "La imagen se relaciona con la sección{title} y muestra: {context}", "gallery": "La imagen se relaciona con la sección{title} y muestra: {context}", "code": "El bloque de código complementa la sección{title}. Su finalidad es: {context}", "table": "La tabla organiza los datos de la sección{title} para compararlos. Contenido: {context}", "graph": "El gráfico representa los datos o la relación de la sección{title}. Contenido: {context}", "diagram": "El diagrama muestra un proceso o unas relaciones de la sección{title}. Descripción: {context}", "file": "El archivo está relacionado con la sección{title}. En esta respuesta sirve para: {context}", "audio": "El bloque de audio está relacionado con la sección{title}: {context}", "video": "El bloque de vídeo está relacionado con la sección{title}: {context}", "generated": "Es una ilustración generada, no una fotografía de archivo.", "edited": "Cambios indicados: {note}", "formula_plain": "Este bloque matemático representa una relación cuantitativa de la sección{title}. Interpreta los símbolos según el contexto de la respuesta.", "table_plain": "La tabla agrupa valores relacionados para facilitar su comparación.{details} Las conclusiones deben basarse solo en las filas mostradas.", "graph_plain": "El gráfico representa la relación entre las variables de los ejes. {details} La tendencia debe leerse a partir de los datos mostrados, sin inferir valores ausentes.", "diagram_plain": "El diagrama ilustra una estructura o una secuencia de pasos. {details}", "block_plain": "Este bloque está relacionado con la sección{title}. {details}", "open": "Abre el bloque para consultar su contenido.", "columns": " Columnas: {headers}.", "rows": " Número de filas de datos: {count}.", "relationship": "La imagen ilustra «{title}»; por sí sola no constituye una prueba factual."},
-        "de": {
-            "link_plain": "Dieser Link dient als Quelle, um das Thema{title} zu prüfen oder zu vertiefen.",
-            "formula": "Diese Formel gehört zum Abschnitt{title}. Sie erklärt: {context}", "link": "Dieser Link führt zu einer Quelle für den Abschnitt{title}. Kontext: {context}", "image": "Das Bild gehört zum Abschnitt{title} und zeigt: {context}", "gallery": "Das Bild gehört zum Abschnitt{title} und zeigt: {context}", "code": "Der Codeblock ergänzt den Abschnitt{title}. Sein Zweck: {context}", "table": "Die Tabelle ordnet die Daten aus dem Abschnitt{title} zum Vergleich. Inhalt: {context}", "graph": "Das Diagramm veranschaulicht Daten oder Beziehungen aus dem Abschnitt{title}. Inhalt: {context}", "diagram": "Das Schema zeigt einen Ablauf oder Beziehungen aus dem Abschnitt{title}. Beschreibung: {context}", "file": "Die Datei gehört zum Abschnitt{title}. In dieser Antwort dient sie dazu: {context}", "audio": "Der Audioblock gehört zum Abschnitt{title}: {context}", "video": "Der Videoblock gehört zum Abschnitt{title}: {context}", "generated": "Dies ist eine generierte Illustration und kein Archivfoto.", "edited": "Dokumentierte Änderungen: {note}", "formula_plain": "Dieser mathematische Block beschreibt einen quantitativen Zusammenhang im Abschnitt{title}. Deute die Symbole im Kontext der Antwort.", "table_plain": "Die Tabelle bündelt zusammengehörige Werte zum Vergleich.{details} Schlussfolgerungen dürfen sich nur auf die angezeigten Zeilen stützen.", "graph_plain": "Das Diagramm zeigt den Zusammenhang zwischen den Achsenvariablen. {details} Lies den Trend aus den angezeigten Daten ab und ergänze keine fehlenden Werte.", "diagram_plain": "Das Schema veranschaulicht eine Struktur oder eine Abfolge von Schritten. {details}", "block_plain": "Dieser Block gehört zum aktuellen Abschnitt{title}. {details}", "open": "Öffne den Block, um seinen Inhalt anzusehen.", "columns": " Spalten: {headers}.", "rows": " Anzahl der Datenzeilen: {count}.", "relationship": "Das Bild veranschaulicht „{title}“, ist für sich genommen aber kein faktischer Beleg."},
-        "it": {
-            "link_plain": "Questo collegamento è una fonte per verificare o approfondire il tema{title}.",
-            "formula": "Questa formula è collegata alla sezione{title}. Spiega: {context}", "link": "Questo collegamento porta a una fonte relativa alla sezione{title}. Contesto: {context}", "image": "L’immagine è collegata alla sezione{title} e mostra: {context}", "gallery": "L’immagine è collegata alla sezione{title} e mostra: {context}", "code": "Il blocco di codice integra la sezione{title}. La sua funzione è: {context}", "table": "La tabella organizza i dati della sezione{title} per confrontarli. Contenuto: {context}", "graph": "Il grafico visualizza dati o relazioni della sezione{title}. Contenuto: {context}", "diagram": "Lo schema mostra un processo o relazioni della sezione{title}. Descrizione: {context}", "file": "Il file è collegato alla sezione{title}. In questa risposta serve a: {context}", "audio": "Il blocco audio è collegato alla sezione{title}: {context}", "video": "Il blocco video è collegato alla sezione{title}: {context}", "generated": "È un’illustrazione generata, non una fotografia d’archivio.", "edited": "Modifiche indicate: {note}", "formula_plain": "Questo blocco matematico rappresenta una relazione quantitativa della sezione{title}. Interpreta i simboli nel contesto della risposta.", "table_plain": "La tabella raccoglie valori correlati per facilitarne il confronto.{details} Le conclusioni devono basarsi sulle righe effettivamente mostrate.", "graph_plain": "Il grafico rappresenta la relazione tra le variabili degli assi. {details} La tendenza va letta dai dati visualizzati, senza inventare valori mancanti.", "diagram_plain": "Lo schema illustra una struttura o una sequenza di passaggi. {details}", "block_plain": "Questo blocco è collegato alla sezione{title}. {details}", "open": "Apri il blocco per consultarne il contenuto.", "columns": " Colonne: {headers}.", "rows": " Numero di righe di dati: {count}.", "relationship": "L’immagine illustra «{title}», ma da sola non costituisce una prova fattuale."},
-        "pl": {
-            "link_plain": "Ten link prowadzi do źródła, które pozwala sprawdzić lub pogłębić temat{title}.",
-            "formula": "Ten wzór jest związany z sekcją{title}. Wyjaśnia: {context}", "link": "Ten link prowadzi do źródła związanego z sekcją{title}. Kontekst: {context}", "image": "Obraz jest związany z sekcją{title} i przedstawia: {context}", "gallery": "Obraz jest związany z sekcją{title} i przedstawia: {context}", "code": "Blok kodu uzupełnia sekcję{title}. Jego przeznaczenie: {context}", "table": "Tabela porządkuje dane z sekcji{title}, aby można je było porównać. Zawartość: {context}", "graph": "Wykres przedstawia dane lub zależność z sekcji{title}. Zawartość: {context}", "diagram": "Schemat pokazuje proces lub zależności z sekcji{title}. Opis: {context}", "file": "Plik jest związany z sekcją{title}. W tej odpowiedzi służy do: {context}", "audio": "Blok audio jest związany z sekcją{title}: {context}", "video": "Blok wideo jest związany z sekcją{title}: {context}", "generated": "To wygenerowana ilustracja, a nie fotografia archiwalna.", "edited": "Odnotowane zmiany: {note}", "formula_plain": "Ten blok matematyczny przedstawia zależność ilościową z sekcji{title}. Symbole należy interpretować w kontekście odpowiedzi.", "table_plain": "Tabela porządkuje powiązane wartości, aby ułatwić ich porównanie.{details} Wnioski powinny wynikać wyłącznie z widocznych wierszy.", "graph_plain": "Wykres przedstawia zależność między zmiennymi na osiach. {details} Trend należy odczytać z pokazanych danych, bez dopowiadania brakujących wartości.", "diagram_plain": "Schemat ilustruje strukturę lub kolejność kroków. {details}", "block_plain": "Ten blok jest związany z bieżącą sekcją{title}. {details}", "open": "Otwórz blok, aby zobaczyć jego zawartość.", "columns": " Kolumny: {headers}.", "rows": " Liczba wierszy danych: {count}.", "relationship": "Obraz ilustruje temat „{title}”, ale sam w sobie nie jest dowodem faktu."},
-        "pt": {
-            "link_plain": "Este link é uma fonte para verificar ou aprofundar o tema{title}.",
-            "formula": "Esta fórmula está relacionada com a secção{title}. Explica: {context}", "link": "Este link conduz a uma fonte relacionada com a secção{title}. Contexto: {context}", "image": "A imagem está relacionada com a secção{title} e mostra: {context}", "gallery": "A imagem está relacionada com a secção{title} e mostra: {context}", "code": "O bloco de código complementa a secção{title}. A sua finalidade é: {context}", "table": "A tabela organiza os dados da secção{title} para comparação. Conteúdo: {context}", "graph": "O gráfico representa dados ou relações da secção{title}. Conteúdo: {context}", "diagram": "O diagrama mostra um processo ou relações da secção{title}. Descrição: {context}", "file": "O ficheiro está relacionado com a secção{title}. Nesta resposta, serve para: {context}", "audio": "O bloco de áudio está relacionado com a secção{title}: {context}", "video": "O bloco de vídeo está relacionado com a secção{title}: {context}", "generated": "É uma ilustração gerada, não uma fotografia de arquivo.", "edited": "Alterações registadas: {note}", "formula_plain": "Este bloco matemático representa uma relação quantitativa da secção{title}. Interprete os símbolos no contexto da resposta.", "table_plain": "A tabela reúne valores relacionados para facilitar a comparação.{details} As conclusões devem basear-se apenas nas linhas apresentadas.", "graph_plain": "O gráfico representa a relação entre as variáveis dos eixos. {details} A tendência deve ser lida nos dados apresentados, sem inventar valores em falta.", "diagram_plain": "O diagrama ilustra uma estrutura ou uma sequência de etapas. {details}", "block_plain": "Este bloco está relacionado com a secção atual{title}. {details}", "open": "Abra o bloco para consultar o seu conteúdo.", "columns": " Colunas: {headers}.", "rows": " Número de linhas de dados: {count}.", "relationship": "A imagem ilustra «{title}», mas por si só não constitui prova factual."},
-        "nl": {
-            "link_plain": "Deze link is een bron om het onderwerp{title} te controleren of verder te verkennen.",
-            "formula": "Deze formule hoort bij het onderdeel{title}. De formule verklaart: {context}", "link": "Deze link verwijst naar een bron bij het onderdeel{title}. Context: {context}", "image": "De afbeelding hoort bij het onderdeel{title} en laat zien: {context}", "gallery": "De afbeelding hoort bij het onderdeel{title} en laat zien: {context}", "code": "Het codeblok vult het onderdeel{title} aan. Het doel is: {context}", "table": "De tabel ordent de gegevens uit het onderdeel{title}, zodat ze te vergelijken zijn. Inhoud: {context}", "graph": "De grafiek geeft gegevens of verbanden uit het onderdeel{title} weer. Inhoud: {context}", "diagram": "Het schema toont een proces of relaties uit het onderdeel{title}. Beschrijving: {context}", "file": "Het bestand hoort bij het onderdeel{title}. In dit antwoord wordt het gebruikt voor: {context}", "audio": "Het audioblok hoort bij het onderdeel{title}: {context}", "video": "Het videoblok hoort bij het onderdeel{title}: {context}", "generated": "Dit is een gegenereerde illustratie, geen archieffoto.", "edited": "Vermelde wijzigingen: {note}", "formula_plain": "Dit wiskundige blok geeft een kwantitatief verband uit het onderdeel{title} weer. Interpreteer de symbolen in de context van het antwoord.", "table_plain": "De tabel groepeert verwante waarden om ze gemakkelijker te vergelijken.{details} Conclusies moeten gebaseerd zijn op de daadwerkelijk getoonde rijen.", "graph_plain": "De grafiek toont het verband tussen de asvariabelen. {details} Lees de trend af uit de weergegeven gegevens en vul ontbrekende waarden niet zelf in.", "diagram_plain": "Het schema toont een structuur of een reeks stappen. {details}", "block_plain": "Dit blok hoort bij het huidige onderdeel{title}. {details}", "open": "Open het blok om de inhoud te bekijken.", "columns": " Kolommen: {headers}.", "rows": " Aantal gegevensrijen: {count}.", "relationship": "De afbeelding illustreert „{title}”, maar is op zichzelf geen feitelijk bewijs."},
-        "ja": {
-            "link_plain": "このリンクは、{title}の内容を確認したり詳しく調べたりするための資料です。",
-            "formula": "この数式はセクション{title}に関連しています。説明：{context}", "link": "このリンクはセクション{title}に関連する資料です。内容：{context}", "image": "この画像はセクション{title}に関連し、次の内容を示しています：{context}", "gallery": "この画像はセクション{title}に関連し、次の内容を示しています：{context}", "code": "このコードブロックはセクション{title}を補足します。目的：{context}", "table": "この表はセクション{title}のデータを整理して比較しやすくします。内容：{context}", "graph": "このグラフはセクション{title}のデータや関係を示しています。内容：{context}", "diagram": "この図はセクション{title}の手順や関係を示しています。説明：{context}", "file": "このファイルはセクション{title}に関連しています。この回答では次の目的で使用します：{context}", "audio": "この音声ブロックはセクション{title}に関連しています：{context}", "video": "この動画ブロックはセクション{title}に関連しています：{context}", "generated": "これは生成されたイラストであり、ストック写真ではありません。", "edited": "変更内容：{note}", "formula_plain": "この数式ブロックはセクション{title}の数量的な関係を表しています。記号は回答の文脈に沿って解釈してください。", "table_plain": "この表は関連する値をまとめ、比較しやすくしています。{details} 結論は表示された行だけに基づいてください。", "graph_plain": "このグラフは軸の変数間の関係を表しています。{details} 傾向は表示データから読み取り、欠けている値を推測で補わないでください。", "diagram_plain": "この図は構造または手順を示しています。{details}", "block_plain": "このブロックはセクション{title}に関連しています。{details}", "open": "ブロックを開いて内容を確認してください。", "columns": " 列：{headers}。", "rows": " データ行数：{count}。", "relationship": "この画像は「{title}」を示していますが、それだけで事実の証明にはなりません。"},
-        "zh": {
-            "link_plain": "此链接可用于核实或深入了解{title}相关内容。",
-            "formula": "此公式与{title}部分有关，说明了：{context}", "link": "此链接指向与{title}部分相关的资料。内容：{context}", "image": "此图像与{title}部分相关，展示了：{context}", "gallery": "此图像与{title}部分相关，展示了：{context}", "code": "此代码块补充了{title}部分。用途：{context}", "table": "此表整理了{title}部分的数据，便于比较。内容：{context}", "graph": "此图表展示了{title}部分的数据或关系。内容：{context}", "diagram": "此示意图展示了{title}部分的流程或关系。说明：{context}", "file": "此文件与{title}部分相关，在本回答中用于：{context}", "audio": "此音频块与{title}部分相关：{context}", "video": "此视频块与{title}部分相关：{context}", "generated": "这是生成的插图，不是图库照片。", "edited": "记录的修改：{note}", "formula_plain": "此数学内容表示{title}部分中的数量关系。请结合回答上下文理解各个符号。", "table_plain": "此表汇总了相关数值，便于比较。{details} 结论应仅依据实际显示的行。", "graph_plain": "此图表展示了坐标轴变量之间的关系。{details} 请根据显示的数据判断趋势，不要推测缺失数值。", "diagram_plain": "此示意图展示了结构或步骤顺序。{details}", "block_plain": "此内容块与当前部分{title}有关。{details}", "open": "打开此内容块以查看详细内容。", "columns": " 列：{headers}。", "rows": " 数据行数：{count}。", "relationship": "该图像用于说明“{title}”，但单凭图像本身不能证明事实。"},
-        "ko": {
-            "link_plain": "이 링크는 {title} 주제를 확인하거나 더 자세히 살펴볼 수 있는 자료입니다.",
-            "formula": "이 수식은 {title} 부분과 관련이 있으며 다음을 설명합니다: {context}", "link": "이 링크는 {title} 부분과 관련된 자료로 연결됩니다. 내용: {context}", "image": "이 이미지는 {title} 부분과 관련되며 다음을 보여 줍니다: {context}", "gallery": "이 이미지는 {title} 부분과 관련되며 다음을 보여 줍니다: {context}", "code": "이 코드 블록은 {title} 부분을 보완합니다. 목적: {context}", "table": "이 표는 {title} 부분의 데이터를 정리해 비교하기 쉽게 합니다. 내용: {context}", "graph": "이 그래프는 {title} 부분의 데이터나 관계를 나타냅니다. 내용: {context}", "diagram": "이 다이어그램은 {title} 부분의 과정이나 관계를 보여 줍니다. 설명: {context}", "file": "이 파일은 {title} 부분과 관련이 있으며, 이 답변에서는 다음 용도로 사용됩니다: {context}", "audio": "이 오디오 블록은 {title} 부분과 관련이 있습니다: {context}", "video": "이 비디오 블록은 {title} 부분과 관련이 있습니다: {context}", "generated": "이 이미지는 생성된 삽화이며 스톡 사진이 아닙니다.", "edited": "기록된 수정 사항: {note}", "formula_plain": "이 수학 블록은 {title} 부분의 정량적 관계를 나타냅니다. 기호는 답변의 문맥에 맞게 해석하세요.", "table_plain": "이 표는 관련 값을 모아 비교하기 쉽게 합니다. {details} 결론은 실제로 표시된 행에만 근거해야 합니다.", "graph_plain": "이 그래프는 축 변수 사이의 관계를 나타냅니다. {details} 추세는 표시된 데이터를 바탕으로 읽고 누락된 값은 추측하지 마세요.", "diagram_plain": "이 다이어그램은 구조 또는 단계의 순서를 보여 줍니다. {details}", "block_plain": "이 블록은 현재 섹션{title}과 관련이 있습니다. {details}", "open": "블록을 열어 내용을 확인하세요.", "columns": " 열: {headers}.", "rows": " 데이터 행 수: {count}.", "relationship": "이 이미지는 ‘{title}’을 보여 주지만, 이미지 자체만으로 사실을 입증하지는 않습니다."},
-        "ar": {
-            "link_plain": "يُدرج هذا الرابط كمصدر للتحقق من موضوع {title} أو التعمق فيه.",
-            "formula": "ترتبط هذه المعادلة بالقسم {title} وتوضح: {context}", "link": "ينقل هذا الرابط إلى مصدر مرتبط بالقسم {title}. السياق: {context}", "image": "ترتبط هذه الصورة بالقسم {title} وتوضح: {context}", "gallery": "ترتبط هذه الصورة بالقسم {title} وتوضح: {context}", "code": "تُكمل كتلة الشيفرة القسم {title}. الغرض منها: {context}", "table": "ينظم الجدول بيانات القسم {title} لتسهيل المقارنة. المحتوى: {context}", "graph": "يعرض الرسم البياني بيانات أو علاقات القسم {title}. المحتوى: {context}", "diagram": "يوضح المخطط عملية أو علاقات في القسم {title}. الوصف: {context}", "file": "يرتبط الملف بالقسم {title} ويُستخدم في هذه الإجابة من أجل: {context}", "audio": "ترتبط كتلة الصوت بالقسم {title}: {context}", "video": "ترتبط كتلة الفيديو بالقسم {title}: {context}", "generated": "هذا رسم توضيحي مولّد، وليس صورة أرشيفية.", "edited": "التعديلات المسجلة: {note}", "formula_plain": "تمثل هذه الكتلة الرياضية علاقة كمية في القسم {title}. فسّر الرموز وفق سياق الإجابة.", "table_plain": "يجمع الجدول القيم المرتبطة لتسهيل المقارنة. {details} يجب أن تستند الاستنتاجات إلى الصفوف المعروضة فقط.", "graph_plain": "يعرض الرسم العلاقة بين متغيرات المحاور. {details} استخلص الاتجاه من البيانات الظاهرة ولا تفترض قيماً غير معروضة.", "diagram_plain": "يوضح المخطط بنية أو تسلسلاً من الخطوات. {details}", "block_plain": "ترتبط هذه الكتلة بالقسم الحالي {title}. {details}", "open": "افتح الكتلة للاطلاع على محتواها.", "columns": " الأعمدة: {headers}.", "rows": " عدد صفوف البيانات: {count}.", "relationship": "توضح الصورة موضوع «{title}»، لكنها لا تُعد دليلاً واقعياً بمفردها."},
-        "hi": {
-            "link_plain": "यह लिंक {title} विषय की जाँच करने या उसके बारे में और जानने के लिए स्रोत के रूप में दिया गया है।",
-            "formula": "यह सूत्र {title} अनुभाग से संबंधित है। इसका अर्थ है: {context}", "link": "यह लिंक {title} अनुभाग से संबंधित स्रोत पर ले जाता है। संदर्भ: {context}", "image": "यह चित्र {title} अनुभाग से संबंधित है और दिखाता है: {context}", "gallery": "यह चित्र {title} अनुभाग से संबंधित है और दिखाता है: {context}", "code": "यह कोड ब्लॉक {title} अनुभाग को पूरा करता है। इसका उद्देश्य: {context}", "table": "यह तालिका {title} अनुभाग के आँकड़ों को तुलना के लिए व्यवस्थित करती है। सामग्री: {context}", "graph": "यह ग्राफ {title} अनुभाग के आँकड़े या संबंध दिखाता है। सामग्री: {context}", "diagram": "यह आरेख {title} अनुभाग की प्रक्रिया या संबंध दिखाता है। विवरण: {context}", "file": "यह फ़ाइल {title} अनुभाग से संबंधित है। इस उत्तर में इसका उपयोग: {context}", "audio": "यह ऑडियो ब्लॉक {title} अनुभाग से संबंधित है: {context}", "video": "यह वीडियो ब्लॉक {title} अनुभाग से संबंधित है: {context}", "generated": "यह AI द्वारा बनाया गया चित्रण है, संग्रह की वास्तविक तस्वीर नहीं।", "edited": "दर्ज किए गए बदलाव: {note}", "formula_plain": "यह गणितीय ब्लॉक {title} अनुभाग के मात्रात्मक संबंध को दर्शाता है। प्रतीकों को उत्तर के संदर्भ में समझें।", "table_plain": "तालिका संबंधित मानों को तुलना के लिए व्यवस्थित करती है। {details} निष्कर्ष केवल दिखाई गई पंक्तियों पर आधारित होने चाहिए।", "graph_plain": "ग्राफ अक्षों के चरों के बीच संबंध दिखाता है। {details} रुझान को दिखाए गए आँकड़ों से समझें; अनुपस्थित मानों का अनुमान न लगाएँ।", "diagram_plain": "यह आरेख संरचना या चरणों का क्रम दिखाता है। {details}", "block_plain": "यह ब्लॉक वर्तमान अनुभाग {title} से संबंधित है। {details}", "open": "सामग्री देखने के लिए ब्लॉक खोलें।", "columns": " कॉलम: {headers}।", "rows": " डेटा पंक्तियों की संख्या: {count}।", "relationship": "यह चित्र ‘{title}’ को दर्शाता है, लेकिन अपने आप में तथ्य का प्रमाण नहीं है।"},
-        "el": {
-            "link_plain": "Αυτός ο σύνδεσμος παρατίθεται ως πηγή για έλεγχο ή περαιτέρω διερεύνηση του θέματος{title}.",
-            "formula": "Ο τύπος σχετίζεται με την ενότητα{title}. Εξηγεί: {context}", "link": "Ο σύνδεσμος οδηγεί σε πηγή σχετική με την ενότητα{title}. Πλαίσιο: {context}", "image": "Η εικόνα σχετίζεται με την ενότητα{title} και δείχνει: {context}", "gallery": "Η εικόνα σχετίζεται με την ενότητα{title} και δείχνει: {context}", "code": "Το μπλοκ κώδικα συμπληρώνει την ενότητα{title}. Σκοπός: {context}", "table": "Ο πίνακας οργανώνει τα δεδομένα της ενότητας{title} για σύγκριση. Περιεχόμενο: {context}", "graph": "Το γράφημα απεικονίζει δεδομένα ή σχέσεις της ενότητας{title}. Περιεχόμενο: {context}", "diagram": "Το διάγραμμα δείχνει μια διαδικασία ή σχέσεις της ενότητας{title}. Περιγραφή: {context}", "file": "Το αρχείο σχετίζεται με την ενότητα{title}. Σε αυτή την απάντηση χρησιμεύει για: {context}", "audio": "Το μπλοκ ήχου σχετίζεται με την ενότητα{title}: {context}", "video": "Το μπλοκ βίντεο σχετίζεται με την ενότητα{title}: {context}", "generated": "Πρόκειται για εικόνα που δημιουργήθηκε τεχνητά, όχι για φωτογραφία αρχείου.", "edited": "Καταγεγραμμένες αλλαγές: {note}", "formula_plain": "Αυτό το μαθηματικό μπλοκ αναπαριστά μια ποσοτική σχέση της ενότητας{title}. Ερμηνεύστε τα σύμβολα με βάση το πλαίσιο της απάντησης.", "table_plain": "Ο πίνακας συγκεντρώνει σχετικά δεδομένα για ευκολότερη σύγκριση. {details} Τα συμπεράσματα πρέπει να βασίζονται μόνο στις εμφανιζόμενες γραμμές.", "graph_plain": "Το γράφημα δείχνει τη σχέση μεταξύ των μεταβλητών των αξόνων. {details} Η τάση πρέπει να προκύπτει από τα εμφανιζόμενα δεδομένα, χωρίς επινόηση τιμών που λείπουν.", "diagram_plain": "Το διάγραμμα παρουσιάζει μια δομή ή μια ακολουθία βημάτων. {details}", "block_plain": "Αυτό το μπλοκ σχετίζεται με την τρέχουσα ενότητα{title}. {details}", "open": "Ανοίξτε το μπλοκ για να δείτε το περιεχόμενό του.", "columns": " Στήλες: {headers}.", "rows": " Αριθμός γραμμών δεδομένων: {count}.", "relationship": "Η εικόνα απεικονίζει το θέμα «{title}», αλλά από μόνη της δεν αποτελεί πραγματολογική απόδειξη."},
-    }
-    t = templates[language]
-    context_templates = t
-    if context:
-        if block_type in context_templates:
-            return context_templates[block_type].format(title=title_ref, context=context)
-
-    if block_type == "link":
-        description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
-        return description or t["link_plain"].format(title=title_ref)
-
-    if block_type == "formula":
-        formula_values = payload.get("formulas") or payload.get("latex_formulas") or []
-        if not isinstance(formula_values, list):
-            formula_values = [formula_values]
-        for key in ("formula", "latex", "equation", "expression", "math"):
-            value = payload.get(key)
-            if value and value not in formula_values:
-                formula_values.append(value)
-        formulas = []
-        for item in formula_values[:6]:
-            value = (item.get("latex") or item.get("formula") or item.get("equation")) if isinstance(item, dict) else item
-            if isinstance(value, str) and value.strip():
-                formulas.append(re.sub(r"\s+", " ", value.strip())[:100])
-        formula = ", ".join(formulas)
-        base = f"{formula}. " if formula else ""
-        return base + t["formula_plain"].format(title=title_ref)
-
-    if block_type in {"image", "gallery"}:
-        images = payload.get("images") or payload.get("items") or []
-        if not isinstance(images, list):
-            images = [images]
-        descriptions = []
-        for item in images[:5]:
-            if isinstance(item, dict):
-                desc = str(item.get("description") or item.get("alt") or item.get("title") or item.get("caption") or "").strip()
+        if isinstance(raw_plan, dict):
+            compact_plan = cls._compact_visual_plan(raw_plan)
+            encoded_plan = cls._compact_json(compact_plan, 1_600) if compact_plan else ""
+            if encoded_plan:
+                parts.append(f"OpenAI structured visual specification: {encoded_plan}")
             else:
-                desc = str(item).strip()
-            if desc:
-                descriptions.append(re.sub(r"\s+", " ", desc)[:220])
-        described = "; ".join(descriptions)
-        edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
-        generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
-        if edit_note:
-            core = t["edited"].format(note=edit_note)
-        elif described:
-            core = ((t["generated"] + " ") if generated else "") + described
-        else:
-            subject_defaults = {
-                "es": "el tema de la respuesta", "de": "das Thema der Antwort", "it": "il tema della risposta",
-                "pl": "temat odpowiedzi", "pt": "o tema da resposta", "nl": "het onderwerp van het antwoord",
-                "ja": "回答のテーマ", "zh": "回答中的主题", "ko": "답변의 주제", "ar": "موضوع الإجابة",
-                "hi": "उत्तर का विषय", "el": "το θέμα της απάντησης",
-            }
-            subject = title or subject_defaults[language]
-            core = t["relationship"].format(title=subject)
-        if generated and t["generated"].lower() not in core.lower():
-            core += " " + t["generated"]
-        return core
+                appearance = cls._appearance_excerpt(raw_plan, request_anchor)
+                if appearance:
+                    parts.append(f"Relevant appearance facts from the answer: {appearance}")
 
-    if block_type == "table":
-        headers = payload.get("headers") or payload.get("columns") or payload.get("column_names") or []
-        if isinstance(headers, dict):
-            headers = list(headers.keys())
-        if isinstance(headers, list):
-            header_text = ", ".join(str(item.get("label") or item.get("name") or item) if isinstance(item, dict) else str(item) for item in headers[:8])
-        else:
-            header_text = str(headers)
-        rows = payload.get("rows") or payload.get("data") or payload.get("values") or []
-        row_count = len(rows) if isinstance(rows, list) else 0
-        details = t["columns"].format(headers=header_text) if header_text else ""
-        details += t["rows"].format(count=row_count) if row_count else ""
-        return t["table_plain"].format(details=details)
+        parts.append(
+            "Render the supplied visual content faithfully. Do not replace the requested subject, "
+            "do not add unrelated subjects or environments, and do not invent missing scene elements."
+        )
+        return "\n".join(parts)
 
-    if block_type == "graph":
-        axis_defaults = {
-            "es": ("eje X", "eje Y"), "de": ("X-Achse", "Y-Achse"), "it": ("asse X", "asse Y"),
-            "pl": ("oś X", "oś Y"), "pt": ("eixo X", "eixo Y"), "nl": ("X-as", "Y-as"),
-            "ja": ("X軸", "Y軸"), "zh": ("X轴", "Y轴"), "ko": ("X축", "Y축"),
-            "ar": ("المحور X", "المحور Y"), "hi": ("X-अक्ष", "Y-अक्ष"), "el": ("άξονας X", "άξονας Y"),
-        }
-        default_x, default_y = axis_defaults[language]
-        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or default_x)
-        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or default_y)
-        graph_title = str(_render_block_field(block, payload, "title", "name") or title or "")
-        details = f"{graph_title + ': ' if graph_title else ''}X — {x_axis}; Y — {y_axis}."
-        return t["graph_plain"].format(details=details)
+    @classmethod
+    def _semantic_plan_for_generation(cls, spec: dict[str, Any]) -> str:
+        """Send only same-turn user intent + OpenAI visual understanding to the image model.
 
-    if block_type == "diagram":
-        labels = []
-        for key in ("nodes", "elements", "steps", "items"):
-            values = payload.get(key)
-            if isinstance(values, list):
-                for item in values[:10]:
-                    if isinstance(item, dict):
-                        label = str(item.get("label") or item.get("title") or item.get("name") or item.get("text") or "").strip()
-                    else:
-                        label = str(item).strip()
-                    if label:
-                        labels.append(label[:80])
-        detail = str(payload.get("description") or payload.get("caption") or "").strip()
-        if not detail and labels:
-            heads = {
-                "es": "Elementos principales", "de": "Hauptelemente", "it": "Elementi principali", "pl": "Główne elementy", "pt": "Elementos principais", "nl": "Belangrijkste onderdelen",
-                "ja": "主な要素", "zh": "主要元素", "ko": "주요 요소", "ar": "العناصر الرئيسية", "hi": "मुख्य तत्व", "el": "Κύρια στοιχεία",
-            }
-            detail = heads[language] + ": " + "; ".join(dict.fromkeys(labels[:7]))
-        return t["diagram_plain"].format(details=detail or t["open"])
-
-    details = str(_render_block_field(block, payload, "description", "caption", "alt", "title", "filename", "name") or title or "")
-    if not details:
-        details = t["open"]
-    return t["block_plain"].format(title=title_ref, details=details)
-
-
-def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
-    payload = _render_payload(block)
-    section, context = _render_section_context(block_type, block, answer)
-    block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
-    title = str(section or block_title).strip()
-    title_for_text = f" «{title[:100]}»" if title else ""
-
-    # Generated-image answers already contain the narrative immediately before
-    # GalleryBlock. Do not repeat that entire narrative a second time below the
-    # image; keep this fallback to one concise, factual caption. Provider-authored
-    # explanations are still preserved by _ensure_render_explanations().
-    if block_type in {"image", "gallery"}:
-        generated_payload = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"}
-        generated = generated_payload or bool(block.get("generated")) or "c_april_images_generator" in str(block.get("source") or "").lower()
-        if generated:
-            if language == "uk":
-                return "Це згенерована ілюстрація за попереднім описом."
-            if language == "ru":
-                return "Это сгенерированная иллюстрация по предыдущему описанию."
-            if language == "fr":
-                return "Cette illustration a été générée à partir de la description précédente."
-            return "This is a generated illustration based on the preceding description."
-
-    if language in {"es", "de", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
-        return _fallback_render_explanation_extended(block_type, block, answer, language)
-    if context:
-        if language == "uk":
-            bodies = {
-                "formula": f"Ця формула пов’язана з розділом{title_for_text}. Вона пояснює: {context}",
-                "link": f"Посилання веде до джерела, доданого для розділу{title_for_text}. Контекст відповіді: {context}",
-                "image": f"Зображення пов’язане з розділом{title_for_text} і візуально показує: {context}",
-                "gallery": f"Зображення пов’язане з розділом{title_for_text} і візуально показує: {context}",
-                "code": f"Кодовий блок доповнює розділ{title_for_text}. Пояснення його призначення: {context}",
-                "table": f"Таблиця впорядковує дані з розділу{title_for_text}. Її зміст: {context}",
-                "graph": f"Графік візуалізує залежність або дані з розділу{title_for_text}. Його зміст: {context}",
-                "diagram": f"Схема показує процес або зв’язки з розділу{title_for_text}. Відповідний опис: {context}",
-                "file": f"Файл пов’язаний з розділом{title_for_text}. У відповіді він потрібен для: {context}",
-                "audio": f"Аудіоблок пов’язаний з розділом{title_for_text}: {context}",
-                "video": f"Відеоблок пов’язаний з розділом{title_for_text}: {context}",
-            }
-        elif language == "fr":
-            bodies = {
-                "formula": f"Cette formule se rapporte à la section{title_for_text}. Elle exprime : {context}",
-                "link": f"Ce lien renvoie à une source associée à la section{title_for_text}. Le contexte de la réponse est : {context}",
-                "image": f"Cette image se rapporte à la section{title_for_text} et illustre : {context}",
-                "gallery": f"Cette image se rapporte à la section{title_for_text} et illustre : {context}",
-                "code": f"Ce bloc de code complète la section{title_for_text}. Son rôle est décrit ici : {context}",
-                "table": f"Ce tableau organise les données de la section{title_for_text} : {context}",
-                "graph": f"Ce graphique visualise les données ou la relation de la section{title_for_text} : {context}",
-                "diagram": f"Ce schéma montre les étapes ou relations de la section{title_for_text} : {context}",
-                "file": f"Ce fichier se rapporte à la section{title_for_text} : {context}",
-                "audio": f"Ce bloc audio se rapporte à la section{title_for_text} : {context}",
-                "video": f"Ce bloc vidéo se rapporte à la section{title_for_text} : {context}",
-            }
-        else:
-            bodies = {
-                "formula": f"Эта формула связана с разделом{title_for_text}. Она объясняет: {context}" if language == "ru" else f"This formula belongs to the section{title_for_text}. It explains: {context}",
-                "link": f"Ссылка ведёт к источнику, указанному для раздела{title_for_text}. В контексте ответа она нужна для проверки и углубления темы: {context}" if language == "ru" else f"This link points to a source associated with the section{title_for_text}. In this answer it is provided to verify or explore: {context}",
-                "image": f"Изображение связано с разделом{title_for_text} и наглядно показывает: {context}" if language == "ru" else f"This image is associated with the section{title_for_text} and illustrates: {context}",
-                "gallery": f"Изображение связано с разделом{title_for_text} и наглядно показывает: {context}" if language == "ru" else f"This image is associated with the section{title_for_text} and illustrates: {context}",
-                "code": f"Кодовый блок дополняет раздел{title_for_text}. Его назначение по поясняющему тексту: {context}" if language == "ru" else f"This code block complements the section{title_for_text}. Its purpose in the answer is: {context}",
-                "table": f"Таблица структурирует данные из раздела{title_for_text}. Она нужна, чтобы увидеть: {context}" if language == "ru" else f"This table organizes the data in the section{title_for_text}. It helps show: {context}",
-                "graph": f"График визуализирует данные или зависимость из раздела{title_for_text}. Его смысл: {context}" if language == "ru" else f"This graph visualizes the data or relationship in the section{title_for_text}: {context}",
-                "diagram": f"Схема показывает этапы или связи из раздела{title_for_text}. Пояснение: {context}" if language == "ru" else f"This diagram shows the steps or relationships in the section{title_for_text}: {context}",
-                "file": f"Файл относится к разделу{title_for_text}. По пояснению в ответе он нужен для: {context}" if language == "ru" else f"This file relates to the section{title_for_text}: {context}",
-                "audio": f"Аудиоблок относится к разделу{title_for_text}: {context}" if language == "ru" else f"This audio block relates to the section{title_for_text}: {context}",
-                "video": f"Видеоблок относится к разделу{title_for_text}: {context}" if language == "ru" else f"This video block relates to the section{title_for_text}: {context}",
-            }
-        explanation = bodies.get(block_type, context)
-        if block_type in {"image", "gallery"}:
-            edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
-            generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
-            if edit_note:
-                if language == "uk":
-                    explanation += f" Окремо зафіксовані зміни: {edit_note}"
-                elif language == "ru":
-                    explanation += f" Отдельно указанные изменения: {edit_note}"
-                elif language == "fr":
-                    explanation += f" Modifications indiquées : {edit_note}"
-                else:
-                    explanation += f" Explicitly recorded changes: {edit_note}"
-            if generated:
-                caveat = " Це згенерована ілюстрація, а не архівна фотографія." if language == "uk" else " Это сгенерированная иллюстрация, а не архивная фотография." if language == "ru" else " Il s’agit d’une illustration générée, pas d’une photographie d’archive." if language == "fr" else " It is a generated illustration, not an archival photograph."
-                if not any(marker in explanation.lower() for marker in ("згенерована ілюстрація", "сгенерированная иллюстрация", "illustration générée", "generated illustration")):
-                    explanation += caveat
-        return explanation
-
-    # Renderer-specific, source-grounded fallbacks for older model output that
-    # doesn't yet include an explanation field or a matching narrative section.
-    if block_type == "formula":
-        formula_values = payload.get("formulas") or payload.get("latex_formulas") or []
-        if not isinstance(formula_values, list):
-            formula_values = [formula_values]
-        for key in ("formula", "latex", "equation", "expression", "math"):
-            value = payload.get(key)
-            if value and value not in formula_values:
-                formula_values.append(value)
-        formulas = []
-        for item in formula_values[:6]:
-            value = item.get("latex") or item.get("formula") or item.get("equation") if isinstance(item, dict) else item
-            if isinstance(value, str) and value.strip():
-                formulas.append(re.sub(r"\s+", " ", value.strip())[:100])
-        formula = ", ".join(formulas)
-        normalized = re.sub(r"[\s{}\\$()^_]", "", formula).lower().replace("²", "2")
-        if re.search(r"e=mc2", normalized):
-            specific = ("Эта формула выражает эквивалентность массы и энергии: E — энергия, m — масса, c — скорость света; множитель c² показывает, почему даже небольшая масса соответствует большой энергии." if language == "ru" else "Ця формула виражає еквівалентність маси та енергії: E — енергія, m — маса, c — швидкість світла; множник c² показує, чому невелика маса відповідає великій енергії." if language == "uk" else "Cette formule exprime l’équivalence masse-énergie : E est l’énergie, m la masse et c la vitesse de la lumière." if language == "fr" else "This formula expresses mass–energy equivalence: E is energy, m is mass, and c is the speed of light; the factor c² explains why a small mass corresponds to a large amount of energy.")
-            return specific
-        if formula:
-            base = f"{formula}. "
-        else:
-            base = ""
-        if language == "uk":
-            return f"{base}Цей математичний блок записує кількісний зв’язок між величинами, згаданими в поточному розділі{title_for_text}. Не трактуйте символи окремо від визначень і припущень у тексті відповіді."
-        if language == "ru":
-            return f"{base}Этот математический блок записывает количественную связь между величинами из текущего раздела{title_for_text}. Символы нужно толковать вместе с определениями и условиями, приведёнными в тексте ответа."
-        if language == "fr":
-            return f"{base}Ce bloc mathématique représente une relation entre les grandeurs du sujet{title_for_text}. Les symboles doivent être lus avec les définitions et hypothèses données dans la réponse."
-        return f"{base}This mathematical block records a quantitative relationship relevant to{title_for_text or ' the current topic'}. Interpret its symbols using the definitions and assumptions in the answer."
-
-    if block_type == "link":
-        links = payload.get("links") if isinstance(payload.get("links"), list) else []
-        if not links:
-            links = [payload]
-        items = []
-        for item in links[:3]:
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("title") or item.get("name") or item.get("description") or "").strip()
-            url = str(item.get("url") or item.get("href") or "").strip()
-            domain_match = re.search(r"https?://([^/\s?#]+)", url, re.IGNORECASE)
-            destination = domain_match.group(1) if domain_match else url
-            if label and destination:
-                items.append(f"{label} ({destination})")
-            elif label or destination:
-                items.append(label or destination)
-        subject = "; ".join(items) or title or "источник из этого ответа"
-        if language == "uk":
-            return f"Посилання відкриває {subject}. Його додано як джерело для перевірки або поглиблення поточної теми; точний зміст сторінки слід звірити після відкриття."
-        if language == "ru":
-            return f"Ссылка открывает {subject}. Она добавлена как источник для проверки или углубления текущей темы; точное содержание страницы следует сверить после перехода."
-        if language == "fr":
-            return f"Ce lien ouvre {subject}. Il sert de source pour vérifier ou approfondir le sujet ; le contenu exact doit être confirmé sur la page ouverte."
-        return f"This link opens {subject}. It is included as a source to verify or explore the current topic; confirm the exact page contents after opening it."
-
-    if block_type == "code":
-        code = str(_render_block_field(block, payload, "code", "content", "text") or payload.get("source") or "")
-        language_name = str(_render_block_field(block, payload, "language", "lang") or "text")
-        filename = str(_render_block_field(block, payload, "filename", "file_name") or "").strip()
-        symbols = re.findall(r"(?m)^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|^\s*class\s+([A-Za-z_]\w*)\b|^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\(", code)
-        symbol_names = [next((part for part in row if part), "") for row in symbols]
-        symbol_text = ", ".join(dict.fromkeys(symbol_names[:5]))
-        file_text = f" «{filename[:100]}»" if filename else ""
-        if language == "uk":
-            return f"Це блок коду мовою {language_name}{file_text}. {('У ньому визначено: ' + symbol_text + '. ') if symbol_text else ''}Використовуйте його разом із поясненням до цього кроку; без контексту решти проєкту не можна надійно стверджувати про побічні ефекти під час запуску."
-        if language == "ru":
-            return f"Это блок кода на {language_name}{file_text}. {('В нём определены: ' + symbol_text + '. ') if symbol_text else ''}Используйте его вместе с пояснением к этому шагу; без остального контекста проекта нельзя надёжно утверждать о побочных эффектах при запуске."
-        if language == "fr":
-            return f"Ce bloc contient du code {language_name}{file_text}. {('Les éléments définis sont : ' + symbol_text + '. ') if symbol_text else ''}Il doit être interprété avec le contexte du projet ; sans celui-ci, les effets à l’exécution ne peuvent pas être affirmés avec certitude."
-        return f"This block contains {language_name} code{file_text}. {('It defines: ' + symbol_text + '. ') if symbol_text else ''}Interpret it in the surrounding project context; runtime side effects cannot be stated reliably without the rest of the project."
-
-    if block_type in {"image", "gallery"}:
-        images = payload.get("images") or payload.get("items") or payload.get("gallery") or []
-        if isinstance(images, dict):
-            images = [images]
-        image_descriptions = []
-        for image in images[:3] if isinstance(images, list) else []:
-            if not isinstance(image, dict):
-                continue
-            description = str(image.get("description") or image.get("alt") or image.get("title") or image.get("caption") or "").strip()
-            if description:
-                description = re.sub(r"\s+", " ", description)[:220]
-                image_descriptions.append(description)
-        described = "; ".join(image_descriptions)
-        generated = str(payload.get("kind") or payload.get("source") or "").lower() in {"generated_image", "april_generated", "c_april_images_generator"} or bool(block.get("generated"))
-        edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
-        if edit_note:
-            core = f"Изображение показывает внесённые изменения: {edit_note}" if language == "ru" else f"Зображення показує внесені зміни: {edit_note}" if language == "uk" else f"L’image montre les modifications suivantes : {edit_note}" if language == "fr" else f"The image shows these changes: {edit_note}"
-        elif described:
-            core = ("Это сгенерированная иллюстрация к текущему разделу: " if language == "ru" and generated else "Це згенерована ілюстрація до поточного розділу: " if language == "uk" and generated else "Il s’agit d’une illustration générée pour cette section : " if language == "fr" and generated else "This is a generated illustration for the current section: " if generated else "Это изображение, связанное с текущим разделом: " if language == "ru" else "Це зображення, пов’язане з поточним розділом: " if language == "uk" else "Cette image est associée à la section actuelle : " if language == "fr" else "This image is associated with the current section: ") + described
-        else:
-            subject = title or "тему текущего ответа"
-            core = f"Изображение относится к теме «{subject}»; его роль — визуальная иллюстрация, а не самостоятельное подтверждение фактов." if language == "ru" else f"Зображення стосується теми «{subject}»; воно є візуальною ілюстрацією, а не самостійним підтвердженням фактів." if language == "uk" else f"L’image illustre le sujet « {subject} » sans constituer à elle seule une preuve factuelle." if language == "fr" else f"The image illustrates “{subject}”; it is not, by itself, evidence for a factual claim."
-        if generated:
-            caveat = " Это сгенерированная иллюстрация, а не архивная фотография." if language == "ru" else " Це згенерована ілюстрація, а не архівна фотографія." if language == "uk" else " Il s’agit d’une illustration générée, pas d’une photographie d’archive." if language == "fr" else " It is a generated illustration, not an archival photograph."
-            if "генерированная иллюстрация" not in core.lower() and "згенерована ілюстрація" not in core.lower() and "illustration générée" not in core.lower() and "generated illustration" not in core.lower():
-                core += caveat
-        return core
-
-    if block_type == "table":
-        headers = payload.get("headers") or payload.get("columns") or payload.get("column_names") or []
-        if isinstance(headers, dict):
-            headers = list(headers.keys())
-        if isinstance(headers, list):
-            header_text = ", ".join(str(item.get("label") or item.get("name") or item) if isinstance(item, dict) else str(item) for item in headers[:8])
-        else:
-            header_text = str(headers)
-        rows = payload.get("rows") or payload.get("data") or payload.get("values") or []
-        row_count = len(rows) if isinstance(rows, list) else 0
-        details = f" Столбцы: {header_text}." if header_text else ""
-        details += f" Количество строк данных: {row_count}." if row_count else ""
-        if language == "uk":
-            return f"Таблиця збирає пов’язані значення в одному місці, щоб їх можна було зіставити.{details} Висновок слід робити за фактичними рядками таблиці, а не за відсутніми даними."
-        if language == "ru":
-            return f"Таблица собирает связанные значения, чтобы их было удобно сопоставить.{details} Вывод следует делать по фактическим строкам таблицы, а не по отсутствующим данным."
-        if language == "fr":
-            return f"Ce tableau regroupe les valeurs pour faciliter leur comparaison.{details} La conclusion doit être fondée sur les lignes réellement affichées."
-        return f"This table groups related values for comparison.{details} Any takeaway should be based on the rows actually shown."
-
-    if block_type == "graph":
-        axis_defaults = {"ru": ("ось X", "ось Y"), "uk": ("вісь X", "вісь Y"), "fr": ("axe X", "axe Y"), "en": ("X axis", "Y axis")}
-        default_x, default_y = axis_defaults.get(language, axis_defaults["en"])
-        x_axis = str(_render_block_field(block, payload, "x_axis", "xAxisLabel", "x_axis_label") or default_x)
-        y_axis = str(_render_block_field(block, payload, "y_axis", "yAxisLabel", "y_axis_label") or default_y)
-        title_value = str(_render_block_field(block, payload, "title", "name") or title or "")
-        details = f"{title_value + ': ' if title_value else ''}X — {x_axis}; Y — {y_axis}."
-        if language == "uk":
-            return f"Графік показує залежність між величинами, відкладеними по осях. {details} Тренд потрібно читати за відображеними точками або поверхнею; відсутні значення не домислюються."
-        if language == "ru":
-            return f"График показывает зависимость между величинами по осям. {details} Тренд следует читать по отображённым точкам или поверхности; отсутствующие значения не домысливаются."
-        if language == "fr":
-            return f"Le graphique représente une relation entre les grandeurs des axes. {details} La tendance doit être lue à partir des points ou de la surface affichés, sans inventer de valeurs manquantes."
-        return f"The graph represents a relationship between the axis variables. {details} Read the trend from the displayed points or surface; missing values are not inferred."
-
-    if block_type == "diagram":
-        labels: List[str] = []
-        for key in ("nodes", "elements", "steps", "items"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                for item in value[:10]:
-                    if isinstance(item, dict):
-                        label = str(item.get("label") or item.get("title") or item.get("name") or item.get("text") or "").strip()
-                    else:
-                        label = str(item).strip()
-                    if label:
-                        labels.append(label[:80])
-        description = str(payload.get("description") or payload.get("caption") or "").strip()
-        detail = description or ("Основные элементы: " + "; ".join(dict.fromkeys(labels[:7])) if labels else "")
-        if language == "uk":
-            return f"Схема візуально пояснює структуру або послідовність кроків. {detail or 'Зв’язки слід читати за стрілками та підписами в самій схемі.'}"
-        if language == "ru":
-            return f"Схема визуально поясняет структуру или последовательность шагов. {detail or 'Связи следует читать по стрелкам и подписям в самой схеме.'}"
-        if language == "fr":
-            return f"Ce schéma illustre une structure ou une succession d’étapes. {detail or 'Lisez les relations à partir des flèches et des libellés affichés.'}"
-        return f"This diagram illustrates a structure or sequence of steps. {detail or 'Read the relationships from the arrows and labels shown.'}"
-
-    # File, audio and video blocks may have only a title/caption and no textual
-    # body; describe the visible metadata without inventing its contents.
-    details = str(_render_block_field(block, payload, "description", "caption", "alt", "title", "filename", "name") or title or "")
-    if language == "ru":
-        return f"Этот блок связан с текущим разделом{title_for_text}. {details or 'Откройте рендер, чтобы ознакомиться с его содержимым.'}"
-    if language == "uk":
-        return f"Цей блок пов’язаний із поточним розділом{title_for_text}. {details or 'Відкрийте рендер, щоб ознайомитися з його вмістом.'}"
-    if language == "fr":
-        return f"Ce bloc est associé à la section actuelle{title_for_text}. {details or 'Ouvrez le bloc pour consulter son contenu.'}"
-    return f"This block is associated with the current section{title_for_text}. {details or 'Open the renderer to inspect its content.'}"
-
-
-
-def _fallback_link_card_description(link: Dict[str, Any], section: str, language: str) -> str:
-    """Conservative per-card description in the active user-facing language."""
-    defaults = {
-        "ru": ("Источник", "тему ответа", " для проверки и более подробного изучения темы «{topic}». Откройте страницу, чтобы ознакомиться с материалами источника."),
-        "uk": ("Джерело", "тему відповіді", " для перевірки та докладнішого вивчення теми «{topic}». Відкрийте сторінку, щоб ознайомитися з матеріалами джерела."),
-        "fr": ("Source", "le sujet de la réponse", " permet de vérifier et d’approfondir le sujet « {topic} ». Ouvrez la page pour consulter son contenu."),
-        "en": ("Source", "the answer topic", " helps verify and explore “{topic}” further. Open the page to review the source material."),
-        "es": ("Fuente", "el tema de la respuesta", " permite verificar y ampliar la información sobre «{topic}». Abre la página para consultar el material."),
-        "de": ("Quelle", "das Thema der Antwort", " hilft, das Thema „{topic}“ zu prüfen und zu vertiefen. Öffne die Seite, um das Material zu lesen."),
-        "it": ("Fonte", "il tema della risposta", " aiuta a verificare e approfondire «{topic}». Apri la pagina per consultare il materiale."),
-        "pl": ("Źródło", "temat odpowiedzi", " pomaga sprawdzić i pogłębić temat „{topic}”. Otwórz stronę, aby zapoznać się z materiałem."),
-        "pt": ("Fonte", "o tema da resposta", " ajuda a verificar e aprofundar o tema «{topic}». Abra a página para consultar o conteúdo."),
-        "nl": ("Bron", "het onderwerp van het antwoord", " helpt om „{topic}” te controleren en verder te verkennen. Open de pagina om het materiaal te bekijken."),
-    }
-    fallback_label, default_topic, template = defaults.get(language, defaults["en"])
-    supplied_label = str(link.get("title") or link.get("domain") or link.get("url") or link.get("href") or "").strip()
-    topic = str(section or default_topic).strip()[:100]
-    if supplied_label:
-        return f"{supplied_label}{template.format(topic=topic)}"
-    # Avoid the unnatural duplicate “Source is a source...” when metadata is absent.
-    return f"{fallback_label}{template.format(topic=topic)}"
-
-
-def _ensure_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "") -> List[Dict[str, Any]]:
-    """Guarantee a visible text explanation immediately after every concrete Premium renderer.
-
-    Provider-created `explanation` is preferred. Older output is repaired from the
-    matching answer section and actual renderer payload; this never creates a
-    renderer or invents a URL, equation, row, image edit, or numeric data.
-    """
-    language = _explanation_language(answer, language_hint)
-    ordered: List[Dict[str, Any]] = []
-    additions = 0
-    for original_index, original in enumerate(blocks):
-        if not isinstance(original, dict):
-            continue
-        block = dict(original)
-        block_type = _scene_block_type(block)
-        if block_type not in _EXPLAINED_RENDER_TYPES or not _scene_payload_has_content(block_type, _render_payload(block), block):
-            ordered.append(block)
-            continue
-
-        payload = _render_payload(block)
-        generated_link_description = False
-        if block_type == "link":
-            section_title, _section_context = _render_section_context(block_type, block, answer)
-            links = payload.get("links")
-            if isinstance(links, list):
-                normalized_links = []
-                for raw_link in links:
-                    if not isinstance(raw_link, dict):
-                        normalized_links.append(raw_link)
-                        continue
-                    link = dict(raw_link)
-                    current_description = str(link.get("description") or "").strip()
-                    if len(current_description) < 32 and (link.get("url") or link.get("href")):
-                        link["description"] = _fallback_link_card_description(link, section_title, language)
-                        generated_link_description = True
-                    normalized_links.append(link)
-                payload["links"] = normalized_links
-                block["payload"] = payload
-            elif payload.get("url") or payload.get("href") or block.get("url") or block.get("href"):
-                current_description = str(payload.get("description") or block.get("description") or "").strip()
-                if len(current_description) < 32:
-                    link_record = dict(payload)
-                    link_record.setdefault("url", block.get("url") or block.get("href") or "")
-                    link_record.setdefault("title", block.get("title") or "")
-                    link_description = _fallback_link_card_description(link_record, section_title, language)
-                    payload["description"] = link_description
-                    block["description"] = link_description
-                    block["payload"] = payload
-                    generated_link_description = True
-        # Keep stable references even when the renderer had no explicit block id.
-        block_id = str(block.get("block_id") or block.get("id") or f"block_{original_index + 1}").strip()
-        block.setdefault("block_id", block_id)
-        ordered.append(block)
-
-        # If the source explicitly has a following explanation linked to this block,
-        # preserve it and do not duplicate it.
-        following = blocks[original_index + 1] if original_index + 1 < len(blocks) else None
-        if isinstance(following, dict) and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}:
-            linked_to = str(following.get("explanation_for_block_id") or following.get("explanation_for") or "").strip()
-            if linked_to and linked_to in {block_id, str(block.get("id") or "")}:
-                continue
-
-        explanation = str(_render_block_field(block, payload, "explanation", "render_explanation", "what_it_shows") or "").strip()
-        if len(explanation) < 24 and not generated_link_description:
-            description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
-            if len(description) >= 48:
-                explanation = description
-        if len(explanation) < 24:
-            explanation = _fallback_render_explanation(block_type, block, answer, language)
-        if not explanation:
-            continue
-        already_labeled = bool(re.match(
-            r"(?i)^\s*(?:пояснение|пояснення|explication|explanation|explicación|explicação|explicacao|erklärung|spiegazione|objaśnienie|wyjaśnienie|uitleg|説明|说明|설명|شرح|व्याख्या|επεξήγηση)\b",
-            explanation,
-        ))
-        # CJK labels do not have a conventional word boundary, so check those explicitly.
-        already_labeled = already_labeled or explanation.lstrip().startswith(("数式の説明", "画像の内容", "コードの動作", "公式说明", "图像内容", "代码的作用", "수식 설명", "이미지 설명", "코드의 기능"))
-        prefix = _localized_explanation_prefix(language, block_type)
-        if not already_labeled and not explanation.lstrip().lower().startswith(prefix.lower()):
-            explanation = f"**{prefix}.** {explanation}"
-        explanation = explanation[:1400]
-        step_index = block.get("step_index", 1)
-        explanation_block = {
-            "type": "text",
-            "artifact_type": "text",
-            "renderer": "MessageTextBlock",
-            "viewer": "MessageTextBlock",
-            "content": explanation,
-            "text": explanation,
-            "block_id": f"explanation_{block_id}",
-            "explanation_for_block_id": block_id,
-            "related_block_ids": [block_id],
-            "step_index": step_index,
-            "step_title": f"{_localized_explanation_prefix(language, block_type)}"[:100],
-            "sequence_index": len(ordered),
-            "source": "render_explanation_contract",
-        }
-        ordered.append(explanation_block)
-        additions += 1
-
-    try:
-        if additions:
-            print("[APRIL_RENDER_EXPLANATION_ENRICHMENT] " + __import__("json").dumps({
-                "status": "added_inline_explanations",
-                "added": additions,
-                "language": language,
-                "render_types": [str(block.get("type") or "") for block in ordered if isinstance(block, dict) and str(block.get("type") or "").lower() in _EXPLAINED_RENDER_TYPES],
-            }, ensure_ascii=False, separators=(",", ":")), flush=True)
-    except Exception:
-        pass
-    return ordered
-
-
-def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
-    """Produce one ordered, identity-bound render stream for the scene."""
-    blueprint = dict(scene.scene_blueprint or {})
-    blocks = list(scene.blocks or [])
-    if not blocks and blueprint:
-        blocks = _scene_blueprint_blocks(
-            blueprint,
-            scene_id=scene.scene_id,
-            turn_id=scene.turn_id,
-            flow_id=scene.flow_id,
+        The former broad ``visual_context`` envelope is preserved separately by
+        ``_dialogue_generation_prompt_for_history`` and returned to the canonical
+        dialogue memory writer instead of being appended to the Image API prompt.
+        """
+        raw_plan = spec.get("openai_structured_visual_plan_raw")
+        plan_semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
         )
 
-    # Artifacts contribute one node each; never append a second narrative copy.
-    existing_artifact_ids = {
-        str(block.get("artifact_id"))
-        for block in blocks
-        if isinstance(block, dict) and block.get("artifact_id")
-    }
-    for artifact in list(getattr(scene, "artifacts", []) or []):
-        if not isinstance(artifact, BaseArtifact):
-            continue
-        artifact_id = str(getattr(artifact.metadata, "artifact_id", "") or "")
-        if artifact_id and artifact_id in existing_artifact_ids:
-            continue
-        artifact_blocks = _artifact_canonical_render_blocks(artifact)
-        for block in artifact_blocks[:1]:
-            block = dict(block)
-            block["scene_id"] = scene.scene_id
-            block["turn_id"] = scene.turn_id
-            block["flow_id"] = scene.flow_id
-            block["artifact_id"] = artifact_id
-            blocks.append(block)
-            if artifact_id:
-                existing_artifact_ids.add(artifact_id)
+        parts: list[str] = []
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        image_subject_only = bool(spec.get("image_subject_only"))
+        if request_anchor and not image_subject_only:
+            parts.append(f"User request: {request_anchor}")
+        elif image_subject_only:
+            # The full multi-part request remains in dialogue metadata, but this
+            # raster job is only the final portrait subtask. Do not turn the whole
+            # answer request into a one-image poster/infographic.
+            parts.append("Image-only subtask: render the specified final portrait, not the other answer sections.")
 
-    # Executor carries the canonical answer in render_blocks, while MachineScene
-    # intentionally has no dedicated `answer` field. Read the scene envelope first,
-    # then recover the longest visible text block if the envelope is textless. Without
-    # this step, render extraction ran on an empty string and silently left all
-    # explanatory output trapped in the one provider text block.
-    answer = _scene_text(scene)
-    if not answer:
-        metadata = scene.metadata if isinstance(scene.metadata, dict) else {}
-        answer = _scene_text(metadata)
-    if not answer:
-        text_candidates: List[str] = []
-        for candidate_block in blocks:
-            if not isinstance(candidate_block, dict):
-                continue
-            if _scene_block_type(candidate_block) not in {"text", "markdown", "message", "message_text"}:
-                continue
-            candidate_text = _scene_text(candidate_block)
-            if candidate_text:
-                text_candidates.append(candidate_text)
-        if text_candidates:
-            answer = max(text_candidates, key=len)
-    active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
-    metadata_for_request = scene.metadata if isinstance(scene.metadata, dict) else {}
-    interpretation_for_request = metadata_for_request.get("interpretation") if isinstance(metadata_for_request.get("interpretation"), dict) else {}
-    interpretation_input = interpretation_for_request.get("input") if isinstance(interpretation_for_request.get("input"), dict) else {}
-    request_structure = interpretation_for_request.get("request_structure") if isinstance(interpretation_for_request.get("request_structure"), dict) else {}
-    dialogue_structure = interpretation_for_request.get("dialogue") if isinstance(interpretation_for_request.get("dialogue"), dict) else {}
-    new_dialogue = dialogue_structure.get("new_dialogue") if isinstance(dialogue_structure.get("new_dialogue"), dict) else {}
-    current_request = str(
-        interpretation_input.get("original_request")
-        or interpretation_input.get("normalized_request")
-        or request_structure.get("user_goal")
-        or request_structure.get("new_dialogue_request")
-        or new_dialogue.get("request")
-        or ""
-    ).strip()
-    blocks = prepare_render_blocks_for_room_dispatch(
-        blocks,
-        answer,
-        active_task.get("requested_outputs"),
-        graph_policy=active_task.get("graph_policy"),
-        current_request=current_request,
-    )
-    visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
-    requested_outputs = _render_requested_outputs(active_task.get("requested_outputs"))
-    suppress_unrequested_table = "graph" in requested_outputs and "table" not in requested_outputs and any(
-        isinstance(item, dict)
-        and _scene_block_type(item) == "graph"
-        and _has_render_payload("graph", _payload_for_render_block(item, "graph"), item)
-        for item in blocks
-    )
-    source_answer = answer
-    answer = _strip_rendered_segments(
-        answer, visible_types, blocks,
-        suppress_unrequested_table=suppress_unrequested_table,
-    )
+        if plan_semantic:
+            parts.append(f"OpenAI visual meaning: {plan_semantic}")
 
-    # Critical integrity step: the old code cleaned the local `answer` string,
-    # but left the original full answer inside the existing MessageTextBlock.
-    # RenderMessage consumes render_blocks, so the table/code/URL stayed in the
-    # text block and then appeared again in its dedicated renderer. Write the
-    # cleaned narrative back into the visible text block(s), updating every text
-    # alias together so a legacy `text`/`markdown` field cannot reintroduce it.
-    text_keys = ("content", "text", "markdown", "display_text")
-    for block in blocks:
-        if not isinstance(block, dict) or _scene_block_type(block) not in {"text", "markdown", "message", "message_text"}:
-            continue
-        block_source_text = _scene_text(block)
-        if not block_source_text:
-            continue
-        if block_source_text.strip() == source_answer.strip():
-            cleaned_text = answer
-        else:
-            # A shorter text section may contain a renderable fragment too. Clean
-            # only exact structures which have a corresponding concrete renderer.
-            cleaned_text = _strip_rendered_segments(block_source_text, visible_types, blocks, suppress_unrequested_table=suppress_unrequested_table)
-        present_text_keys = [key for key in text_keys if isinstance(block.get(key), str)]
-        for key in (present_text_keys or ["content"]):
-            block[key] = cleaned_text
-        # `prepare_render_blocks_for_room_dispatch()` also hydrates text into the
-        # block's payload. Keep that canonical payload synchronized with the
-        # visible fields; otherwise a viewer reading payload.content could still
-        # receive the old Markdown table/code/URLs after the top-level text was
-        # cleaned.
-        payload = block.get("payload")
-        if isinstance(payload, dict):
-            payload_text_keys = [key for key in text_keys if isinstance(payload.get(key), str)]
-            for key in payload_text_keys:
-                payload[key] = cleaned_text
+        if isinstance(raw_plan, dict):
+            compact_plan = cls._compact_visual_plan(raw_plan)
+            encoded_plan = cls._compact_json(compact_plan, 1_600) if compact_plan else ""
+            if encoded_plan:
+                parts.append(f"OpenAI structured visual specification: {encoded_plan}")
+            else:
+                appearance = cls._appearance_excerpt(raw_plan, request_anchor)
+                if appearance:
+                    parts.append(f"Relevant appearance facts from the answer: {appearance}")
 
-    # Empty text shells must not mount in Web. The structured renderer remains;
-    # useful prose is preserved in `answer` and restored below when necessary.
-    blocks = [
-        block for block in blocks
-        if isinstance(block, dict)
-        and (
-            _scene_block_type(block) not in {"text", "markdown", "message", "message_text"}
-            or bool(_scene_text(block))
+        visual_context = spec.get("visual_context") if isinstance(spec.get("visual_context"), dict) else {}
+        ui_brief = visual_context.get("site_navigation_visual_brief") if isinstance(visual_context.get("site_navigation_visual_brief"), dict) else {}
+        if ui_brief:
+            brief = cls._compact_json(ui_brief, 2_200)
+            if brief:
+                parts.append(
+                    "Verified April UI navigation brief (source-derived; follow literally): " + brief + "\n"
+                    "Draw a realistic instructional mockup of the actual dark April web interface. "
+                    "Show only the listed visible controls and routes; never add people, unrelated objects, invented buttons, "
+                    "circuit/transistor/electrical diagrams, or decorative artwork. Keep labels legible on a phone. "
+                    "If the user requested a red arrow, the arrow itself must be red and point at the specified control."
+                )
+
+        parts.append(
+            "Follow the request and visual plan exactly, preserving subject, identity, action, relationships, "
+            "setting, mood, palette and style. Use clear framing, focal hierarchy, coherent perspective, "
+            "consistent lighting and readable textures. Keep anatomy and object geometry consistent. Add no "
+            "unrequested elements; avoid clutter, duplicates, stray text, logos and watermarks unless requested. "
+            "Resolve ambiguities conservatively."
         )
-    ]
-    metadata_for_language = scene.metadata if isinstance(scene.metadata, dict) else {}
-    interpretation_for_language = metadata_for_language.get("interpretation") if isinstance(metadata_for_language.get("interpretation"), dict) else {}
-    input_for_language = interpretation_for_language.get("input") if isinstance(interpretation_for_language.get("input"), dict) else {}
-    language_hint = (
-        interpretation_for_language.get("display_language")
-        or interpretation_for_language.get("language")
-        or input_for_language.get("display_language")
-        or metadata_for_language.get("display_language")
-        or ""
-    )
-    if answer and not any(_scene_block_type(b) in {"text", "markdown", "formula"} and _scene_text(b) for b in blocks if isinstance(b, dict)):
-        blocks.insert(0, {
-            "type": "text",
-            "artifact_type": "text",
-            "renderer": "MessageTextBlock",
-            "viewer": "MessageTextBlock",
-            "content": answer,
-            "text": answer,
+        return "\n".join(parts)
+
+    @classmethod
+    def _compose_prompt(cls, prompt: str, spec: Optional[dict[str, Any]] = None) -> str:
+        """Compose only user request + same-turn OpenAI visual meaning."""
+        if not isinstance(spec, dict):
+            return cls._clean_prompt(prompt)
+        composed = cls._semantic_plan_for_generation(spec)
+        if composed:
+            return composed
+        return cls._clean_prompt(prompt)
+
+    # -------------------------------------------------
+    # Size / quality
+    # -------------------------------------------------
+
+    @classmethod
+    def _parse_size(cls, size: Any) -> tuple[int, int]:
+        if isinstance(size, (tuple, list)) and len(size) == 2:
+            try:
+                width, height = int(size[0]), int(size[1])
+            except (TypeError, ValueError):
+                width, height = cls.DEFAULT_SIZE
+        else:
+            match = re.match(r"^\s*(\d{2,5})\s*x\s*(\d{2,5})\s*$", str(size or ""))
+            if match:
+                width, height = int(match.group(1)), int(match.group(2))
+            else:
+                width, height = cls.DEFAULT_SIZE
+        width = max(cls.MIN_SIZE, min(cls.MAX_SIZE, width))
+        height = max(cls.MIN_SIZE, min(cls.MAX_SIZE, height))
+        width = max(16, (width // 16) * 16)
+        height = max(16, (height // 16) * 16)
+        return width, height
+
+    @classmethod
+    def _api_generation_size(cls, width: int, height: int) -> tuple[int, int]:
+        width, height = cls._parse_size((width, height))
+        if max(width, height) > cls.API_MAX_EDGE:
+            raise ValueError("APRIL_IMAGES_GPT_IMAGE_SIZE_EDGE_INVALID")
+        ratio = max(width, height) / max(1, min(width, height))
+        if ratio > 3.0:
+            raise ValueError("APRIL_IMAGES_GPT_IMAGE_ASPECT_RATIO_INVALID")
+
+        pixels = width * height
+        if pixels < cls.API_MIN_PIXELS:
+            # April's canonical 512x512 Web output maps to the documented
+            # 1024x1024 square generation target, which keeps the low-quality
+            # image price deterministic and then downsamples only at the final
+            # decoder boundary.
+            if width == height:
+                return 1024, 1024
+            scale = math.sqrt(cls.API_MIN_PIXELS / float(pixels))
+            width = int(math.ceil((width * scale) / 16.0) * 16)
+            height = int(math.ceil((height * scale) / 16.0) * 16)
+
+        width = min(width, cls.API_MAX_EDGE)
+        height = min(height, cls.API_MAX_EDGE)
+        width = max(16, (width // 16) * 16)
+        height = max(16, (height // 16) * 16)
+
+        if width * height > cls.API_MAX_PIXELS:
+            scale = math.sqrt(cls.API_MAX_PIXELS / float(width * height))
+            width = max(16, int((width * scale) // 16) * 16)
+            height = max(16, int((height * scale) // 16) * 16)
+
+        if width * height < cls.API_MIN_PIXELS:
+            # 1024x1024 is the canonical compliant square for April's current Web route.
+            if width == height:
+                return 1024, 1024
+            while width * height < cls.API_MIN_PIXELS:
+                width += 16
+                height += 16
+                if width > cls.API_MAX_EDGE or height > cls.API_MAX_EDGE:
+                    raise ValueError("APRIL_IMAGES_GPT_IMAGE_SIZE_NORMALIZATION_FAILED")
+
+        return width, height
+
+    @staticmethod
+    def _normalize_quality(quality: str) -> str:
+        value = str(quality or "low").strip().lower()
+        mapping = {
+            "draft": "low",
+            "standard": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "ultra": "high",
+            "auto": "auto",
+        }
+        normalized = mapping.get(value, "low")
+        if normalized == "auto":
+            # April currently prefers deterministic cost control over automatic upsizing.
+            return "low"
+        return normalized
+
+    # -------------------------------------------------
+    # GPT Image 2 request / base64 decoder
+    # -------------------------------------------------
+
+    @classmethod
+    def _extract_response_data(cls, response: Any) -> tuple[str, dict[str, Any]]:
+        data = getattr(response, "data", None)
+        if data is None and isinstance(response, dict):
+            data = response.get("data")
+        if not isinstance(data, (list, tuple)) or not data:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_EMPTY_RESPONSE")
+        first = data[0]
+        if isinstance(first, dict):
+            encoded = first.get("b64_json") or first.get("base64") or first.get("image")
+            meta = dict(first)
+        else:
+            encoded = getattr(first, "b64_json", None) or getattr(first, "base64", None)
+            meta = {}
+        encoded = cls._safe_text(encoded).strip()
+        if not encoded:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_NO_BASE64")
+        return encoded, meta
+
+    @classmethod
+    def _decode_gpt_image(cls, response: Any) -> tuple[bytes, dict[str, Any]]:
+        encoded, item_meta = cls._extract_response_data(response)
+        if encoded.startswith("data:image/"):
+            encoded = encoded.split(",", 1)[1]
+        try:
+            image_bytes = base64.b64decode(encoded, validate=True)
+        except Exception as exc:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_BASE64_DECODE_FAILED") from exc
+        if not image_bytes:
+            raise RuntimeError("APRIL_IMAGES_GPT_IMAGE_DECODED_EMPTY")
+        return image_bytes, item_meta
+
+    @classmethod
+    def _usage_dict(cls, response: Any) -> dict[str, Any]:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return dict(usage)
+        for method_name in ("model_dump", "to_dict", "dict"):
+            method = getattr(usage, method_name, None)
+            if callable(method):
+                try:
+                    value = method()
+                    if isinstance(value, dict):
+                        return dict(value)
+                except Exception:
+                    pass
+        result: dict[str, Any] = {}
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "image_input_tokens",
+            "image_output_tokens",
+            "text_input_tokens",
+        ):
+            value = getattr(usage, key, None)
+            if value is not None:
+                result[key] = value
+        return result
+
+    @classmethod
+    def _estimate_prompt_tokens(cls, text: str) -> int:
+        # Conservative local diagnostic only; billing truth is the API response/account.
+        total = 0.0
+        for ch in str(text or ""):
+            if ch.isspace():
+                total += 0.15
+            elif ord(ch) > 127:
+                total += 0.50
+            elif ch in '{}[]":,;|_-':
+                total += 0.35
+            else:
+                total += 0.25
+        return max(1, int(total + 0.999))
+
+    @classmethod
+    def _log_cost(
+        cls,
+        *,
+        response: Any,
+        prompt: str,
+        requested_size: tuple[int, int],
+        api_size: tuple[int, int],
+        quality: str,
+        item_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        usage = cls._usage_dict(response)
+        input_tokens = usage.get("text_input_tokens")
+        if input_tokens is None:
+            input_tokens = usage.get("input_tokens")
+        image_output_tokens = usage.get("image_output_tokens")
+
+        estimated_text_tokens = cls._estimate_prompt_tokens(prompt)
+        text_cost = (
+            float(input_tokens) * cls.TEXT_INPUT_USD_PER_MILLION / 1_000_000
+            if input_tokens is not None else
+            float(estimated_text_tokens) * cls.TEXT_INPUT_USD_PER_MILLION / 1_000_000
+        )
+
+        if image_output_tokens is not None:
+            image_cost = float(image_output_tokens) * cls.IMAGE_OUTPUT_USD_PER_MILLION / 1_000_000
+            image_cost_method = "api_usage_image_output_tokens"
+        elif api_size == (1024, 1024) and quality == "low":
+            image_cost = cls.LOW_1024_IMAGE_ESTIMATE_USD
+            image_cost_method = "official_1024x1024_low_price"
+        else:
+            image_cost = None
+            image_cost_method = "usage_not_returned_custom_size"
+
+        total_cost = (text_cost + image_cost) if image_cost is not None else None
+        request_id = getattr(response, "_request_id", None) or getattr(response, "request_id", None)
+        log_payload = {
+            "model": cls.MODEL,
+            "quality": quality,
+            "requested_size": f"{requested_size[0]}x{requested_size[1]}",
+            "api_generation_size": f"{api_size[0]}x{api_size[1]}",
+            "output_format": "png",
+            "image_count": 1,
+            "request_id": cls._safe_text(request_id),
+            "input_text_tokens_api": input_tokens,
+            "input_text_tokens_estimated": estimated_text_tokens,
+            "image_output_tokens_api": image_output_tokens,
+            "image_output_cost_usd": round(image_cost, 8) if image_cost is not None else None,
+            "text_input_cost_usd": round(text_cost, 8),
+            "estimated_total_cost_usd": round(total_cost, 8) if total_cost is not None else None,
+            "cost_method": image_cost_method,
+            "api_response_item": item_meta,
+            "usage": usage,
+        }
+        print("💰 GPT IMAGE 2 COST:", json.dumps(log_payload, ensure_ascii=False, default=str))
+        return log_payload
+
+    @classmethod
+    def _resize_to_requested(cls, image_bytes: bytes, requested_width: int, requested_height: int) -> bytes:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            if source.size == (requested_width, requested_height):
+                converted = source.copy()
+            else:
+                # Preserve the raster returned by GPT Image 2; only normalize to the
+                # existing April Web contract size at the final decoder boundary.
+                converted = source.resize(
+                    (requested_width, requested_height),
+                    Image.Resampling.LANCZOS,
+                )
+            output = io.BytesIO()
+            converted.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+
+    @classmethod
+    def _generate_gpt_image_bytes(
+        cls,
+        prompt: str,
+        *,
+        requested_width: int,
+        requested_height: int,
+        quality: str,
+    ) -> tuple[bytes, dict[str, Any]]:
+        cls._require_backend()
+        api_width, api_height = cls._api_generation_size(requested_width, requested_height)
+        normalized_quality = cls._normalize_quality(quality)
+
+        request = {
+            "model": cls.MODEL,
+            "prompt": prompt,
+            "size": f"{api_width}x{api_height}",
+            "quality": normalized_quality,
+            "output_format": "png",
+            "n": 1,
+        }
+        print(
+            "🧠 GPT IMAGE 2 REQUEST:",
+            json.dumps(
+                {
+                    "model": cls.MODEL,
+                    "quality": normalized_quality,
+                    "requested_size": f"{requested_width}x{requested_height}",
+                    "api_generation_size": f"{api_width}x{api_height}",
+                    "output_format": "png",
+                    "image_count": 1,
+                    "prompt_chars": len(prompt),
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+        client = cls._client()
+        response = client.images.generate(**request)
+        decoded_bytes, item_meta = cls._decode_gpt_image(response)
+        decoded_bytes = cls._resize_to_requested(
+            decoded_bytes,
+            requested_width,
+            requested_height,
+        )
+
+        cost = cls._log_cost(
+            response=response,
+            prompt=prompt,
+            requested_size=(requested_width, requested_height),
+            api_size=(api_width, api_height),
+            quality=normalized_quality,
+            item_meta=item_meta,
+        )
+        meta = {
+            "api_generation_size": (api_width, api_height),
+            "requested_size": (requested_width, requested_height),
+            "effective_quality": normalized_quality,
+            "cost": cost,
+            "request_id": cls._safe_text(
+                getattr(response, "_request_id", None)
+                or getattr(response, "request_id", None)
+            ),
+        }
+        return decoded_bytes, meta
+
+    # -------------------------------------------------
+    # PNG + C_ARTIFACT
+    # -------------------------------------------------
+
+    @staticmethod
+    def _png_bytes(image: Image.Image) -> bytes:
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue()
+
+    @staticmethod
+    def _validate_png(image_bytes: bytes, expected_width: int, expected_height: int) -> None:
+        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("APRIL_IMAGES_OUTPUT_NOT_PNG")
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.width != int(expected_width) or image.height != int(expected_height):
+                raise RuntimeError("APRIL_IMAGES_OUTPUT_DIMENSIONS_INVALID")
+            if all(lo == hi for lo, hi in image.convert("RGB").getextrema()):
+                raise RuntimeError("APRIL_IMAGES_OUTPUT_EMPTY_PIXELS")
+
+    @classmethod
+    def build_artifact(
+        cls,
+        *,
+        image_bytes: bytes,
+        prompt: str,
+        width: int,
+        height: int,
+        backend: str = BACKEND,
+        variant: str = "primary",
+        dialogue_context: Optional[dict[str, Any]] = None,
+    ) -> tuple[dict[str, Any], UniversalArtifactContract]:
+        data_base64 = base64.b64encode(image_bytes).decode("ascii")
+        data_uri = f"data:image/png;base64,{data_base64}"
+        image_item = {
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "mime_type": "image/png",
+            "width": width,
+            "height": height,
+            "title": "Image",
+            "alt": prompt,
+            "caption": prompt,
+        }
+        dialogue_context = dict(dialogue_context or {}) if isinstance(dialogue_context, dict) else {}
+        artifact = create_artifact(
+            artifact_type="image",
+            room_source="APRIL_IMAGES_GENERATION",
+            data={
+                "prompt": prompt,
+                "variant": variant,
+                "backend": backend,
+                "mime_type": "image/png",
+                "width": width,
+                "height": height,
+                "image_base64": data_base64,
+                "image_data_uri": data_uri,
+                "human_visible": True,
+                "machine_only": False,
+                "presentation": {
+                    "mode": "gallery",
+                    "renderer": "GalleryBlock",
+                    "viewer": "GalleryBlock",
+                    "source_engine": cls.ENGINE_NAME,
+                    "generation_backend": backend,
+                },
+                "payload": {
+                    "kind": "generated_image",
+                    "artifact_type": "image",
+                    "mime_type": "image/png",
+                    "width": width,
+                    "height": height,
+                    "image_base64": data_base64,
+                    "image_data_uri": data_uri,
+                    "src": data_uri,
+                    "url": data_uri,
+                    "prompt": prompt,
+                    "engine": cls.ENGINE_NAME,
+                    "engine_version": cls.ENGINE_VERSION,
+                    "backend": backend,
+                    "variant": variant,
+                    "presentation": {
+                        "mode": "gallery",
+                        "renderer": "GalleryBlock",
+                        "viewer": "GalleryBlock",
+                        "payload_type": "image",
+                        "mime_type": "image/png",
+                    },
+                    "images": [image_item],
+                    "dialogue_context": dialogue_context,
+                    "flow_id": dialogue_context.get("flow_id", ""),
+                    "turn_id": dialogue_context.get("turn_id", ""),
+                    "scene_id": dialogue_context.get("scene_id", ""),
+                    "conversation_id": dialogue_context.get("conversation_id", ""),
+                    "dialogue_sequence_id": dialogue_context.get("dialogue_sequence_id", ""),
+                },
+            },
+        )
+        artifact.quality.validation_passed = True
+        artifact.quality.quality_score = 1.0
+        artifact.quality.confidence_score = 1.0
+        artifact.quality.completeness_score = 1.0
+
+        contract = build_universal_contract(artifact, user_id=str(dialogue_context.get("user_id") or ""))
+        artifact_data = dict(artifact.data or {})
+        payload = artifact_data.get("payload") if isinstance(artifact_data.get("payload"), dict) else {}
+        images = payload.get("images") if isinstance(payload.get("images"), list) else []
+        if not images or not isinstance(images[0], dict) or not images[0].get("src"):
+            raise RuntimeError("APRIL_IMAGES_GALLERY_CONTRACT_INVALID")
+        artifact_data["images"] = list(images)
+        return artifact_data, contract
+
+    @classmethod
+    def build_artifact_from_bytes(
+        cls,
+        image_bytes: bytes,
+        prompt: str,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        backend: str = BACKEND,
+        variant: str = "generated",
+    ) -> tuple[dict[str, Any], UniversalArtifactContract]:
+        if not image_bytes:
+            raise ValueError("APRIL_IMAGES_EMPTY_IMAGE")
+        if width is None or height is None:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                width, height = image.size
+        cls._validate_png(image_bytes, int(width), int(height))
+        return cls.build_artifact(
+            image_bytes=image_bytes,
+            prompt=prompt,
+            width=int(width),
+            height=int(height),
+            backend=backend,
+            variant=variant,
+        )
+
+    @staticmethod
+    def _result_dict(result: ImageGenerationResult) -> dict[str, Any]:
+        return {
+            "success": True,
+            "image_bytes": result.image_bytes,
+            "mime_type": result.mime_type,
+            "width": result.width,
+            "height": result.height,
+            "backend": result.backend,
+            "prompt": result.prompt,
+            "artifact": result.artifact,
+            "contract": result.contract,
+        }
+
+    # -------------------------------------------------
+    # Public API
+    # -------------------------------------------------
+
+    def get_engine_info(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine_name,
+            "version": self.engine_version,
+            "status": "ready" if self._can_initialize() else "configuration_required",
+            "architecture": "Interpretation -> Provider -> GPT Image 2.0 -> C_ARTIFACT_CONTRACT -> GalleryBlock",
+            "backend_mode": self.BACKEND,
+            "model_source": self.MODEL,
+            "local_model_configured": False,
+            "model_id_configured": True,
+            "diffusers_available": False,
+            "long_prompt_support": True,
+            "max_semantic_prompt_tokens": self.MAX_SEMANTIC_PROMPT_TOKENS,
+            "long_prompt_strategy": "provider_semantic_plan_passthrough",
+            "device": self._device(),
+            "dtype": None,
+            "external_image_api": True,
+            "fallback_backend": None,
+            "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
+            "default_quality": "low",
+            "default_web_size": "512x512",
+            "api_generation_size_for_512": "1024x1024",
+        }
+
+    @classmethod
+    def build_visual_prompt(
+        cls,
+        request: str,
+        *,
+        visual_context: Optional[dict[str, Any]] = None,
+        style: str = "",
+        quality: str = "low",
+    ) -> str:
+        # Compatibility method. Style is intentionally not injected.
+        spec = {
+            "prompt": request,
+            "quality": quality,
+            "visual_context": visual_context or {},
+            "request_anchor": request,
+            "openai_structured_visual_plan_semantic": request,
+        }
+        return cls._compose_prompt(cls._clean_prompt(request), spec)
+
+    # -------------------------------------------------
+    # Provider image-spec validation / execution
+    # -------------------------------------------------
+
+    @classmethod
+    def _validate_render_spec(cls, spec: Any) -> dict[str, Any]:
+        if not isinstance(spec, dict):
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC")
+        if spec.get("schema") != "april_image_spec_v1":
+            raise ValueError("APRIL_IMAGES_INVALID_SPEC_SCHEMA")
+
+        width, height = cls._parse_size(
+            f"{spec.get('width', cls.DEFAULT_SIZE[0])}x{spec.get('height', cls.DEFAULT_SIZE[1])}"
+        )
+        generator_signal = cls._safe_text(spec.get("generator_signal") or "").strip()
+        if generator_signal and generator_signal != "C_APRIL_IMAGES_GENERATOR":
+            raise ValueError("APRIL_IMAGES_INVALID_GENERATOR_SIGNAL")
+
+        request_anchor = cls._safe_text(spec.get("request_anchor") or "").strip()
+        if generator_signal == "C_APRIL_IMAGES_GENERATOR" and not request_anchor:
+            raise ValueError("APRIL_IMAGES_MISSING_REQUEST_ANCHOR")
+
+        semantic = cls._clean_prompt(
+            spec.get("openai_structured_visual_plan_semantic")
+            or spec.get("prompt")
+            or ""
+        )
+        return {
+            "schema": "april_image_spec_v1",
+            "prompt": semantic,
+            "width": width,
+            "height": height,
+            "style": cls._safe_text(spec.get("style") or ""),
+            "quality": cls._normalize_quality(cls._safe_text(spec.get("quality") or "low")),
+            "negative": [str(x) for x in (spec.get("negative") or []) if str(x).strip()],
+            "visual_context": dict(spec.get("visual_context") or {}) if isinstance(spec.get("visual_context"), dict) else {},
+            "openai_structured_visual_plan_raw": spec.get("openai_structured_visual_plan_raw"),
+            "openai_structured_visual_plan_semantic": semantic,
+            "render_profile": "",
+            "render_profile_source": "",
+            "seed": None,
+            "generator_signal": generator_signal,
+            "request_anchor": request_anchor,
+            "image_caption": cls._safe_text(spec.get("image_caption") or ""),
+            "image_subject_only": bool(spec.get("image_subject_only")),
+            "flow_id": cls._safe_text(spec.get("flow_id") or ""),
+            "turn_id": cls._safe_text(spec.get("turn_id") or ""),
+            "scene_id": cls._safe_text(spec.get("scene_id") or ""),
+            "user_id": cls._safe_text(spec.get("user_id") or ""),
+            "conversation_id": cls._safe_text(spec.get("conversation_id") or ""),
+            "dialogue_sequence_id": cls._safe_text(spec.get("dialogue_sequence_id") or ""),
+            "dialogue_development": dict(spec.get("dialogue_development") or {}) if isinstance(spec.get("dialogue_development"), dict) else {},
+        }
+
+    @classmethod
+    async def generate_from_spec(
+        cls,
+        spec: dict[str, Any],
+        *,
+        variant: str = "provider_spec",
+    ) -> dict[str, Any]:
+        clean = cls._validate_render_spec(spec)
+        width, height = cls._parse_size(f"{clean['width']}x{clean['height']}")
+
+        # The former broad generator envelope is retained as dialogue evidence,
+        # not as image-model input. The actual GPT Image 2 prompt is now limited
+        # to the current user anchor + OpenAI's same-turn visual understanding.
+        dialogue_generation_prompt = cls._dialogue_generation_prompt_for_history(clean)
+        prompt = cls._compose_prompt(clean["prompt"], clean)
+        final_prompt_tokens = cls._estimate_prompt_tokens(prompt)
+
+        dialogue_generation_memory = {
+            "version": "visual_generation_dialogue_memory_v1",
+            "memory_kind": "visual_generation_prompt",
+            "source": "C_APRIL_IMAGES_GENERATOR",
+            "route": "C_ARTIFACT_CONTRACT",
+            "request_anchor": clean.get("request_anchor") or "",
+            "generation_prompt": dialogue_generation_prompt,
+            "image_model_prompt": prompt,
+            "image_model_prompt_chars": len(prompt),
+            "legacy_prompt_chars": len(dialogue_generation_prompt),
+            "openai_structured_visual_plan_semantic": clean.get("openai_structured_visual_plan_semantic") or "",
+            "flow_id": clean.get("flow_id") or "",
+            "turn_id": clean.get("turn_id") or "",
+            "scene_id": clean.get("scene_id") or "",
+            "user_id": clean.get("user_id") or "",
+            "conversation_id": clean.get("conversation_id") or "",
+            "dialogue_sequence_id": clean.get("dialogue_sequence_id") or "",
+            "created_at": time.time(),
+            "expires_after_hours": 12,
+            "full_prompt_consumed_by_image_api": False,
+            "history_only": True,
+        }
+
+        print(
+            "\n===== IMAGE PROMPT TRACE: GENERATOR ENTRY =====\n"
+            + json.dumps(
+                {
+                    "variant": variant,
+                    "schema": clean.get("schema"),
+                    "generator_signal": clean.get("generator_signal") or "implicit_canonical_route",
+                    "request_anchor": clean.get("request_anchor") or "",
+                    "semantic_generation_prompt": clean.get("prompt") or "",
+                    "prompt_chars": len(prompt),
+                    "openai_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                    "provider_model": cls.MODEL,
+                    "quality": clean.get("quality") or "low",
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+            + "\n===== END GENERATOR ENTRY =====\n"
+        )
+        print(
+            "===== IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+            + prompt[:12000]
+            + "\n===== END IMAGE PROMPT TRACE: GENERATOR COMPOSED PROMPT =====\n"
+        )
+        print(
+            "🔒 IMAGE PROMPT SEMANTIC LOCK:",
+            {
+                "request_anchor": clean.get("request_anchor") or "",
+                "source_prompt": clean.get("prompt") or "",
+                "generation_prompt": prompt,
+                "scene_content_authority": "USER_REQUEST_PLUS_OPENAI_STRUCTURED_VISUAL_PLAN",
+                "generation_prompt_source": "USER_REQUEST_PLUS_OPENAI_SEMANTIC_PLAN_PLUS_STRUCTURED_PLAN",
+                "user_request_is_trigger_only": False,
+                "openai_structured_plan_preserved": clean.get("openai_structured_visual_plan_raw") is not None,
+                "render_profile_injected_into_prompt": False,
+                "provider_model": cls.MODEL,
+                "generator_scene_invention": False,
+            },
+        )
+        print(
+            "🧠 IMAGE PROMPT NORMALIZED:",
+            {
+                "semantic_chars": len(prompt),
+                "estimated_prompt_tokens": int(final_prompt_tokens),
+                "contains_markup": bool(re.search(r"<(?:svg|path|rect|circle)\\b|data:image/", prompt, flags=re.IGNORECASE)),
+                "generation_model": cls.MODEL,
+                "quality": clean["quality"],
+                "output_format": "png",
+            },
+        )
+
+        image_bytes, meta = await asyncio.to_thread(
+            cls._generate_gpt_image_bytes,
+            prompt,
+            requested_width=width,
+            requested_height=height,
+            quality=clean["quality"],
+        )
+        cls._validate_png(image_bytes, width, height)
+
+        try:
+            output_sha256 = hashlib.sha256(image_bytes).hexdigest()
+            print(
+                "🔎 APRIL IMAGE GENERATOR RASTER EXIT (OBSERVATION ONLY):",
+                {
+                    "request_anchor": clean.get("request_anchor") or "",
+                    "generator_prompt": prompt,
+                    "model": cls.MODEL,
+                    "backend": cls.BACKEND,
+                    "variant": variant,
+                    "width": int(width),
+                    "height": int(height),
+                    "png_bytes": len(image_bytes),
+                    "png_sha256": output_sha256,
+                    "png_validation": "passed",
+                    "next_route": "C_ARTIFACT_CONTRACT",
+                    "decoded_png_forwarded_unchanged_to_artifact": True,
+                    "api_raster_resized_to_web_contract": bool(
+                        meta["api_generation_size"] != (width, height)
+                    ),
+                    "api_generation_size": f"{meta['api_generation_size'][0]}x{meta['api_generation_size'][1]}",
+                    "effective_quality": meta["effective_quality"],
+                },
+            )
+        except Exception as diag_exc:
+            print(
+                "⚠️ APRIL IMAGE GENERATOR RASTER EXIT DIAGNOSTIC FAILED:",
+                {
+                    "error_type": type(diag_exc).__name__,
+                    "error": str(diag_exc)[:240],
+                    "decoded_png_forwarded_unchanged_to_artifact": True,
+                },
+            )
+
+        artifact, contract = cls.build_artifact(
+            image_bytes=image_bytes,
+            prompt=prompt,
+            width=width,
+            height=height,
+            backend=cls.BACKEND,
+            variant=variant,
+            dialogue_context={
+                "user_id": clean.get("user_id", ""),
+                "flow_id": clean.get("flow_id", ""),
+                "turn_id": clean.get("turn_id", ""),
+                "scene_id": clean.get("scene_id", ""),
+                "conversation_id": clean.get("conversation_id", ""),
+                "dialogue_sequence_id": clean.get("dialogue_sequence_id", ""),
+                "dialogue_development": clean.get("dialogue_development", {}),
+            },
+        )
+
+        payload = artifact.get("payload") if isinstance(artifact, dict) else None
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        data_base64 = base64.b64encode(image_bytes).decode("ascii")
+        data_uri = f"data:image/png;base64,{data_base64}"
+        image_item = {
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "title": payload.get("title") or "Image",
+            "alt": clean.get("image_caption") or payload.get("alt") or clean.get("request_anchor") or prompt,
+            "caption": clean.get("image_caption") or payload.get("caption") or clean.get("request_anchor") or prompt,
+        }
+        payload.update({
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "image_base64": data_base64,
+            "image_data_uri": data_uri,
+            "src": data_uri,
+            "url": data_uri,
+            "image": data_uri,
+            "prompt": prompt,
+            "alt": clean.get("image_caption") or payload.get("alt") or clean.get("request_anchor") or prompt,
+            "caption": clean.get("image_caption") or payload.get("caption") or clean.get("request_anchor") or prompt,
+            "engine": cls.ENGINE_NAME,
+            "engine_version": cls.ENGINE_VERSION,
+            "backend": cls.BACKEND,
+            "variant": variant,
+            "images": [image_item],
+            "generation_model": cls.MODEL,
+            "generation_quality": meta["effective_quality"],
         })
 
-    # Add concise explanations directly after every non-text renderer, even if the
-    # model omitted the optional explanation field. Keep the original answer first.
-    blocks = _ensure_render_explanations(blocks, source_answer or answer, language_hint)
-
-    order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
-    order_pos = {value: idx for idx, value in enumerate(order)}
-    normalized: List[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    seen_signatures: set[str] = set()
-    semantic_index: Dict[str, int] = {}
-
-    for index, raw in enumerate(blocks):
-        if not isinstance(raw, dict):
-            continue
-        block = dict(raw)
-        block_type = _scene_block_type(block)
-        if block_type == "graph_data":
-            continue
-        renderer = _scene_block_renderer(block)
-        block["type"] = block_type
-        block["artifact_type"] = str(block.get("artifact_type") or block_type)
-        block["renderer"] = renderer
-        block["viewer"] = str(block.get("viewer") or renderer)
-        block_id = str(block.get("block_id") or block.get("id") or f"block_{index + 1}").strip()
-        block["block_id"] = block_id
-        block["scene_id"] = scene.scene_id
-        block["turn_id"] = scene.turn_id
-        block["flow_id"] = scene.flow_id
-        block["topic_group"] = str(block.get("topic_group") or scene.topic_group or blueprint.get("topic_group") or "").strip()
-        block["continuation"] = bool(block.get("continuation", scene.continuation))
-        block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene.scene_id, 'block': block_id, 'renderer': renderer})}")
-        block["sequence_index"] = order_pos.get(block_id, index)
-        block["scene_contract"] = True
-        block["signal_version"] = UNIFIED_RENDER_SIGNAL_VERSION
-        block_payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "code", "link", "file", "audio", "video"} and not _scene_payload_has_content(block_type, block_payload, block):
-            continue
-        related = [str(x).strip() for x in _scene_list(block.get("related_block_ids")) if str(x).strip()]
-        block["related_block_ids"] = list(dict.fromkeys(related))
-        signature = _scene_hash({
-            "type": block_type,
-            "renderer": renderer,
-            "content": _scene_text(block),
-            "payload": block.get("payload", {}),
+        if not isinstance(artifact, dict):
+            artifact = {}
+        artifact.update({
+            "artifact_type": "image",
+            "mime_type": "image/png",
+            "width": int(width),
+            "height": int(height),
+            "image_base64": data_base64,
+            "image_data_uri": data_uri,
+            "payload": payload,
+            "images": [image_item],
+            "render_spec": clean,
+            "generation_model": cls.MODEL,
+            "generation_quality": meta["effective_quality"],
         })
-        semantic_key = _canonical_visual_dedupe_key(block)
-        if semantic_key and semantic_key in semantic_index:
-            previous_index = semantic_index[semantic_key]
-            normalized[previous_index] = _prefer_canonical_visual_block(normalized[previous_index], block)
-            continue
-        if block_id in seen_ids or signature in seen_signatures:
-            continue
-        seen_ids.add(block_id)
-        seen_signatures.add(signature)
-        if semantic_key:
-            semantic_index[semantic_key] = len(normalized)
-        normalized.append(block)
-
-    normalized.sort(key=lambda b: int(b.get("sequence_index", 0)))
-    for idx, block in enumerate(normalized):
-        block["sequence_index"] = idx
-    return normalized
-
-
-def _canonical_scene_relations(scene: MachineScene, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    blueprint = dict(scene.scene_blueprint or {})
-    relations: List[Dict[str, Any]] = []
-    for raw in _scene_list(blueprint.get("relations")):
-        if not isinstance(raw, dict):
-            continue
-        source = str(raw.get("from") or raw.get("source") or "").strip()
-        target = str(raw.get("to") or raw.get("target") or "").strip()
-        if not source or not target:
-            continue
-        relations.append({
-            "from": source,
-            "to": target,
-            "relation": str(raw.get("relation") or raw.get("type") or "related").strip(),
-        })
-    if not relations:
-        for block in blocks:
-            source = str(block.get("block_id") or "").strip()
-            for target in block.get("related_block_ids") or []:
-                if source and str(target).strip():
-                    relations.append({"from": source, "to": str(target).strip(), "relation": "related"})
-    unique: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in relations:
-        key = f"{item['from']}|{item['relation']}|{item['to']}"
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique
-
-
-def build_scene_signal(contract: SceneContract) -> Dict[str, Any]:
-    """Create the single Web signal for the authenticated dialogue scene."""
-    return {
-        "signal_type": CANONICAL_SCENE_SIGNAL_TYPE,
-        "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
-        "scene_version": contract.scene_version,
-        "scene_id": contract.scene_id,
-        "turn_id": contract.turn_id,
-        "flow_id": contract.flow_id,
-        "topic_group": contract.topic_group,
-        "continuation": contract.continuation,
-        "single_response": True,
-        "single_signal": True,
-        "answer_render_policy": ANSWER_RENDER_POLICY,
-        "answer": str(contract.metadata.get("answer") or ""),
-        "identity": {
-            "user_id": contract.user_id,
-            "conversation_id": contract.conversation_id,
-            "dialogue_sequence_id": contract.dialogue_sequence_id,
-            "sequence_turn_index": int(contract.sequence_turn_index or 0),
-        },
-        "authenticated_scope": deepcopy(contract.authenticated_scope),
-        "dialogue_state": deepcopy(contract.dialogue_state),
-        "dialogue_development": deepcopy(contract.dialogue_development),
-        "result_event": deepcopy(contract.result_event),
-        "open_loops": deepcopy(contract.open_loops),
-        "pending_obligations": deepcopy(contract.pending_obligations),
-        "active_task": deepcopy(contract.active_task),
-        "order": list(contract.order),
-        "relations": deepcopy(contract.relations),
-        "blocks": deepcopy(contract.render_blocks),
-        "render_blocks": deepcopy(contract.render_blocks),
-        "presentation": deepcopy((contract.metadata.get("presentation") or {})),
-    }
-
-
-def build_machine_scene(response: MachineResponse) -> MachineScene:
-    """Canonical MachineResponse -> one MachineScene transformation."""
-    scene = create_default_machine_scene()
-    scene.fiber = response.fiber
-    metadata = dict(getattr(response, "metadata", {}) or {})
-    source_scene = dict(getattr(response, "scene", {}) or {})
-    blueprint = dict(
-        getattr(response, "scene_blueprint", {})
-        or source_scene.get("scene_blueprint")
-        or source_scene.get("blueprint")
-        or {}
-    )
-
-    scene.scene_id = str(getattr(response, "scene_id", "") or source_scene.get("scene_id") or metadata.get("scene_id") or scene.scene_id)
-    scene.turn_id = str(getattr(response, "turn_id", "") or source_scene.get("turn_id") or metadata.get("turn_id") or "")
-    scene.flow_id = str(getattr(response, "flow_id", "") or source_scene.get("flow_id") or metadata.get("flow_id") or "")
-    scene.topic_group = str(getattr(response, "topic_group", "") or blueprint.get("topic_group") or metadata.get("topic_group") or "")
-    scene.continuation = bool(getattr(response, "continuation", False) or blueprint.get("continuation", False) or metadata.get("continuation", False))
-    scene.active_scene = str(source_scene.get("active_scene") or metadata.get("active_scene") or "")
-    identity_scope = dict(metadata.get("identity_scope") or metadata.get("authenticated_scope") or {})
-    fiber_identity = getattr(getattr(response, "fiber", None), "identity", None)
-    scene.user_id = str(identity_scope.get("user_id") or getattr(response, "user_id", "") or getattr(fiber_identity, "user_id", "") or "")
-    scene.conversation_id = str(identity_scope.get("conversation_id") or getattr(response, "conversation_id", "") or metadata.get("conversation_id") or "")
-    scene.dialogue_sequence_id = str(metadata.get("dialogue_sequence_id") or "")
-    try:
-        scene.sequence_turn_index = int(metadata.get("sequence_turn_index") or 0)
-    except (TypeError, ValueError):
-        scene.sequence_turn_index = 0
-    scene.active_task = deepcopy(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}) if isinstance(metadata.get("active_task") or metadata.get("interactive_task_state") or source_scene.get("active_task") or {}, dict) else {}
-    scene.dialogue_state = deepcopy(metadata.get("dialogue_state") or metadata.get("processor_interpretation") or {})
-    scene.dialogue_development = deepcopy(
-        metadata.get("dialogue_development")
-        or scene.dialogue_state.get("dialogue_development")
-        or {}
-    ) if isinstance(metadata.get("dialogue_development") or scene.dialogue_state.get("dialogue_development") or {}, dict) else {}
-    scene.result_event = deepcopy(metadata.get("result_event") or scene.dialogue_development.get("latest_result_event") or {}) if isinstance(metadata.get("result_event") or scene.dialogue_development.get("latest_result_event") or {}, dict) else {}
-    scene.open_loops = deepcopy(metadata.get("open_loops") or scene.dialogue_development.get("open_loops") or []) if isinstance(metadata.get("open_loops") or scene.dialogue_development.get("open_loops") or [], list) else []
-    scene.pending_obligations = deepcopy(metadata.get("pending_obligations") or scene.dialogue_development.get("pending_obligations") or []) if isinstance(metadata.get("pending_obligations") or scene.dialogue_development.get("pending_obligations") or [], list) else []
-    scene.scene_blueprint = blueprint
-
-    scene.metadata = {
-        "confidence": getattr(response, "confidence", 0.0),
-        "diagnostics": dict(getattr(response, "diagnostics", {}) or {}),
-        "quality": dict(getattr(response, "quality", {}) or {}),
-        "routing_decision": dict(getattr(response, "routing_decision", {}) or {}),
-        "machine_only": bool(metadata.get("machine_only", False)),
-        "human_visible": metadata.get("human_visible", True),
-        "answer": str(getattr(response, "answer", "") or ""),
-        "content": str(getattr(response, "content", "") or ""),
-        "summary": str(getattr(response, "summary", "") or ""),
-        "contributions": dict(getattr(response, "contributions", {}) or {}),
-        "executor_hints": dict(getattr(response, "executor_hints", {}) or {}),
-        "scene_id": scene.scene_id,
-        "turn_id": scene.turn_id,
-        "flow_id": scene.flow_id,
-        "topic_group": scene.topic_group,
-        "continuation": scene.continuation,
-        "scene_blueprint": deepcopy(blueprint),
-        "user_id": scene.user_id,
-        "conversation_id": scene.conversation_id,
-        "dialogue_sequence_id": scene.dialogue_sequence_id,
-        "sequence_turn_index": scene.sequence_turn_index,
-        "active_task": deepcopy(scene.active_task),
-        "dialogue_state": deepcopy(scene.dialogue_state),
-        "dialogue_development": deepcopy(scene.dialogue_development),
-        "result_event": deepcopy(scene.result_event),
-        "open_loops": deepcopy(scene.open_loops),
-        "pending_obligations": deepcopy(scene.pending_obligations),
-        "identity_scope": {"user_id": scene.user_id, "conversation_id": scene.conversation_id, "dialogue_sequence_id": scene.dialogue_sequence_id},
-    }
-
-    scene.blocks = list(getattr(response, "render_blocks", []) or [])
-    scene.relations = list(getattr(response, "scene_relations", []) or blueprint.get("relations", []) or [])
-    scene.order = list(getattr(response, "scene_order", []) or blueprint.get("order", []) or [])
-    setattr(scene, "artifacts", list(getattr(response, "artifacts", []) or []))
-    setattr(scene, "answer", getattr(response, "answer", ""))
-    setattr(scene, "content", getattr(response, "content", ""))
-    setattr(scene, "summary", getattr(response, "summary", ""))
-
-    if hasattr(response, "conversation_space"):
-        setattr(scene, "conversation_space", getattr(response, "conversation_space"))
-    return scene
-
-def build_scene_contract(scene: MachineScene) -> SceneContract:
-    """Finalize the one canonical SceneContract and one Web scene signal."""
-    contract = scene.contract if isinstance(scene.contract, SceneContract) else create_default_scene_contract()
-    contract.scene_version = CANONICAL_SCENE_VERSION
-    contract.scene_id = scene.scene_id
-    contract.turn_id = scene.turn_id
-    contract.flow_id = scene.flow_id
-    contract.topic_group = scene.topic_group
-    contract.continuation = scene.continuation
-    contract.user_id = str(scene.user_id or scene.metadata.get("user_id") or "")
-    contract.conversation_id = str(scene.conversation_id or scene.metadata.get("conversation_id") or "")
-    contract.dialogue_sequence_id = str(scene.dialogue_sequence_id or scene.metadata.get("dialogue_sequence_id") or "")
-    contract.sequence_turn_index = int(scene.sequence_turn_index or scene.metadata.get("sequence_turn_index") or 0)
-    contract.active_task = deepcopy(scene.active_task or scene.metadata.get("active_task") or {})
-    contract.dialogue_state = deepcopy(scene.dialogue_state or scene.metadata.get("dialogue_state") or {})
-    contract.dialogue_development = deepcopy(scene.dialogue_development or scene.metadata.get("dialogue_development") or {})
-    contract.result_event = deepcopy(scene.result_event or scene.metadata.get("result_event") or {})
-    contract.open_loops = deepcopy(scene.open_loops or scene.metadata.get("open_loops") or [])
-    contract.pending_obligations = deepcopy(scene.pending_obligations or scene.metadata.get("pending_obligations") or [])
-    contract.authenticated_scope = {
-        "user_id": contract.user_id,
-        "conversation_id": contract.conversation_id,
-        "dialogue_sequence_id": contract.dialogue_sequence_id,
-    }
-    contract.active_scene = scene.active_scene
-    contract.scene_blueprint = deepcopy(scene.scene_blueprint or {})
-
-    canonical_blocks = _canonical_scene_blocks(scene)
-    for block in canonical_blocks:
-        if isinstance(block, dict):
-            block["user_id"] = contract.user_id
-            block["conversation_id"] = contract.conversation_id
-            block["dialogue_sequence_id"] = contract.dialogue_sequence_id
-            block["sequence_turn_index"] = contract.sequence_turn_index
-            block["scene_id"] = contract.scene_id
-            block["turn_id"] = contract.turn_id
-            block["flow_id"] = contract.flow_id
-            route_meta = (scene.metadata or {}).get("route") if isinstance((scene.metadata or {}).get("route"), dict) else {}
-            selected_rooms = route_meta.get("selected_rooms") or (scene.metadata or {}).get("selected_rooms") or []
-            registration = get_web_renderer_registration(str(block.get("type") or block.get("artifact_type") or "text"))
-            source_room = str(block.get("source_room") or block.get("room_source") or "")
-            payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-            identity_signal = {
-                "signal_type": CANONICAL_SCENE_SIGNAL_TYPE,
-                "signal_version": UNIFIED_RENDER_SIGNAL_VERSION,
-                "signal_channel": "canonical_web_render_signal_v2",
-                "web_registry_version": WEB_RENDERER_REGISTRY_VERSION,
-                "representation": str(block.get("type") or block.get("artifact_type") or "text"),
-                "type": str(block.get("type") or block.get("artifact_type") or "text"),
-                "renderer": str(block.get("renderer") or registration.get("renderer") or "MessageTextBlock"),
-                "viewer": str(block.get("viewer") or registration.get("viewer") or "MessageTextBlock"),
-                "payload_contract_keys": list(registration.get("payload_keys") or []),
-                "payload_present": _scene_payload_has_content(str(block.get("type") or "text"), payload, block),
-                "content_present": bool(_scene_text(block)),
-                "source_room": source_room,
-                "room_id": source_room,
-                "selected_room_ids": [str(item.get("room") or item.get("room_id") or "") for item in selected_rooms if isinstance(item, dict) and str(item.get("room") or item.get("room_id") or "")],
-                "selected_room_registry_keys": [str(item.get("registry_key") or "") for item in selected_rooms if isinstance(item, dict) and str(item.get("registry_key") or "")],
-                "payload_ref": "payload",
-                "identity": {"user_id": contract.user_id, "conversation_id": contract.conversation_id, "dialogue_sequence_id": contract.dialogue_sequence_id, "turn_id": contract.turn_id, "flow_id": contract.flow_id, "scene_id": contract.scene_id, "interpretation_id": str((scene.metadata or {}).get("identity", {}).get("interpretation_id") or "")},
-                "user_id": contract.user_id,
-                "conversation_id": contract.conversation_id,
-                "dialogue_sequence_id": contract.dialogue_sequence_id,
-                "dialog_id": contract.dialogue_sequence_id,
-                "message_id": contract.turn_id,
-                "turn_id": contract.turn_id,
-                "flow_id": contract.flow_id,
-                "scene_id": contract.scene_id,
-                "interpretation_id": str((scene.metadata or {}).get("identity", {}).get("interpretation_id") or ""),
-            }
-            existing_render_signal = block.get("render_signal") if isinstance(block.get("render_signal"), dict) else {}
-            existing_render_signal = {**existing_render_signal, **identity_signal, "payload": payload}
-            block["render_signal"] = existing_render_signal
-            existing_signal = block.get("signal") if isinstance(block.get("signal"), dict) else {}
-            block["signal"] = {**existing_signal, **identity_signal}
-            block["payload_contract_keys"] = list(registration.get("payload_keys") or [])
-            block["source_room"] = source_room
-    relations = _canonical_scene_relations(scene, canonical_blocks)
-    order = [str(block.get("block_id") or "").strip() for block in canonical_blocks if str(block.get("block_id") or "").strip()]
-
-    contract.blocks = canonical_blocks
-    contract.render_blocks = list(canonical_blocks)
-    contract.relations = relations
-    contract.order = order
-    contract.metadata = dict(scene.metadata or {})
-    contract.metadata.update({
-        "scene_id": scene.scene_id,
-        "turn_id": scene.turn_id,
-        "flow_id": scene.flow_id,
-        "topic_group": scene.topic_group,
-        "continuation": scene.continuation,
-        "user_id": contract.user_id,
-        "conversation_id": contract.conversation_id,
-        "dialogue_sequence_id": contract.dialogue_sequence_id,
-        "sequence_turn_index": contract.sequence_turn_index,
-        "active_task": deepcopy(contract.active_task),
-        "dialogue_state": deepcopy(contract.dialogue_state),
-        "dialogue_development": deepcopy(contract.dialogue_development),
-        "result_event": deepcopy(contract.result_event),
-        "open_loops": deepcopy(contract.open_loops),
-        "pending_obligations": deepcopy(contract.pending_obligations),
-        "authenticated_scope": deepcopy(contract.authenticated_scope),
-        "artifact_count": len(getattr(scene, "artifacts", []) or []),
-        "transport_stage": "artifact_contract_scene_v3",
-        "canonical_scene_contract": True,
-        "single_response": True,
-        "single_signal": True,
-        "answer_render_policy": ANSWER_RENDER_POLICY,
-        "machine_only": bool(contract.metadata.get("machine_only", False) or _scene_is_internal_only(scene)),
-        "human_visible": bool(contract.metadata.get("human_visible", not contract.metadata.get("machine_only", False))),
-    })
-
-    answer = _scene_text(scene)
-    if contract.metadata.get("machine_only"):
-        contract.metadata["answer"] = ""
-        contract.metadata["content"] = ""
-        contract.metadata["summary"] = ""
-    else:
-        contract.metadata["answer"] = answer
-        contract.metadata["content"] = answer
-        contract.metadata["summary"] = answer
-
-    # Presentation is generated once for the canonical scene, never once per
-    # renderer. This keeps all renderers in one visual stream.
-    # Presentation metadata is kept inside the existing SceneContract.
-    presentation = {
-        "version": "scene_presentation_v1",
-        "engine": "McDowell",
-        "math_engine": "KaTeX",
-        "single_response": True,
-        "single_signal": True,
-        "layout": {
-            "mode": "flow",
-            "container": "adaptive_full_width",
-            "frames": False,
-            "cards": False,
-        },
-        "scene_id": scene.scene_id,
-        "turn_id": scene.turn_id,
-        "flow_id": scene.flow_id,
-    }
-    contract.metadata["presentation"] = presentation
-    contract.metadata["renderer_instances"] = list(dict.fromkeys(
-        str(block.get("renderer") or "MessageTextBlock") for block in contract.render_blocks if isinstance(block, dict)
-    ))
-    contract.space_continuity = {
-        **dict(contract.space_continuity or {}),
-        "active_scene": contract.active_scene,
-        "scene_id": contract.scene_id,
-        "turn_id": contract.turn_id,
-        "flow_id": contract.flow_id,
-        "relations": deepcopy(contract.relations),
-        "order": list(contract.order),
-        "dialogue_development": deepcopy(contract.dialogue_development),
-        "result_event": deepcopy(contract.result_event),
-        "open_loops": deepcopy(contract.open_loops),
-        "pending_obligations": deepcopy(contract.pending_obligations),
-    }
-    contract.signal = build_scene_signal(contract)
-    contract.metadata["scene_signal"] = deepcopy(contract.signal)
-
-    scene.contract = contract
-    scene.blocks = list(contract.render_blocks)
-    scene.relations = list(contract.relations)
-    scene.order = list(contract.order)
-    return contract
-
-
-# =====================================================
-# QUANTUM FACTORY CONTROL
-# =====================================================
-# The Factory does not become a second processor and does not create a
-# second route.  It is a coordinated production layer controlled by the
-# Quantum Executor through the same Fiber Core.
-#
-# Design invariant:
-#   Quantum Executor
-#       -> one MachineRequest
-#       -> one Fiber Core / one route
-#       -> one factory control session
-#       -> zero or more domain-room contributions
-#       -> one MachineResponse
-#       -> one MachineScene
-#       -> one SceneContract
-#       -> April Web
-#
-# Room selection/meaning comes from the processor's contextual analysis.
-# This layer never uses keyword triggers to select a room.
-# =====================================================
-
-QUANTUM_FACTORY_VERSION = "april_quantum_factory_control_v1"
-QUANTUM_FACTORY_SINGLE_ROUTE = True
-
-
-@dataclass
-class FactoryRoomContribution:
-    """One room's contribution inside the current Fiber transaction."""
-    room: str = ""
-    artifact: Optional[BaseArtifact] = None
-    payload: Dict[str, Any] = field(default_factory=dict)
-    accepted: bool = False
-    sequence: int = 0
-
-
-@dataclass
-class QuantumFactoryState:
-    """Per-request factory state. Never shared between users."""
-    request_id: str = ""
-    flow_id: str = ""
-    user_id: str = ""
-    route_id: str = FIBER_ROUTE_NAME
-    lane: str = "A"
-    status: str = "READY"
-    expected_rooms: List[str] = field(default_factory=list)
-    active_rooms: List[str] = field(default_factory=list)
-    completed_rooms: List[str] = field(default_factory=list)
-    contributions: List[FactoryRoomContribution] = field(default_factory=list)
-    render_blocks: List[Dict[str, Any]] = field(default_factory=list)
-    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
-    started_at: float = field(default_factory=time.time)
-
-
-def _safe_dict(value: Any) -> Dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _request_flow_id(request: Optional[MachineRequest]) -> str:
-    if request is None:
-        return ""
-    metadata = _safe_dict(getattr(request, "metadata", {}))
-    if metadata.get("flow_id"):
-        return str(metadata["flow_id"])
-    routing = _safe_dict(getattr(request, "routing", {}))
-    return str(routing.get("flow_id", "") or "")
-
-
-def bind_request_to_fiber(
-    request: MachineRequest,
-    *,
-    user_id: str = "",
-    flow_id: str = "",
-    lane: str = "A",
-) -> MachineRequest:
-    """Bind processor identity/trace to the existing Fiber Core.
-
-    This only enriches the canonical request. It does not create a route,
-    Provider, memory, Executor, or renderer.
-    """
-    if request is None:
-        raise ValueError("request is required")
-
-    fiber = request.fiber or FiberCoreContract()
-    request.fiber = fiber
-
-    fiber.identity.user_id = str(user_id or fiber.identity.user_id or "")
-    fiber.route.active_lane = str(lane or fiber.route.active_lane or "A")
-    fiber.lane.lane_id = fiber.route.active_lane
-    fiber.lane.lane_name = f"Lane {fiber.route.active_lane}"
-    fiber.metrics.lane = fiber.route.active_lane
-    fiber.trace.lane = fiber.route.active_lane
-
-    resolved_flow = str(flow_id or _request_flow_id(request) or "")
-    if resolved_flow:
-        request.metadata = dict(getattr(request, "metadata", {}) or {})
-        request.metadata["flow_id"] = resolved_flow
-        request.routing = dict(request.routing or {})
-        request.routing["flow_id"] = resolved_flow
-
-    request.metadata = dict(getattr(request, "metadata", {}) or {})
-    request.metadata.update({
-        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
-        "single_route": True,
-        "fiber_route": FIBER_ROUTE_NAME,
-        "user_bound": bool(fiber.identity.user_id),
-    })
-    request.routing = dict(request.routing or {})
-    request.routing["single_route"] = True
-    request.routing["fiber_route"] = FIBER_ROUTE_NAME
-    return request
-
-
-def create_quantum_factory_state(
-    request: MachineRequest,
-    *,
-    user_id: str = "",
-    flow_id: str = "",
-) -> QuantumFactoryState:
-    """Create isolated factory state for exactly one request/user."""
-    request = bind_request_to_fiber(
-        request,
-        user_id=user_id,
-        flow_id=flow_id,
-        lane=request.fiber.route.active_lane if request.fiber else "A",
-    )
-
-    expected = []
-    for value in (
-        list(getattr(request, "required_competencies", []) or [])
-        + list(getattr(request, "required_artifacts", []) or [])
-    ):
-        value = str(value or "").strip()
-        if value and value not in expected:
-            expected.append(value)
-
-    return QuantumFactoryState(
-        request_id=str(getattr(request, "request_id", "") or ""),
-        flow_id=str(_request_flow_id(request) or ""),
-        user_id=str(user_id or request.fiber.identity.user_id or ""),
-        lane=str(request.fiber.route.active_lane or "A"),
-        expected_rooms=expected,
-    )
-
-
-def quantum_factory_room_begin(
-    factory: QuantumFactoryState,
-    room_name: str,
-) -> None:
-    """Mark a processor-selected room as active on the same Fiber route."""
-    if not factory:
-        return
-    room = str(room_name or "").strip()
-    if not room:
-        return
-
-    factory.status = "RUNNING"
-    if room not in factory.active_rooms:
-        factory.active_rooms.append(room)
-    factory_stage_begin("ROOM_BEGIN", {
-        "room": room,
-        "request_id": factory.request_id,
-        "flow_id": factory.flow_id,
-        "user_id": factory.user_id,
-        "lane": factory.lane,
-        "single_route": True,
-        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
-    })
-
-
-def quantum_factory_accept_artifact(
-    factory: QuantumFactoryState,
-    room_name: str,
-    artifact: Optional[BaseArtifact],
-) -> Optional[FactoryRoomContribution]:
-    """Accept one room artifact without rewriting its payload."""
-    if not factory or artifact is None:
-        return None
-
-    room = str(room_name or getattr(artifact.metadata, "room_source", "") or "").strip()
-    if not room:
-        room = str(getattr(artifact.metadata, "room_source", "") or "UNKNOWN_ROOM")
-
-    # Re-materialize the canonical signal only when the artifact has not
-    # already got one. Existing room payload is never replaced.
-    artifact = _ensure_artifact_render_signal(artifact)
-
-    contribution = FactoryRoomContribution(
-        room=room,
-        artifact=artifact,
-        payload=dict(getattr(artifact, "data", {}) or {}),
-        accepted=True,
-        sequence=len(factory.contributions) + 1,
-    )
-    factory.contributions.append(contribution)
-
-    if room not in factory.completed_rooms:
-        factory.completed_rooms.append(room)
-
-    blocks = _artifact_canonical_render_blocks(artifact)
-    for block in blocks:
-        if block not in factory.render_blocks:
-            factory.render_blocks.append(block)
-
-    factory_stage_success("ROOM_SUCCESS", {
-        "room": room,
-        "request_id": factory.request_id,
-        "flow_id": factory.flow_id,
-        "user_id": factory.user_id,
-        "lane": factory.lane,
-        "artifact": getattr(artifact.metadata, "artifact_type", ""),
-        "render_blocks": len(blocks),
-        "single_route": True,
-    })
-    return contribution
-
-
-def quantum_factory_accept_response(
-    factory: QuantumFactoryState,
-    response: MachineResponse,
-) -> MachineResponse:
-    """Merge room contributions into the canonical MachineResponse."""
-    if not factory or response is None:
-        return response
-
-    response.fiber = response.fiber or FiberCoreContract()
-    response.fiber.identity.user_id = factory.user_id
-    response.fiber.route.active_lane = factory.lane
-    response.fiber.lane.lane_id = factory.lane
-    response.fiber.lane.lane_name = f"Lane {factory.lane}"
-    response.fiber.trace.lane = factory.lane
-    response.fiber.metrics.lane = factory.lane
-
-    existing = list(getattr(response, "render_blocks", []) or [])
-    merged = existing[:]
-
-    for block in factory.render_blocks:
-        if block not in merged:
-            merged.append(block)
-
-    response.render_blocks = merged
-
-    response.artifacts = list(getattr(response, "artifacts", []) or [])
-    for contribution in factory.contributions:
-        if contribution.artifact is not None and contribution.artifact not in response.artifacts:
-            response.artifacts.append(contribution.artifact)
-
-    response.contributions = dict(getattr(response, "contributions", {}) or {})
-    for contribution in factory.contributions:
-        response.contributions[contribution.room] = dict(contribution.payload)
-
-    response.metadata = dict(getattr(response, "metadata", {}) or {})
-    response.metadata.update({
-        "quantum_factory_version": QUANTUM_FACTORY_VERSION,
-        "factory_request_id": factory.request_id,
-        "flow_id": factory.flow_id,
-        "user_id": factory.user_id,
-        "factory_lane": factory.lane,
-        "factory_rooms": list(factory.completed_rooms),
-        "factory_contribution_count": len(factory.contributions),
-        "single_route": True,
-        "canonical_factory_merge": True,
-    })
-
-    return response
-
-
-def quantum_factory_finalize(
-    factory: QuantumFactoryState,
-    response: MachineResponse,
-) -> MachineResponse:
-    """Close the current factory transaction and preserve one route."""
-    response = quantum_factory_accept_response(factory, response)
-
-    if factory:
-        factory.status = "COMPLETE"
-        factory_stage_success("FACTORY_COMPLETE", {
-            "request_id": factory.request_id,
-            "flow_id": factory.flow_id,
-            "user_id": factory.user_id,
-            "lane": factory.lane,
-            "rooms": list(factory.completed_rooms),
-            "contributions": len(factory.contributions),
-            "render_blocks": len(factory.render_blocks),
-            "single_route": True,
-            "quantum_factory_version": QUANTUM_FACTORY_VERSION,
-        })
-
-    return response
-
-
-def coordinate_factory_response(
-    request: MachineRequest,
-    response: MachineResponse,
-    *,
-    user_id: str = "",
-    flow_id: str = "",
-) -> tuple[MachineResponse, QuantumFactoryState]:
-    """Canonical Quantum Executor -> Factory coordination point.
-
-    The processor remains the authority for interpretation. The Factory
-    receives the already-decided request, accepts domain-room artifacts,
-    merges them into the same MachineResponse, and returns that response
-    to the existing SceneContract path.
-    """
-    request = bind_request_to_fiber(
-        request,
-        user_id=user_id,
-        flow_id=flow_id,
-    )
-    factory = create_quantum_factory_state(
-        request,
-        user_id=user_id,
-        flow_id=flow_id,
-    )
-
-    # Existing response artifacts are already authoritative room output.
-    # Accept them without inventing room selection.
-    for artifact in list(getattr(response, "artifacts", []) or []):
-        room = str(getattr(getattr(artifact, "metadata", None), "room_source", "") or "")
-        quantum_factory_accept_artifact(factory, room, artifact)
-
-    response = quantum_factory_finalize(factory, response)
-    return response, factory
-
-
-# =====================================================
-# FACTORY OUTPUT VALIDATION
-# =====================================================
-
-def validate_quantum_factory_result(
-    request: MachineRequest,
-    response: MachineResponse,
-    factory: QuantumFactoryState,
-) -> Dict[str, Any]:
-    """Check the single-route invariants before SceneContract creation."""
-    request_user = str(getattr(request.fiber.identity, "user_id", "") or "")
-    response_user = str(getattr(response.fiber.identity, "user_id", "") or "")
-
-    return {
-        "ok": bool(
-            factory
-            and factory.status == "COMPLETE"
-            and factory.route_id == FIBER_ROUTE_NAME
-            and request_user == response_user
-        ),
-        "single_route": True,
-        "route_id": FIBER_ROUTE_NAME,
-        "request_id": factory.request_id if factory else "",
-        "flow_id": factory.flow_id if factory else "",
-        "user_id": response_user,
-        "lane": factory.lane if factory else "",
-        "room_count": len(factory.completed_rooms) if factory else 0,
-        "artifact_count": len(getattr(response, "artifacts", []) or []),
-        "render_block_count": len(getattr(response, "render_blocks", []) or []),
-    }
-
-
-# =====================================================
-# CPU COORDINATION API (Stage 1)
-# Factory remains autonomous internally.
-# CPU becomes the single coordinator.
-# =====================================================
-
-FACTORY_CPU_HOOKS = {
-    "begin": None,
-    "success": None,
-    "error": None,
-}
-
-def register_cpu_hooks(begin=None, success=None, error=None):
-    FACTORY_CPU_HOOKS["begin"] = begin
-    FACTORY_CPU_HOOKS["success"] = success
-    FACTORY_CPU_HOOKS["error"] = error
-
-def factory_stage_begin(stage:str,payload:dict|None=None):
-    cb=FACTORY_CPU_HOOKS.get("begin")
-    if cb:
-        cb(stage,payload or {})
-
-def factory_stage_success(stage:str,payload:dict|None=None):
-    cb=FACTORY_CPU_HOOKS.get("success")
-    if cb:
-        cb(stage,payload or {})
-
-def factory_stage_error(stage:str,error):
-    cb=FACTORY_CPU_HOOKS.get("error")
-    if cb:
-        cb(stage,error)
-
-
-# =====================================================
-# CPU FACTORY EVENTS (Stage 2)
-# =====================================================
-
-def factory_room_begin(room_name:str, request:dict|None=None):
-    factory_stage_begin("ROOM_BEGIN",{
-        "room":room_name,
-        "input":request or {}
-    })
-
-def factory_room_success(room_name:str, artifact=None):
-    factory_stage_success("ROOM_SUCCESS",{
-        "room":room_name,
-        "artifact":type(artifact).__name__ if artifact is not None else None
-    })
-
-def factory_room_error(room_name:str, error):
-    factory_stage_error(
-        f"{room_name}: {error}",
-        error,
-    )
-
-def factory_response_complete(response=None):
-    factory_stage_success("FACTORY_COMPLETE",{
-        "response_type":type(response).__name__ if response is not None else None
-    })
-
-
-# =====================================================
-# CPU FACTORY BRIDGE (Stage 3)
-# =====================================================
-
-FACTORY_CPU_REGISTERED = False
-
-def factory_register_cpu_bridge(register_callback):
-    """Register CPU hooks exactly once."""
-    global FACTORY_CPU_REGISTERED
-    if FACTORY_CPU_REGISTERED:
-        return
-    register_callback(
-        begin=factory_stage_begin,
-        success=factory_stage_success,
-        error=factory_stage_error,
-    )
-    FACTORY_CPU_REGISTERED = True
-
-def factory_room_selected(room_name:str):
-    factory_stage_success("ROOM_SELECTED",{
-        "room":room_name
-    })
-
-def factory_machine_response_ready(response):
-    factory_response_complete(response)
+        artifact["payload"]["render_spec"] = clean
+        artifact["payload"]["generation_model"] = cls.MODEL
+        artifact["payload"]["generation_quality"] = meta["effective_quality"]
+
+        base_artifact = getattr(contract, "artifact", None) if contract is not None else None
+        if base_artifact is not None:
+            try:
+                base_data = dict(getattr(base_artifact, "data", {}) or {})
+                base_data.update({
+                    "artifact_type": "image",
+                    "mime_type": "image/png",
+                    "width": int(width),
+                    "height": int(height),
+                    "image_base64": data_base64,
+                    "image_data_uri": data_uri,
+                    "human_visible": True,
+                    "machine_only": False,
+                    "payload": payload,
+                })
+                base_artifact.data = base_data
+                contract = build_universal_contract(base_artifact)
+            except Exception as exc:
+                print("⚠️ GPT IMAGE 2 ARTIFACT CONTRACT REFRESH:", exc)
+
+        print(
+            "🧠 IMAGE ARTIFACT OUTPUT:",
+            {
+                "artifact_type": artifact.get("artifact_type"),
+                "mime_type": artifact.get("mime_type"),
+                "width": artifact.get("width"),
+                "height": artifact.get("height"),
+                "has_image_base64": bool(artifact.get("image_base64")),
+                "has_image_data_uri": bool(artifact.get("image_data_uri")),
+                "payload_has_src": bool(artifact.get("payload", {}).get("src")),
+                "images_count": len(artifact.get("images") or []),
+                "display_contract": "C_ARTIFACT_CONTRACT -> GalleryBlock",
+                "generation_model": cls.MODEL,
+                "generation_quality": meta["effective_quality"],
+            },
+        )
+        result_dict = cls._result_dict(
+            ImageGenerationResult(
+                image_bytes=image_bytes,
+                mime_type="image/png",
+                width=width,
+                height=height,
+                backend=cls.BACKEND,
+                prompt=prompt,
+                artifact=artifact,
+                contract=contract,
+            )
+        )
+        # Machine-only handoff back to the canonical dialogue-memory writer.
+        # The large envelope is never forwarded to GPT Image 2.
+        result_dict["metadata"] = {
+            "_dialogue_visual_generation_memory": dialogue_generation_memory,
+        }
+        return result_dict
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        size: str = "512x512",
+        quality: str = "low",
+        seed: Optional[int] = None,
+        variant: str = "primary",
+    ) -> dict[str, Any]:
+        # Direct legacy callers still end in the same GPT Image 2 route.
+        request = self._clean_prompt(prompt)
+        width, height = self._parse_size(size)
+        spec = {
+            "schema": "april_image_spec_v1",
+            "prompt": request,
+            "width": width,
+            "height": height,
+            "quality": self._normalize_quality(quality),
+            "visual_context": {},
+            "openai_structured_visual_plan_semantic": request,
+            "openai_structured_visual_plan_raw": None,
+            "request_anchor": request,
+            "generator_signal": "C_APRIL_IMAGES_GENERATOR",
+        }
+        return await self.generate_from_spec(spec, variant=variant)
+
+    async def edit(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        *,
+        quality: str = "low",
+        strength: float = 0.65,
+        variant: str = "edit",
+    ) -> dict[str, Any]:
+        """GPT Image 2 image edit compatibility path.
+
+        ``strength`` is accepted for API compatibility with the old Diffusers
+        implementation but is not sent to GPT Image 2 because the Images API
+        controls edits by prompt + input image rather than a diffusion strength.
+        """
+        cls = type(self)
+        cls._require_backend()
+        if not image_bytes:
+            raise ValueError("APRIL_IMAGES_EDIT_SOURCE_EMPTY")
+        clean_prompt = cls._clean_prompt(prompt)
+        quality_value = cls._normalize_quality(quality)
+        # The Web commonly supplies JPEG photographs. Passing JPEG bytes under a
+        # .png filename makes the API upload metadata inconsistent and can cause
+        # the edit route to reject an otherwise valid source. Normalize the image
+        # once, respecting EXIF orientation and alpha, then upload matching PNG bytes.
+        with Image.open(io.BytesIO(image_bytes)) as opened_source:
+            source = ImageOps.exif_transpose(opened_source)
+            source.load()
+            original_size = source.size
+            has_alpha = "A" in source.getbands() or "transparency" in source.info
+            normalized_source = source.convert("RGBA" if has_alpha else "RGB")
+            normalized_buffer = io.BytesIO()
+            normalized_source.save(normalized_buffer, format="PNG", optimize=True)
+            normalized_input_bytes = normalized_buffer.getvalue()
+        api_width, api_height = cls._api_generation_size(*original_size)
+
+        def _do_edit() -> tuple[bytes, dict[str, Any]]:
+            client = cls._client()
+            handle = io.BytesIO(normalized_input_bytes)
+            handle.name = "april_input.png"
+            response = client.images.edit(
+                model=cls.MODEL,
+                image=handle,
+                prompt=clean_prompt,
+                size=f"{api_width}x{api_height}",
+                quality=quality_value,
+                output_format="png",
+            )
+            output, item_meta = cls._decode_gpt_image(response)
+            output = cls._resize_to_requested(output, original_size[0], original_size[1])
+            usage = cls._usage_dict(response)
+            print(
+                "💰 GPT IMAGE 2 EDIT COST:",
+                json.dumps(
+                    {
+                        "model": cls.MODEL,
+                        "quality": quality_value,
+                        "requested_size": f"{original_size[0]}x{original_size[1]}",
+                        "api_generation_size": f"{api_width}x{api_height}",
+                        "usage": usage,
+                        "estimated_text_input_tokens": cls._estimate_prompt_tokens(clean_prompt),
+                        "note": "Image edit input tokens depend on the supplied source image; see API billing usage/account for exact charge.",
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+            return output, item_meta
+
+        output, _item_meta = await asyncio.to_thread(_do_edit)
+        cls._validate_png(output, original_size[0], original_size[1])
+        artifact, contract = cls.build_artifact(
+            image_bytes=output,
+            prompt=clean_prompt,
+            width=original_size[0],
+            height=original_size[1],
+            backend=cls.BACKEND,
+            variant=variant,
+        )
+        return cls._result_dict(
+            ImageGenerationResult(
+                image_bytes=output,
+                mime_type="image/png",
+                width=original_size[0],
+                height=original_size[1],
+                backend=cls.BACKEND,
+                prompt=clean_prompt,
+                artifact=artifact,
+                contract=contract,
+            )
+        )
+
+
+april_images_generator = AprilImagesGenerator()
+
+
+async def generate_from_spec(spec: dict[str, Any], *, variant: str = "provider_spec") -> dict[str, Any]:
+    return await april_images_generator.generate_from_spec(spec, variant=variant)
+
+
+async def generate_image(prompt: str, size: str = "512x512", quality: str = "low") -> Optional[bytes]:
+    result = await april_images_generator.generate(prompt, size=size, quality=quality)
+    return result.get("image_bytes") if result.get("success") else None
+
+
+async def generate_image_result(
+    prompt: str,
+    size: str = "512x512",
+    quality: str = "low",
+    variant: str = "primary",
+) -> dict[str, Any]:
+    return await april_images_generator.generate(prompt, size=size, quality=quality, variant=variant)
+
+
+async def edit_image(image_bytes: bytes, prompt: str, quality: str = "low") -> Optional[bytes]:
+    result = await april_images_generator.edit(image_bytes, prompt, quality=quality)
+    return result.get("image_bytes") if result.get("success") else None
+
+
+async def edit_image_result(image_bytes: bytes, prompt: str, quality: str = "low") -> dict[str, Any]:
+    return await april_images_generator.edit(image_bytes, prompt, quality=quality)
+
+
+__all__ = [
+    "AprilImagesGenerator",
+    "ImageGenerationResult",
+    "april_images_generator",
+    "generate_image",
+    "generate_image_result",
+    "generate_from_spec",
+    "edit_image",
+    "edit_image_result",
+]
