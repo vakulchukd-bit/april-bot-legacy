@@ -331,6 +331,30 @@ def _contains_marker(text: str, marker: str) -> bool:
     return phrase in low
 
 
+def _is_ui_instruction_request(text: Any) -> bool:
+    """Recognize instructions about operating an existing image, not creating one.
+
+    This guard has priority over generic verbs such as "show", "point out" and
+    "image": otherwise "show me how to download the picture in this chat" can
+    accidentally call the paid image generator instead of explaining the UI.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    media = r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|рисунок\w*|image\w*|picture\w*|photo\w*|visual\w*)"
+    operation = r"(?:скача\w*|загруз\w*\s+на\s+устройств\w*|сохран\w*|скопир\w*|встав\w*|откро\w*|увелич\w*|поделит\w*|пересла\w*|download\w*|save\w*|copy\w*|paste\w*|open\w*|share\w*)"
+    how_to = bool(re.search(
+        rf"(?:как|подскажи\w*\s+как|объясни\w*\s+как|покажи\w*\s+как|how\s+(?:do\s+i|to)|explain\s+how|show\s+me\s+how).{{0,100}}?{operation}.{{0,100}}?{media}"
+        rf"|{operation}.{{0,70}}?{media}.{{0,45}}?(?:в\s+(?:чате|април\w*|приложени\w*)|из\s+чата|на\s+устройств\w*|in\s+(?:this\s+)?chat|from\s+(?:this\s+)?chat|on\s+(?:my\s+)?device)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_ui_terms = bool(re.search(
+        r"(?:кнопк\w*|значок\w*|меню\s+действи\w*|из\s+чата|в\s+чате\s+april|в\s+интерфейс\w*|нажать|куда\s+нажать|с\s+телефон\w*|на\s+телефон\w*|на\s+устройств\w*)",
+        low, re.IGNORECASE,
+    ))
+    return how_to or (explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S)))
+
+
 def _detect_image_modification(text: str) -> bool:
     """Detect explicit editing language, including requests to draw *on* a photo.
 
@@ -339,6 +363,8 @@ def _detect_image_modification(text: str) -> bool:
     Whether the source bytes are available is decided later by build_interpretation.
     """
     low = _text(text).lower().replace("ё", "е")
+    if _is_ui_instruction_request(low):
+        return False
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
         return True
     action = (
@@ -368,7 +394,18 @@ def _detect_image_generation_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    if _is_ui_instruction_request(low):
+        return False
     if _detect_image_modification(low):
+        return True
+
+    # Self-representation is a real image deliverable even without the noun
+    # "picture": e.g. "нарисуй себя" / "покажи, как выглядит April".
+    self_portrait = bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|покаж\w*|созда\w*|сдела\w*|draw|show|create|make).{0,55}?(?:себя|свой\s+портрет|свой\s+аватар|как\s+(?:ты|april|април)\s+выгляд\w*|yourself|your\s+portrait|your\s+avatar)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if self_portrait:
         return True
 
     action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
@@ -395,12 +432,26 @@ def _detect_image_generation_request(text: str) -> bool:
     photo_noun = r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|photo\w*|image\w*)"
     possessive = r"(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)"
     coordinated_before = rf"(?<![\w\u0080-\uffff])(?:а\s+|и\s+|еще\s+|ещё\s+|also\s+)?{photo_noun}\s+(?:{possessive}\s+)?(?:.{0,48})?(?:и|and|а также).{{0,60}}(?:таблиц\w*|\btable\b|график\w*|диаграмм\w*).{{0,60}}(?:сдела\w*|улучш\w*|исправ\w*|оформ\w*|красив\w*|make\b|improve\b|beautif\w*)"
-    return bool(
+    explicit_image_noun_action = bool(
         re.search(forward, low, flags=re.IGNORECASE)
         or re.search(reverse, low, flags=re.IGNORECASE)
         or re.search(coordinated_after, low, flags=re.IGNORECASE)
         or re.search(coordinated_before, low, flags=re.IGNORECASE)
     )
+    if explicit_image_noun_action:
+        return True
+
+    # "Draw a tractor/model/person" is an image request even when the user does
+    # not say "draw a picture". Keep diagrams, tables and charts on their own
+    # renderer path; no lexical hard-coding of any particular subject is used.
+    structured_target = bool(re.search(
+        r"(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*|\bflowchart\b|\bdiagram\b|\bgraph\b|\bchart\b|\btable\b)",
+        low, re.IGNORECASE,
+    ))
+    visual_action = bool(re.search(r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate|illustrat\w*)", low, re.I))
+    if visual_action and not structured_target and _has_drawable_subject(low):
+        return True
+    return False
 
 
 def _detect_link_request(text: str) -> bool:
@@ -420,6 +471,8 @@ def _detect_link_request(text: str) -> bool:
 def _has_drawable_subject(text: str) -> bool:
     """True when a visual verb has a concrete drawable object, not just style words."""
     low = _text(text).lower().replace("ё", "е")
+    if not low or _is_ui_instruction_request(low):
+        return False
     drawable_objects = (
         r"(?:\bcat\b|\bdog\b|\bperson\b|\bportrait\b|\blandscape\b|\bhouse\b|"
         r"\btree\b|\bflower\b|\bcar\b|\bship\b|\bplanet\b|\bdinosaur\w*\b|"
@@ -428,7 +481,23 @@ def _has_drawable_subject(text: str) -> bool:
         r"машин\w*|корабл\w*|планет\w*|динозавр\w*|утк\w*|карт\w*|аватар\w*|"
         r"персонаж\w*|объект\w*|макет\w*|модель\w*|предмет\w*|иллюстрац\w*)"
     )
-    return bool(re.search(drawable_objects, low, flags=re.IGNORECASE))
+    if re.search(drawable_objects, low, flags=re.IGNORECASE):
+        return True
+    # Generic drawable noun phrase fallback. Do not require a hard-coded entity
+    # list (tractor, bicycle, robot, building, etc.); the action plus a concrete
+    # object phrase is enough unless the request explicitly names another renderer.
+    visual_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|illustrat\w*|draw|create|generate)"
+    abstract_targets = r"(?:ответ\w*|вывод\w*|анализ\w*|объяснен\w*|инструкц\w*|план\w*|отчет\w*|отч[её]т\w*|документ\w*|формул\w*|таблиц\w*|схем\w*|диаграмм\w*|график\w*|код\w*|скрипт\w*|текст\w*|перевод\w*|список|summary|answer|analysis|instructions|plan|report|document|formula|table|diagram|chart|graph|code|script|text|translation|list)"
+    generic_subject = re.search(
+        rf"(?<![\w\u0080-\uffff]){visual_action}\b\s+(?:мне\s+|нам\s+|a\s+|an\s+|the\s+)?(?P<object>[\w-]+(?:\s+[\w-]+){{0,4}})",
+        low, re.IGNORECASE,
+    )
+    if generic_subject:
+        words = re.findall(r"[\w-]+", generic_subject.group("object"), re.UNICODE)
+        head = words[-1] if words else ""
+        if head and not re.fullmatch(abstract_targets, head, flags=re.IGNORECASE):
+            return True
+    return False
 
 
 
@@ -514,15 +583,20 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
+    ui_instruction_request = _is_ui_instruction_request(low)
     for output, markers in _OUTPUT_MARKERS.items():
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
+    if ui_instruction_request:
+        # A reference to an existing image in a how-to question is not an image
+        # deliverable, regardless of generic "show/point out" words.
+        result = [kind for kind in result if kind != "image"]
 
     # A plain image/photo mention is input context, not an output request.
     # The object-order-aware detector captures explicit image requests even
     # when users insert "мне", an adjective, or other polite filler.
-    explicit_image_request = _detect_image_generation_request(low)
-    portrait_request = _detect_portrait_request(low)
+    explicit_image_request = False if ui_instruction_request else _detect_image_generation_request(low)
+    portrait_request = False if ui_instruction_request else _detect_portrait_request(low)
     if (explicit_image_request or portrait_request) and "image" not in result:
         result.append("image")
     explicit_link_request = _detect_link_request(low)
@@ -591,7 +665,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
         low,
     ))
     has_spatial_primitive = bool(re.search(
-        r"(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|сетка\w*|поверхност\w*|\bsphere\w*\b|\bcube\w*\b|\bcone\w*\b|\bcylinder\w*\b|\btorus\b|\bplane\b|\bmesh\b)",
+        r"(?<![\w\u0080-\uffff])(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|сетк\w*|поверхност\w*|sphere\w*|cube\w*|cone\w*|cylinder\w*|torus|plane|mesh)(?![\w\u0080-\uffff])",
         low,
     ))
     if has_graph_action and has_spatial_body and has_spatial_dynamics and not explicit_image_request and "graph" not in result:
@@ -714,6 +788,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not explicit_graph_intent
         and "image" not in outputs
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
+        and not _is_ui_instruction_request(low)
         and _has_drawable_subject(low)
     ):
         outputs.append("image")
@@ -2529,7 +2604,18 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     # attached to answer this request.
     if (relation != "CONTINUE" and not history_request and not contextual_history_match) or not isinstance(pairs, list):
         return []
-    limit = 6 if history_request else 2
+    source_retrieval = memory.get("source_retrieval") if isinstance(memory.get("source_retrieval"), dict) else {}
+    retrieval_method = _text(source_retrieval.get("method")).lower()
+    retrieval_strategy = _text(source_retrieval.get("strategy")).upper()
+    branch_context_ready = bool(
+        retrieval_method.endswith("_branch_context")
+        or retrieval_method in {"same_dialog_topic_branch_context", "semantic_history_topic_branch_context"}
+        or retrieval_strategy in {"ACTIVE_BRANCH_SOURCE", "HOT_WORK_BRANCH_SOURCE", "NAMED_HISTORY_SOURCE_WITH_NEW_OPERATION"}
+    )
+    # Branch retrieval provides several compact, semantically related source turns
+    # (including the originating request and structured-data turns). The provider's
+    # Premium token guard remains the final budget authority.
+    limit = 6 if (history_request or contextual_history_match or branch_context_ready) else 2
     return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
 
 
@@ -2618,7 +2704,7 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
-    if _is_site_navigation_request(source):
+    if _is_site_navigation_request(source) or _is_ui_instruction_request(source):
         return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
@@ -3205,6 +3291,22 @@ def build_interpretation(
     routing_capabilities = _infer_routing_capabilities(original or text)
     relation = _text(memory.get("relation") or "NEW").upper()
     normalized_visual_request = _text(original or text).lower().replace("ё", "е")
+    ui_instruction_request = _is_ui_instruction_request(normalized_visual_request)
+    if ui_instruction_request:
+        requested_outputs = [item for item in requested_outputs if item != "image"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = [
+                    name for name in (sequence_item.get("output_types") or []) if _text(name).lower() != "image"
+                ] or ["text"]
+        presentation_sequence = [
+            item for item in presentation_sequence
+            if isinstance(item, dict) and any(_text(name).lower() != "image" for name in (item.get("output_types") or []))
+        ]
+        for sequence_item in presentation_sequence:
+            sequence_item["output_types"] = [
+                name for name in (sequence_item.get("output_types") or []) if _text(name).lower() != "image"
+            ]
     has_saved_output_image = any(
         _text(item.get("kind")).lower() == "image"
         and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
@@ -3225,7 +3327,7 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
-    explicit_image_edit = _detect_image_modification(normalized_visual_request)
+    explicit_image_edit = False if ui_instruction_request else _detect_image_modification(normalized_visual_request)
     if (
         explicit_image_edit
         and not has_original_image
@@ -3235,7 +3337,7 @@ def build_interpretation(
         # changing a named/attached photo. Keep the image output and let the
         # registered generator create a new picture instead of asking for upload.
         explicit_image_edit = False
-    contextual_image_edit = bool(has_original_image and _detect_contextual_image_edit(normalized_visual_request))
+    contextual_image_edit = bool(not ui_instruction_request and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
     image_edit_requested = bool(explicit_image_edit or contextual_image_edit)
     # A contextual command such as "Добавь зелёную галочку" becomes an image
     # edit only when a source image is actually available. An explicit edit request
@@ -3300,7 +3402,7 @@ def build_interpretation(
     # A short "where is his photo?" follow-up is an image deliverable even when
     # no prior output asset was saved. Reuse the saved asset when available;
     # otherwise let the image-generation path create the missing portrait.
-    image_followup = relation == "CONTINUE" and short_image_reference
+    image_followup = relation == "CONTINUE" and short_image_reference and not ui_instruction_request
     reuse_saved_image = image_followup and has_saved_output_image
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
