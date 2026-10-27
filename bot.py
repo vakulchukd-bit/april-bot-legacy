@@ -2416,6 +2416,9 @@ class AprilHandler(BaseHTTPRequestHandler):
 
                 client_disconnected = False
                 event_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+                stream_started = time.monotonic()
+                delay_notice_sent = False
+                last_heartbeat = stream_started
 
                 def write_progress_event(event: dict[str, Any]) -> bool:
                     nonlocal client_disconnected
@@ -2438,14 +2441,47 @@ class AprilHandler(BaseHTTPRequestHandler):
                         worker = stream_pool.submit(_handle_payload, data, attachments, progress_sink=event_queue.put)
                         while not worker.done() or not event_queue.empty():
                             try:
-                                event = event_queue.get(timeout=8.0)
+                                if not delay_notice_sent:
+                                    remaining = max(0.05, 5.0 - (time.monotonic() - stream_started))
+                                    event = event_queue.get(timeout=min(8.0, remaining))
+                                else:
+                                    event = event_queue.get(timeout=8.0)
                             except queue.Empty:
                                 if worker.done():
                                     break
-                                if not write_progress_event({"type": "progress", "stage": "processing"}):
-                                    continue
+                                now_mono = time.monotonic()
+                                elapsed = round(now_mono - stream_started, 1)
+                                if not delay_notice_sent and elapsed >= 5.0:
+                                    language_hint = _text(data.get("display_language") or data.get("language")).lower()
+                                    request_text = _text(data.get("text") or data.get("message") or data.get("input"))
+                                    if language_hint.startswith(("uk", "ua")):
+                                        delay_message = "Відповідь ще формується. Спочатку з'явиться текст, а потрібні зображення чи діаграми додадуться слідом."
+                                    elif language_hint.startswith("en") or (language_hint in {"", "auto"} and not re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", request_text)):
+                                        delay_message = "Your answer is still being prepared. The text will appear first; any requested images or diagrams will follow."
+                                    else:
+                                        delay_message = "Ответ ещё формируется. Сначала появится текст, а нужные изображения или диаграммы добавятся следом."
+                                    write_progress_event({
+                                        "type": "progress",
+                                        "stage": "still_working",
+                                        "message_key": "APRIL_ANSWER_STILL_FORMING",
+                                        "message": delay_message,
+                                        "elapsed_seconds": elapsed,
+                                        "canonical_route": CANONICAL_CHAT_ROUTE,
+                                    })
+                                    delay_notice_sent = True
+                                    last_heartbeat = now_mono
+                                elif now_mono - last_heartbeat >= 8.0:
+                                    write_progress_event({
+                                        "type": "progress",
+                                        "stage": "processing",
+                                        "message_key": "APRIL_PROCESSING",
+                                        "elapsed_seconds": elapsed,
+                                        "canonical_route": CANONICAL_CHAT_ROUTE,
+                                    })
+                                    last_heartbeat = now_mono
                                 continue
                             write_progress_event(event)
+                            last_heartbeat = time.monotonic()
                         status, payload = worker.result()
                         while not event_queue.empty():
                             write_progress_event(event_queue.get_nowait())
