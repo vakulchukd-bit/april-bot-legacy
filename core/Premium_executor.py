@@ -2077,23 +2077,13 @@ async def execute(
             }
             and not _text(resume_message_id)
         )
-        # A self-contained NEW turn whose clauses do not request prior context should
-        # not run a full cross-history ranking once per clause. Any continuation,
-        # explicit history request, attachment, resume anchor, correction or choice
-        # candidate still uses State Manager and must pass its normal confirmation.
-        compound_turn_is_new = bool(
-            semantic_interpretation.get("primary_intent") == "NEW_INFORMATION"
-            and not semantic_interpretation.get("requires_memory")
-            and not semantic_interpretation.get("history_request")
-            and not _text(resume_message_id)
-            and not visual_context and not file_inputs and not file_contents and not attachments
-            and not any(
-                item.get("requires_memory") or item.get("history_request")
-                or item.get("active_branch_repair")
-                or (item.get("features") or {}).get("selection_followup_candidate")
-                for item in question_sequence if isinstance(item, dict)
-            )
-        )
+        # Every root clause goes through the canonical hot-branch -> all-history
+        # -> new-topic arbiter. Do not bypass memory merely because the wording is
+        # self-contained or split into several tasks: a self-contained question can
+        # still refer to an earlier branch in this user's retained dialogue history.
+        # Related child clauses reuse the selected parent context below, so this does
+        # not require a second search for every phrase in the same topic.
+        compound_turn_is_new = False
         # Keep whole-turn meaning alongside each decomposed clause. Search and work-branch
         # compatibility must see that "continue about Newton; tell me facts" is one
         # text-information request, not a command to resume an older image-editing task.
@@ -2163,16 +2153,36 @@ async def execute(
                     and bool(task_semantics.get("active_branch_repair") or (task_semantics.get("pragmatic_features") or {}).get("active_branch_repair"))
                     and not task_semantics.get("explicit_topic_switch")
                 )
-                # Once a continuation clause has anchored the named/current topic,
-                # dependent clauses like "tell me more" / "what facts do you know
-                # about him" inherit that exact source instead of each launching a
-                # fresh, full-history retrieval. A child with its own topic intro or
-                # an explicit switch still takes its own normal search path.
+                # Reuse a confirmed source only for a clause that actually depends
+                # on its parent. A separate self-contained task must still run its
+                # own hot-branch -> all-history -> new-topic arbitration; otherwise
+                # an older matched topic could leak into an unrelated later clause.
+                _parent_relation = _text((current_request_subject_context or {}).get("relation")).upper()
+                _parent_has_selected_history = bool((current_request_subject_context or {}).get("contextual_history_match"))
+                _item_features = question_item.get("features") if isinstance(question_item.get("features"), dict) else {}
+                child_depends_on_parent = bool(
+                    inherits_subject
+                    or question_item.get("parent_context_dependency")
+                    or question_item.get("requires_memory")
+                    or question_item.get("previous_answer_reference")
+                    or question_item.get("active_branch_repair")
+                    or _text(question_item.get("topic_reference")).upper() in {
+                        "PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"
+                    }
+                    or _item_features.get("context_dependent_question")
+                    or _item_features.get("context_dependent_reaction")
+                    or _item_features.get("answer_followup")
+                    or _item_features.get("topic_reference_fragment")
+                )
                 reuse_parent_topic_context = bool(
                     index > 0
-                    and parent_active_topic_turn
                     and current_request_subject_context
-                    and _text(current_request_subject_context.get("relation")).upper() == "CONTINUE"
+                    and child_depends_on_parent
+                    and (
+                        (parent_active_topic_turn and _parent_relation == "CONTINUE")
+                        or _parent_relation == "CONTINUE"
+                        or _parent_has_selected_history
+                    )
                     and not question_item.get("introduces_current_request_subject")
                     and not question_item.get("explicit_topic_switch")
                 )
@@ -2242,9 +2252,12 @@ async def execute(
                         prepare_dialogue_context,
                         uid, search_query, query_interpretation=task_semantics, **search_kwargs
                     )
-                    if index == 0 and (
-                        parent_repair_turn or parent_active_topic_turn
-                    ) and _text(task_context.get("relation")).upper() == "CONTINUE":
+                    if index == 0 and not question_item.get("explicit_topic_switch") and (
+                        _text(task_context.get("relation")).upper() == "CONTINUE"
+                        or bool(task_context.get("contextual_history_match"))
+                    ):
+                        # Keep the first confirmed branch/history source as the parent
+                        # for pronoun-based or action-only clauses later in this turn.
                         current_request_subject_context = task_context
                     if question_item.get("introduces_current_request_subject"):
                         # Bind dependent substeps to the first subject clause; do not
