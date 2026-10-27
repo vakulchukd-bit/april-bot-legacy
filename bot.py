@@ -41,6 +41,7 @@ from blocks.state_manager import (
 )
 from blocks.Premium_state_manager import (
     get_dialogue_pairs as get_premium_dialogue_pairs,
+    save_dialogue_pair as save_premium_dialogue_pair,
     _topic_label as _premium_topic_label,
     _row_subject_tokens as _premium_row_subject_tokens,
     _subject_overlap as _premium_subject_overlap,
@@ -929,7 +930,72 @@ def _handle_payload(
         # call. The Free executor continues on its original response path unchanged.
         if is_premium and callable(progress_sink):
             execution_kwargs["progress_sink"] = progress_sink
-        result = asyncio.run(selected_executor(uid, **execution_kwargs))
+        try:
+            result = asyncio.run(selected_executor(uid, **execution_kwargs))
+        except Exception as exc:
+            # A provider/image-edit exception must never leave the Web client with
+            # an indefinitely pending/blank assistant bubble. Keep Free's legacy
+            # failure behavior unchanged; Premium gets one localized text result
+            # and a best-effort durable dialogue pair, without fabricating an image.
+            if not is_premium:
+                raise
+            result = _apr_backend_failure_payload(data, exc)
+            image_related = bool(visual_context) or bool(re.search(
+                r"(?iu)(?:фот|картин|изображен|монет|банкнот|купюр|евро|image|photo|picture|edit|редакт|измен|добавь на не[её])",
+                original,
+            ))
+            if image_related:
+                if language in {"ru", "uk", "ua"}:
+                    message = "Не удалось завершить обработку изображения. Исходная фотография не заменена другой картинкой. Повтори запрос — продолжим с нужного изображения из этой беседы."
+                else:
+                    message = "The image operation could not be completed. The source photo was not replaced by another image. Please retry and we will continue with the intended image from this conversation."
+                result.update({"answer": message, "content": message, "summary": message})
+                result["render_blocks"] = [{
+                    "type": "text", "renderer": "TextRenderer", "viewer": "MessageTextBlock",
+                    "text": message, "content": message,
+                }]
+            _apr_timing_log(
+                "premium_executor_exception_recovered", executor_started,
+                user_key=_apr_diag_ref(uid), message_key=_apr_diag_ref(message_id),
+                error_type=type(exc).__name__, image_related=image_related,
+            )
+            persisted = False
+            try:
+                persisted = bool(save_premium_dialogue_pair(
+                    uid,
+                    original,
+                    _text(result.get("answer") or result.get("content")),
+                    created_at=message_created_at,
+                    language=language,
+                    relation="CONTINUE" if (dialog_id or conversation_id) else "NEW",
+                    dialog_id=dialog_id,
+                    conversation_id=conversation_id or dialog_id,
+                    message_id=message_id,
+                    interpretation_id=_text(data.get("interpretation_id")),
+                    structured_request={
+                        "fallback": "premium_executor_exception",
+                        "error_type": type(exc).__name__,
+                        "image_related": image_related,
+                        "input_modalities": {
+                            "has_image": bool(visual_context),
+                            "attachment_count": len(attachment_meta or []),
+                        },
+                    },
+                    structured_response={
+                        "status": "degraded",
+                        "answer": _text(result.get("answer") or result.get("content")),
+                        "render_blocks": list(result.get("render_blocks") or []),
+                        "artifacts": [],
+                        "generated_asset_saved": False,
+                    },
+                ))
+            except Exception as persist_exc:
+                _apr_timing_log(
+                    "premium_exception_fallback_persist_failed", None,
+                    user_key=_apr_diag_ref(uid), message_key=_apr_diag_ref(message_id),
+                    error_type=type(persist_exc).__name__,
+                )
+            result["persistence"] = {"saved": persisted, "reason": "executor_exception_fallback"}
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
             answer_chars=len(_text(result.get("answer") or result.get("content"))) if isinstance(result, dict) else 0)
