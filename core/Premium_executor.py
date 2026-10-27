@@ -613,6 +613,7 @@ def _apply_presentation_sequence(
         return by_step.get(max(1, fallback_step), sequence[0])
 
     expanded: list[dict[str, Any]] = []
+    used_renderer_steps: dict[str, set[int]] = {}
     for source_index, block in enumerate(blocks):
         block_type = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
         content = str(block.get("content") or block.get("text") or "")
@@ -662,9 +663,29 @@ def _apply_presentation_sequence(
                 image_items = [item for item in sequence if "image" in (item.get("output_types") or [])]
                 match = image_items[-1] if image_items else None
         elif kind in {"formula", "diagram", "graph", "table", "link", "code", "file"}:
-            match = next((item for item in sequence if kind in (item.get("output_types") or [])), None)
-            if kind == "diagram" and "experiments" in by_section:
+            renderer_steps = [item for item in sequence if kind in (item.get("output_types") or [])]
+            explicit_step = block.get("step_index")
+            try:
+                explicit_step_number = max(1, int(explicit_step)) if explicit_step is not None else None
+            except (TypeError, ValueError, OverflowError):
+                explicit_step_number = None
+            # Honor an existing valid step assignment first. Otherwise distribute
+            # repeated same-type renderers across requested task steps without
+            # forcing every block onto the first matching presentation step.
+            match = next((
+                item for item in renderer_steps
+                if explicit_step_number is not None
+                and int(item.get("step_index") or 1) == explicit_step_number
+            ), None)
+            if match is None:
+                used = used_renderer_steps.setdefault(kind, set())
+                match = next((item for item in renderer_steps if int(item.get("step_index") or 1) not in used), None)
+                if match is None and renderer_steps:
+                    match = renderer_steps[0]
+            if kind == "diagram" and match is None and "experiments" in by_section:
                 match = by_section["experiments"]
+            if isinstance(match, dict):
+                used_renderer_steps.setdefault(kind, set()).add(int(match.get("step_index") or 1))
         else:
             text_payload = _text(block.get("content") or block.get("text") or block.get("title") or "")
             match = section_for_text(text_payload, current_step)
@@ -871,8 +892,10 @@ async def _generate_image_artifact(
     interpretation: dict[str, Any],
     raw: dict[str, Any],
     identity: dict[str, str],
+    *,
+    spec_override: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    spec = _build_image_spec(raw, interpretation, identity)
+    spec = dict(spec_override) if isinstance(spec_override, dict) else _build_image_spec(raw, interpretation, identity)
     if spec is None:
         return None
 
@@ -2316,10 +2339,87 @@ async def execute(
                 topic_index_count=len(task_context.get("topic_index") or []) if isinstance(task_context, dict) else 0,
             )
 
-        # Preserve the established top-level route contract by using the first
-        # ordered task as the legacy turn anchor. All other per-task relation and
-        # history results travel in REQUEST_SEQUENCE; no second dialogue is made.
+        # Preserve the first ordered task as the default anchor, but do not let it
+        # erase a strongly confirmed active-branch continuation discovered by a later
+        # dependent clause. Every candidate still has to be grounded in this user's
+        # saved pair(s), explicitly classified CONTINUE, and free of a topic-switch
+        # marker; a loose lexical/history match is never enough.
         dialogue_context = dict(question_contexts[0] if question_contexts else {})
+        parent_semantic_intent = _text(semantic_interpretation.get("primary_intent")).upper()
+        parent_topic_reference = _text(semantic_interpretation.get("topic_reference")).upper()
+        parent_features = semantic_interpretation.get("pragmatic_features") if isinstance(semantic_interpretation.get("pragmatic_features"), dict) else {}
+        parent_history_recall = bool(
+            semantic_interpretation.get("history_request")
+            or parent_semantic_intent in {"HISTORY_RECALL", "HISTORY_SUMMARY", "DIALOGUE_HISTORY"}
+        )
+        parent_continuation_signal = (not parent_history_recall) and bool(
+            parent_active_topic_turn or parent_repair_turn
+            or parent_semantic_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "ACTIVE_BRANCH_REPAIR"}
+            or semantic_interpretation.get("requires_memory")
+            or semantic_interpretation.get("previous_answer_reference")
+            or parent_features.get("context_dependent_question")
+            or parent_features.get("context_dependent_reaction")
+            or parent_features.get("answer_followup")
+            or re.search(
+                r"(?:\b(?:дальше|продолж\w*|подробнее|конкретн\w*|точнее|как\s+ты\s+(?:сказал|писал|объяснил)|это|этот|эта|эту|там|тогда|следующ\w*)\b|"
+                r"\b(?:continue|go\s+on|more\s+specifically|in\s+more\s+detail|what\s+next|as\s+you\s+said|that|this|there)\b)",
+                _text(current_text).lower().replace("ё", "е"), re.IGNORECASE,
+            )
+        ) and not bool(semantic_interpretation.get("explicit_topic_switch"))
+        continuation_candidates: list[tuple[tuple[int, float, int, int], int, dict[str, Any]]] = []
+        if parent_continuation_signal:
+            for task_index, (task_item, task_context) in enumerate(zip(question_sequence, question_contexts)):
+                if not isinstance(task_context, dict) or not isinstance(task_item, dict):
+                    continue
+                task_search = task_item.get("dialogue_search") if isinstance(task_item.get("dialogue_search"), dict) else {}
+                task_intent = _text(task_item.get("semantic_intent")).upper()
+                task_topic_reference = _text(task_item.get("topic_reference")).upper()
+                task_features = task_item.get("pragmatic_features") if isinstance(task_item.get("pragmatic_features"), dict) else {}
+                explicit_switch = bool(task_item.get("explicit_topic_switch") or task_context.get("explicit_topic_switch"))
+                saved_pairs = task_context.get("selected_pairs") or task_search.get("selected_pairs") or []
+                dependent = bool(
+                    task_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "ACTIVE_BRANCH_REPAIR"}
+                    or task_item.get("requires_memory")
+                    or task_item.get("previous_answer_reference")
+                    or task_item.get("active_branch_repair")
+                    or task_topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT", "ACTIVE_TOPIC"}
+                    or task_features.get("context_dependent_question")
+                    or task_features.get("context_dependent_reaction")
+                    or task_features.get("answer_followup")
+                    or task_search.get("reused_parent_branch_context")
+                    or task_search.get("reused_parent_topic_context")
+                )
+                if explicit_switch or not dependent or not saved_pairs:
+                    continue
+                if _text(task_context.get("relation") or task_search.get("relation")).upper() != "CONTINUE":
+                    continue
+                reason = _text(task_context.get("reason") or task_search.get("reason")).lower()
+                strong_route = int(any(marker in reason for marker in (
+                    "semantic_active_branch_intent", "active_branch_repair", "same_dialog_topic_branch_context",
+                    "parent_active_branch_context_reuse", "parent_active_topic_context_reuse",
+                )))
+                try:
+                    confidence = float(task_context.get("relation_confidence") or task_search.get("confidence") or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    confidence = 0.0
+                key = (strong_route, confidence, min(len(saved_pairs), 5), -task_index)
+                continuation_candidates.append((key, task_index, task_context))
+        selected_continuation_step = None
+        if continuation_candidates:
+            continuation_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+            _, selected_continuation_step, selected_continuation_context = continuation_candidates[0]
+            dialogue_context = dict(selected_continuation_context)
+        _apr_timing_log(
+            "multi_question_context_arbitration",
+            None,
+            parent_continuation_signal=parent_continuation_signal,
+            parent_history_recall=parent_history_recall,
+            continuation_candidate_count=len(continuation_candidates),
+            selected_continuation_step=(question_sequence[selected_continuation_step].get("step_index") if selected_continuation_step is not None and selected_continuation_step < len(question_sequence) else None),
+            selected_context_reason=_text(dialogue_context.get("reason")),
+            selected_relation=_text(dialogue_context.get("relation")),
+            selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+        )
         # Keep the legacy first-question anchor, but do not lose history topics when
         # a history-recall item appears later in a compound request.
         history_context = next((ctx for ctx in question_contexts if isinstance(ctx, dict) and ctx.get("history_request")), None)
@@ -3353,6 +3453,7 @@ async def execute(
             _apr_timing_log("progressive_handoff_skipped", None, error=type(progress_error).__name__)
 
     image_result = None
+    image_results: list[dict[str, Any]] = []
     image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     if image_intent.get("wants_image") and (
         not bool(provider_metadata.get("provider_fallback"))
@@ -3426,90 +3527,166 @@ async def execute(
                 raw,
                 identity,
             )
+        if isinstance(image_result, dict) and image_result.get("success", True):
+            image_results = [image_result]
+
+        # A single user turn may explicitly request several pictures or split into
+        # multiple image-bearing subtasks. Generate a bounded number of distinct
+        # variants and put all of them into the same GalleryBlock/SceneContract;
+        # never repeat the first raster merely to satisfy a requested count.
+        request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+        raw_question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
+        image_subrequests: list[str] = []
+        for question in raw_question_sequence:
+            if not isinstance(question, dict):
+                continue
+            outputs = question.get("output_types") or question.get("outputs") or []
+            if isinstance(outputs, str):
+                outputs = [outputs]
+            request_part = _text(question.get("request") or question.get("text"))
+            if request_part and any(_text(kind).lower() == "image" for kind in outputs):
+                if request_part not in image_subrequests:
+                    image_subrequests.append(request_part)
+        original_user_request = _text((interpretation.get("input") or {}).get("original_request"))
+        explicit_count_match = re.search(
+            r"(?:\b([2-4])\s*(?:разн\w*\s+)?(?:картинк\w*|изображени\w*|иллюстраци\w*|фото\w*|images?|pictures?|illustrations?|photos?)\b|"
+            r"\b(?:images?|pictures?|illustrations?|photos?)\s*(?:x|×)?\s*([2-4])\b)",
+            original_user_request.lower().replace("ё", "е"), re.IGNORECASE,
+        )
+        requested_count = int(next((part for part in explicit_count_match.groups() if part), "1")) if explicit_count_match else 1
+        asks_for_several = bool(re.search(
+            r"(?:нескольк\w*\s+(?:разн\w*\s+)?(?:картинк\w*|изображени\w*|иллюстраци\w*|фото\w*)|"
+            r"разн\w*\s+(?:картинк\w*|изображени\w*|иллюстраци\w*|фото\w*)|"
+            r"several\s+(?:different\s+)?(?:images?|pictures?|illustrations?|photos?)|multiple\s+(?:different\s+)?(?:images?|pictures?|illustrations?|photos?))",
+            original_user_request.lower().replace("ё", "е"), re.IGNORECASE,
+        ))
+        if asks_for_several:
+            requested_count = max(requested_count, 2)
+        requested_count = max(1, min(4, max(requested_count, len(image_subrequests))))
+        is_generation = bool(
+            image_result
+            and not image_intent.get("reuse_saved_image")
+            and not image_result.get("reused")
+            and image_intent.get("image_operation") != "edit"
+            and _text(image_intent.get("task")) != "edit_image"
+        )
+        if is_generation and requested_count > 1:
+            base_spec = _build_image_spec(raw, interpretation, identity)
+            extra_jobs = []
+            for variant_index in range(1, requested_count):
+                variant_spec = dict(base_spec or {})
+                if not variant_spec:
+                    continue
+                if variant_index < len(image_subrequests):
+                    variant_brief = image_subrequests[variant_index]
+                    # When the user specified separate image subrequests, preserve
+                    # each subrequest's subject rather than reusing one generic prompt.
+                    variant_prompt = variant_brief
+                else:
+                    variant_prompt = (
+                        _text(variant_spec.get("prompt"))
+                        + f"\n\nCreate complementary image variant {variant_index + 1} of {requested_count}. "
+                        + "It must not duplicate another image from this answer: use a distinctly different composition, camera/viewpoint, layout, and focal emphasis while keeping the same requested subject and facts. "
+                        + "Return one standalone image, not a collage or contact sheet."
+                    )
+                variant_spec["prompt"] = variant_prompt[:12000]
+                variant_spec["openai_structured_visual_plan_semantic"] = variant_prompt[:12000]
+                base_caption = _text(variant_spec.get("image_caption") or variant_spec.get("request_anchor") or original_user_request)
+                variant_spec["image_caption"] = (f"{base_caption} — вариант {variant_index + 1}")[:300]
+                extra_jobs.append(_generate_image_artifact(
+                    interpretation, raw, identity, spec_override=variant_spec
+                ))
+            if extra_jobs:
+                extra_results = await asyncio.gather(*extra_jobs, return_exceptions=True)
+                for result_index, result_item in enumerate(extra_results, start=2):
+                    if isinstance(result_item, dict) and result_item.get("success", True):
+                        # Keep generated raster identities/prompt variants separate.
+                        result_item.setdefault("variant_index", result_index)
+                        image_results.append(result_item)
+                    else:
+                        _apr_timing_log(
+                            "complementary_image_failed", None,
+                            variant_index=result_index,
+                            error=(type(result_item).__name__ if isinstance(result_item, BaseException) else _text((result_item or {}).get("error"))[:100]),
+                        )
         _apr_timing_log(
             "image_edit" if image_intent.get("image_operation") == "edit" else "image_generation",
             image_started,
             succeeded=bool(image_result),
             reused=bool((image_result or {}).get("reused")),
+            image_count=len(image_results),
+            requested_image_count=requested_count,
             source_message_key=_apr_diag_ref((image_result or {}).get("source_asset_message_id")),
         )
-        if image_result:
-            source_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
-            artifact_payload = source_artifact.get("payload") if isinstance(source_artifact.get("payload"), dict) else {}
-            source_items = source_artifact.get("images") if isinstance(source_artifact.get("images"), list) else artifact_payload.get("images", [])
-            source_items = source_items if isinstance(source_items, list) else []
-            raw_image_bytes = image_result.get("image_bytes")
-            image_mime = _text(image_result.get("mime_type") or source_artifact.get("mime_type") or "image/png")
-            image_data_uri = _mime_data_uri(bytes(raw_image_bytes), image_mime) if isinstance(raw_image_bytes, (bytes, bytearray)) and raw_image_bytes else ""
-            source_item = next((item for item in source_items if isinstance(item, dict) and _text(item.get("src") or item.get("image_data_uri") or item.get("url")).startswith("data:image/")), {})
-            if not image_data_uri:
-                image_data_uri = _text(source_item.get("src") or source_item.get("image_data_uri") or source_item.get("url"))
-            image_width = int(image_result.get("width") or source_artifact.get("width") or source_item.get("width") or 0)
-            image_height = int(image_result.get("height") or source_artifact.get("height") or source_item.get("height") or 0)
-            visible_image = {
-                "src": image_data_uri,
-                "mime_type": image_mime,
-                "width": image_width,
-                "height": image_height,
-                "alt": _text(source_item.get("alt") or source_item.get("title") or "Иллюстрация к ответу")[:180],
-                "caption": _text(source_item.get("caption") or source_item.get("title"))[:220],
-            }
-            # Keep the image bytes exactly once in the response: GalleryBlock reads
-            # payload.images. The previous block duplicated the same ~400 KB PNG
-            # through payload, block.artifact, block.images and artifacts, raising
-            # peak JSON/React memory use and the risk of the Web render crashing.
-            compact_artifact = {
-                "artifact_type": "image",
-                "type": "image",
-                "mime_type": image_mime,
-                "width": image_width,
-                "height": image_height,
-                "generated": not bool((image_result or {}).get("reused")),
-                "reused": bool((image_result or {}).get("reused")),
-            }
-            packaged["artifacts"].append(compact_artifact)
-            visible_image_payload = {
-                "kind": "generated_image",
-                "artifact_type": "image",
-                "mime_type": image_mime,
-                "width": image_width,
-                "height": image_height,
-                "images": [visible_image] if image_data_uri else [],
-            }
-            image_step_index = 1
-            image_step_title = "Illustration"
-            image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
-            image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
-            if image_sequence_item is None and image_sequence_items:
-                image_sequence_item = image_sequence_items[-1]
-            if isinstance(image_sequence_item, dict):
-                image_step_index = max(1, int(image_sequence_item.get("step_index") or 1))
-                image_step_title = _text(image_sequence_item.get("title") or "Final portrait")[:100]
-            else:
-                question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
-                image_questions = []
-                for question in question_sequence:
-                    if not isinstance(question, dict):
-                        continue
-                    question_outputs = question.get("output_types") or question.get("outputs") or []
-                    if isinstance(question_outputs, str):
-                        question_outputs = [question_outputs]
-                    if any(str(value).lower() == "image" for value in question_outputs):
-                        image_questions.append(question)
-                if image_questions:
-                    last_image_question = image_questions[-1]
-                    image_step_index = max(1, int(last_image_question.get("step_index") or 1))
-                    image_step_title = _text(last_image_question.get("title") or last_image_question.get("request") or "Illustration")[:100]
-            image_block = {
-                "type": "image",
-                "step_index": image_step_index,
-                "step_title": image_step_title,
-                "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
-                "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
-                "content": "",
-                "payload": visible_image_payload,
-            }
-            packaged["render_blocks"].append(image_block)
+        if image_results:
+            visible_images: list[dict[str, Any]] = []
+            compact_artifacts: list[dict[str, Any]] = []
+            for image_index, result_item in enumerate(image_results, start=1):
+                source_artifact = result_item.get("artifact") if isinstance(result_item.get("artifact"), dict) else result_item
+                artifact_payload = source_artifact.get("payload") if isinstance(source_artifact.get("payload"), dict) else {}
+                source_items = source_artifact.get("images") if isinstance(source_artifact.get("images"), list) else artifact_payload.get("images", [])
+                source_items = source_items if isinstance(source_items, list) else []
+                raw_image_bytes = result_item.get("image_bytes")
+                image_mime = _text(result_item.get("mime_type") or source_artifact.get("mime_type") or "image/png")
+                image_data_uri = _mime_data_uri(bytes(raw_image_bytes), image_mime) if isinstance(raw_image_bytes, (bytes, bytearray)) and raw_image_bytes else ""
+                source_item = next((item for item in source_items if isinstance(item, dict) and _text(item.get("src") or item.get("image_data_uri") or item.get("url")).startswith("data:image/")), {})
+                if not image_data_uri:
+                    image_data_uri = _text(source_item.get("src") or source_item.get("image_data_uri") or source_item.get("url"))
+                image_width = int(result_item.get("width") or source_artifact.get("width") or source_item.get("width") or 0)
+                image_height = int(result_item.get("height") or source_artifact.get("height") or source_item.get("height") or 0)
+                if not image_data_uri:
+                    continue
+                variant_caption = _text(source_item.get("caption") or source_item.get("title") or result_item.get("prompt") or "Иллюстрация к ответу")[:220]
+                visible_images.append({
+                    "src": image_data_uri,
+                    "mime_type": image_mime,
+                    "width": image_width,
+                    "height": image_height,
+                    "alt": _text(source_item.get("alt") or source_item.get("title") or f"Иллюстрация {image_index}")[:180],
+                    "caption": variant_caption if len(image_results) == 1 else f"Вариант {image_index}: {variant_caption}"[:240],
+                    "variant_index": int(result_item.get("variant_index") or image_index),
+                })
+                compact_artifacts.append({
+                    "artifact_type": "image",
+                    "type": "image",
+                    "mime_type": image_mime,
+                    "width": image_width,
+                    "height": image_height,
+                    "generated": not bool(result_item.get("reused")),
+                    "reused": bool(result_item.get("reused")),
+                    "variant_index": int(result_item.get("variant_index") or image_index),
+                })
+            packaged.setdefault("artifacts", []).extend(compact_artifacts)
+            if visible_images:
+                first_artifact = image_results[0].get("artifact") if isinstance(image_results[0].get("artifact"), dict) else image_results[0]
+                image_step_index = 1
+                image_step_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
+                image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
+                image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
+                if image_sequence_item is None and image_sequence_items:
+                    image_sequence_item = image_sequence_items[-1]
+                if isinstance(image_sequence_item, dict):
+                    image_step_index = max(1, int(image_sequence_item.get("step_index") or 1))
+                    image_step_title = _text(image_sequence_item.get("title") or image_step_title)[:100]
+                visible_image_payload = {
+                    "kind": "generated_image_gallery" if len(visible_images) > 1 else "generated_image",
+                    "artifact_type": "image",
+                    "mime_type": "image/png",
+                    "width": int(first_artifact.get("width") or visible_images[0].get("width") or 0),
+                    "height": int(first_artifact.get("height") or visible_images[0].get("height") or 0),
+                    "images": visible_images,
+                    "image_count": len(visible_images),
+                }
+                image_block = {
+                    "type": "image",
+                    "step_index": image_step_index,
+                    "step_title": image_step_title,
+                    "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
+                    "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
+                    "content": "",
+                    "payload": visible_image_payload,
+                }
+                packaged["render_blocks"].append(image_block)
 
     if _text(image_intent.get("task")) == "edit_image":
         edit_state = "success" if image_result and image_result.get("success") else "failed"
@@ -3765,53 +3942,56 @@ async def execute(
     output_asset_persist_started = time.perf_counter()
     generated_asset_saved = False
     output_asset_refs: list[dict[str, Any]] = []
-    if image_result:
-        # The generator returns validated raw bytes as well as a scene artifact.
-        # Persist raw bytes first; artifact fields are the compatibility fallback.
-        direct_image_bytes = image_result.get("image_bytes")
-        direct_mime = _text(image_result.get("mime_type") or "image/png")
+    for output_index, output_result in enumerate(image_results or ([image_result] if image_result else []), start=1):
+        if not isinstance(output_result, dict):
+            continue
+        # Persist every validated image separately under its own durable asset ref.
+        direct_image_bytes = output_result.get("image_bytes")
+        direct_mime = _text(output_result.get("mime_type") or "image/png")
         if isinstance(direct_image_bytes, (bytes, bytearray)) and direct_image_bytes:
             generated_image = (bytes(direct_image_bytes), direct_mime)
         else:
-            generated_image = _image_payload_bytes(image_result.get("artifact") or image_result)
+            generated_image = _image_payload_bytes(output_result.get("artifact") or output_result)
         if generated_image:
             generated_bytes, generated_mime = generated_image
-            generated_width = int(image_result.get("width") or 0)
-            generated_height = int(image_result.get("height") or 0)
+            generated_width = int(output_result.get("width") or 0)
+            generated_height = int(output_result.get("height") or 0)
             if len(generated_bytes) >= 24 and generated_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
                 import struct as _struct
                 generated_width = generated_width or int(_struct.unpack(">I", generated_bytes[16:20])[0])
                 generated_height = generated_height or int(_struct.unpack(">I", generated_bytes[20:24])[0])
+            generated_filename = f"april-generated-{identity['message_id'][-10:]}-{output_index:02d}.png"
             if len(generated_bytes) <= 25 * 1024 * 1024:
                 durable_asset_payloads.append({
                     "kind": "image",
                     "mime_type": generated_mime or "image/png",
                     "asset_role": "april_output",
                     "output_type": "image",
-                    "filename": f"april-generated-{identity['message_id'][-10:]}.png",
+                    "filename": generated_filename,
                     "message_id": identity["message_id"],
                     "size_bytes": len(generated_bytes),
                     "sha256": hashlib.sha256(generated_bytes).hexdigest(),
                     "width": generated_width,
                     "height": generated_height,
-                    "prompt": _text((image_result or {}).get("prompt"))[:1200],
-                    "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
-                    "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
-                    "source_asset_role": _text((image_result or {}).get("source_asset_role")),
+                    "prompt": _text(output_result.get("prompt"))[:1200],
+                    "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
+                    "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
+                    "source_asset_role": _text(output_result.get("source_asset_role")),
                     "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
                 })
             generated_ref = _save_premium_asset(
                 uid, identity["message_id"],
-                filename=f"april-generated-{identity['message_id'][-10:]}.png",
+                filename=generated_filename,
                 content=generated_bytes, mime_type=generated_mime, kind="image",
                 asset_role="april_output", output_type="image",
                 metadata={
                     "source_type": "april_generated", "asset_role": "april_output", "output_type": "image",
                     "width": generated_width, "height": generated_height,
-                    "prompt": _text((image_result or {}).get("prompt"))[:1200],
-                    "operation": _text((image_result or {}).get("operation") or image_intent.get("image_operation") or "generate"),
-                    "derived_from_message_id": _text((image_result or {}).get("source_asset_message_id")),
-                    "source_asset_role": _text((image_result or {}).get("source_asset_role")),
+                    "prompt": _text(output_result.get("prompt"))[:1200],
+                    "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
+                    "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
+                    "source_asset_role": _text(output_result.get("source_asset_role")),
+                    "variant_index": int(output_result.get("variant_index") or output_index),
                 },
             )
             if generated_ref:
