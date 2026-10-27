@@ -397,9 +397,57 @@ def _detect_explicit_portrait_generation_request(text: str) -> bool:
     return bool(re.search(rf"\b{action}\b.{{0,100}}\b{subject}\b", low, re.IGNORECASE))
 
 
+def _is_feedback_control_help_request(text: Any) -> bool:
+    """Detect a request to locate/use feedback controls below an April reply.
+
+    Mentions of photos, graphs or code in an explanatory example must not turn
+    the answer into a media-generation task. The helper requires both a feedback
+    target and an interaction/location question, and rejects a separate explicit
+    artifact-creation instruction.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    feedback_target = bool(re.search(
+        r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,35}(?:кноп|нажат|найт|где|куда)|"
+        r"пожалова\w*|жалоб\w*|feedback\s+(?:button|control)|report\s+(?:button|response|answer)|"
+        r"thank(?:s|ing)?\s+(?:button|the\s+answer|the\s+response)|thumbs?\s*(?:up|down))",
+        low, re.IGNORECASE,
+    ))
+    interaction_question = bool(re.search(
+        r"(?:куда.{0,35}нажат\w*|что\s+нажат\w*|где.{0,70}(?:кноп\w*|наход\w*|располож\w*|это)|"
+        r"(?:кноп\w*|функци\w*).{0,70}(?:где|куда|наж|наход|располож)|"
+        r"(?:отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*).{0,70}(?:куда|где|наж|кноп)|"
+        r"покажи.{0,70}(?:где|куда|наж|путь|стрелк)|расскажи.{0,70}(?:где|куда|наж)|"
+        r"как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи|"
+        r"where.{0,70}(?:click|button|find|located)|how\s+(?:do\s+i|to).{0,60}(?:thank|report|click)|"
+        r"where\s+(?:is|are)\s+(?:the\s+)?(?:thank|report|feedback))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_artifact_creation = bool(re.search(
+        r"(?:\b(?:создай|сгенерир\w*|построй|нарисуй|напиши|выдай|исправь|create|generate|build|draw|write|fix)\b"
+        r".{0,65}\b(?:график\w*|диаграмм\w*|код\w*|скрипт\w*|картинк\w*|изображени\w*|фото\w*|"
+        r"graph|chart|code|script|image|photo|picture)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    return feedback_target and interaction_question and not explicit_artifact_creation
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
+    if _is_feedback_control_help_request(low):
+        # A route diagram is useful for "where do I click?"; photo/graph/code
+        # words in the same sentence are examples of earlier answers, not deliverables.
+        return ["text", "diagram"]
+    if _is_site_navigation_request(low) and re.search(
+        r"(?:стрелк\w*|покажи.{0,70}(?:путь|карту|схем|меню|интерфейс|куда\s+нажать|нажат\w*)|карта\s+сайт\w*|схем\w*.{0,35}(?:переход|кноп|страниц)|пошаг\w*|по\s+шагам|последовательност\w*.{0,35}(?:нажат|переход|действ)|step[- ]by[- ]step|click[- ]by[- ]click)",
+        low, re.IGNORECASE | re.DOTALL,
+    ) and not re.search(
+        r"(?:\b(?:создай|сгенерир\w*|построй|нарисуй|напиши|выдай|исправь|create|generate|build|draw|write|fix)\b"
+        r".{0,65}\b(?:график\w*|диаграмм\w*|код\w*|скрипт\w*|картинк\w*|изображени\w*|фото\w*|graph|chart|code|script|image|photo|picture)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ):
+        return ["text", "diagram"]
+
     for output, markers in _OUTPUT_MARKERS.items():
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
@@ -899,7 +947,8 @@ _SITE_NAVIGATION_REQUEST_RE = re.compile(
 _SITE_NAVIGATION_TARGET_RE = re.compile(
     r"(?:сообществ|community|истори\w*\s+диалог|saved\s+dialogues?|history|"
     r"кабинет|профил|настройк|settings|account|help\s+center|справк|support|поддержк|"
-    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service)",
+    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service|"
+    r"отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*|feedback|report\s+(?:button|response|answer)|thank(?:s|ing)?\s+button)",
     re.IGNORECASE,
 )
 
@@ -1631,7 +1680,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         reason = "explicit_topic_introduction_overrides_continuation" if explicit_topic_introduction and (continuation_action or any(token in token_set for token in {"дальше", "прежнему", "прежней", "resume", "continue"})) else "no_prior_dialogue_intent_detected"
 
     # UI navigation can mention “история диалога”, but it is not a request to retrieve prior conversation content.
-    site_navigation_request = _is_site_navigation_request(source)
+    site_navigation_request = _is_site_navigation_request(source) or _is_feedback_control_help_request(source)
     if site_navigation_request:
         primary_intent = "NEW_INFORMATION"
         direction = "ANSWER_NEW_REQUEST"
@@ -1923,6 +1972,24 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
     }
 
 
+def _has_explicit_independent_non_ui_action(text: Any) -> bool:
+    """Detect a clearly separate artifact/calculation action inside a UI-help turn.
+
+    Words such as “image”, “graph”, or “code” alone are examples/references,
+    not deliverables. Require an action verb tied to a concrete output or task.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:\b(?:напиши|создай|сгенерируй|построй|нарисуй|исправь|перепиши|оптимизируй|выдай|"
+        r"посчитай|рассчитай|переведи|проанализируй|сравни|write|create|generate|plot|draw|fix|rewrite|"
+        r"optimize|calculate|translate|analyze|compare)\b.{0,90}\b(?:код\w*|скрипт\w*|график\w*|диаграмм\w*|таблиц\w*|"
+        r"картинк\w*|изображени\w*|фотографи\w*|\bфото\b|формул\w*|уравнен\w*|файл\w*|"
+        r"\bcode\b|\bscript\b|\bgraph\b|\bchart\b|\btable\b|\bimage\b|\bphoto\b|"
+        r"\bformula\b|\bequation\b|\bfile\b))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+
+
 def _split_request_sequence(text: str) -> list[str]:
     """Find ordered questions/tasks without rewriting or de-duplicating user text.
 
@@ -1933,7 +2000,11 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
-    if _is_site_navigation_request(source) and not _has_explicit_independent_task_boundaries(source):
+    if _is_feedback_control_help_request(source):
+        return [source]
+    # Keep several route questions together as one navigation workflow. A separate
+    # explicit artifact/calculation action is still split by the normal task path.
+    if _is_site_navigation_request(source) and not _has_explicit_independent_non_ui_action(source):
         return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
