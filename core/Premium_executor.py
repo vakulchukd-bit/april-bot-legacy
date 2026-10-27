@@ -3168,7 +3168,34 @@ async def execute(
     response_package_started = time.perf_counter()
     answer = _text(raw.get("answer") or raw.get("content"))
     if not answer:
+        # The provider can validly return a text render block while omitting the
+        # duplicate top-level `answer` field. Recover it before packaging; otherwise
+        # the executor can emit a blank bubble or fail despite having visible text.
+        for _block in (raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []):
+            if not isinstance(_block, dict):
+                continue
+            _kind = _text(_block.get("type") or _block.get("artifact_type") or "text").lower()
+            if _kind not in {"text", "markdown", "message", "message_text"}:
+                continue
+            _candidate = _text(_block.get("content") or _block.get("text") or _block.get("markdown"))
+            if _candidate:
+                answer = _candidate
+                break
+    if not answer:
+        # Keep a truthful, non-empty textual explanation when only a concrete
+        # artifact survived normalization. Never replace the artifact with prose.
+        for _block in (raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []):
+            if not isinstance(_block, dict):
+                continue
+            _explanation = _text(_block.get("explanation") or _block.get("caption") or _block.get("title"))
+            if _explanation:
+                answer = _explanation
+                break
+    if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
+    raw["answer"] = answer
+    if not _text(raw.get("content")):
+        raw["content"] = answer
 
     image_intent_for_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     image_task = _text(image_intent_for_answer.get("task"))
