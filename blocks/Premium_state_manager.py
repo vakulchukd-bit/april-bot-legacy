@@ -4386,6 +4386,7 @@ def search_dialogue_context(
     )
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
     explicit_artifact_kind = (
         _text(query_interpretation.get("saved_artifact_followup_kind"))
@@ -7521,6 +7522,75 @@ def search_dialogue_context(
         "query_composition": "current_request_plus_interpreter_profile_and_active_branch" if relation == "CONTINUE" else "current_request_and_interpreter_profile",
         "search_method": "deterministic_lexical_fuzzy_with_premium_active_branch_and_source_ranking",
     })
+    if site_navigation_request and not history_request and not resume_anchor_row:
+        # UI guidance is a new operation on the product interface, not a continuation
+        # of whichever old task happens to be marked hot. Never attach an unrelated
+        # active branch or old dialogue pair to this response.
+        relation = "NEW"
+        continuation = False
+        selected_for_context = []
+        matches = []
+        anchor = None
+        active_topic = ""
+        contextual_history_match = False
+        history_selection_method = "site_navigation_no_memory_source"
+        history_topics = []
+        topic_index = []
+        selected_section = {}
+        clarification_needed = False
+        pending_for_next_turn = {}
+        clarification_resolution = {}
+        repair_active_branch = False
+        hot_work_followup = False
+        hot_work_match_reason = "site_navigation_is_independent_task"
+        active_work_branch = {}
+        active_work_pair = None
+        active_branch_descriptor = {}
+        named_option_reanchor_row = None
+        selection_followup_confirmed = False
+        hot_branch_candidate = False
+        historical_work_reactivated = False
+        source_retrieval_descriptor = {"strategy": "CURRENT_REQUEST_NO_MEMORY_SOURCE", "reason": "site_navigation_help"}
+        # Keep diagnostics and result metadata consistent with the navigation override;
+        # otherwise old active-work IDs can leak into downstream prompt construction.
+        source_retrieval_strategy = "CURRENT_REQUEST_NO_MEMORY_SOURCE"
+        active_work_origin_id = ""
+        latest_topic_origin_id = ""
+        user_operation = {"type": "EXPLAIN_SITE_NAVIGATION", "target": "verified_ui_control_or_route"}
+        topic_table_md = ""
+        topics = []
+        best = None
+        anchor_payload = {}
+        active_branch_descriptor = {}
+        route_decision = "NEW_TOPIC"
+        latest_route_row = None
+        latest_route_subjects = set()
+        route_subject_overlap = 0.0
+        route_subject_conflict = False
+        contextual_antecedent = False
+        underspecified_turn = False
+        semantic_active_branch_intent = False
+        branch_context_expanded = False
+        active_work_marker_is_from_another_topic = False
+        active_work_root_subject_conflict = False
+        active_work_root_subject_overlap = 0.0
+        active_work_root_topic_overlap = 0.0
+        active_work_root_match = False
+        active_work_topic_origin_mismatch = False
+        active_work_reanchored_to_origin = False
+        unrelated_active_work_topic = False
+        current_topic_closure = False
+        explicit_closed_branch_reopen = False
+        closed_branch_barrier = False
+        marker = ""
+        reference_followup = False
+        self_contained_new_information = False
+        retrieval_profile.update({
+            "mode": "NEW_TOPIC", "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "selection_method": "site_navigation_no_memory_source", "active_topic_seed": "",
+            "prefer_active_branch": False, "prefer_named_history": False, "selected_message_ids": [],
+            "coverage_policy": "answer_new_request", "query_composition": "current_request_only",
+        })
     result = {
         "engine": "premium_state_manager_topic_section_search_v12_task_root_and_source_verification",
         "authenticated": True,
