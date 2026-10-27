@@ -2974,6 +2974,7 @@ def search_dialogue_context(
     new_topic_request = _looks_like_new_topic(query)
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
     context_signature = _query_context_signature(query, query_interpretation)
     query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
     _apr_timing_log(
@@ -3830,6 +3831,31 @@ def search_dialogue_context(
         "query_composition": topic_vector_query_source,
         "search_method": "deterministic_lexical_fuzzy_topic_section_ranking",
     })
+    if site_navigation_request and not history_request and not resume_anchor_row:
+        # An explicit product-navigation task should not inherit an unrelated hot topic.
+        relation = "NEW"
+        selected_for_context = []
+        matches = []
+        anchor = None
+        active_topic = ""
+        contextual_history_match = False
+        history_selection_method = "site_navigation_no_memory_source"
+        topic_index = []
+        history_topics = []
+        selected_section = {}
+        clarification_needed = False
+        pending_for_next_turn = {}
+        clarification_resolution = {}
+        topic_vector_hits = []
+        history_time_search = {}
+        topic_table_md = ""
+        self_contained_new_information = False
+        retrieval_profile.update({
+            "mode": "NEW_TOPIC", "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "selection_method": "site_navigation_no_memory_source", "active_topic_seed": "",
+            "prefer_active_branch": False, "prefer_named_history": False, "selected_message_ids": [],
+            "coverage_policy": "answer_new_request", "query_composition": "current_request_only",
+        })
     result = {
         "engine": "state_manager_topic_section_search_v9_named_topic_vector",
         "authenticated": True,
