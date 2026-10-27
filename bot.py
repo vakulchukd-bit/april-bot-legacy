@@ -2407,11 +2407,21 @@ class AprilHandler(BaseHTTPRequestHandler):
                 and _voice_attachment(attachments) is None
                 and _text(get_user_plan(canonical_user_id)).lower() == "premium"
             )
+            _apr_timing_log(
+                "premium_progress_stream_negotiation",
+                user_key=_apr_diag_ref(canonical_user_id),
+                enabled=wants_progress_stream,
+                accept=_text(self.headers.get("Accept"))[:120],
+                content_type=content_type[:80],
+                canonical_route=CANONICAL_CHAT_ROUTE,
+            )
             if wants_progress_stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
                 self.send_header("Transfer-Encoding", "chunked")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", "no-store, no-transform")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("Connection", "keep-alive")
                 self.end_headers()
 
                 client_disconnected = False
@@ -2430,6 +2440,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                         self.wfile.write(encoded)
                         self.wfile.write(b"\r\n")
                         self.wfile.flush()
+                        _apr_timing_log(
+                            "premium_progress_stream_event",
+                            event_type=_text(event.get("type"))[:24],
+                            stage=_text(event.get("stage"))[:36],
+                            has_message=bool(_text(event.get("message"))),
+                            elapsed_seconds=event.get("elapsed_seconds"),
+                            canonical_route=CANONICAL_CHAT_ROUTE,
+                        )
                         return True
                     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                         client_disconnected = True
@@ -2452,14 +2470,30 @@ class AprilHandler(BaseHTTPRequestHandler):
                                 now_mono = time.monotonic()
                                 elapsed = round(now_mono - stream_started, 1)
                                 if not delay_notice_sent and elapsed >= 5.0:
-                                    language_hint = _text(data.get("display_language") or data.get("language")).lower()
+                                    language_hint = _text(data.get("display_language") or data.get("language") or data.get("preferred_language"))
                                     request_text = _text(data.get("text") or data.get("message") or data.get("input"))
-                                    if language_hint.startswith(("uk", "ua")):
-                                        delay_message = "Відповідь ще формується. Спочатку з'явиться текст, а потрібні зображення чи діаграми додадуться слідом."
-                                    elif language_hint.startswith("en") or (language_hint in {"", "auto"} and not re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", request_text)):
-                                        delay_message = "Your answer is still being prepared. The text will appear first; any requested images or diagrams will follow."
-                                    else:
-                                        delay_message = "Ответ ещё формируется. Сначала появится текст, а нужные изображения или диаграммы добавятся следом."
+                                    # Use the language actually used in this message first;
+                                    # the saved UI language is only a fallback for ambiguous input.
+                                    response_language = _detect_language(request_text, language_hint)
+                                    delay_messages = {
+                                        "uk": "Відповідь ще формується. Спочатку з'явиться текст, а потрібні зображення чи діаграми додадуться слідом.",
+                                        "ru": "Ответ ещё формируется. Сначала появится текст, а нужные изображения или диаграммы добавятся следом.",
+                                        "en": "Your answer is still being prepared. The text will appear first; any requested images or diagrams will follow.",
+                                        "fr": "Votre réponse est en cours de préparation. Le texte apparaîtra d'abord, puis les images ou diagrammes demandés.",
+                                        "es": "Tu respuesta se está preparando. Primero aparecerá el texto y después las imágenes o los diagramas solicitados.",
+                                        "de": "Deine Antwort wird vorbereitet. Zuerst erscheint der Text, danach folgen die angeforderten Bilder oder Diagramme.",
+                                        "it": "La risposta è in preparazione. Prima apparirà il testo, poi le immagini o i diagrammi richiesti.",
+                                        "pl": "Odpowiedź jest przygotowywana. Najpierw pojawi się tekst, a potem wymagane obrazy lub diagramy.",
+                                        "pt": "Sua resposta está sendo preparada. O texto aparecerá primeiro; depois, as imagens ou diagramas solicitados.",
+                                        "nl": "Je antwoord wordt voorbereid. Eerst verschijnt de tekst; daarna volgen de gevraagde afbeeldingen of diagrammen.",
+                                        "ja": "回答を準備しています。まずテキストが表示され、その後、リクエストされた画像や図が表示されます。",
+                                        "zh": "正在准备回答。文本会先显示，随后显示所请求的图片或图表。",
+                                        "ko": "답변을 준비하고 있습니다. 먼저 텍스트가 표시되고, 이후 요청한 이미지나 다이어그램이 표시됩니다.",
+                                        "ar": "يتم إعداد الإجابة الآن. سيظهر النص أولاً، ثم الصور أو المخططات المطلوبة.",
+                                        "hi": "आपका उत्तर तैयार हो रहा है। पहले टेक्स्ट दिखेगा, फिर अनुरोधित चित्र या आरेख।",
+                                        "el": "Η απάντησή σας ετοιμάζεται. Πρώτα θα εμφανιστεί το κείμενο και έπειτα οι εικόνες ή τα διαγράμματα που ζητήσατε.",
+                                    }
+                                    delay_message = delay_messages.get(response_language, delay_messages.get(_normalize_language_code(language_hint), delay_messages["en"]))
                                     write_progress_event({
                                         "type": "progress",
                                         "stage": "still_working",
