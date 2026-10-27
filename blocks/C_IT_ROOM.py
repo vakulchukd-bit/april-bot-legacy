@@ -86,7 +86,13 @@ APRIL_SITE_MAP = {
             "id": "chat", "path": "/", "label": "Основной чат April",
             "purpose": "Переписка с April; отправка текста и доступные элементы ввода, вложений и голоса; просмотр текстовых и мультимедийных блоков ответа.",
             "steps": ["Если в верхней панели видна кнопка Log in, войдите в Google-аккаунт; если уже видны имя/профиль, откройте его только для настроек.", "Введите полный вопрос в нижнее поле Message April / поле сообщения и нажмите стрелку отправки. Если в одном сообщении несколько связанных пунктов, April должна ответить на них по порядку, не превращая каждую фразу в отдельный новый диалог.", "Для голосового запроса нажмите микрофон и произнесите задачу; дождитесь распознавания и ответа.", "Для фотографии/документа нажмите скрепку, выберите Камера, Изображения или Файлы, убедитесь, что источник прикреплён, и только затем отправьте просьбу.", "Читайте обычный текст, а при наличии — соответствующие ему ссылки, диаграммы, таблицы, формулы, графики, код, файлы и изображения. Визуальный блок должен дополнять объяснение, а не заменять его.", "Если хотите уточнить предыдущий ответ, опишите желаемое продолжение естественными словами. Короткое «Жду» означает продолжить незавершённую задачу, а не спрашивать её заново."],
-            "related": ["history", "settings", "guide"]
+            "related": ["history", "settings", "guide", "response-feedback"]
+        },
+        {
+            "id": "response-feedback", "path": "/", "label": "Кнопки обратной связи под ответом",
+            "purpose": "Это элементы прямо под каждым ответом April в основном чате, а не отдельная страница и не часть поля ввода. В русской локализации исходника видны кнопки «Жалоба» и «Спасибо». «Спасибо» показывает короткое подтверждение; «Жалоба» открывает форму выбора причины и отправки отчёта.",
+            "steps": ["Откройте основной чат / и найдите именно тот ответ April, который хотите оценить.", "Прокрутите до самого низа этого ответа — под текстом и относящимися к нему блоками расположена строка обратной связи.", "Нажмите «Спасибо», чтобы показать благодарность. На экране появится краткое подтверждение «Спасибо за обратную связь»; вводить отдельное сообщение и прикреплять фото не нужно.", "Чтобы сообщить о проблеме, нажмите «Жалоба». В форме выберите причину: вредный ответ, оскорбительный, вводящий в заблуждение или другое; затем нажмите кнопку отправки формы.", "Если этих кнопок нет под текущим ответом, проверьте, что вы на сайте April и что ответ полностью отрисовался. Для точного разбора отличающегося интерфейса приложите скриншот только тогда, когда он действительно нужен."],
+            "related": ["chat"]
         },
         {
             "id": "attachments", "path": "/", "label": "Прикрепить фото или файл к сообщению",
@@ -208,6 +214,12 @@ APRIL_SITE_MAP = {
 # Task journeys connect the user's intent to a real screen, control, expected destination and next action.
 # They are authoritative guidance for the interpreter; they never claim that the room clicked a control.
 APRIL_USER_JOURNEYS = {
+    "response-feedback": {
+        "aliases": ["отблагодарить ответ", "поблагодарить тебя", "поблагодарить за ответ", "как нажать спасибо", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "где жалоба", "где спасибо", "feedback button", "report response", "thank the answer"],
+        "action": "USE_RESPONSE_FEEDBACK_CONTROLS", "availability": "На экране основного чата под каждым отрисованным ответом, если контролы присутствуют в текущей версии интерфейса",
+        "steps": ["Откройте основной чат и найдите конкретный ответ April.", "Под этим ответом найдите кнопки «Жалоба» и «Спасибо» — они находятся ниже ответа, а не в поле ввода.", "Нажмите «Спасибо»: появится краткое сообщение «Спасибо за обратную связь».", "Для жалобы нажмите «Жалоба», выберите причину и отправьте форму."],
+        "finish": "Это действия обратной связи. «Спасибо» не отправляет новый запрос April и не запускает оплату; фото или файл для этого не нужны.",
+    },
     "attach_image": {
         "aliases": ["добавить фото", "прикрепить картинку", "чтобы ты увидела фото", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить изображение в чат", "paperclip", "attach image"],
         "action": "GUIDE_ATTACH_IMAGE", "availability": "Free и Premium; пользователь вручную прикрепляет файл",
@@ -270,6 +282,11 @@ def _select_user_journeys(query: str) -> list[dict]:
     """Return a small relevant workflow excerpt without guessing unseen UI controls."""
     low = _text(query).lower().replace("ё", "е")
     result = []
+    feedback_target = bool(re.search(r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|наж|где|куда)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response))", low, re.I))
+    feedback_location = bool(re.search(r"(?:куда.{0,40}наж|где.{0,70}(?:кноп|наход|это)|кноп\w*.{0,60}(?:под\s+(?:ответ|сообщ)|где|наж)|покажи.{0,60}(?:где|куда|путь)|where.{0,60}(?:click|button|find))", low, re.I | re.S))
+    if feedback_target and feedback_location and not re.search(r"(?:создай|сгенерир\w*|построй|нарисуй|напиши|generate|create|build|write).{0,60}(?:график|код|картинк|изображени|graph|code|image)", low, re.I | re.S):
+        journey = APRIL_USER_JOURNEYS.get("response-feedback")
+        return [{"id": "response-feedback", **journey}] if isinstance(journey, dict) else []
     if re.search(r"(?:создай|сгенерируй|нарисуй|изобрази)\s+(?:мне\s+)?(?:нов\w*\s+)?(?:картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bpicture\b)", low, re.I):
         return []
     if "_is_attachment_instruction_query" in globals() and _is_attachment_instruction_query(query):
@@ -307,6 +324,12 @@ def _select_user_journeys(query: str) -> list[dict]:
 # Screen blueprints reconstructed from the supplied April UI screenshots and existing route map.
 # They are knowledge records for retrieval/rendering, not route-specific answer templates.
 APRIL_UI_BLUEPRINTS = {
+    "response-feedback": {
+        "screen_id": "response-feedback", "screen_title": "Обратная связь под ответом April",
+        "visible_controls": ["Текст и блоки конкретного ответа April", "Кнопка «Жалоба»", "Кнопка «Спасибо»", "Форма выбора причины жалобы: вредный, оскорбительный, вводящий в заблуждение, другое", "Кнопка отправки формы"],
+        "screen_flow": ["Открыть основной чат /", "Найти нужный ответ April", "Под ответом нажать «Спасибо» для краткого подтверждения либо «Жалоба» для открытия формы", "Для жалобы выбрать причину и отправить форму"],
+        "semantic_concepts": ["отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "feedback", "report response", "thank button"],
+    },
     "chat": {
         "screen_id": "chat", "screen_title": "Основной чат April",
         "visible_controls": ["APRIL header", "profile / Log in", "paperclip attachment", "message field", "send arrow", "microphone", "square image-action menu in the top-right of a rendered gallery image", "Download to device", "Share"],
@@ -400,6 +423,8 @@ for _area in APRIL_SITE_MAP.get("areas", []):
         _blueprint_key = "attachments"
     elif _area_id == "image-controls":
         _blueprint_key = "image-controls"
+    elif _area_id == "response-feedback":
+        _blueprint_key = "response-feedback"
     elif _area_id == "history":
         _blueprint_key = "history"
     elif _area_id in {"settings", "memory"}:
@@ -418,6 +443,7 @@ _SITE_CONCEPT_ALIASES = {
     "settings": ("личный кабинет", "учётная запись", "параметры аккаунта", "поменять ник", "сменить имя", "язык интерфейса", "тариф", "подписка", "april id", "premium id"),
     "attachments": ("скрепка", "прикрепить", "прикрепить фото", "добавить картинку в чат", "добавить фото в чат", "загрузить фото", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload", "attach an image", "upload a photo"),
     "image-controls": ("скачать картинку в чате", "сохранить изображение", "скопировать картинку из чата", "поделиться изображением", "меню изображения", "кнопка скачивания картинки", "download image", "save picture", "share image"),
+    "response-feedback": ("кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "поблагодарить за ответ", "feedback button", "report response", "thank the answer"),
     "help": ("инструкция", "документация", "частые вопросы", "правила сервиса", "как пользоваться", "справочный раздел", "help center", "how to use"),
     "support": ("пожаловаться", "обратиться за помощью", "сообщить об ошибке", "зависла", "залипла", "ошибка интерфейса", "support request"),
     "deletion": ("стереть информацию", "удалить профиль", "удалить сведения", "delete account", "data deletion"),
@@ -560,6 +586,7 @@ _SITE_AREA_HINTS = {
     "chat": ("главный чат", "основной чат", "чат с april", "chat", "написать april", "поле сообщения", "отправить вопрос", "голос"),
     "attachments": ("скрепк", "прикрепить фото", "добавить картинку в чат", "фото чтобы ты увидела", "фото чтобы ты увидел", "картинку чтобы ты увидела", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить фото", "выбрать изображение", "камера", "image picker", "file upload"),
     "image-controls": ("скачать картинку", "сохранить изображение", "скопировать картинку", "поделиться изображением", "меню изображения", "кнопка действий", "download image", "save picture", "share image"),
+    "response-feedback": ("отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "где спасибо", "где жалоба", "feedback button", "report response", "thank button"),
     "history": ("истор", "history", "сохраненн", "прошл", "старый диалог", "предыдущ", "восстанов", "продолж", "saved dialogues", "saved dialogs"),
     "memory": ("памят", "memory", "запом", "срок хранения", "окно памяти"),
     "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен"),
@@ -14494,13 +14521,23 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     # short UI noun, while map metadata permits paraphrases absent from a trigger list.
     score_by_id = {area_id: score for score, area_id in semantic_scores}
     attachment_help = _is_attachment_instruction_query(query)
+    feedback_help = bool(re.search(
+        r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+(?:спасибо|жалоб)|пожалова\w*.{0,80}(?:ответ|кноп|куда|где)|feedback\s+button|report\s+(?:button|response))",
+        query, re.I | re.S,
+    )) and bool(re.search(r"(?:куда.{0,40}наж|где.{0,60}(?:кноп|наход|это)|покажи.{0,50}(?:где|куда|путь)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи|where.{0,50}(?:click|button|find))", query, re.I | re.S))
     direct_hint_ids = [area_id for area_id, hints in _SITE_AREA_HINTS.items() if any(hint in query for hint in hints)]
+    if feedback_help:
+        selected_ids = ["response-feedback", "chat"]
+        direct_hint_ids = ["response-feedback", "chat"]
     for area_id in direct_hint_ids:
         score_by_id[area_id] = max(score_by_id.get(area_id, 0.0), 3.0)
     selected_ids = [area_id for score, area_id in semantic_scores if score_by_id.get(area_id, score) >= 2.8]
     for area_id in direct_hint_ids:
         if area_id not in selected_ids:
             selected_ids.append(area_id)
+    if feedback_help:
+        # Specific response-rating controls must outrank generic "complaint" -> support.
+        selected_ids = ["response-feedback", "chat"]
     # The picker is a modal over /, but its own map node is required so the answer
     # explains the exact attachment workflow rather than generic image controls.
     if attachment_help:
@@ -14517,7 +14554,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         selected_ids = ["guide", "chat", "settings", "history"]
     # Target route order follows the user's wording. The screenshots confirm that
     # History, Support and Community are quick links inside the profile/CURRENT PLAN card.
-    if not referent_ids and selected_ids:
+    if not referent_ids and selected_ids and not feedback_help:
         targets = [area_id for area_id in selected_ids if area_id not in {"settings", "chat", "guide", "memory"}]
         targets.sort(key=lambda area_id: min((query.find(hint) for hint in _SITE_AREA_HINTS.get(area_id, ()) if query.find(hint) >= 0), default=10**6))
         if targets and any(area_id in {"history", "space", "support"} for area_id in targets):
@@ -14618,6 +14655,12 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                 selected_ids = [exact_area]
             broad_self_help = False
 
+    # Feedback buttons are embedded under a reply. Keep the route excerpt focused;
+    # never turn the word "жалоба" into the unrelated Support page shortcut.
+    if feedback_help and not referent_ids:
+        selected_ids = ["response-feedback", "chat"]
+        broad_self_help = False
+        full_interface_overview = False
     # Add directly related routes so users can recover to the next useful section.
     areas_by_id = {str(area.get("id")): area for area in APRIL_SITE_MAP["areas"]}
     pending = list(selected_ids)
@@ -14628,11 +14671,16 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                 pending.append(related)
     # Specific route questions get only the profile gateway and requested destinations;
     # do not clutter their diagram with unrelated related routes such as Memory or Support.
-    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "attachments", "image-controls", "history", "memory", "space", "direct", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "tools"}]
+    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "attachments", "image-controls", "history", "memory", "space", "direct", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "tools", "response-feedback"}]
     if any(area_id not in {"settings", "chat", "guide"} for area_id in query_targets):
         pending = query_targets
     else:
         pending = query_targets + [area_id for area_id in pending if area_id not in query_targets]
+    # Button help is an in-message interaction, not a tour of profile/help/history.
+    # Force a tiny deterministic excerpt after related-route expansion so a word
+    # such as "жалоба" cannot drag generic Support or unrelated pages into the map.
+    if feedback_help and not referent_ids:
+        pending = ["response-feedback", "chat"]
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
     selected_ids_final = [str(area.get("id")) for area in chosen]
     screen_id = _site_screen_for_query(query, selected_ids_final)
@@ -14681,6 +14729,8 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
         low, re.IGNORECASE,
     ))
     shortcut_targets = ids.intersection({"history", "space", "support", "plans", "deletion", "privacy", "terms", "guide", "help-center", "how-to-use"})
+    if "response-feedback" in ids or (re.search(r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+(?:спасибо|жалоб)|пожалова\w*)", low, re.I) and re.search(r"(?:куда.{0,35}наж|где.{0,60}(?:кноп|наход)|покажи.{0,50}(?:где|куда)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи)", low, re.I | re.S)):
+        return "response-feedback"
     if "attachments" in ids:
         return "attachments"
     if "image-controls" in ids:
@@ -14818,6 +14868,71 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     is_ru_or_uk = language.startswith(("ru", "uk")) or not language
     heading = "Проверенные переходы" if is_ru_or_uk else "Verified links"
     query_for_routes = _current_user_query(machine_request).lower().replace("ё", "е")
+    feedback_help = bool(re.search(
+        r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|где|куда|наж)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response)|thank(?:s|ing)?\s+button)",
+        query_for_routes, re.I,
+    )) and bool(re.search(r"(?:куда.{0,35}наж|что\s+нажать|где.{0,60}(?:кноп|наход|это)|кноп\w*.{0,60}(?:где|наж)|покажи.{0,60}(?:где|куда|путь)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи|where.{0,60}(?:click|button|find))", query_for_routes, re.I | re.S))
+    if feedback_help:
+        if is_ru_or_uk:
+            answer = (
+                "В основном чате найдите именно тот ответ April, за который хотите оставить отзыв. "
+                "Прокрутите до конца этого ответа: сразу под ним находится строка с кнопками «Жалоба» и «Спасибо».\n\n"
+                "1. **Чтобы поблагодарить:** нажмите «Спасибо». Появится короткое подтверждение «Спасибо за обратную связь». "
+                "Новое сообщение в поле ввода писать не нужно.\n"
+                "2. **Чтобы пожаловаться:** нажмите «Жалоба». Откроется форма; выберите причину — вредный ответ, оскорбительный, "
+                "вводящий в заблуждение или другое — затем отправьте форму.\n\n"
+                "Фото, график или код прикреплять не нужно. Эти кнопки относятся к конкретному ответу и находятся под ним, а не в поле сообщения."
+            )
+        else:
+            answer = (
+                "In the main chat, find the specific April reply you want to react to. Scroll to the end of that reply; "
+                "the «Report» and «Thanks» buttons are directly underneath it.\n\n"
+                "1. To thank April, click «Thanks». A brief feedback confirmation appears; you do not need to type another message.\n"
+                "2. To report a problem, click «Report», choose a reason (harmful, offensive, misleading, or other), then submit the form.\n\n"
+                "No photo, graph, or code attachment is needed. These controls belong to the reply itself, not the message input."
+            )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    product_walkthrough = bool(re.search(
+        r"(?:\b(?:free|бесплатн\w*)\b.{0,70}\b(?:premium|премиум)\b|\b(?:premium|премиум)\b.{0,70}\b(?:free|бесплатн\w*)\b|"
+        r"(?:как\s+(?:устроен\w*|работа\w*|пользова\w*)).{0,90}(?:april|април)|"
+        r"(?:объясни|расскажи).{0,90}(?:april|април).{0,60}(?:free|premium|премиум|куда\s+нажать)|"
+        r"how\s+(?:does|to\s+use)\s+april.{0,100}(?:free|premium|step|click|navigate))",
+        query_for_routes, re.IGNORECASE | re.DOTALL,
+    )) and bool(re.search(r"(?:объясн|расскаж|покажи|по\s+шагам|пошаг|куда\s+нажать|как\s+польз|how|guide|step[- ]by[- ]step|click)", query_for_routes, re.I))
+    if product_walkthrough:
+        if is_ru_or_uk:
+            answer = (
+                "**Как устроена April: Free и Premium**\n\n"
+                "**Free** — основной чат, поддерживаемые вложения, сообщество `/space`, профиль и настройки `/settings`, справка `/aprill`; по проектной политике активный контекст хранится до 12 часов.\n\n"
+                "**Premium** включает функции Free, доступ к сохранённым диалогам `/history` (с проверкой активного Premium), редактирование существующих изображений по правилам бота и активный контекст до 24 часов. В проверенных исходниках нет основания обещать, что отдельные страницы `/memory` или `/tools` работают как самостоятельные пользовательские разделы.\n\n"
+                "**Куда нажимать:**\n"
+                "1. [Основной чат April](/) — задавайте вопрос обычным текстом или голосом; прикладывайте файл только если хотите, чтобы April изучила именно этот файл.\n"
+                "2. [Настройки и профиль](/settings) — проверьте аккаунт, язык и карточку CURRENT PLAN; в ней находятся быстрые переходы к разделам.\n"
+                "3. [Сообщество](/space) — откройте публичное сообщество и доступные в текущем интерфейсе действия с участниками.\n"
+                "4. [История диалогов](/history) — Premium: выберите сохранённую запись и нажмите **Continue this dialogue**, чтобы продолжить именно её.\n"
+                "5. [Help & Information / Справка](/aprill) — инструкции, условия, конфиденциальность, тарифы и другие карточки справки.\n\n"
+                "**Принцип работы:** сначала определяем, что вы хотите сделать, затем выбираем соответствующий раздел и выполняем действия по порядку. Для навигационной подсказки April должна показывать короткую схему маршрута; фотография не требуется, если вопрос не связан с конкретным изображением."
+            )
+        else:
+            answer = (
+                "**How April works: Free and Premium**\n\n"
+                "**Free** includes the main chat, supported attachments, Community `/space`, Profile and Settings `/settings`, Help `/aprill`, and up to 12 hours of active context under the project policy.\n\n"
+                "**Premium** includes Free features, saved-dialogue History `/history` (with an active Premium entitlement check), supported editing of existing images, and up to 24 hours of active context. The source snapshot does not support promising standalone working `/memory` or `/tools` pages.\n\n"
+                "**Where to click:**\n"
+                "1. [Main April chat](/) — ask in text or voice; attach a file only when you want April to inspect that file.\n"
+                "2. [Profile and Settings](/settings) — review your account, language and CURRENT PLAN card.\n"
+                "3. [Community](/space) — open the community and use the participant actions available on screen.\n"
+                "4. [Dialogue History](/history) — Premium: select a saved conversation and click **Continue this dialogue**.\n"
+                "5. [Help & Information](/aprill) — instructions, terms, privacy, plans and help cards.\n\n"
+                "April should identify the requested action first, then provide the appropriate destination and ordered steps. A photo is not needed unless the question concerns a specific image."
+            )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
     asked_for_real_screenshot = bool(re.search(
         r"(?:реальн\w*.{0,35}(?:скриншот|снимок|экран|интерфейс)|(?:скриншот|снимок).{0,45}(?:реальн\w*|настоящ\w*)|live\s+screenshot|actual\s+screen(?:shot)?|real\s+(?:ui|interface|screenshot))",
         query_for_routes, re.IGNORECASE,
@@ -14829,13 +14944,21 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     )
     # Always expose a safe route back to the main chat. Add it as a text link even
     # when the selected excerpt only contains a deep-link destination.
-    if not any(row["path"] == "/" for row in route_rows):
+    if feedback_help and not any(row.get("id") == "chat" for row in route_rows):
+        route_rows.insert(0, {"id": "chat", "path": "/", "label": "Основной чат April"})
+        route_rows = route_rows[:route_row_limit]
+    elif not any(row["path"] == "/" for row in route_rows):
         route_rows.insert(0, {"id": "chat", "path": "/", "label": "Основной чат April"})
         route_rows = route_rows[:route_row_limit]
     missing_links = []
     linked_paths = set(re.findall(r"\]\((/[^)]+)\)", answer))
     seen_missing_paths = set()
-    for row in route_rows:
+    if product_walkthrough:
+        walkthrough_route_ids = {"chat", "settings", "space", "history", "guide"}
+        route_rows_for_links = [row for row in route_rows if row.get("id") in walkthrough_route_ids]
+    else:
+        route_rows_for_links = [row for row in route_rows if not feedback_help or row.get("id") == "chat"]
+    for row in route_rows_for_links:
         path = row["path"]
         if path not in linked_paths and path not in seen_missing_paths:
             missing_links.append(row)
@@ -14857,7 +14980,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         area_id for area_id, hints in _SITE_AREA_HINTS.items()
         if any(hint in query_for_routes for hint in hints)
     ]
-    if targeted_ids:
+    if targeted_ids and not feedback_help and not product_walkthrough:
         full_areas = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
         target_area = next((full_areas.get(area_id) for area_id in targeted_ids if full_areas.get(area_id) and area_id != "admin-support"), None)
         if target_area:
@@ -14952,7 +15075,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     # Whole-site requests get an overview canvas instead of being mistaken for a
     # profile quick-link request just because the map also contains settings.
     screen_id = "overview" if full_interface_overview else _site_screen_for_query(current_route_query, all_selected_area_ids)
-    pointer_requested = bool(re.search(r"(?:стрелк\w*|указател\w*|укаж\w*|отмет\w*|подсвет\w*|arrow|pointer|point\s+to)", current_route_query, re.IGNORECASE))
+    pointer_requested = feedback_help or bool(re.search(r"(?:стрелк\w*|указател\w*|укаж\w*|отмет\w*|подсвет\w*|arrow|pointer|point\s+to)", current_route_query, re.IGNORECASE))
     pointer_target = ""
     if re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
         pointer_target = "history"
@@ -15027,8 +15150,27 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
 
     selected_area_ids = [str(row.get("id") or "") for row in diagram_route_rows]
+    if screen_id == "response-feedback":
+        # The controls are inside the response card, not separate URL destinations.
+        # Represent the actual interaction sequence instead of collapsing all '/' paths.
+        nodes = [
+            {"id": "chat", "label": "Основной чат April\n/", "kind": "start", "href": "/"},
+            {"id": "reply", "label": "Найти нужный ответ April", "kind": "step"},
+            {"id": "thanks", "label": "Кнопка «Спасибо»", "kind": "action"},
+            {"id": "report", "label": "Кнопка «Жалоба»", "kind": "action"},
+            {"id": "reason", "label": "Выбрать причину\nи отправить форму", "kind": "step"},
+        ]
+        edges = [
+            {"from": "chat", "to": "reply", "label": "Найти ответ"},
+            {"from": "reply", "to": "thanks", "label": "Поблагодарить"},
+            {"from": "reply", "to": "report", "label": "Пожаловаться"},
+            {"from": "report", "to": "reason", "label": "Выбрать причину"},
+        ]
+        node_by_area = {"chat": "chat", "response-feedback": "reply"}
+        selected_area_ids = ["response-feedback", "chat"]
     screen_titles = {
         "overview": "Полная карта пользовательского интерфейса April",
+        "response-feedback": "Куда нажать: «Спасибо» или «Жалоба»",
         "profile": "Настройки и профиль · Быстрые переходы",
         "chat": "Основной чат April",
         "history": "Saved dialogues / История диалогов",
@@ -15060,7 +15202,13 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     }
     if pointer_requested:
         target_id = ""
-        if re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
+        if screen_id == "response-feedback" and re.search(r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+спасибо|thank(?:s|ing)?)", current_route_query, re.IGNORECASE):
+            target_id = "thanks"
+        elif screen_id == "response-feedback" and re.search(r"(?:пожалова\w*|жалоб\w*|report)", current_route_query, re.IGNORECASE):
+            target_id = "report"
+        elif screen_id == "response-feedback":
+            target_id = "reply"
+        elif re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
             target_id = "history"
         elif re.search(r"(?:сообществ\w*|community)", current_route_query, re.IGNORECASE):
             target_id = "space"
@@ -15100,11 +15248,25 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 return any(str(key).lower().replace("-", "_") in allowed and _has_site_image_source(child, depth + 1) for key, child in value.items())
             return False
         cleaned_blocks = []
+        allowed_outputs = set(_requested_outputs_from_machine_request(machine_request)) | {"text", "diagram"}
+        # Visual terms cited as examples ("a picture, graph or code") are not
+        # generation requests. The intent layer is authoritative for deliverables.
+        output_aliases = {
+            "image": "image", "gallery": "image", "generated_image": "image",
+            "graph": "graph", "chart": "graph", "plot": "graph",
+            "code": "code", "code_block": "code", "formula": "formula",
+            "table": "table", "diagram": "diagram", "flowchart": "diagram",
+            "flow": "flow", "text": "text", "markdown": "text",
+            "message": "text", "message_text": "text",
+        }
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            block_kind = _text(block.get("type") or block.get("artifact_type")).lower()
-            if block_kind in {"image", "gallery", "generated_image"} and not _has_site_image_source(block):
+            block_kind = _text(block.get("type") or block.get("artifact_type") or block.get("renderer")).lower().replace("-", "_")
+            canonical_kind = output_aliases.get(block_kind, block_kind)
+            if canonical_kind in {"image", "graph", "code", "formula", "table", "flow"} and canonical_kind not in allowed_outputs:
+                continue
+            if canonical_kind == "image" and not _has_site_image_source(block) and "image" not in allowed_outputs:
                 continue
             cleaned_blocks.append(block)
         blocks = cleaned_blocks
