@@ -351,6 +351,14 @@ def _is_ui_instruction_request(text: Any) -> bool:
         r"change\s+(?:the\s+)?language|switch\s+(?:the\s+)?language|account\s+settings|profile\s+settings)",
         low, re.IGNORECASE | re.DOTALL,
     ))
+    attach_photo_tutorial = bool(re.search(
+        r"(?:как|расскажи|объясни|подскажи|покажи|how\s+to|explain\s+how|show\s+me\s+how).{0,110}"
+        r"(?:добав\w*|прикреп\w*|загруз\w*|выбрат\w*|attach\w*|upload\w*|add\w*|select\w*).{0,100}"
+        r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|image\w*|photo\w*)"
+        r"|(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|picture\w*|image\w*).{0,90}"
+        r"(?:в\s+(?:тво[её]м\s+)?(?:пространств\w*|чат\w*|переписк\w*)|чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*|прочитал\w*))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
     navigation_cue = bool(re.search(
         r"(?:куда\s+(?:надо\s+)?нажат\w*|что\s+нажать|куда\s+кликнут\w*|по\s+шагам|покажи\w*.{0,30}(?:оба\s+вариант\w*|шаг\w*|куда\s+нажать)|"
         r"нажми\w*.{0,35}(?:кабинет\w*|профил\w*|настройк\w*|язык)|"
@@ -366,7 +374,7 @@ def _is_ui_instruction_request(text: Any) -> bool:
         r"(?:кнопк\w*|значок\w*|меню\s+действи\w*|из\s+чата|в\s+чате\s+april|в\s+интерфейс\w*|нажать|куда\s+нажать|с\s+телефон\w*|на\s+телефон\w*|на\s+устройств\w*)",
         low, re.IGNORECASE,
     ))
-    return account_ui or navigation_cue or how_to or (
+    return attach_photo_tutorial or account_ui or navigation_cue or how_to or (
         explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S))
     )
 
@@ -1147,10 +1155,21 @@ _HISTORY_MARKERS = (
     'gespreksgeschiedenis',
 )
 
+def _is_attachment_tutorial_request(text: Any) -> bool:
+    """Recognize instructions for attaching a source image to the chat."""
+    low = _text(text).lower().replace("ё", "е")
+    has_howto = bool(re.search(r"(?:как|расскажи|объясни|подскажи|покажи|how\s+to|explain\s+how|show\s+me\s+how)", low))
+    has_attach = bool(re.search(r"(?:добав\w*|прикреп\w*|загруз\w*|выбрат\w*|attach\w*|upload\w*|add\w*|select\w*)", low))
+    has_media = bool(re.search(r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|image\w*|photo\w*)", low))
+    in_chat = bool(re.search(r"(?:в\s+(?:тво[её]м\s+)?(?:пространств\w*|чат\w*|переписк\w*)|чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*|прочитал\w*)|in\s+(?:the\s+)?chat|so\s+(?:you|april)\s+can\s+(?:see|read))", low))
+    edits_existing = bool(re.search(r"(?:добав\w*.{0,55}\b(?:евро|гривн|надпис|стрелк|сумм)\b|на\s+(?:эту\s+|этой\s+|эту\s+)?(?:фот\w*|картинк\w*|изображени\w*)|(?:редактир\w*|измени\w*|дорисуй|убери)\s+(?:это\s+)?(?:фото|картинк|изображени))", low, re.I | re.S))
+    return has_howto and has_attach and has_media and in_chat and not edits_existing
+
+
 _SITE_NAVIGATION_REQUEST_RE = re.compile(
     r"(?:\bгде\b.{0,90}\b(?:вход|кнопк|ссылк|раздел|страниц|находится|расположен|открыть|посмотреть|найти|зайти)\b|"
     r"\bкуда\b.{0,45}\b(?:зайти|нажать|перейти|открыть)\b|"
-    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть)\b|"
+    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть|добавить|прикрепить|загрузить|выбрать)\b|"
     r"покажи.{0,55}(?:куда|путь|интерфейс|меню|на\s+картинк|на\s+изображен|по\s+шагам)|"
     r"проведи.{0,55}(?:интерфейс|сайт|раздел)|"
     r"(?:where\s+(?:is|can\s+i|do\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|show\s+me\s+where)"
@@ -1160,7 +1179,7 @@ _SITE_NAVIGATION_REQUEST_RE = re.compile(
 _SITE_NAVIGATION_TARGET_RE = re.compile(
     r"(?:сообществ|community|истори\w*\s+диалог|saved\s+dialogues?|history|"
     r"кабинет|профил|настройк|settings|account|help\s+center|справк|support|поддержк|"
-    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service)",
+    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service|чат|пространств|картинк|изображени|фото|вложен|скрепк|attachment|upload|image|picture)",
     re.IGNORECASE,
 )
 
@@ -1170,6 +1189,8 @@ def _is_site_navigation_request(text: Any) -> bool:
     if not source:
         return False
     low = source.lower().replace("ё", "е")
+    if _is_attachment_tutorial_request(source):
+        return True
     if not _SITE_NAVIGATION_TARGET_RE.search(low):
         return False
     return bool(_SITE_NAVIGATION_REQUEST_RE.search(low))
@@ -2759,6 +2780,94 @@ def _split_explicit_tasks(text: str) -> list[str]:
     return pieces or [source]
 
 
+def _has_explicit_independent_task_boundaries(text: str) -> bool:
+    """Return True only for unmistakable multi-request separators, not workflow verbs."""
+    source = _text(text)
+    if not source:
+        return False
+    if ";" in source or "；" in source:
+        return True
+    if len(re.findall(r"[?？]", source)) >= 2:
+        return True
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    if len(lines) >= 2 and sum(bool(re.match(r"^(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s+", line)) for line in lines) >= 2:
+        return True
+    return False
+
+
+def _build_action_contract_for_step(request: str, semantics: dict[str, Any], outputs: list[str], index: int) -> dict[str, Any]:
+    """Bind each sub-request to a concrete user goal, target, inputs and completion check."""
+    low = _text(request).lower().replace("ё", "е")
+    sem = semantics if isinstance(semantics, dict) else {}
+    output_names = [str(x).lower().replace("-", "_") for x in (outputs or ["text"])]
+    attach_help = _is_attachment_tutorial_request(request)
+    ui_instruction_detector = globals().get("_is_ui_instruction_request")
+    ui_help = _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
+    composite_detector = globals().get("_detect_image_compositing_request")
+    image_edit = _detect_image_modification(request) or (
+        callable(composite_detector) and bool(composite_detector(request))
+        and bool(re.search(r"(?:на\s+(?:это\s+|эту\s+|этой\s+|мою\s+)?фот\w*|фото\s+с\s+монет\w*|присланн\w*\s+фото)", low, re.I))
+    )
+    image_generation = _detect_image_generation_request(request)
+    history_detector = globals().get("_is_history_request")
+    history_action_phrase = bool(re.search(
+        r"(?:во\s+сколько\s+(?:времени\s+)?мы\s+(?:говорил\w*|обсуждал\w*|разговаривал\w*)|"
+        r"когда\s+мы\s+(?:говорил\w*|обсуждал\w*|разговаривал\w*)|"
+        r"(?:что|о\s+чем|о\s+чём)\s+мы\s+(?:сегодня\s+|вчера\s+|раньше\s+)?(?:говорил\w*|обсуждал\w*)|"
+        r"найди\w*.{0,45}(?:разговор|диалог|обсуждени|истори)|"
+        r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|conversation\s+history))",
+        low, re.I | re.S,
+    ))
+    history = bool(sem.get("history_request") or sem.get("primary_intent") in {"HISTORY_RECALL", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL"} or history_action_phrase or (callable(history_detector) and history_detector(request)))
+    if attach_help:
+        action, domain, target = "GUIDE_ATTACH_IMAGE", "april_ui", "chat.paperclip_picker"
+        must_not = ["не запускать генерацию или редактирование вместо инструкции", "не утверждать, что фото прикреплено до появления вложения и отправки сообщения"]
+        success = ["пользователь понимает, где скрепка", "пользователь различает Камера, Изображения и Файлы", "объяснено, что после выбора надо вернуться в чат и нажать отправку"]
+        outputs = list(dict.fromkeys(["text", "diagram"]))
+        source_requirement = "никакой исходный файл не требуется для инструкции"
+    elif ui_help:
+        action, domain, target = "EXPLAIN_UI_ROUTE", "april_ui", "verified_site_map"
+        must_not = ["не придумывать кнопку, раздел, URL или тариф", "для страницы без реализации честно описать статус"]
+        success = ["назвать стартовый экран и точную кнопку", "описать куда попадёт пользователь", "дать следующий шаг и безопасный путь назад"]
+        source_requirement = "APRIL_SITE_MAP и проверенные UI blueprint-описания"
+    elif history:
+        action, domain, target = "SEARCH_DIALOGUE_HISTORY", "dialogue_history", "dialogue_memory"
+        must_not = ["не подменять названную тему другой похожей темой", "не сообщать время без подходящей записи или достоверной отметки времени", "при отсутствии точного совпадения явно сказать об этом и предложить ближайшие подтверждённые совпадения"]
+        success = ["сначала сопоставить явную тему и временное окно", "вернуть только подтверждённые записи", "сохранить связь с текущим вопросом"]
+        source_requirement = "тема пользователя и/или указанное время должны совпасть с записью истории"
+    elif image_edit:
+        action, domain, target = "EDIT_EXISTING_IMAGE", "image", "explicit_source_image"
+        must_not = ["не подменять исходное фото новой картинкой", "не использовать последнюю генерацию вместо указанного исходника"]
+        success = ["привязать задачу к конкретному источнику", "при отсутствии доступного оригинала попросить прикрепить именно его", "сохранить изображение результата и связать его с этой задачей"]
+        source_requirement = "конкретное прикреплённое или найденное в той же ветке исходное изображение; не выбирать по принципу самого свежего"
+    elif image_generation:
+        action, domain, target = "GENERATE_NEW_IMAGE", "image", "new_image_output"
+        must_not = ["не выдавать текстовое описание за созданный файл", "не смешивать с просьбой редактировать существующий источник"]
+        success = ["созданный результат предъявлен как изображение", "результат и исходный запрос связаны в истории"]
+        source_requirement = "новое изображение явно запрошено пользователем"
+    elif any(name in output_names for name in ("code", "table", "graph", "diagram", "formula", "file", "link")):
+        action, domain, target = "BUILD_REQUESTED_ARTIFACT", "artifact", "requested_output_types"
+        must_not = ["не заменять запрошенный рендер одним текстовым обещанием", "сохранить все явно запрошенные типы результата"]
+        success = ["выполнены все запрошенные типы вывода", "сохранён порядок шагов"]
+        source_requirement = "входные данные и ограничения из этого шага"
+    elif sem.get("active_branch_repair") or sem.get("previous_answer_reference"):
+        action, domain, target = "REPAIR_PREVIOUS_ANSWER", "dialogue", "referenced_previous_answer"
+        must_not = ["не повторять прежний ответ без исправления", "не менять тему без просьбы пользователя"]
+        success = ["уточнено, что именно исправляется", "исправленный ответ продолжает прежнюю задачу"]
+        source_requirement = "предыдущий ответ и связанная активная ветка"
+    else:
+        action, domain, target = "ANSWER_DIRECTLY", "general", "current_request"
+        must_not = ["не притягивать несвязанные старые темы", "не терять числа, отрицания, ограничения и указанные объекты"]
+        success = ["получен прямой ответ на текущий шаг", "непрерывный смысл запроса сохранён"]
+        source_requirement = "текущий текст запроса; история только при явной ссылке или подтверждённой зависимости"
+    return {
+        "step_index": int(index), "domain": domain, "action": action, "target": target,
+        "output_types": list(outputs or ["text"]),
+        "source_requirement": source_requirement, "depends_on_previous": bool(sem.get("parent_context_dependency") or sem.get("inherits_current_request_subject")),
+        "must_not": must_not, "success_criteria": success,
+    }
+
+
 def _split_request_sequence(text: str) -> list[str]:
     """Find ordered questions/tasks without rewriting or de-duplicating user text.
 
@@ -2769,7 +2878,7 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
-    if _is_site_navigation_request(source) or _is_ui_instruction_request(source):
+    if (_is_site_navigation_request(source) or _is_ui_instruction_request(source)) and not _has_explicit_independent_task_boundaries(source):
         return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
@@ -3264,10 +3373,11 @@ def build_question_sequence(
                 "parent_intent": parent.get("primary_intent", "NEW_INFORMATION"),
                 "reason": "child_action_uses_parent_context",
             }
+        action_contract = _build_action_contract_for_step(item, item_semantics, outputs or ["text"], index)
         sequence.append({
             "step_index": index,
             "request": item,
-            "output_types": outputs or ["text"],
+            "output_types": action_contract.get("output_types") or outputs or ["text"],
             "answer_in_order": True,
             "semantic_intent": item_semantics.get("primary_intent", "NEW_INFORMATION"),
             "search_direction": item_semantics.get("direction", "ANSWER_NEW_REQUEST"),
@@ -3301,6 +3411,7 @@ def build_question_sequence(
             "parent_intent": item_semantics.get("parent_intent", ""),
             "introduces_current_request_subject": item_introduces_subject,
             "inherits_current_request_subject": inherits_current_request_subject,
+            "action_contract": action_contract,
         })
         if item_introduces_subject:
             subject_intro_seen = True
