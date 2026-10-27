@@ -140,6 +140,7 @@ When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adja
 
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
+A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
 Treat new-topic markers and explicit subject changes as a hard boundary: do not pull an unrelated hot branch into the answer.
@@ -1781,6 +1782,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "coverage_policy": _text(raw_guidance.get("coverage_policy"))[:60],
             "avoid_cross_topic_injection": bool(raw_guidance.get("avoid_cross_topic_injection", True)),
             "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
+            "waiting_acknowledgement": bool(raw_guidance.get("waiting_acknowledgement")),
+            "active_task_policy": _text(raw_guidance.get("active_task_policy"))[:80],
         }
         # Preserve request-scoped site-help knowledge even in the emergency/minimal prompt.
         # C_IT_ROOM already selects only relevant areas, so this keeps navigation usable
@@ -2970,6 +2973,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     selected_heading = _clip(selected_section.get("heading"), 100) if isinstance(selected_section, dict) else ""
     if selected_heading and use_history_coverage and selected_heading.casefold() not in {x.casefold() for x in covered_sections}:
         covered_sections.insert(0, selected_heading)
+    _current_is_waiting_acknowledgement = bool(re.fullmatch(
+        r"\s*(?:ну\s*)?(?:жду|ожидаю|жду\s+ответа|жду\s+результат\w*|долго|ну\s+и\s+что|wait(?:ing)?|i\s*wait|still\s+waiting|waiting\s+for\s+(?:it|the\s+result|the\s+image))\s*[.!?…]*\s*",
+        _text(current).lower().replace("ё", "е"), re.I,
+    ))
     continuation_guidance = {
         "mode": "HISTORY_LOOKUP" if history_request else ("CONTINUE_ACTIVE_THREAD" if relation == "CONTINUE" else "NEW_TOPIC"),
         "semantic_intent": _clip(raw_retrieval_profile.get("primary_intent") or structured_intent.get("primary_intent") or "", 60),
@@ -2983,6 +2990,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "covered_sections": covered_sections[:12],
         "selected_section": selected_heading,
         "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
+        "waiting_acknowledgement": bool(_current_is_waiting_acknowledgement or (raw_retrieval_profile.get("features") or {}).get("waiting_acknowledgement") or (raw_retrieval_profile.get("pragmatic_features") or {}).get("waiting_acknowledgement")),
+        "active_task_policy": "resume_latest_unfinished_same_dialogue_task_without_reasking" if relation == "CONTINUE" else "answer_current_request",
         "avoid_cross_topic_injection": True,
         "do_not_repeat_completed_answer_or_artifact": relation == "CONTINUE" and not history_request,
     }
@@ -3001,6 +3010,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "links": "provide real destinations with a brief explanation of relevance",
         },
         "preserve_each_explicitly_requested_renderer": True,
+        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its quota. Never create a renderer merely to meet a quota.",
         "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
     }
 
@@ -3748,7 +3758,8 @@ def normalize_render_blocks(
             "table_data": "table", "equation": "formula", "math": "formula", "latex": "formula", "math_equation": "formula",
             "source_code": "code", "code_block": "code", "script": "code",
             "file_card": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file",
-            "generated_image": "image", "image_gallery": "gallery", "screenshot": "image", "svg": "diagram", "mermaid": "diagram",
+            "generated_image": "image", "image_gallery": "gallery", "screenshot": "image",
+            "svg": "diagram", "svgblock": "diagram", "svg_block": "diagram", "mermaid": "diagram", "diagramrenderer": "diagram", "diagram_renderer": "diagram", "flowchart": "diagram", "scene": "diagram", "layout": "diagram",
         }
         block_type = aliases.get(block_type, block_type)
         explicit_3d_type = raw_block_type in {
@@ -3793,6 +3804,11 @@ def normalize_render_blocks(
         item["type"] = block_type
         item.setdefault("renderer", renderer)
         item.setdefault("viewer", viewer)
+        if block_type == "diagram":
+            _diagram_payload = item.get("payload") if isinstance(item.get("payload"), dict) else item.get("data") if isinstance(item.get("data"), dict) else payload
+            if any(isinstance(_diagram_payload.get(key), str) and _diagram_payload.get(key).strip().lower().startswith("<svg") for key in ("svg", "svg_payload", "drawing")):
+                item["renderer"] = "SvgBlock"
+                item["viewer"] = "SvgBlock"
         if block_type == "graph" and payload:
             item["payload"] = payload
             item.setdefault("representation", payload.get("representation", ""))
@@ -3808,6 +3824,10 @@ def normalize_render_blocks(
                 item.setdefault("language", "text")
                 if not _text(item.get("filename")):
                     item["filename"] = "generated-code.txt"
+
+        if block_type == "diagram" and not _premium_diagram_has_concrete_payload(item):
+            _apr_timing_log("empty_diagram_render_block_dropped", None, block_type=raw_block_type, reason="no_concrete_diagram_payload")
+            continue
 
         # Do not mount an image renderer that has no raster/vector/cache source.
         # A request to generate an image belongs to the artifact pipeline, not to
@@ -4054,25 +4074,49 @@ def _artifact_render_block(artifact: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _premium_diagram_has_concrete_payload(block: dict[str, Any]) -> bool:
-    """Reject diagram shells that contain only a label or explanatory sentence."""
-    sources = [block]
-    for key in ("payload", "data", "artifact", "render_signal", "signal", "presentation_signal"):
-        child = block.get(key)
-        if isinstance(child, dict):
-            sources.append(child)
-            if isinstance(child.get("payload"), dict):
-                sources.append(child["payload"])
-    for source in sources:
-        if any(_text(source.get(key)) for key in ("svg", "svg_payload", "drawing")):
-            return True
-        if any(isinstance(source.get(key), list) and source.get(key) for key in ("elements", "drawing_elements", "vertices", "primitives")):
-            return True
-        nodes, edges = source.get("nodes"), source.get("edges")
-        if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and edges:
-            return True
-        shape = _text(source.get("shape") or source.get("kind") or source.get("diagram_type")).lower().replace("-", "_").replace(" ", "_")
-        if shape in {"triangle", "equilateral_triangle", "square", "rectangle", "parallelogram", "circle", "sphere", "cube"}:
-            return True
+    """Reject diagram shells while retaining valid SVG, Mermaid and geometry payloads."""
+    queue: list[Any] = [block]
+    seen: set[int] = set()
+    drawable_tag = re.compile(r"<(?:path|rect|circle|ellipse|polygon|polyline|line|image|use)\b", re.I)
+    nested_keys = ("payload", "data", "artifact", "artifact_payload", "render_signal", "signal", "presentation_signal", "diagram", "graph", "payload_contract", "render", "spec")
+    for _ in range(6):
+        if not queue:
+            break
+        next_queue: list[Any] = []
+        for source in queue:
+            if isinstance(source, list):
+                next_queue.extend(item for item in source if isinstance(item, (dict, list)))
+                continue
+            if not isinstance(source, dict) or id(source) in seen:
+                continue
+            seen.add(id(source))
+            for key in nested_keys:
+                child = source.get(key)
+                if isinstance(child, (dict, list)):
+                    next_queue.append(child)
+            for key in ("svg", "svg_payload", "drawing"):
+                value = source.get(key)
+                if not isinstance(value, str):
+                    continue
+                svg = value.strip()
+                if svg.lower().startswith("<svg") and len(svg) >= 180 and len(drawable_tag.findall(svg)) >= 2:
+                    return True
+            source_text = " ".join(_text(source.get(key)) for key in ("diagram", "mermaid", "flowchart", "source", "code", "content", "text"))
+            if source_text and re.search(r"(?:-->|---|flowchart\s+(?:LR|RL|TB|TD|BT)|graph\s+(?:LR|RL|TB|TD|BT))", source_text, re.I):
+                return True
+            nodes = source.get("nodes") or source.get("components") or source.get("vertices")
+            edges = source.get("edges") or source.get("connections") or source.get("relations")
+            if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and edges:
+                return True
+            if any(isinstance(source.get(key), list) and len(source[key]) >= 2 for key in ("elements", "drawing_elements", "drawingElements", "primitives")):
+                return True
+            geometry = source.get("geometry")
+            if isinstance(geometry, dict) and any(isinstance(geometry.get(key), list) and len(geometry[key]) >= 2 for key in ("vertices", "elements", "primitives")):
+                return True
+            shape = _text(source.get("shape") or source.get("kind") or source.get("diagram_type")).lower().replace("-", "_").replace(" ", "_")
+            if shape in {"triangle", "equilateral_triangle", "square", "rectangle", "parallelogram", "circle", "sphere", "cube"}:
+                return True
+        queue = next_queue
     return False
 
 
