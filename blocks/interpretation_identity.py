@@ -509,10 +509,21 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"состав\w*|вывед\w*|представ\w*|нарис\w*)"
     )
     table_request = bool(
-        re.search(table_action + r".{0,60}" + table_noun, low, flags=re.IGNORECASE)
-        or re.search(table_noun + r".{0,60}" + table_action, low, flags=re.IGNORECASE)
+        re.search(table_action + r".{0,120}" + table_noun, low, flags=re.IGNORECASE | re.DOTALL)
+        or re.search(table_noun + r".{0,120}" + table_action, low, flags=re.IGNORECASE | re.DOTALL)
     )
-    if table_request and "table" not in outputs:
+    # Voice transcripts and compound turns often put the table noun and action
+    # in different clauses: "в таблице, вывел каждую ... выдай всю таблицу
+    # Менделеева". Treat the requested view as cumulative, not as plain text.
+    table_grid_request = bool(re.search(
+        r"(?:периодическ\w*.{0,80}таблиц\w*|таблиц\w*.{0,80}(?:менделеев\w*|периодическ\w*)|"
+        r"(?:всю|полную|все\s+118|все\s+элемент\w*).{0,45}таблиц\w*|"
+        r"таблиц\w*.{0,80}(?:ячейк\w*|окошк\w*|порядков\w+\s+номер\w*|атомн\w+\s+номер\w*)|"
+        r"(?:show|display|list|print|give|provide|build|create).{0,60}(?:periodic\s+table)|"
+        r"(?:full\s+periodic\s+table).{0,50}(?:table|elements))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if (table_request or table_grid_request) and "table" not in outputs:
         outputs.append("table")
 
     # Semantic visual policy: generic drawing verbs do not imply raster image
