@@ -4217,16 +4217,19 @@ def prepare_render_blocks_for_room_dispatch(
             "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_experiment_steps",
         })
         existing_types.add("diagram")
-    # For a broad educational answer without explicit experiment-step bullets,
-    # render the answer's own headings as a structure diagram. This is an index
-    # of the answer's sections, not an invented scientific process or causal model.
-    if "diagram" in requested and "diagram" not in existing_types:
+    # An outline diagram is opt-in. Automatically drawing the answer's headings
+    # duplicates the same structure the user just read and adds no new evidence.
+    outline_requested = bool(re.search(
+        r"(?:структур\w*\s+(?:ответ\w*|тем\w*|разговор\w*|обсужден\w*)|карта\s+(?:тем|разделов|мыслей|ответа)|mind\s*map|answer\s+outline|outline\s+of\s+the\s+answer)",
+        current_request.lower().replace("ё", "е"),
+    ))
+    if outline_requested and "diagram" in requested and "diagram" not in existing_types:
         outline_diagram = _section_outline_diagram(section_outline)
         if outline_diagram and _has_render_payload("diagram", outline_diagram):
             prepared.append({
                 "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
                 "viewer": "DiagramRenderer", "payload": outline_diagram,
-                "source_room": "C_ARTIFACT_CONTRACT", "source": "same_turn_answer_section_outline",
+                "source_room": "C_ARTIFACT_CONTRACT", "source": "explicit_answer_section_outline_request",
             })
             existing_types.add("diagram")
     # A requested source gallery may be absent as a separate block even though
