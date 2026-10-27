@@ -6928,6 +6928,19 @@ def search_dialogue_context(
         key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
         default=None,
     )
+    # A correction like “you used green, I asked for red” changes an attribute of
+    # the active visual, not the topic. The exception is intentionally gated by
+    # both a revision act and an image annotation target plus a same-dialog anchor.
+    visual_edit_revision = bool(
+        latest_route_row
+        and re.search(r"\b(?:передел\w*|исправ\w*|поправ\w*|перерис\w*|замени\w*|я\s+(?:же\s+)?просил\w*|я\s+(?:же\s+)?просила\w*|не\s+так|wrong|redo|revise|i\s+asked|change\s+it)\b", query, re.I)
+        and re.search(r"(?:стрелк\w*|указател\w*|pointer|arrow|цвет\w*|красн\w*|зелен\w*|red|green|кнопк\w*|подсвет\w*|выдел\w*|куда\s+нажать|highlight|marker)", query, re.I)
+        and bool(re.search(r"(?:visual_creation_or_editing|image|картинк|изображен|screenshot|скриншот|стрелк|arrow)", _text(latest_route_row.get("active_work_kind") or latest_route_row.get("artifact_kind") or latest_route_row.get("user_text") or latest_route_row.get("user") or latest_route_row.get("topic")), re.I)
+                 or latest_route_row.get("render_blocks") or latest_route_row.get("artifacts"))
+    )
+    if visual_edit_revision:
+        route_is_repair = True
+        route_is_contextual = True
     latest_route_subjects = _row_subject_tokens(latest_route_row) if latest_route_row else set()
     # If the user refers to the current subject by pronoun/deixis and does not
     # introduce another subject, nouns naming the requested output or an attribute
@@ -6951,7 +6964,7 @@ def search_dialogue_context(
             or not route_subject_conflict
             or bool(route_features.get("context_dependent_question"))
         )
-        and not (is_correction and bool(positive_replacement))
+        and not (is_correction and bool(positive_replacement) and not visual_edit_revision)
     )
     underspecified_turn = bool(
         not route_query_subjects
