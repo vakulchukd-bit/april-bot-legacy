@@ -331,7 +331,7 @@ If CLARIFICATION_RESOLUTION
 exists, honor its original_request and treat CURRENT_REQUEST as a clarification reply, not a replacement
 intent. For status topic_not_found or needs_more_detail, apologize briefly and say no clear match was found in saved history,
 without claiming the topic definitely never came up; don't repeat old options, and ask for a couple of concrete hints. Keep any resolved topic active.
-Use compact section maps to know what was already covered and how to deepen it. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW with no ACTIVE_WORK_BRANCH, answer independently. If ACTIVE_WORK_BRANCH is supplied, follow its validated task state unless the current request clearly switches topic. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
+Use compact section maps to know what was already covered and how to deepen it. Each REQUEST_SEQUENCE step may include an `a` action contract; in a flattened long request manifest the same contract may appear as `|act=ACTION:TARGET`. Treat its action, target, source_requirement, must_not and success_criteria as binding for that step; execute multiple steps in order and keep each step's intended operation distinct. An attachment tutorial such as how to add a photo to the chat is navigation help, not an image-generation/editing request. For image edits, bind the operation to the specifically referenced source image, never simply to the most recently generated asset. For named-history or time questions, match the requested subject/time against the selected records; if no matching record exists, say so rather than answering from a different topic. Do not repeat answered sections verbatim. If PROTECTED_STRUCTURED_DATA is present, preserve only its selected source values exactly; compress ordinary explanation and history as usual. If PROTECTED_CURRENT_INPUT is present, read the separately labeled PROTECTED_CURRENT_INPUT_SOURCE input_text part as the lossless authoritative source for the current structured/numeric request: preserve all values/rows/coordinates/formulas/order and never recreate missing data from a summary. That source body is outside the structured-card compaction budget but still counts toward actual API input usage. On NEW with no ACTIVE_WORK_BRANCH, answer independently. If ACTIVE_WORK_BRANCH is supplied, follow its validated task state unless the current request clearly switches topic. For each REQUEST_SEQUENCE item, prefer its own dialogue_search relation/context (or compact r/c fields) over the top-level relation. A NEW item must not inherit another item's prior-history context. When compact flag p=true, inherit only the explicit subject from CURRENT_REQUEST and do not import prior records or structured values for that item. If one item needs clarification, answer all clear items and ask only about the unresolved item. Use topic history only when
 HISTORY_REQUEST=true. For HISTORY_REQUEST=true with a named subject/task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS, and CONTINUATION_CONTEXT as factual evidence even though the relation can remain NEW. Honor HISTORY_TOPIC_MINIMUM and HISTORY_TOPIC_COUNT; default to up to 10 topics, show at least five when five or more distinct entries exist, and report the actual smaller count when fewer exist. Never invent topics. Use HISTORY_TIME_WINDOW as the requested scope after Premium's 24-hour retention cap. Preserve topic_id/origin_message_id/source_message_id bindings when resuming a topic or restoring its table, graph, image or other saved data. Ask for hints only if no matching stored entry/pair is supplied. Enumerate a topic list only when the user asks for a general history overview. For REQUEST_SEQUENCE items marked p=true, resolve pronouns from the explicit subject in CURRENT_REQUEST, without importing prior-history context. For multi-section
 explanations, use user-visible Markdown headings and put the same ordered heading/summary map in
 dialogue_memory_record.sections.
@@ -1952,6 +1952,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "r": task_search.get("relation", "NEW"),
                 "p": bool(item.get("inherits_current_request_subject")),
                 "c": search_min,
+                "a": {k: v for k, v in (item.get("action_contract") or {}).items()
+                      if k in {"step_index", "domain", "action", "target", "source_requirement", "depends_on_previous", "must_not", "success_criteria"}},
             })
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
@@ -2249,6 +2251,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 relation_hint = _text(compact_search.get("relation") or "NEW")[:4]
                 flags_hint = ("A" if compact_profile.get("prefer_active_branch") else "") + ("P" if compact_profile.get("previous_answer_reference") else "") + ("X" if compact_profile.get("avoid_cross_topic_injection", True) else "")
                 cue = f"|ctx={relation_hint},{mode_hint},{intent_hint},{seed_hint},{ids_hint},{coverage_hint},{flags_hint}" if (relation_hint != "NEW" or mode_hint or intent_hint or seed_hint) else ""
+                action_contract = item.get("action_contract") if isinstance(item.get("action_contract"), dict) else {}
+                action_tag = _text(action_contract.get("action") or "")[:28]
+                target_tag = _text(action_contract.get("target") or "")[:34]
+                action_cue = f"|act={action_tag}:{target_tag}" if action_tag else ""
+                cue += action_cue
                 if outputs.strip().lower() == "text":
                     compact_lines.append(f"{step_index}|{request_text}{cue}")
                 else:
@@ -2263,6 +2270,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "r": ((item.get("dialogue_search") or {}).get("relation", "NEW") if isinstance(item.get("dialogue_search"), dict) else "NEW"),
                     "p": bool(item.get("inherits_current_request_subject")),
                     "c": _compact_search_context(item, tiny_topic_budget),
+                    "a": {k: v for k, v in (item.get("action_contract") or {}).items()
+                          if k in {"step_index", "domain", "action", "target", "source_requirement", "depends_on_previous", "must_not", "success_criteria"}},
                 }
                 for idx, item in enumerate(original_sequence) if isinstance(item, dict)
             ]
