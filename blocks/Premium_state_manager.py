@@ -4604,8 +4604,19 @@ def search_dialogue_context(
     candidate_started = time.perf_counter()
     scoring_rows = rows
     light_prefilter_used = False
+    # A general inventory request (“what did we discuss today/yesterday?”) is
+    # served from the chronological topic index and needs no O(history) fuzzy
+    # scoring of every row. Named-topic history searches still get full ranking.
+    history_inventory_fast_path = bool(
+        history_request and (
+            bool(query_interpretation.get("history_inventory_request"))
+            or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or not _history_query_topic_tokens(query)
+        )
+    )
     needs_full_candidate_rank = bool(
-        history_request or needs_structured_search or _is_section_request(query)
+        (history_request and not history_inventory_fast_path)
+        or needs_structured_search or _is_section_request(query)
         or query_modalities or is_correction or is_short_acknowledgement
         or reference_followup or explicit_artifact_followup or resume_key
         or continuation_intent or pending_clarification
@@ -4661,6 +4672,7 @@ def search_dialogue_context(
         "candidate_score_rank", candidate_started,
         total_scoped_rows=len(rows), candidates_scored=len(scoring_rows), matches=len(matches),
         lightweight_prefilter=light_prefilter_used,
+        history_inventory_fast_path=history_inventory_fast_path,
     )
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
