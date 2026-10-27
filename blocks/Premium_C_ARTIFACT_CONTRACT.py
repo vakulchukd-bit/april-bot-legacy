@@ -3548,10 +3548,38 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
                 merged.update(parsed_mermaid)
     # Some older render blocks placed transfer data directly on the envelope.
     # Preserve actual content/URLs but never treat a filename alone as file data.
-    for key in ("file_data_uri", "data_uri", "file_base64", "base64", "download_url", "file_url", "source", "content"):
+    for key in ("file_data_uri", "data_uri", "file_base64", "base64", "download_url", "file_url", "source", "content", "text", "markdown", "latex", "formula", "equation", "expression", "math"):
         value = block.get(key)
         if key not in merged and value not in (None, "", [], {}):
             merged[key] = deepcopy(value)
+
+    # FormulaRenderer validates canonical math fields, not the transport's generic
+    # `content` / `text` aliases. Promote an explicitly typed formula block without
+    # changing the mathematical expression; otherwise SceneContract can silently
+    # discard a real formula and leave only its surrounding prose.
+    if block_type == "formula":
+        expression = next((
+            str(merged.get(key) or "").strip()
+            for key in ("formula", "latex", "equation", "expression", "math", "content", "text", "display_text", "markdown")
+            if str(merged.get(key) or "").strip()
+        ), "")
+        if expression and len(expression) <= 4000:
+            merged.setdefault("formula", expression)
+            merged.setdefault("latex", expression)
+            if not isinstance(merged.get("formulas"), list) or not merged.get("formulas"):
+                merged["formulas"] = [expression]
+
+    # Accept a direct Mermaid/SVG source on a diagram's generic text aliases.
+    # Diagram payload parsing happens before this adapter in older responses, so
+    # repeat it after aliases are normalized to avoid dropping valid diagrams.
+    if block_type == "diagram" and not (merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or merged.get("nodes")):
+        direct_source = str(merged.get("mermaid") or merged.get("source") or merged.get("content") or merged.get("text") or merged.get("markdown") or "").strip()
+        if direct_source.lstrip().lower().startswith("<svg"):
+            merged["svg"] = direct_source
+        elif direct_source and re.search(r"(?im)^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|mindmap|timeline)\b", direct_source):
+            parsed_mermaid = _mermaid_payload(direct_source)
+            if isinstance(parsed_mermaid, dict) and parsed_mermaid:
+                merged.update(parsed_mermaid)
     if merged:
         return merged
     keys = (WEB_RENDERER_REGISTRY.get(block_type) or {}).get("payload_keys") or []
