@@ -203,18 +203,21 @@ _IMAGE_MODIFICATION_MARKERS = {
 
 _IMAGE_EDIT_ACTION_RE = re.compile(
     r"\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|"
-    r"draw|redraw|paint|place|move|crop|enhance|"
+    r"draw|redraw|paint|place|move|crop|enhance|mark|point|annotate|highlight|outline|circle|redo|revise|"
     r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
     r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|"
-    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|сделай|сделать)\b",
+    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
+    r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|сделай|сделать|поправ\w*)\b",
     re.IGNORECASE,
 )
 _IMAGE_EDIT_TARGET_RE = re.compile(
     r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
     r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
-    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|объект\w*|"
-    r"check\s?mark|tick|background|quality|sharpen|contrast|brightness|text|logo|realistic|remove)",
+    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|стрелк\w*|указател\w*|маркер\w*|"
+    r"кнопк\w*|точк\w*|област\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
+    r"check\s?mark|tick|arrow|pointer|marker|highlight|annotat\w*|outline|circle|button|click|"
+    r"background|quality|sharpen|contrast|brightness|text|logo|realistic|remove|red|green)",
     re.IGNORECASE,
 )
 
@@ -227,7 +230,22 @@ def _detect_contextual_image_edit(text: str) -> bool:
     arbitrary short instruction into a raster-generation request.
     """
     low = _text(text).lower().replace("ё", "е")
-    return bool(_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low))
+    # An attribute correction (e.g. the pointer was green but should be red) is
+    # an edit intent even when the user omits the word "изменить".
+    visual_target = bool(re.search(
+        r"(?:стрелк\w*|arrow|указател\w*|pointer|маркер\w*|marker|цвет\w*|красн\w*|зелен\w*|red|green|обводк\w*|highlight|кнопк\w*|button|надпис\w*|text)",
+        low, re.IGNORECASE,
+    ))
+    revision_of_visual = bool(
+        re.search(r"(?:передел\w*|исправ\w*|поправ\w*|я\s+просил\w*|я\s+просила|не\s+то|вместо|wrong|redo|revise|i\s+asked|not\s+the)", low, re.IGNORECASE)
+        and visual_target
+    )
+    natural_desired_visual = bool(
+        re.search(r"(?:хочу\w*|хотел\w*|хотела|мне\s+нужно|мне\s+надо|пусть|чтобы|i\s+want|i(?:'d|\s+would)\s+like)", low, re.IGNORECASE)
+        and visual_target
+        and re.search(r"(?:на\s+(?:этой\s+|присланной\s+|предыдущей\s+)?(?:картинк\w*|изображени\w*|фото|скриншот\w*)|\bon\s+(?:this\s+)?(?:picture|image|photo|screenshot)\b|(?:стрелк\w*|кнопк\w*|arrow|button))", low, re.IGNORECASE)
+    )
+    return bool((_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low)) or revision_of_visual or natural_desired_visual)
 
 
 def _should_generate_instead_of_requesting_missing_source(text: str) -> bool:
@@ -327,7 +345,7 @@ def _detect_image_modification(text: str) -> bool:
         r"(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|draw|redraw|paint|"
         r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
         r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
-        r"нарис\w*)"
+        r"нарис\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*)"
     )
     image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
     # Explicit image target can appear after an action ("нарисуй на фото") or
@@ -1822,9 +1840,13 @@ def _infer_dialogue_act_profile(
     positive_evaluation = short and has_phrase(positive_terms)
     dissatisfaction = has_phrase(dissatisfaction_terms)
     revision_request = has_phrase(revision_terms) and short
-    acknowledgement = short and any(
+    waiting_acknowledgement = bool(re.fullmatch(
+        r"\s*(?:ну\s*)?(?:жду|ожидаю|жду\s+ответа|жду\s+результат\w*|долго|ну\s+и\s+что|wait(?:ing)?|i\s*wait|still\s+waiting|waiting\s+for\s+(?:it|the\s+result|the\s+image))\s*[.!?…]*\s*",
+        low, flags=re.IGNORECASE,
+    ))
+    acknowledgement = short and (waiting_acknowledgement or any(
         token in agreement_terms or token.startswith(("соглас", "правиль", "точн")) for token in tokens
-    ) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
+    )) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
     negation = short and (
         any(token in rejection_terms for token in tokens)
         or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
@@ -1863,6 +1885,7 @@ def _infer_dialogue_act_profile(
         not explicit_topic_introduction
         and (
             (acknowledgement and len(tokens) <= 5 and not has_independent_payload)
+            or waiting_acknowledgement
             or (gratitude and not has_independent_payload)
             or (positive_evaluation and not has_independent_payload)
             or correction_of_active
@@ -1943,6 +1966,7 @@ def _infer_dialogue_act_profile(
         "pragmatic_intent": speech_act.lower(),
         "message_function": communicative_act.lower(),
         "context_dependent_reaction": context_dependent_reaction,
+        "waiting_acknowledgement": bool(waiting_acknowledgement),
         "topic_reference_fragment": bool(topic_reference_fragment),
         "previous_answer_reference": bool(previous_answer_reference),
         "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
@@ -1955,6 +1979,7 @@ def _infer_dialogue_act_profile(
         ),
         "pragmatic_features": {
             "acknowledgement_or_agreement": bool(acknowledgement),
+            "waiting_acknowledgement": bool(waiting_acknowledgement),
             "bare_acknowledgement": bool(acknowledgement and len(tokens) <= 2 and not has_independent_payload),
             "negation_or_disagreement": bool(negation),
             "correction": bool(correction),
@@ -3195,8 +3220,8 @@ def build_interpretation(
     source_image_available = bool(
         has_original_image
         and any(
-            isinstance(item.get("image_url") or item.get("data_uri") or item.get("src"), str)
-            and str(item.get("image_url") or item.get("data_uri") or item.get("src")).startswith("data:image/")
+            isinstance(item.get("image_url") or item.get("data_uri") or item.get("src") or item.get("image_data_uri") or item.get("_content_data_uri"), str)
+            and str(item.get("image_url") or item.get("data_uri") or item.get("src") or item.get("image_data_uri") or item.get("_content_data_uri")).startswith("data:image/")
             for item in visual_context if isinstance(item, dict)
         )
     )
