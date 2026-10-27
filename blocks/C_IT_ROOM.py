@@ -89,6 +89,12 @@ APRIL_SITE_MAP = {
             "related": ["history", "settings", "guide"]
         },
         {
+            "id": "image-controls", "path": "/", "label": "Действия с изображением в чате",
+            "purpose": "Управление уже созданной картинкой в основном чате April. В GalleryBlock.tsx изображение имеет кнопку меню действий в правой верхней части карточки; меню содержит действия Download to device / Скачать на устройство и Share / Поделиться. Это операция с существующим изображением, а не запрос на генерацию новой картинки.",
+            "steps": ["Откройте основной чат April (/), где уже показана нужная картинка.", "Найдите на карточке изображения маленькую квадратную кнопку меню действий в правом верхнем углу картинки. Её доступное название в интерфейсе — Open content actions menu / Открыть меню действий с материалом.", "Нажмите эту кнопку. В меню изображения выберите «Скачать на устройство» (Download to device), чтобы сохранить файл, либо «Поделиться» (Share), чтобы передать его через доступные на телефоне приложения.", "Если меню не открылось, изображение не появилось или кнопки нет на текущей версии экрана, не удерживайте палец на самой картинке в надежде на системное меню: отправьте April скриншот текущего экрана и попросите уточнить путь именно для этой версии интерфейса."],
+            "related": ["chat", "guide", "support"]
+        },
+        {
             "id": "history", "path": "/history", "label": "История диалогов",
             "purpose": "Просмотр сохранённых диалогов, индекса тем и возврат к выбранному сообщению/теме. Доступ к истории проверяется по Premium; если доступ закрыт или статус тарифа не подтверждён, обновите страницу и проверьте Premium в настройках.",
             "steps": ["Откройте [Saved dialogues / История диалогов](/history) через профиль или прямую ссылку.", "Прокручивайте список сохранённых записей; карточка содержит время, заголовок/фрагмент текста и номер записи.", "Нажмите «Continue this dialogue» у нужной карточки, чтобы продолжить именно тот диалог. Не путайте историю с кратковременной памятью активного чата.", "Если запись не видна, проверьте период и статус тарифа; если раздел показывает Connected в Memory Status, это само по себе не означает, что отдельная страница памяти содержит список всех диалогов."],
@@ -194,9 +200,15 @@ APRIL_SITE_MAP = {
 APRIL_UI_BLUEPRINTS = {
     "chat": {
         "screen_id": "chat", "screen_title": "Основной чат April",
-        "visible_controls": ["APRIL header", "profile / Log in", "paperclip attachment", "message field", "send arrow", "microphone"],
-        "screen_flow": ["Верхняя панель April и профиль", "Рабочая область разговора", "Нижняя панель: вложение, поле сообщения, отправка и голос", "Если ответ неполный или не по запросу, уточнить пропущенную часть в той же беседе; не требуется повторять всю задачу или использовать конкретную команду-слово", "Для правки созданного изображения сослаться на картинку из текущего контекста и описать желаемый вид, объект и цвет; при наличии оригинала и разрешённого тарифа править источник, а не заменять его декоративной картинкой", "Если ответ пустой/завис, дождаться окончания операции и один раз обновить страницу; при повторении перейти в Contact Support из профиля или справки"],
-        "semantic_concepts": ["написать April", "отправить вопрос", "пустой чат", "поле ввода", "голосовое сообщение", "начать беседу", "ответ завис", "крутится индикатор", "пустой ответ", "не отвечает", "продолжи", "я жду", "покажи на этой картинке", "image annotation", "message", "send", "microphone", "login", "log in"]
+        "visible_controls": ["APRIL header", "profile / Log in", "paperclip attachment", "message field", "send arrow", "microphone", "square image-action menu in the top-right of a rendered gallery image", "Download to device", "Share"],
+        "screen_flow": ["Верхняя панель April и профиль", "Рабочая область разговора", "Нижняя панель: вложение, поле сообщения, отправка и голос", "Для уже отрисованной картинки нажать квадратную кнопку меню действий в правом верхнем углу карточки и выбрать «Скачать на устройство» или «Поделиться»", "Если ответ неполный или не по запросу, уточнить пропущенную часть в той же беседе; не требуется повторять всю задачу или использовать конкретную команду-слово", "Для правки созданного изображения сослаться на картинку из текущего контекста и описать желаемый вид, объект и цвет; при наличии оригинала и разрешённого тарифа править источник, а не заменять его декоративной картинкой", "Если ответ пустой/завис, дождаться окончания операции и один раз обновить страницу; при повторении перейти в Contact Support из профиля или справки"],
+        "semantic_concepts": ["написать April", "отправить вопрос", "пустой чат", "поле ввода", "голосовое сообщение", "начать беседу", "ответ завис", "крутится индикатор", "пустой ответ", "не отвечает", "продолжи", "я жду", "покажи на этой картинке", "скачать изображение", "меню изображения", "поделиться картинкой", "image annotation", "message", "send", "microphone", "login", "log in"]
+    },
+    "image-controls": {
+        "screen_id": "image-controls", "screen_title": "Действия с изображением в чате",
+        "visible_controls": ["Карточка уже созданного изображения", "Квадратная кнопка меню действий в правом верхнем углу карточки", "Открыть меню действий с материалом", "Скачать на устройство", "Поделиться"],
+        "screen_flow": ["Открыть основной чат и найти уже созданную картинку", "Нажать квадратную кнопку меню действий в правом верхнем углу карточки изображения", "В меню выбрать «Скачать на устройство» либо «Поделиться»", "Не запускать повторную генерацию только для того, чтобы скачать существующую картинку; если кнопка отсутствует, проверить версию экрана и приложить скриншот"],
+        "semantic_concepts": ["скачать картинку", "сохранить изображение", "скопировать картинку", "поделиться картинкой", "меню действий изображения", "кнопка скачать", "download image", "save image", "share image"],
     },
     "attachments": {
         "screen_id": "attachments", "screen_title": "Добавить вложение",
@@ -275,6 +287,8 @@ for _area in APRIL_SITE_MAP.get("areas", []):
         _blueprint_key = "plans"
     elif _area_id == "chat":
         _blueprint_key = "chat"
+    elif _area_id == "image-controls":
+        _blueprint_key = "image-controls"
     elif _area_id == "history":
         _blueprint_key = "history"
     elif _area_id in {"settings", "memory"}:
@@ -292,6 +306,7 @@ _SITE_CONCEPT_ALIASES = {
     "space": ("люди", "другие пользователи", "публичная переписка", "общий чат", "пост", "участник", "private chat", "community"),
     "settings": ("личный кабинет", "учётная запись", "параметры аккаунта", "поменять ник", "сменить имя", "язык интерфейса", "тариф", "подписка", "april id", "premium id"),
     "attachments": ("скрепка", "прикрепить", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload"),
+    "image-controls": ("скачать картинку в чате", "сохранить изображение", "скопировать картинку из чата", "поделиться изображением", "меню изображения", "кнопка скачивания картинки", "download image", "save picture", "share image"),
     "help": ("инструкция", "документация", "частые вопросы", "правила сервиса", "как пользоваться", "справочный раздел", "help center", "how to use"),
     "support": ("пожаловаться", "обратиться за помощью", "сообщить об ошибке", "зависла", "залипла", "ошибка интерфейса", "support request"),
     "deletion": ("стереть информацию", "удалить профиль", "удалить сведения", "delete account", "data deletion"),
@@ -352,6 +367,7 @@ _SITE_HELP_SIGNALS = (
 # The complete map above remains the canonical source; no user topic is hard-coded.
 _SITE_AREA_HINTS = {
     "chat": ("главный чат", "основной чат", "чат с april", "chat", "написать april", "поле сообщения", "отправить вопрос", "вложен", "голос"),
+    "image-controls": ("картинк", "изображени", "фото", "скачат", "сохран", "скопир", "поделиться", "download", "save", "share", "кнопка действий"),
     "history": ("истор", "history", "сохраненн", "прошл", "старый диалог", "предыдущ", "восстанов", "продолж", "saved dialogues", "saved dialogs"),
     "memory": ("памят", "memory", "запом", "срок хранения", "окно памяти"),
     "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен"),
@@ -370,21 +386,23 @@ _SITE_AREA_HINTS = {
 
 
 _SITE_NAVIGATION_ACTION_RE = re.compile(
-    r"(?:куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|открыть)|как\s+(?:зайти|попасть|перейти|открыть|найти|посмотреть|просмотреть)|"
+    r"(?:куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|открыть)|как\s+(?:зайти|попасть|перейти|открыть|найти|посмотреть|просмотреть|скачать|сохранить|скопировать|поделиться)|"
+    r"как.{0,70}?(?:скача\w*|сохран\w*|скопир\w*|поделит\w*|download|save|copy|share)|"
     r"где\s+(?:(?:у\s+(?:меня|тебя|вас|april|април)\s+)?(?:находится|расположен|найти|открыть|посмотреть|вход|кнопк|ссылк)|.{0,55}(?:вход|кнопк|ссылк))|покажи\s+(?:мне\s+)?(?:куда|путь|раздел|ссылк)|"
     r"проведи\s+меня|как\s+пользоваться|по\s+сайту|по\s+интерфейсу|навигац|"
-    r"where\s+(?:do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|where\s+is|show\s+me\s+where)",
+    r"where\s+(?:do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate|download|save|copy|share)|how\s+to\s+(?:download|save|copy|share)|where\s+is|show\s+me\s+where)",
     re.IGNORECASE,
 )
 def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None) -> bool:
     """Route visual questions about April UI to its real SVG navigation map."""
     low = str(query or "").strip().lower().replace("ё", "е")
     referenced_ids = {str(value).strip().lower() for value in (referenced_area_ids or []) if str(value).strip()} if isinstance(referenced_area_ids, (list, tuple, set)) else set()
-    ui_target = bool(referenced_ids.intersection({"space", "history", "settings", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "memory", "chat"})) or bool(re.search(
+    ui_target = bool(referenced_ids.intersection({"space", "history", "settings", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "memory", "chat", "image-controls"})) or bool(re.search(
         r"(?:сообществ\w*|community|saved\s+dialogues?|истори\w*\s+диалог\w*|history|"
         r"кабинет|профил\w*|настройк\w*|settings|account|help\s+center|справк\w*|"
         r"support|поддержк\w*|тариф\w*|premium|памят\w*|удален\w*\s+аккаунт|"
-        r"privacy\s+policy|terms\s+of\s+service|chat\s+with\s+april|основн\w*\s+чат)",
+        r"privacy\s+policy|terms\s+of\s+service|chat\s+with\s+april|основн\w*\s+чат|"
+        r"картинк\w*|изображени\w*|фото|image|picture|скача\w*|сохран\w*|скопир\w*|поделит\w*|download|share)",
         low, re.IGNORECASE,
     ))
     if not ui_target or _SITE_NO_DIAGRAM_RE.search(low):
@@ -419,11 +437,20 @@ def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None
         )
         and re.search(
             r"(?:стрелк\w*|указател\w*|куда\s+нажать|показ\w*\s+путь|истори\w*\s+диалог\w*|"
-            r"сообществ\w*|community|saved\s+dialogues?|history|кнопк\w*)",
+            r"сообществ\w*|community|saved\s+dialogues?|history|кнопк\w*|скача\w*|сохран\w*|"
+            r"скопир\w*|поделит\w*|download|save|copy|share|в\s+чате|на\s+телефон\w*)",
             low, re.IGNORECASE,
         )
     )
-    return asks_visual_path or asks_to_annotate_ui_path or bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(low))
+    # For an interface tutorial, a user may name the existing image before saying
+    # "show/point out how to save it". Route this to April's SVG control map, not
+    # to a new raster image, even when the action words appear in reverse order.
+    asks_image_control_path = bool(
+        re.search(r"(?:картинк\w*|изображени\w*|фото\b|picture\w*|image\w*|photo\w*)", low, re.I)
+        and re.search(r"(?:скача\w*|сохран\w*|скопир\w*|поделит\w*|download|save|copy|share)", low, re.I)
+        and re.search(r"(?:покаж\w*|укаж\w*|отмет\w*|стрелк\w*|куда\s+нажать|show|point\s+out|mark)", low, re.I)
+    )
+    return asks_visual_path or asks_to_annotate_ui_path or asks_image_control_path or bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(low))
 
 
 _SITE_ROUTE_WORDS = (
@@ -461,7 +488,8 @@ def is_site_help_query(query: str) -> bool:
     ui_target = bool(re.search(
         r"(?:кабинет|профил|аккаунт|раздел|кнопк|меню|сайт|интерфейс|страниц|истор|диалог|сообществ|"
         r"тариф|подписк|памят|удален|поддержк|функци|возможност|как работает|как устроен|умеет|умеешь|"
-        r"community|profile|account|settings|history|support|help center|features|capabilities|how does april work)",
+        r"community|profile|account|settings|history|support|help center|features|capabilities|how does april work|"
+        r"картинк|изображени|фото|image|picture|скача|сохран|скопир|поделиться|download|save|copy|share)",
         low,
     ))
     return bool(_SITE_NAVIGATION_ACTION_RE.search(low) and ui_target)
@@ -1005,6 +1033,8 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
         low, re.IGNORECASE,
     ))
     shortcut_targets = ids.intersection({"history", "space", "support", "plans", "deletion", "privacy", "terms", "guide", "help-center", "how-to-use"})
+    if "image-controls" in ids:
+        return "chat"
     if "settings" in ids and shortcut_targets and (entry_request or len(shortcut_targets) > 1):
         return "profile"
     # A source-image annotation is handled by the image-edit branch, not this screen map.
