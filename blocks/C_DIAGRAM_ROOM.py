@@ -983,13 +983,18 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
 
 
 def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str:
-    """Render route data as a compact April-like UI card, not a generic tiny graph."""
+    """Render a screenshot-faithful April screen/path as a readable mobile SVG.
+
+    The selected template comes from C_IT_ROOM's source-derived ``screen_id`` and
+    blueprints. It does not make up destination controls or reuse a profile template
+    for unrelated screens such as attachments or Help & Information.
+    """
     nodes_raw = payload.get("nodes") or payload.get("components") or payload.get("vertices")
     if not isinstance(nodes_raw, list) or not nodes_raw:
         return ""
     normalized = []
     seen = set()
-    for index, raw in enumerate(nodes_raw[:8]):
+    for index, raw in enumerate(nodes_raw[:10]):
         node = dict(raw) if isinstance(raw, dict) else {"label": _text(raw)}
         node_id = _text(node.get("id") or node.get("key") or f"node_{index + 1}")
         href = _text(node.get("href") or node.get("path"))
@@ -1004,75 +1009,362 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
     if len(normalized) < 2:
         return ""
 
-    profile = next((item for item in normalized if item["id"].lower() == "settings" or item["href"] == "/settings"), None)
-    routes = [item for item in normalized if item is not profile and item["href"] and item["href"] != "/"][:4]
-    if not routes:
-        routes = [item for item in normalized if item is not profile][:4]
+    title_text = _text(title or payload.get("title") or "Карта переходов April")
+    screen_id = _text(payload.get("screen_id") or payload.get("ui_screen") or "").lower()
+    route_ids = {str(value).strip().lower() for value in (payload.get("selected_route_ids") or []) if str(value).strip()} if isinstance(payload.get("selected_route_ids"), list) else set()
+    highlight_target_id = _text(payload.get("highlight_target_id") or payload.get("highlight_route_id")).lower()
+    highlight_color = _text(payload.get("highlight_color") or "#58d7a6")
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", highlight_color):
+        highlight_color = "#58d7a6"
+    low_source = " ".join([title_text, str(payload.get("description") or ""), str(payload.get("matched_query") or "")]).lower().replace("ё", "е")
+    if screen_id not in {"profile", "chat", "attachments", "help", "history", "community", "support", "plans", "deletion", "legal"}:
+        if any(term in low_source for term in ("скрепк", "вложен", "camera", "камера", "изображения", "файлы", "attachment")):
+            screen_id = "attachments"
+        elif route_ids.intersection({"guide", "help-center", "how-to-use", "privacy", "terms"}) or "справк" in low_source or "help" in low_source:
+            screen_id = "help"
+        elif route_ids.intersection({"space", "direct"}) or "сообществ" in low_source or "community" in low_source:
+            screen_id = "community"
+        elif "history" in route_ids or "истори" in low_source:
+            screen_id = "profile" if "settings" in route_ids else "history"
+        elif "settings" in route_ids or "profile" in low_source or "профил" in low_source:
+            screen_id = "profile"
+        elif "deletion" in route_ids:
+            screen_id = "deletion"
+        elif "support" in route_ids:
+            screen_id = "support"
+        elif "chat" in route_ids:
+            screen_id = "chat"
+        else:
+            screen_id = "profile"
+
+    def esc(value: Any) -> str:
+        return html.escape(_text(value), quote=True)
+
     def route_label(item: dict[str, str]) -> str:
         href = item["href"]
-        source = (item["label"] + " " + href).lower()
-        if href == "/space" or "community" in source or "сообществ" in source:
-            return "Community / Сообщество"
-        if href == "/history" or "history" in source or "истори" in source or "saved dialogues" in source:
-            return "Dialog history / История диалогов"
-        if href == "/" or "основной чат" in source or "chat with april" in source:
-            return "Chat with April / Основной чат"
-        if "support" in source or "/insights" in href:
-            return "Contact support / Поддержка"
-        if href == "/aprill" or "help" in source or "справк" in source:
-            return "Help & Information / Справка"
-        return item["label"].splitlines()[0][:42]
+        source = (item["label"] + " " + href + " " + item["id"]).lower().replace("ё", "е")
+        route_patterns = (
+            ("/space", ("community", "сообществ"), "Community / Сообщество"),
+            ("/history", ("history", "истори", "saved dialogues", "сохраненн"), "Dialog history / История диалогов"),
+            ("/", ("основной чат", "chat with april", "основной чат"), "Chat with April / Основной чат"),
+            ("/insights", ("support", "поддерж", "обращен"), "Contact support / Поддержка"),
+            ("/aprill", ("help", "справк"), "Help & Information / Справка"),
+        )
+        for exact_path, markers, label in route_patterns:
+            if href == exact_path or (exact_path == "/insights" and href.startswith(exact_path)) or any(marker in source for marker in markers):
+                return label
+        return item["label"].splitlines()[0][:46]
 
-    title_text = _text(title or payload.get("title") or "Карта переходов April")
     width = 440
     margin = 18
-    header_y, header_h = 18, 54
+    header_h = 54
+    def header(screen_title: str, subtitle: str = "") -> list[str]:
+        items = [
+            f'<rect x="{margin}" y="16" width="{width-2*margin}" height="{header_h}" rx="27" fill="#171922" stroke="#30333e" stroke-width="1.2"/>',
+            '<text x="34" y="51" font-family="Inter,Arial,sans-serif" font-size="27" font-weight="750" fill="#9becc5">A</text>',
+            '<text x="59" y="51" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="650" fill="#f3f4f6">PRIL</text>',
+            f'<text x="{width-36}" y="49" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#aab0bb">●</text>',
+        ]
+        if screen_title:
+            items.extend([
+                f'<text x="{margin+4}" y="{header_h+41}" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#eef1f5">{esc(screen_title)}</text>',
+            ])
+            if subtitle:
+                items.append(f'<text x="{margin+4}" y="{header_h+63}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#9ca5b3">{esc(subtitle)}</text>')
+        return items
+
+    def draw_card(x: int, y: int, w: int, h: int, label: str, sub: str = "", *, accent: str = "#2c604d", number: str = "", badge: str = "", arrow: bool = False) -> list[str]:
+        output = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="14" fill="#151922" stroke="{accent}" stroke-width="1.4"/>']
+        if number:
+            output.extend([
+                f'<circle cx="{x+22}" cy="{y+h/2}" r="12" fill="#193d2d" stroke="#3f8a64"/>',
+                f'<text x="{x+22}" y="{y+h/2+4}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="700" fill="#c0f6d6">{esc(number)}</text>'
+            ])
+        label_x = x + (42 if number else 14)
+        if badge:
+            output.append(f'<rect x="{x+w-86}" y="{y+8}" width="70" height="20" rx="10" fill="#17382d" stroke="#396e56"/>')
+            output.append(f'<text x="{x+w-51}" y="{y+22}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="700" fill="#a4efc3">{esc(badge)}</text>')
+        # Truncation is preferable to allowing long labels to overlap the arrows.
+        label_text = label[:42]
+        output.append(f'<text x="{label_x}" y="{y+21}" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#edf4f1">{esc(label_text)}</text>')
+        if sub:
+            output.append(f'<text x="{label_x}" y="{y+39}" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#82dcb4">{esc(sub[:54])}</text>')
+        if arrow:
+            output.append(f'<text x="{x+w-19}" y="{y+h/2+5}" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#8ae2b1">→</text>')
+        return output
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="420" viewBox="0 0 {width} 420" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<defs><linearGradient id="april-ui-brand" x1="0" x2="1"><stop offset="0" stop-color="#a4f3c1"/><stop offset="1" stop-color="#7bd9e5"/></linearGradient><marker id="april-ui-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#58d7a6"/></marker></defs>',
+        f'<rect width="{width}" height="420" rx="24" fill="#080a10" stroke="#242a35" stroke-width="2"/>',
+    ]
+
+    # Content is derived from the actual route IDs/visible-control blueprint.
+    if screen_id == "attachments":
+        title_text = "Добавить вложение"
+        parts.extend(header("", ""))
+        parts.extend([
+            '<rect x="12" y="92" width="416" height="310" rx="25" fill="#171922" stroke="#30333e" stroke-width="1.5"/>',
+            '<rect x="196" y="106" width="48" height="5" rx="2.5" fill="#565b67"/>',
+            '<text x="34" y="145" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="750" letter-spacing="1.5" fill="#79dcb1">APRIL</text>',
+            '<text x="34" y="179" font-family="Inter,Arial,sans-serif" font-size="22" font-weight="700" fill="#f4f5f8">Добавить вложение</text>',
+            '<text x="34" y="207" font-family="Inter,Arial,sans-serif" font-size="14" fill="#9ca3af">Выберите, что прикрепить</text>',
+        ])
+        # Avoid emoji glyph dependencies in SVG viewers; simple vector-like labels render consistently on mobile.
+        cards = [("Камера", "Сделать снимок", "#ea258e", "CAM"), ("Изображения", "Выбрать фото", "#2a7ff2", "IMG"), ("Файлы", "Документы и другие файлы", "#05b9a1", "DOC")]
+        cx, cy, cw, ch, gap = 25, 229, 124, 130, 8
+        for i, (label, sub, color, icon_label) in enumerate(cards):
+            x = cx + i*(cw+gap)
+            parts.extend([
+                f'<rect x="{x}" y="{cy}" width="{cw}" height="{ch}" rx="20" fill="#20232d" stroke="#343844" stroke-width="1.3"/>',
+                f'<rect x="{x+28}" y="{cy+14}" width="68" height="58" rx="18" fill="{color}"/>',
+                f'<text x="{x+62}" y="{cy+51}" text-anchor="middle" font-family="Arial,sans-serif" font-size="27" fill="#ffffff">{icon_label}</text>',
+                f'<text x="{x+cw/2}" y="{cy+91}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#f1f3f7">{esc(label)}</text>',
+                f'<text x="{x+cw/2}" y="{cy+111}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#8d95a4">{esc(sub)}</text>',
+            ])
+        parts.extend([
+            '<rect x="26" y="371" width="388" height="22" rx="10" fill="#20232d" stroke="#30333e"/>',
+            '<text x="220" y="386" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" fill="#9ca3af">Отмена</text>',
+            '</svg>'
+        ])
+        # Set the dynamic viewBox to the contents' actual height.
+        return "".join(parts).replace('height="420" style=', 'height="420" style=', 1)
+
+    if screen_id == "chat":
+        parts.extend(header("Основной чат", "Текст · голос · изображения · память"))
+        parts.extend([
+            '<rect x="22" y="152" width="396" height="132" rx="18" fill="#11141b" stroke="#252a33"/>',
+            '<text x="220" y="198" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="700" fill="#f0f0e8">Начните разговор с April</text>',
+            '<text x="220" y="225" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" fill="#8d95a4">Задайте вопрос или прикрепите материал</text>',
+            '<rect x="68" y="331" width="304" height="54" rx="27" fill="#20222b" stroke="#353944" stroke-width="1.3"/>',
+            '<circle cx="43" cy="358" r="17" fill="#22252e" stroke="#353944"/>',
+            '<text x="43" y="363" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#eceff4">⌁</text>',
+            '<text x="88" y="363" font-family="Inter,Arial,sans-serif" font-size="13" fill="#9097a4">Message April</text>',
+            '<circle cx="334" cy="358" r="16" fill="#3a3d48"/>',
+            '<text x="334" y="364" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#d9dce4">→</text>',
+            '<circle cx="401" cy="358" r="18" fill="#22252e" stroke="#353944"/>',
+            '<text x="401" y="364" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" fill="#eceff4">♟</text>',
+            '</svg>'
+        ])
+        return "".join(parts)
+
+    if screen_id == "help" or screen_id == "legal":
+        parts.extend(header("Помощь и информация", "Инструкции, аккаунт и правила сервиса"))
+        cards = [
+            ("Help Center / Центр помощи", "Частые вопросы и ответы", "/aprill"),
+            ("How to Use April", "Текст, голос, изображения и память", "/aprill"),
+            ("Privacy Policy / Конфиденциальность", "Обработка данных и удаление", "/privacy-policy"),
+            ("Terms of Service / Условия", "Правила использования April", "/terms-of-service"),
+            ("Plans & Payments / Тарифы", "Free, Lite, Premium и продление", "/aprill"),
+            ("Account & Data Deletion", "Удаление April-аккаунта и данных", "/account-deletion"),
+            ("Contact Support / Поддержка", "История обращений и ответы", "/insights?room=support"),
+        ]
+        y0, card_h, gap = 110, 38, 6
+        for i, (label, sub, href) in enumerate(cards):
+            y = y0 + i*(card_h+gap)
+            parts.extend([
+                f'<rect x="24" y="{y}" width="392" height="{card_h}" rx="12" fill="#13161e" stroke="#282d37" stroke-width="1.1"/>',
+                f'<circle cx="45" cy="{y+19}" r="11" fill="#162d26" stroke="#315a47"/>',
+                f'<text x="45" y="{y+23}" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" fill="#8de2b0">{i+1}</text>',
+                f'<text x="64" y="{y+16}" font-family="Inter,Arial,sans-serif" font-size="11.7" font-weight="650" fill="#edf1f5">{esc(label)}</text>',
+                f'<text x="64" y="{y+30}" font-family="Inter,Arial,sans-serif" font-size="9.5" fill="#9aa2af">{esc(sub)} · {esc(href)}</text>',
+                f'<text x="400" y="{y+24}" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" fill="#8be2b2">→</text>',
+            ])
+        parts.append('</svg>')
+        # Seven compact cards need a taller intrinsic canvas, rather than shrinking into the corner.
+        rendered = "".join(parts).replace('height="420"', 'height="440"', 1).replace('viewBox="0 0 440 420"', 'viewBox="0 0 440 440"', 1)
+        return rendered
+
+    if screen_id == "history":
+        parts.extend(header("Saved dialogues / История диалогов", "Найдите запись и продолжите беседу"))
+        parts.extend([
+            '<rect x="24" y="111" width="392" height="54" rx="15" fill="#141720" stroke="#2e3a51"/>',
+            '<text x="42" y="135" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#eff2f6">Saved dialogue · дата и фрагмент темы</text>',
+            '<text x="42" y="152" font-family="Inter,Arial,sans-serif" font-size="11" fill="#9aa2b1">Краткое содержание сохранённой записи</text>',
+            '<rect x="42" y="174" width="356" height="36" rx="10" fill="#12231f" stroke="#2a5a46"/>',
+            '<text x="220" y="196" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="650" fill="#a3efc0">Continue this dialogue →</text>',
+            '<rect x="24" y="222" width="392" height="54" rx="15" fill="#141720" stroke="#2e3a51"/>',
+            '<text x="42" y="246" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#eff2f6">Ещё одна карточка диалога</text>',
+            '<text x="42" y="263" font-family="Inter,Arial,sans-serif" font-size="11" fill="#9aa2b1">Дата · фрагмент разговора · номер записи</text>',
+            '<rect x="42" y="285" width="356" height="36" rx="10" fill="#12231f" stroke="#2a5a46"/>',
+            '<text x="220" y="307" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="650" fill="#a3efc0">Continue this dialogue →</text>',
+            '<rect x="24" y="340" width="392" height="44" rx="14" fill="#171922" stroke="#30333e"/>',
+            '<circle cx="44" cy="362" r="6" fill="#70eaa3"/>',
+            '<text x="60" y="367" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#c8f3d7">Memory Status · Connected</text>',
+            '</svg>'
+        ])
+        return "".join(parts)
+
+    if screen_id == "community":
+        parts.extend(header("April · Community / Сообщество", "Публичные сообщения и личные диалоги"))
+        parts.extend([
+            '<rect x="24" y="111" width="392" height="48" rx="14" fill="#13161e" stroke="#34475a"/>',
+            '<circle cx="48" cy="135" r="16" fill="#152b23" stroke="#38684f"/>',
+            '<text x="48" y="140" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="700" fill="#a7efc2">П</text>',
+            '<text x="73" y="132" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#edf1f5">Personal profile</text>',
+            '<text x="73" y="148" font-family="Inter,Arial,sans-serif" font-size="11" fill="#9ba4b2">Имя и настройки профиля сообщества</text>',
+        ])
+        for i, (kind, msg, badge, accent) in enumerate([
+            ("Пользователь", "Публичное сообщение в сообществе", "PREMIUM", "#35664d"),
+            ("Другой участник", "Ещё одна карточка сообщения", "FREE", "#6d5f2d"),
+        ]):
+            y = 171 + i*91
+            parts.extend([
+                f'<rect x="24" y="{y}" width="392" height="78" rx="14" fill="#15161c" stroke="{accent}" stroke-width="1.4"/>',
+                f'<text x="42" y="{y+21}" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#f0d98d">{esc(kind)}</text>',
+                f'<rect x="{width-111}" y="{y+8}" width="78" height="20" rx="10" fill="#1c2726" stroke="#345348"/>',
+                f'<text x="{width-72}" y="{y+22}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="700" fill="#a9e9c4">{badge}</text>',
+                f'<text x="42" y="{y+42}" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#c7cbd3">{esc(msg)}</text>',
+                f'<rect x="42" y="{y+51}" width="105" height="21" rx="8" fill="#1b1e27" stroke="#504b31"/>',
+                f'<text x="94" y="{y+65}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" font-weight="650" fill="#f1e6bd">Private chat</text>',
+            ])
+        parts.extend([
+            '<rect x="68" y="365" width="304" height="31" rx="16" fill="#20222b" stroke="#353944"/>',
+            '<text x="86" y="385" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#9299a5">Ask a question or share a solution…</text>',
+            '<text x="350" y="385" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#d3d7e0">→</text>',
+            '</svg>'
+        ])
+        return "".join(parts)
+
+    if screen_id == "deletion":
+        parts.extend(header("Удаление аккаунта April", "Внимательно проверьте последствия"))
+        parts.extend([
+            '<rect x="24" y="116" width="392" height="148" rx="18" fill="#21151b" stroke="#6b3041"/>',
+            '<text x="44" y="145" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0b3c1">Удаление April-аккаунта</text>',
+            '<text x="44" y="171" font-family="Inter,Arial,sans-serif" font-size="12" fill="#e1d2d7">Удаляются данные, связанные с April.</text>',
+            '<text x="44" y="192" font-family="Inter,Arial,sans-serif" font-size="12" fill="#e1d2d7">Google-аккаунт не удаляется.</text>',
+            '<text x="44" y="226" font-family="Inter,Arial,sans-serif" font-size="11" fill="#b99ba5">Прочитайте условия и подтвердите только</text>',
+            '<text x="44" y="243" font-family="Inter,Arial,sans-serif" font-size="11" fill="#b99ba5">если действительно хотите удалить профиль.</text>',
+            '<rect x="44" y="284" width="352" height="44" rx="12" fill="#271922" stroke="#8d4057"/>',
+            '<text x="220" y="311" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="700" fill="#ef9eaf">Удалить аккаунт</text>',
+            '</svg>'
+        ])
+        return "".join(parts)
+
+    # Default is the screenshot-verified profile card and quick navigation links.
+    profile = next((item for item in normalized if item["id"].lower() == "settings" or item["href"] == "/settings"), None)
+    # In the profile quick-links view, "Chat with April" is a real shortcut
+    # even though its destination is /. The profile is already the start node,
+    # so keep that row here rather than converting it into a loop to the header.
+    routes = [
+        item for item in normalized
+        if item is not profile and item["href"] and (
+            item["href"] != "/" or (screen_id == "profile" and item["id"].lower() == "chat")
+        )
+    ]
+    # Preserve help cards that share /aprill, but remove only duplicate node/path pairs.
+    unique_routes = []
+    used_route_keys = set()
+    for item in routes:
+        key = (item["id"], item["href"], item["label"])
+        if key in used_route_keys:
+            continue
+        used_route_keys.add(key)
+        unique_routes.append(item)
+    routes = unique_routes[:6]
+    row_h, row_gap = 50, 8
     profile_y, profile_h = 84, 64
     plan_y = profile_y + profile_h + 14
-    row_h, row_gap = 48, 8
-    list_top = plan_y + 52
-    panel_h = 68 + max(1, len(routes)) * (row_h + row_gap) + 12
-    height = plan_y + panel_h + 18
-    esc = html.escape
+    list_top = plan_y + 66
+    panel_h = 62 + max(1, len(routes)) * (row_h + row_gap) + 10
+    height = list_top + max(1, len(routes)) * (row_h + row_gap) + 20
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
         '<defs><linearGradient id="april-ui-brand" x1="0" x2="1"><stop offset="0" stop-color="#a4f3c1"/><stop offset="1" stop-color="#7bd9e5"/></linearGradient><marker id="april-ui-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#58d7a6"/></marker></defs>',
         f'<rect width="{width}" height="{height}" rx="24" fill="#080a10" stroke="#242a35" stroke-width="2"/>',
-        f'<rect x="{margin}" y="{header_y}" width="{width-2*margin}" height="{header_h}" rx="27" fill="#171922" stroke="#30333e"/>',
-        f'<text x="35" y="{header_y+34}" font-family="Inter,Arial,sans-serif" font-size="26" font-weight="750" fill="url(#april-ui-brand)">A</text>',
-        f'<text x="58" y="{header_y+34}" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="650" fill="#f3f4f6">PRIL</text>',
-        f'<circle cx="{width-47}" cy="{header_y+27}" r="17" fill="#22252e" stroke="#3a3d48"/>',
-        f'<text x="{width-47}" y="{header_y+32}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="16" fill="#b3f2cb">●</text>',
+        *header("", ""),
         f'<rect x="{margin}" y="{profile_y}" width="{width-2*margin}" height="{profile_h}" rx="16" fill="#13161e" stroke="#34475a" stroke-width="1.5"/>',
         f'<circle cx="43" cy="{profile_y+32}" r="17" fill="#152c25" stroke="#38745d"/>',
-        f'<text x="43" y="{profile_y+37}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#a5efc0">Л</text>',
-        f'<text x="70" y="{profile_y+26}" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="650" fill="#f1f3f6">{esc(profile["label"].splitlines()[0] if profile else "Personal profile / Настройки")}</text>',
-        f'<text x="70" y="{profile_y+47}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#a0a7b4">{esc(profile["href"] if profile else "/settings")} · Профиль пользователя</text>',
+        f'<text x="43" y="{profile_y+37}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#a5efc0">П</text>',
+        f'<text x="70" y="{profile_y+26}" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="650" fill="#f1f3f6">Настройки и профиль</text>',
+        f'<text x="70" y="{profile_y+47}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#a0a7b4">/settings · Профиль пользователя</text>',
+        f'<path d="M {width/2} {profile_y+profile_h} L {width/2} {plan_y-6}" stroke="#58d7a6" stroke-width="2.5" fill="none" marker-end="url(#april-ui-arrow)"/>',
         f'<rect x="{margin}" y="{plan_y}" width="{width-2*margin}" height="{panel_h}" rx="18" fill="#0d1413" stroke="#2c604d" stroke-width="1.6"/>',
-        f'<text x="34" y="{plan_y+28}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" letter-spacing="1.5" fill="#91e8b1">CURRENT PLAN</text>',
-        f'<text x="34" y="{plan_y+47}" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="650" fill="#eef5f1">Быстрые переходы из профиля</text>',
+        f'<text x="34" y="{plan_y+26}" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" letter-spacing="1.5" fill="#91e8b1">CURRENT PLAN</text>',
+        f'<text x="34" y="{plan_y+45}" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="650" fill="#eef5f1">Быстрые переходы из профиля</text>',
     ]
-    # Connect from the profile card to a vertical menu rail, then branch to each
-    # independent shortcut. This avoids falsely implying that one route leads to another.
+    if not routes:
+        routes = [{"id":"history", "href":"/history", "label":"Dialog history / История диалогов"}]
     rail_x = 30
-    if routes:
-        parts.append(f'<path d="M {width/2:.0f} {profile_y+profile_h} L {width/2:.0f} {plan_y-4}" stroke="#58d7a6" stroke-width="2.5" fill="none" marker-end="url(#april-ui-arrow)"/>')
-        for index, item in enumerate(routes):
-            y = list_top + index * (row_h + row_gap)
-            label = route_label(item)
-            href = item["href"] or ""
-            cy = y + row_h / 2
-            parts.extend([
-                f'<path d="M {rail_x} {list_top+row_h/2:.0f} L {rail_x} {cy:.0f} L {margin+5} {cy:.0f}" stroke="#58d7a6" stroke-width="1.8" fill="none"/>',
-                f'<rect x="{margin+8}" y="{y}" width="{width-2*margin-16}" height="{row_h}" rx="12" fill="#151b20" stroke="#293c36" stroke-width="1.1"/>',
-                f'<circle cx="{margin+28}" cy="{cy}" r="11" fill="#193c2c" stroke="#3f8a64"/>',
-                f'<text x="{margin+28}" y="{cy+4}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#b2f2ce">{index+1}</text>',
-                f'<text x="{margin+47}" y="{y+19}" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#edf5f1">{esc(label)}</text>',
-                f'<text x="{margin+47}" y="{y+37}" font-family="Inter,Arial,sans-serif" font-size="12" fill="#83dcb3">{esc(href)}</text>',
-                f'<text x="{width-36}" y="{cy+5}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="#78dfa9">→</text>',
-            ])
-    parts.append("</svg>")
-    return "".join(parts)
+    first_cy = list_top + row_h/2
+    parts.append(f'<path d="M {rail_x} {first_cy} L {rail_x} {first_cy + (len(routes)-1)*(row_h+row_gap)}" stroke="#58d7a6" stroke-width="1.8" fill="none"/>')
+    for index, item in enumerate(routes):
+        y = list_top + index*(row_h+row_gap)
+        label = route_label(item)
+        href = item["href"] or "/aprill"
+        cy = y + row_h/2
+        normalized_item_id = _text(item.get("id")).lower()
+        is_highlighted = bool(highlight_target_id and (
+            normalized_item_id == highlight_target_id
+            or (highlight_target_id == "history" and href.rstrip("/") == "/history")
+            or (highlight_target_id == "space" and href.rstrip("/") == "/space")
+            or (highlight_target_id == "support" and href.startswith("/insights"))
+            or (highlight_target_id == "settings" and href.rstrip("/") == "/settings")
+        ))
+        route_accent = highlight_color if is_highlighted else "#293c36"
+        route_accent_width = "2.7" if is_highlighted else "1.1"
+        number_fill = "#4b171b" if is_highlighted else "#193c2c"
+        number_stroke = highlight_color if is_highlighted else "#3f8a64"
+        number_text = "#ffd9d9" if is_highlighted else "#b2f2ce"
+        arrow_text = highlight_color if is_highlighted else "#78dfa9"
+        parts.extend([
+            f'<path d="M {rail_x} {cy} L {margin+5} {cy}" stroke="{highlight_color if is_highlighted else "#58d7a6"}" stroke-width="{2.8 if is_highlighted else 1.8}" fill="none"/>',
+            f'<rect x="{margin+8}" y="{y}" width="{width-2*margin-16}" height="{row_h}" rx="12" fill="#151b20" stroke="{route_accent}" stroke-width="{route_accent_width}"/>',
+            f'<circle cx="{margin+28}" cy="{cy}" r="11" fill="{number_fill}" stroke="{number_stroke}" stroke-width="{2 if is_highlighted else 1}"/>',
+            f'<text x="{margin+28}" y="{cy+4}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="{number_text}">{index+1}</text>',
+            f'<text x="{margin+47}" y="{y+20}" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="650" fill="#edf5f1">{esc(label)}</text>',
+            f'<text x="{margin+47}" y="{y+38}" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#83dcb3">{esc(href)}</text>',
+        ])
+        if is_highlighted:
+            # Draw one clear red pointer into the selected row. Avoid combining a
+            # rightward navigation glyph with an opposite-facing chevron; that
+            # previously looked like a broken/X-shaped arrow at the screen edge.
+            parts.append(
+                f'<path d="M {width-6} {cy} L {width-22} {cy} M {width-14} {cy-5} L {width-22} {cy} L {width-14} {cy+5}" '
+                f'stroke="{highlight_color}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+            )
+        else:
+            parts.append(f'<text x="{width-36}" y="{cy+5}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="{arrow_text}">→</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def diagram_payload_has_concrete_visual(payload: Any) -> bool:
+    """Validate drawable diagrams without mistaking empty SVG shells for assets."""
+    if not isinstance(payload, dict):
+        return False
+    candidates = [payload]
+    for key in ("payload", "data", "spec", "artifact", "render_signal", "presentation_signal"):
+        child = payload.get(key)
+        if isinstance(child, dict):
+            candidates.append(child)
+            nested = child.get("payload")
+            if isinstance(nested, dict):
+                candidates.append(nested)
+    drawable_tags = re.compile(r"<(?:path|rect|circle|ellipse|polygon|polyline|line|image|use)\b", re.I)
+    for source in candidates:
+        for key in ("svg", "svg_payload", "drawing"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                svg = value.strip()
+                tag_count = len(drawable_tags.findall(svg))
+                # A frame-only rect is not an informative diagram. Require more
+                # than a wrapper, or a long complete SVG containing labels/paths.
+                if svg.lower().startswith("<svg") and tag_count >= 2 and len(svg) >= 180:
+                    return True
+        source_text = " ".join(_text(source.get(key)) for key in ("diagram", "mermaid", "flowchart", "source", "code", "content", "text"))
+        if source_text and re.search(r"(?:-->|---|flowchart\s+(?:LR|RL|TB|TD|BT)|graph\s+(?:LR|RL|TB|TD|BT))", source_text, re.I):
+            return True
+        nodes = source.get("nodes") or source.get("components") or source.get("vertices")
+        edges = source.get("edges") or source.get("connections") or source.get("relations")
+        if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and len(edges) >= 1:
+            return True
+        for key in ("elements", "drawing_elements", "drawingElements", "primitives"):
+            elements = source.get(key)
+            if isinstance(elements, list) and len(elements) >= 2:
+                return True
+    return False
+
 
 def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[str, Any]:
     """Return the original payload plus an SVG when actual nodes/edges are present."""
