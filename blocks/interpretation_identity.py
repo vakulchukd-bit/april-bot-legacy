@@ -257,6 +257,17 @@ def _detect_image_modification(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    # "Нарисуй картинку к заставке" is a new-image deliverable, not an edit of
+    # a missing source image. This direct-object rule intentionally does not
+    # swallow ambiguous "нарисуй на этой картинке" instructions.
+    direct_new_image = bool(re.search(
+        r"(?<![\w\u0080-\uffff])(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate)\b\s+"
+        r"(?:(?:мне|нам|a|an|the|new|нов\w*|бел\w*|черн\w*|красив\w*|прост\w*|маленьк\w*|больш\w*)\s+){0,3}"
+        r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bpicture\b|\bphoto\b)",
+        low, re.IGNORECASE,
+    ))
+    if direct_new_image:
+        return False
     how_to_question = bool(re.search(
         r"^\s*(?:как\s+(?:(?:мне|можно|самому|самой)\s+)?(?:редактир|измен|улучш|обработ|ретуш|поменя)"
         r"|как\s+делать\s+ретуш|объясни\w*\s*,?\s*как\b|расскажи\w*\s*,?\s*как\b"
