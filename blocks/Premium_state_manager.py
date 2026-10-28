@@ -820,10 +820,6 @@ _HISTORY_COUNT_WORDS = {
 }
 
 
-def _text(value: Any) -> str:
-    return str(value or "").strip()
-
-
 def _tokens(value: Any) -> set[str]:
     return {
         token
