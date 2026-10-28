@@ -405,16 +405,59 @@ def _is_structured_visual_explanation_request(text: Any) -> bool:
 
 
 def _detect_image_modification(text: str) -> bool:
-    """Detect explicit editing language, including requests to draw *on* a photo.
+    """Detect edits to an explicitly identified existing image, not a generic canvas.
 
-    A source object in the request ("на фото", "на этой канистре") means the
-    user wants a change to an existing image, not a new standalone illustration.
-    Whether the source bytes are available is decided later by build_interpretation.
+    Russian voice requests often say "нарисуй на картинке/изображении X" to ask
+    for a new illustration. A specific source is indicated by a demonstrative,
+    possessive/upload reference, a deictic pronoun ("на ней"), or an edit verb such
+    as "добавь/дорисуй/измени". Without that evidence, a create/draw verb plus a
+    generic canvas noun is not enough to request image editing.
     """
     low = _text(text).lower().replace("ё", "е")
     if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
         return False
+
+    # Explicit correction language outranks legacy edit markers. Voice transcripts
+    # may contain both "не просил изменять фото" and "создай новую фотографию".
+    # Without this guard, the word "фотография" alone caused a source-image request.
+    correction_rejects_edit = bool(re.search(
+        r"(?:я\s+(?:же\s+)?не\s+(?:просил\w*|попросил\w*|говорил\w*).{0,100}(?:измен\w*|редактир\w*|обрабатыва\w*|дорис\w*)|"
+        r"не\s+(?:надо|нужно|просил\w*|попросил\w*)\s+(?:измен\w*|редактир\w*|обрабатыва\w*)|"
+        r"(?:не\s+изменяй|не\s+редактируй|не\s+обрабатывай|i\s+did\s+not\s+ask\s+you\s+to\s+edit|don't\s+edit|do\s+not\s+edit))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_new_creation = bool(re.search(
+        r"(?:я\s+(?:же\s+)?(?:просил\w*|попросил\w*|хотел\w*|говорил\w*).{0,100}(?:созда\w*|нарис\w*|сгенерир\w*|изобраз\w*).{0,65}(?:нов\w*\s+)?(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b)|"
+        r"(?:создай|создайте|сгенерируй|нарисуй|изобрази|generate|create|draw)\s+(?:мне\s+)?нов\w*\s+(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b)|"
+        r"(?:создай|создайте|сгенерируй|нарисуй|изобрази|generate|create|draw)\s+(?:мне\s+)?(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    correction_explicitly_requests_new_image = bool(re.search(
+        r"(?:исправься|исправь|повтори|создай\s+мне\s+нов|нов\w*\s+фотограф|нов\w*\s+изображен|i\s+asked|create\s+a\s+new)",
+        low, re.IGNORECASE,
+    ))
+    if explicit_new_creation and (correction_rejects_edit or correction_explicitly_requests_new_image):
+        return False
+
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    create_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|\bdraw\b|\bcreate\b|\bgenerate\b)"
+    edit_action = r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|укаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|redraw)\b)"
+    generic_canvas_creation = bool(re.search(
+        rf"\b{create_action}\b.{{0,100}}?\b(?:на|в|по)\s+{image_target}",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    specific_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|исходн\w*|прикрепл\w*|загруженн\w*|предыдущ\w*)\s+{image_target}|"
+        rf"\b(?:на|в)\s+(?:ней|нее|неё|нем|нём|них|this\s+(?:image|photo|picture)|the\s+(?:uploaded|attached)\s+(?:image|photo|picture))\b|"
+        rf"{image_target}.{{0,60}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше|uploaded|attached)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_edit_action = bool(re.search(rf"\b{edit_action}\b", low, re.IGNORECASE))
+    if generic_canvas_creation and not explicit_edit_action and not specific_source:
+        return False
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
+        # Bare "draw on image" markers are overridden above; the remaining
+        # markers describe actual mutation/edit operations.
         return True
     action = (
         r"(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|draw|redraw|paint|"
@@ -2970,6 +3013,52 @@ def _split_request_sequence(text: str) -> list[str]:
     if _looks_like_previous_answer_followup(source):
         return [source]
 
+    # A repair that explains the previous visual-operation mistake is one request,
+    # even if its punctuation resembles several independent commands. Splitting it
+    # caused multiple history searches and let a middle fragment replace the goal.
+    low_repair_source = source.lower().replace("ё", "е")
+    repair_rejects_edit = bool(re.search(
+        r"(?:я\s+(?:же\s+)?не\s+просил\w*.{0,100}(?:измен\w*|редактир\w*|обрабатыва\w*)|"
+        r"не\s+(?:надо|нужно)\s+(?:измен\w*|редактир\w*)|"
+        r"я\s+(?:же\s+)?просил\w*.{0,100}(?:созда\w*|нарис\w*|сгенерир\w*)|исправься|i\s+did\s+not\s+ask\s+you\s+to\s+edit)",
+        low_repair_source, re.IGNORECASE | re.DOTALL,
+    ))
+    repair_has_visual_output = bool(
+        set(_detect_requested_outputs(source)) & {"image", "diagram", "graph", "table", "file"}
+    )
+    if repair_rejects_edit and repair_has_visual_output and len(source.split()) <= 100:
+        return [source]
+
+    # A correction/continuation that names the prior task must remain one semantic
+    # unit. Splitting "I already asked you to draw X. Continue" detached the subject
+    # from its continuation verb and arbitration then selected only the trailing
+    # "continue" step, with no usable render instructions.
+    low_source = source.lower().replace("ё", "е")
+    # Imperative splitting used to detach "Я попросил тебя" from the requested
+    # artifact, leaving the actual visual subject as a second artificial task.
+    # Preserve the complete user-authored clause whenever that opening explains
+    # a single visual-creation request. Multi-deliverable bundles are handled above.
+    first_person_visual_repair = bool(
+        re.search(r"^\s*(?:я\s+(?:же\s+)?(?:просил|просила|попросил|попросила)|i\s+asked\s+you)\b", low_source)
+        and set(_detect_requested_outputs(source)) & {"image", "diagram", "graph", "table", "file"}
+        and re.search(r"(?:созда\w*|нарис\w*|сгенерир\w*|постро\w*|create|draw|generate|build)\w*", low_source)
+    )
+    if first_person_visual_repair and len(source.split()) <= 100:
+        return [source]
+    visual_or_artifact_task = bool(set(_detect_requested_outputs(source)) & {
+        "image", "diagram", "graph", "table", "formula", "code", "file", "link"
+    })
+    prior_task_repair = bool(re.search(
+        r"\b(?:я\s+же\s+)?(?:просил|просила|попросил|попросила|говорил|говорила)\b",
+        low_source,
+    ))
+    continuation_suffix = bool(re.search(
+        r"(?:^|[.!?。]\s*)\b(?:продолжи(?:те)?|продолжай(?:те)?|продолжим|дальше|далее|resume|continue|go\s+on)\s*[.!?…]*\s*$",
+        low_source, re.IGNORECASE,
+    ))
+    if visual_or_artifact_task and continuation_suffix and (prior_task_repair or len(source.split()) <= 35):
+        return [source]
+
     # A detailed 3D-scene prompt is one artifact task with many constraints, not
     # a collection of independent questions. Keep its formula, object counts,
     # geometry, axes, colours and interaction requirements bound together so the
@@ -3060,18 +3149,12 @@ def _split_request_sequence(text: str) -> list[str]:
     # instruction, not two searches. Merge only a short filler with an explicit
     # continuation clause; independently named tasks still stay separate.
     if len(cleaned) > 1 and re.fullmatch(
-        r"(?:ну\s+так|ну|так|хорошо|ладно|ок(?:ей)?|да)[,.!?…\s]*",
+        r"(?:ну\s+так|ну|так|хорошо|ладно|ок(?:ей)?|да|отлично|спасибо|great|good|okay|ok|yes)[,.!?…\s]*",
         cleaned[0], flags=re.IGNORECASE,
     ):
-        second_semantics = interpret_request_semantics(cleaned[1])
-        if (
-            second_semantics.get("primary_intent") in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
-            and second_semantics.get("requires_memory")
-            and not second_semantics.get("history_request")
-            and not _has_explicit_topic_introduction(cleaned[1])
-            and not _has_explicit_topic_switch(cleaned[1])
-        ):
-            cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
+        # These are discourse openers, not executable requests. Always bind one to
+        # the following substantive clause, including a brand-new visual task.
+        cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
     if (len(cleaned) > 1 and _is_short_continuation_preface(cleaned[0])
             and _has_explicit_topic_introduction(cleaned[1])):
         # “Good, continue further” is a transition, not a retrieval task, when the
@@ -3905,6 +3988,7 @@ def build_interpretation(
                 "confidence": float(memory.get("relation_confidence") or 0.0),
                 "selected_pairs": selected_pairs,
                 "anchor": continuation_anchor,
+                "active_work_branch": dict(memory.get("active_work_branch") or {}) if isinstance(memory.get("active_work_branch"), dict) else {},
                 "selected_section": dict(memory.get("selected_section") or {}),
                 "clarification_needed": bool(memory.get("clarification_needed")),
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
