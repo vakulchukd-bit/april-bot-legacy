@@ -579,6 +579,16 @@ def _has_affirmative_visual_instruction(text: str) -> bool:
     return False
 
 
+def _has_independent_nonvisual_artifact_request(text: str) -> bool:
+    """Protect a new graph/table/code/file request embedded in image discussion."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    action = r"(?:построй(?:те)?|составь(?:те)?|напиши(?:те)?|разработай(?:те)?|подготовь(?:те)?|создай(?:те)?|сгенерируй(?:те)?|сделай(?:те)?|исправь(?:те)?|перепиши(?:те)?|выведи(?:те)?|выдай(?:те)?|покаж\w*|показать|сравни(?:те)?|проанализируй(?:те)?|build|create|write|draft|prepare|make|fix|rewrite|show|compare|analy[sz]e)"
+    artifact = r"(?:график\w*|таблиц\w*|диаграмм\w*|код\w*|скрипт\w*|ссылк\w*|документ\w*|файл\w*|презентац\w*|отчет\w*|отчёт\w*|chart\w*|graph\w*|table\w*|code\w*|script\w*|link\w*|document\w*|file\w*|presentation\w*|report\w*)"
+    return bool(re.search(r"\b" + action + r"\b.{0,100}\b" + artifact + r"\b", low, re.IGNORECASE | re.DOTALL))
+
+
 def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     """Identify image-related discussion/correction that is not an image command.
 
@@ -592,6 +602,32 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     if not re.search(image_noun, low, re.IGNORECASE):
         return False
+    # A voice recap can contain the same edit verbs as a live command:
+    # "I asked you to change the photo from 8800 to 8803, and you did it".
+    # Remove only the retrospective clause before checking for a *new* action.
+    # Any separate command left in the message still wins and keeps the edit route.
+    retrospective_edit_clause = re.compile(
+        r"\b(?:я\s+(?:(?:же|только)\s+)?(?:тебя\s+)?(?:попросил\w*|просил\w*|просила|попросила)|"
+        r"i\s+(?:had\s+)?(?:asked|requested|told)\s+you)\b"
+        r".{0,180}?\b(?:измен\w*|редактир\w*|добав\w*|встав\w*|дорис\w*|замен\w*|исправ\w*|"
+        r"edit\w*|modify\w*|add\w*|replace\w*|fix\w*)\b"
+        r"[^,.!?;\n]{0,100}",
+        re.IGNORECASE | re.DOTALL,
+    )
+    past_edit_match = retrospective_edit_clause.search(low)
+    if past_edit_match:
+        current_action_scan = low[:past_edit_match.start()] + " " + low[past_edit_match.end():]
+        if (
+            not _has_affirmative_visual_instruction(current_action_scan)
+            and not _has_independent_nonvisual_artifact_request(current_action_scan)
+        ):
+            return True
+
+    # Do not let a comment about an earlier image swallow a separate, current
+    # graph/table/code/document request in the same message.
+    if _has_independent_nonvisual_artifact_request(low):
+        return False
+
     if _has_affirmative_visual_instruction(low):
         return False
 
@@ -1011,9 +1047,16 @@ def _detect_requested_outputs(text: str) -> list[str]:
 
     # A plain image/photo mention is input context, not an output request.
     # The object-order-aware detector captures explicit image requests even
-    # when users insert "мне", an adjective, or other polite filler.
-    explicit_image_request = False if ui_instruction_request else _detect_image_generation_request(low)
-    portrait_request = False if ui_instruction_request else _detect_portrait_request(low)
+    # when users insert "мне", an adjective, or other polite filler. A separate
+    # code/graph/table request must not become an image output merely because the
+    # same sentence briefly comments on an earlier photo.
+    incidental_nonvisual_followup = bool(
+        _has_independent_nonvisual_artifact_request(low)
+        and not _has_affirmative_visual_instruction(low)
+        and not _is_self_portrait_generation_request(low)
+    )
+    explicit_image_request = False if (ui_instruction_request or incidental_nonvisual_followup) else _detect_image_generation_request(low)
+    portrait_request = False if (ui_instruction_request or incidental_nonvisual_followup) else _detect_portrait_request(low)
     if (explicit_image_request or portrait_request) and "image" not in result:
         result.append("image")
     explicit_link_request = _detect_link_request(low)
@@ -1099,7 +1142,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
             # is a structured spatial object request in April's adaptive visual layer.
             result.append("graph")
 
-    if _is_image_discussion_without_new_visual_action(low):
+    if _is_image_discussion_without_new_visual_action(low) or incidental_nonvisual_followup:
         result = [kind for kind in result if kind != "image"]
     if not result:
         result.append("text")
@@ -1116,8 +1159,13 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
-    explicit_image_request = _detect_image_generation_request(low)
-    portrait_request = _detect_portrait_request(low)
+    incidental_nonvisual_followup = bool(
+        _has_independent_nonvisual_artifact_request(low)
+        and not _has_affirmative_visual_instruction(low)
+        and not _is_self_portrait_generation_request(low)
+    )
+    explicit_image_request = False if incidental_nonvisual_followup else _detect_image_generation_request(low)
+    portrait_request = False if incidental_nonvisual_followup else _detect_portrait_request(low)
     structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
@@ -2331,6 +2379,8 @@ def _infer_dialogue_act_profile(
         "ты не поняла", "ты не понял", "вы не поняли", "опять не понял", "опять не поняла",
         "не понимаешь меня", "ты меня не понимаешь", "не то имел в виду", "не то имела в виду",
         "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
+        "ты путаешь", "ты что-то путаешь", "ты шо-то путаешь", "ты опять путаешь",
+        "я тебе про", "какие зайчики", "какие еще зайчики", "какие ещё зайчики",
         "я просил", "я просила", "я же просил", "я же просила", "ты должен был", "ты должна была",
         "not what i asked", "you misunderstood", "you did not understand", "you mixed it up", "you got it mixed up", "i don't understand", "i do not understand",
         "you don't understand me", "you do not understand me", "i hate this", "i hate it", "this is annoying",
@@ -2384,9 +2434,10 @@ def _infer_dialogue_act_profile(
     )
     explicit_previous_answer_correction = bool(re.search(
         r"\b(?:ты\s+(?:все|всё)\s+напутал\w*|ты\s+перепутал\w*|"
+        r"ты\s+(?:что|шо)[- ]?то\s+путаешь|ты\s+путаешь|ты\s+опять\s+путаешь|"
         r"я\s+(?:же\s+)?просил\w*|ты\s+(?:должен\s+был|должна\s+была)|"
         r"не\s+то,?\s+что\s+я\s+просил\w*|you\s+(?:mixed\s+it\s+up|got\s+it\s+mixed\s+up)|"
-        r"you\s+were\s+supposed\s+to)\b",
+        r"you\s+were\s+supposed\s+to|you\s+(?:are|keep)\s+mixing\s+(?:it\s+)?up)\b",
         low, flags=re.IGNORECASE,
     ))
     selection_followup_candidate = _looks_like_selection_followup(text)
@@ -2948,6 +2999,64 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "HISTORY_LOOKUP_WITH_NEW_VISUAL_OUTPUT"
         reason = "dialogue_based_self_portrait_requires_recent_history_context"
 
+    # Long image feedback is still part of the active exchange even when it contains
+    # edit verbs, numeric values, or a question. The visual-discussion guard has already
+    # established that no new visual instruction remains after stripping retrospective
+    # clauses; route it to the active branch instead of treating it as a fresh request.
+    retrospective_image_discussion = _is_image_discussion_without_new_visual_action(source)
+    if (
+        retrospective_image_discussion
+        and not history_request
+        and not site_navigation_request
+        and not dialogue_profile_request
+        and not explicit_topic_switch
+    ):
+        low_retro = _text(source).lower().replace("ё", "е")
+        repair_feedback = bool(re.search(
+            r"(?:что\s+случил\w*|что\s+произошл\w*|почему\s+ты|не\s+можешь\s+отвечать|"
+            r"какие\s+проблем\w*|не\s+понимаю|ты\s+(?:что|шо)[- ]?то\s+путаешь|"
+            r"ты\s+путаешь|перепутал\w*|напутал\w*|what\s+happened|why\s+can.?t\s+you\s+answer|"
+            r"what\s+is\s+the\s+problem|you\s+(?:mixed|mixing)\s+(?:it\s+)?up)",
+            low_retro, re.IGNORECASE,
+        ))
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = max(int(intent_score or 0), 3)
+        relation_hint = "CONTINUE"
+        reason = "retrospective_image_discussion_active_branch_repair" if repair_feedback else "retrospective_image_feedback_active_branch"
+        # Rebuild the pragmatic label so past-tense edit wording cannot masquerade as
+        # an instruction to edit again. Preserve clarification/explanation intent.
+        pragmatic = dict(dialogue_act_profile.get("pragmatic_features") or {})
+        pragmatic.update({
+            "correction": bool(repair_feedback),
+            "frustration_or_dissatisfaction": bool(repair_feedback),
+            "positive_evaluation": not repair_feedback,
+            "active_branch_repair": bool(repair_feedback),
+            "previous_answer_reference": bool(repair_feedback),
+            "has_independent_payload": False,
+        })
+        dialogue_act_profile = dict(dialogue_act_profile)
+        dialogue_act_profile.update({
+            "speech_act": "EXPLANATION_REQUEST" if repair_feedback and re.search(r"(?:почему|что\s+случил\w*|расскажи|what\s+happened|why)", low_retro, re.I) else ("CORRECTION_OR_REVISION" if repair_feedback else "POSITIVE_EVALUATION"),
+            "communicative_act": "CONTINUE_ACTIVE_DIALOGUE" if repair_feedback else "ACKNOWLEDGEMENT_OR_POSITIVE_FEEDBACK",
+            "pragmatic_intent": "explanation_request" if repair_feedback else "positive_evaluation",
+            "message_function": "continue_active_dialogue" if repair_feedback else "acknowledgement_or_positive_feedback",
+            "context_dependent_reaction": True,
+            "active_branch_repair": bool(repair_feedback),
+            "previous_answer_reference": bool(repair_feedback),
+            "tone": "DISSATISFIED" if repair_feedback else "POSITIVE",
+            "recommended_response_action": "REPAIR_OR_EXPLAIN_PREVIOUS_RESPONSE" if repair_feedback else "ACKNOWLEDGE_COMPLETED_RESULT_WITHOUT_REPEATING",
+            "pragmatic_features": pragmatic,
+        })
+        active_branch_repair = bool(repair_feedback)
+        previous_answer_reference = bool(repair_feedback)
+        saved_artifact_followup_kind = ""
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -2958,7 +3067,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "continuation_action": bool(continuation_action or saved_artifact_followup_kind),
         "answer_followup": bool(answer_followup),
         "context_dependent_question": bool(context_dependent_question),
-        "context_dependent_reaction": bool(context_dependent_reaction),
+        "context_dependent_reaction": bool(context_dependent_reaction or retrospective_image_discussion),
         "topic_reference_fragment": bool(topic_reference_fragment or saved_artifact_followup_kind),
         "previous_answer_reference": bool(previous_answer_reference),
         "active_branch_repair": bool(active_branch_repair),
@@ -4119,7 +4228,16 @@ def build_interpretation(
         )
     )
     image_discussion_only = _is_image_discussion_without_new_visual_action(normalized_visual_request)
-    explicit_image_edit = False if (ui_instruction_request or dialogue_profile_request or image_discussion_only) else _detect_image_modification(normalized_visual_request)
+    independent_artifact_request = _has_independent_nonvisual_artifact_request(normalized_visual_request)
+    # A prior mention of a photo must not turn an unrelated graph/table/code/link
+    # request into an image-edit operation. Preserve compound edits only when the
+    # current utterance also contains a positive, explicit visual-action instruction.
+    visual_action_is_current = _has_affirmative_visual_instruction(normalized_visual_request)
+    suppress_incidental_image_edit = bool(independent_artifact_request and not visual_action_is_current)
+    explicit_image_edit = False if (
+        ui_instruction_request or dialogue_profile_request or image_discussion_only
+        or suppress_incidental_image_edit
+    ) else _detect_image_modification(normalized_visual_request)
     if (
         explicit_image_edit
         and not has_original_image
@@ -4370,7 +4488,12 @@ def build_interpretation(
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
 
-    if has_original_image and task == "answer_request" and not image_status_request:
+    if (
+        has_original_image
+        and task == "answer_request"
+        and not image_status_request
+        and not image_discussion_only
+    ):
         task = "analyze_image"
     if dialogue_profile_request:
         task = "generate_image"
