@@ -900,6 +900,201 @@ def _apply_presentation_sequence(
         block["sequence_index"] = index
     return compact
 
+def _provider_declined_visual_output(raw: dict[str, Any]) -> bool:
+    """Detect a refusal/limitation that must not be bypassed by raster fallback.
+
+    When a provider returns a textual refusal and no concrete visual plan, a missing
+    image block is not permission to retry the original request through another
+    renderer. This prevents text/render contradictions and accidental policy bypass.
+    """
+    texts: list[str] = []
+    if isinstance(raw, dict):
+        for key in ("answer", "content", "summary"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+        for block in raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []:
+            if not isinstance(block, dict):
+                continue
+            value = block.get("content") or block.get("text") or block.get("markdown")
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+    combined = "\n".join(texts).lower().replace("ё", "е")
+    if not combined:
+        return False
+    refusal_patterns = (
+        r"(?:не могу|не предоставляю|не буду предоставлять|не могу помочь|не могу создать|не могу выполнить|нельзя предоставить|не предоставлю).{0,180}(?:оруж\w*|чертеж\w*|чертёж\w*|сборк\w*|ударно[- ]спусков\w*|инструкц\w*|изображен\w*|картинк\w*|схем\w*|рабоч\w*|подробн\w*)",
+        r"(?:не подробн\w* рабоч\w* чертеж\w*|не предоставля\w* подробн\w* (?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w*)|"
+        r"(?:подробн\w* )?(?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w*|инструкц\w* по внутренн\w* устройств\w*).{0,100}(?:не предоставля\w*|не могу|не буду|не могу помочь)|"
+        r"без (?:размер\w*|инструкц\w* по сборк\w*))",
+        r"(?:i\s+(?:cannot|can't|am unable to|won't be able to)|i\s+can't\s+help\s+with).{0,180}(?:weapon|firearm|blueprint|assembly|detailed\s+(?:diagram|schematic|instructions)|image generation)",
+        r"(?:request was rejected by the safety system|safety system rejected|safety policy prevents)",
+    )
+    return any(re.search(pattern, combined, re.IGNORECASE | re.DOTALL) for pattern in refusal_patterns)
+
+
+def _is_missing_source_reply(text: str) -> bool:
+    low = _text(text).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:прикрепи(?:те)?|загрузите|пришлите|добавьте)\b.{0,90}(?:исходн\w*|прикрепленн\w*|загруженн\w*|фото|картинк\w*|изображени\w*|снимок)|"
+        r"(?:please|kindly)\s+(?:attach|upload|provide)\b.{0,90}(?:original|source|image|photo|picture)|"
+        r"(?:исходн\w* изображени\w* нет|сейчас изображени\w* в сообщении нет|source image (?:is )?not available|no source image)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+
+
+def _reconcile_new_image_source_text(
+    answer: str,
+    raw: dict[str, Any],
+    interpretation: dict[str, Any],
+) -> tuple[str, bool]:
+    """Align provisional text with a confirmed new-image intent before streaming.
+
+    The model sometimes replies as if the user requested an edit and asks for a
+    source photo, even when Interpretation selected GENERATE_NEW_IMAGE and there
+    is no source image. Keep the user's operation authoritative, while withholding
+    any claim that the raster is already complete.
+    """
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    task = _text(intent.get("task")).lower()
+    if not (
+        bool(intent.get("wants_image"))
+        and task == "generate_image"
+        and not bool(intent.get("source_image_available"))
+        and not bool(intent.get("image_status_request"))
+        and _is_missing_source_reply(answer)
+        and not _provider_declined_visual_output(raw)
+    ):
+        return answer, False
+
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    language = _text(input_data.get("display_language") or "").lower()
+    if language in {"uk", "ua", "uk-ua"}:
+        reconciled = "Зрозуміла: потрібно створити нове зображення за вашим описом, а не редагувати оригінальне фото. Готую результат."
+    elif language in {"en", "en-us", "en-gb"}:
+        reconciled = "Understood — this request is to create a new image, not edit an existing photo. Preparing the result."
+    else:
+        reconciled = "Поняла: вы просите создать новое изображение по описанию, а не редактировать исходную фотографию. Подготавливаю результат."
+
+    raw["answer"] = reconciled
+    raw["content"] = reconciled
+    raw["summary"] = reconciled[:180]
+    if not isinstance(raw.get("render_blocks"), list):
+        raw["render_blocks"] = []
+    text_blocks = [
+        block for block in raw["render_blocks"]
+        if isinstance(block, dict)
+        and _text(block.get("type") or block.get("artifact_type") or "text").lower()
+            in {"text", "message", "answer", "markdown", "message_text", "message_text_block"}
+    ]
+    if text_blocks:
+        for block in text_blocks:
+            if "content" in block:
+                block["content"] = reconciled
+            if "text" in block:
+                block["text"] = reconciled
+            if "markdown" in block:
+                block["markdown"] = reconciled
+    else:
+        raw["render_blocks"].append({
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": reconciled,
+        })
+    return reconciled, True
+
+
+def _has_concrete_image_plan(raw: dict[str, Any]) -> bool:
+    """True only if a provider response includes a non-empty explicit image spec."""
+    if not isinstance(raw, dict):
+        return False
+    prompt_keys = (
+        "openai_structured_visual_plan_semantic", "visual_generation_prompt",
+        "image_prompt", "visual_prompt", "prompt",
+    )
+    direct = raw.get("image_spec")
+    if isinstance(direct, dict) and any(_text(direct.get(key)) for key in prompt_keys):
+        return True
+    for artifact in raw.get("artifacts") if isinstance(raw.get("artifacts"), list) else []:
+        if not isinstance(artifact, dict) or _text(artifact.get("type") or artifact.get("artifact_type")).lower() not in {"image", "generated_image"}:
+            continue
+        for candidate in (artifact.get("spec"), artifact.get("render_spec"), artifact.get("payload"), artifact.get("data"), artifact):
+            if isinstance(candidate, dict) and any(_text(candidate.get(key)) for key in prompt_keys):
+                return True
+    for block in raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []:
+        if not isinstance(block, dict) or _text(block.get("type") or block.get("artifact_type")).lower() not in {"image", "gallery"}:
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        # An empty legacy image block may carry only `prompt` on the outer block.
+        # That placeholder is not a structured visual plan and must not bypass refusal.
+        strong_plan_keys = (
+            "openai_structured_visual_plan_semantic", "visual_generation_prompt",
+            "image_prompt", "visual_prompt",
+        )
+        if any(_text(block.get(key)) for key in strong_plan_keys):
+            return True
+        if any(_text(payload.get(key)) for key in prompt_keys):
+            return True
+    return False
+
+
+def _has_safe_alternative_visual_plan(raw: dict[str, Any]) -> bool:
+    """Accept a visual alternative after refusal only when the plan is explicit and bounded.
+
+    A raw user prompt or placeholder image block is not a safe alternative. For a
+    refused technical drawing, require an explicit high-level/educational scope and
+    reject dimensions, assembly guidance, or detailed functional-mechanism language.
+    """
+    if not isinstance(raw, dict) or not _has_concrete_image_plan(raw):
+        return False
+    prompt_keys = (
+        "openai_structured_visual_plan_semantic", "visual_generation_prompt",
+        "image_prompt", "visual_prompt", "prompt", "description",
+    )
+    candidates: list[str] = []
+    direct = raw.get("image_spec")
+    if isinstance(direct, dict):
+        candidates.extend(_text(direct.get(key)) for key in prompt_keys if _text(direct.get(key)))
+    for artifact in raw.get("artifacts") if isinstance(raw.get("artifacts"), list) else []:
+        if not isinstance(artifact, dict):
+            continue
+        for candidate in (artifact.get("spec"), artifact.get("render_spec"), artifact.get("payload"), artifact.get("data"), artifact):
+            if isinstance(candidate, dict):
+                candidates.extend(_text(candidate.get(key)) for key in prompt_keys if _text(candidate.get(key)))
+    for block in raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []:
+        if not isinstance(block, dict):
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        strong_keys = ("openai_structured_visual_plan_semantic", "visual_generation_prompt", "image_prompt", "visual_prompt")
+        candidates.extend(_text(block.get(key)) for key in strong_keys if _text(block.get(key)))
+        candidates.extend(_text(payload.get(key)) for key in prompt_keys if _text(payload.get(key)))
+    plan = "\n".join(dict.fromkeys(candidates)).lower().replace("ё", "е")
+    if not plan:
+        return False
+    explicitly_bounded = bool(re.search(
+        r"(?:учебн\w*|обзорн\w*|в\s+общих\s+чертах|внешн\w*\s+(?:узл\w*|детал\w*|элемент\w*)|"
+        r"без\s+(?:размер\w*|инструкц\w*|сборк\w*|детальн\w*\s+механизм\w*)|неоперацион\w*|"
+        r"educational|high[- ]level|overview|external\s+(?:parts|components)|without\s+dimensions|no\s+dimensions|"
+        r"without\s+assembly\s+instructions|non[- ]operational)",
+        plan, re.IGNORECASE | re.DOTALL,
+    ))
+    # Remove explicit negated scope first so a safe phrase such as
+    # "без инструкций по сборке" is not mistaken for an instruction to assemble.
+    unsafe_scan = re.sub(
+        r"без\s+(?:(?:размер\w*|инструкц\w*(?:\s+по\s+(?:сборк\w*|разборк\w*))?|указан\w*(?:\s+размер\w*))(?:\s+(?:и|или)\s+)?){1,4}",
+        " ", plan, flags=re.IGNORECASE | re.DOTALL,
+    )
+    unsafe_detail = bool(re.search(
+        r"(?:с\s+размерам\w*|точн\w*\s+размер\w*|укаж\w*\s+размер\w*|размер\w*\s+в\s*(?:мм|см|дюйм)|"
+        r"with\s+(?:exact\s+)?dimensions|include\s+(?:exact\s+)?dimensions|dimensioned\s+blueprint|"
+        r"рабоч\w*\s+чертеж\w*|blueprint|подробн\w*\s+(?:инструкц\w*|схем\w*\s+внутренн\w*|механизм\w*)|"
+        r"сборк\w*|разборк\w*|ударно[- ]спусков\w*|firing\s+mechanism|assembly\s+steps|how\s+to\s+assemble)",
+        unsafe_scan, re.IGNORECASE | re.DOTALL,
+    ))
+    return explicitly_bounded and not unsafe_detail
+
+
 def _build_image_spec(
     raw: dict[str, Any],
     interpretation: dict[str, Any],
@@ -916,6 +1111,12 @@ def _build_image_spec(
         return None
 
     request_text = _text((interpretation.get("input") or {}).get("original_request"))
+    # If the provider refused the exact request but supplied a clearly bounded
+    # safe alternative, never feed the original hazardous request back into the
+    # image prompt through request_anchor or continuation-context enrichment.
+    safe_alternative_after_refusal = bool(
+        _provider_declined_visual_output(raw) and _has_safe_alternative_visual_plan(raw)
+    )
     prompt_keys = (
         "openai_structured_visual_plan_semantic", "visual_generation_prompt",
         "image_prompt", "visual_prompt", "image_description", "visual_description",
@@ -980,6 +1181,48 @@ def _build_image_spec(
         clean.setdefault("visual_context", {})
         if not isinstance(clean.get("visual_context"), dict):
             clean["visual_context"] = {}
+        if safe_alternative_after_refusal:
+            # The only authorized visual subject is the model's explicit bounded
+            # alternative; do not carry hazardous source dimensions/assembly text
+            # into the separate raster prompt.
+            clean["request_anchor"] = semantic
+            clean["prompt"] = semantic
+            clean["visual_context"]["bounded_safe_alternative_only"] = True
+            clean["visual_context"]["original_request_not_forwarded"] = True
+        # The active branch is the source of truth for a visual continuation. Keep
+        # its original goal attached to the current instruction so a short "continue"
+        # cannot accidentally become a generic/ unrelated image request.
+        dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+        continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+        if _text(dialogue.get("relation")).upper() == "CONTINUE" and not safe_alternative_after_refusal:
+            branch = continuation.get("active_work_branch") if isinstance(continuation.get("active_work_branch"), dict) else {}
+            anchor = continuation.get("anchor") if isinstance(continuation.get("anchor"), dict) else {}
+            branch_goal = _text(
+                branch.get("goal") or branch.get("topic") or anchor.get("user_text")
+                or anchor.get("user") or anchor.get("question")
+            )[:1000]
+            if not branch_goal:
+                selected_pairs = continuation.get("selected_pairs") if isinstance(continuation.get("selected_pairs"), list) else []
+                for pair in selected_pairs:
+                    if not isinstance(pair, dict):
+                        continue
+                    candidate = _text(pair.get("user_text") or pair.get("user") or pair.get("question"))
+                    if candidate and candidate != request_text:
+                        branch_goal = candidate[:1000]
+                        break
+            if branch_goal and branch_goal.lower().replace("ё", "е") not in request_text.lower().replace("ё", "е"):
+                clean["visual_context"]["validated_active_task_source"] = branch_goal
+                clean["visual_context"]["current_turn_instruction"] = request_text[:1000]
+                semantic = (
+                    "Continue the same validated visual task from this dialogue branch. "
+                    "Original task/request: " + branch_goal + ". "
+                    "Current user instruction: " + request_text + ". "
+                    "Treat the original task as the stable subject and requirements; "
+                    "apply the current instruction as a continuation/refinement. "
+                    "Do not introduce an unrelated subject or substitute a generic photo for a requested diagram."
+                )
+                clean["openai_structured_visual_plan_semantic"] = semantic
+                clean["prompt"] = semantic
         # A screenshot-style April navigation illustration must be grounded in the
         # existing screen blueprint. Do not let the image model invent unrelated UI.
         _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
@@ -3614,6 +3857,10 @@ async def execute(
             "content": answer,
         }]
         raw["artifacts"] = []
+    else:
+        answer, _image_text_reconciled = _reconcile_new_image_source_text(answer, raw, interpretation)
+        if _image_text_reconciled:
+            _apr_timing_log("image_text_contract_reconciled", None, mode="new_image_intent_corrected_before_progressive_text")
 
     # Recover HTML tables emitted into prose or text render blocks. This is a
     # post-provider compatibility repair: an actual table must never reach React
@@ -3740,7 +3987,19 @@ async def execute(
     request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
     presentation_sequence = request_structure.get("presentation_sequence") if isinstance(request_structure.get("presentation_sequence"), list) else []
     graph_policy = (interpretation.get("intent") or {}).get("graph_policy") if isinstance((interpretation.get("intent") or {}).get("graph_policy"), dict) else {}
-    image_pending = bool((interpretation.get("intent") or {}).get("wants_image"))
+    _early_image_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    _early_image_task = _text(_early_image_intent.get("task")).lower()
+    _early_image_operation = _text(_early_image_intent.get("image_operation")).lower()
+    _source_missing_only = _early_image_task == "request_source_image" or _early_image_operation == "request_source"
+    _visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
+    image_pending = bool(
+        _early_image_intent.get("wants_image")
+        and not _source_missing_only
+        and not _visual_declined_without_plan
+        and not bool(_early_image_intent.get("image_status_request"))
+        and not bool(_early_image_intent.get("reuse_saved_image"))
+        and (not bool(provider_metadata.get("provider_fallback")) or _early_image_operation == "edit")
+    )
 
     # First publish all text and non-image typed renderers. The Web replaces this
     # provisional SceneContract with the final one, while the image generator keeps
@@ -3818,10 +4077,28 @@ async def execute(
         image_intent.get("image_operation") == "edit"
         or _text(image_intent.get("task")) == "edit_image"
     )
-    if image_intent.get("wants_image") and (
-        not bool(provider_metadata.get("provider_fallback"))
-        or is_image_edit_operation
-    ):
+    image_task_is_missing_source = (
+        _text(image_intent.get("task")).lower() == "request_source_image"
+        or _text(image_intent.get("image_operation")).lower() == "request_source"
+    )
+    visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
+    image_generation_allowed = bool(
+        image_intent.get("wants_image")
+        and not image_task_is_missing_source
+        and not bool(image_intent.get("image_status_request"))
+        and not visual_declined_without_plan
+        and (not bool(provider_metadata.get("provider_fallback")) or is_image_edit_operation)
+    )
+    _apr_timing_log(
+        "image_generation_gate", None,
+        wants_image=bool(image_intent.get("wants_image")),
+        task=_text(image_intent.get("task")),
+        image_operation=_text(image_intent.get("image_operation")),
+        source_missing_only=bool(image_task_is_missing_source),
+        provider_visual_refusal=bool(visual_declined_without_plan),
+        allowed=bool(image_generation_allowed),
+    )
+    if image_generation_allowed:
         image_started = time.perf_counter()
         if is_image_edit_operation:
             try:
@@ -3893,7 +4170,7 @@ async def execute(
                     "reused": True,
                 }
                 _apr_timing_log("saved_image_reuse", None, reused=True, image_bytes=len(saved_bytes), message_key=_apr_diag_ref((saved_output or {}).get("asset_message_id")))
-        if image_result is None and not is_image_edit_operation and not image_intent.get("image_status_request"):
+        if image_result is None and not is_image_edit_operation and not image_intent.get("image_status_request") and not image_intent.get("reuse_saved_image") and not image_task_is_missing_source and not visual_declined_without_plan:
             try:
                 image_result = await _generate_image_artifact(
                     interpretation,
@@ -4047,6 +4324,30 @@ async def execute(
                 })
             packaged.setdefault("artifacts", []).extend(compact_artifacts)
             if visible_images:
+                if (
+                    not is_image_edit_operation
+                    and _text(image_intent.get("task")).lower() == "generate_image"
+                    and _is_missing_source_reply(answer)
+                ):
+                    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+                    language = _text(input_data.get("display_language") or "").lower()
+                    if language in {"uk", "ua", "uk-ua"}:
+                        answer = "Готово — створено нове зображення за поточним запитом. Нижче — результат."
+                    elif language in {"en", "en-us", "en-gb"}:
+                        answer = "Done — a new image was created from your current request. The result is below."
+                    else:
+                        answer = "Готово — создано новое изображение по текущему запросу. Ниже — результат."
+                    raw["answer"] = answer
+                    raw["content"] = answer
+                    packaged["answer"] = answer
+                    packaged["content"] = answer
+                    packaged["summary"] = answer[:180]
+                    for text_block in (packaged.get("render_blocks") or []):
+                        if isinstance(text_block, dict) and _text(text_block.get("type") or text_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
+                            text_block["content"] = answer
+                            text_block["text"] = answer
+                            break
+                    _apr_timing_log("image_text_contract_reconciled", None, mode="generated_image_overrode_missing_source_text")
                 first_artifact = image_results[0].get("artifact") if isinstance(image_results[0].get("artifact"), dict) else image_results[0]
                 image_step_index = 1
                 image_step_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
@@ -4126,7 +4427,32 @@ async def execute(
             "text": answer,
         }]
 
-    elif image_generation_failed or (image_intent.get("wants_image") and not image_result and not image_intent.get("reuse_saved_image")):
+    elif image_intent.get("reuse_saved_image") and not image_result:
+        input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+        language = _text(input_data.get("display_language") or "").lower()
+        if language in {"uk", "ua", "uk-ua"}:
+            answer = "Не вдалося відновити збережене зображення з історії, тому я не підмінятиму його новою картинкою. Повторіть початковий запит, щоб створити результат заново."
+        elif language in {"en", "en-us", "en-gb"}:
+            answer = "I couldn’t restore the saved image from the conversation, so I won’t replace it with a new picture. Repeat the original request to generate the result again."
+        else:
+            answer = "Не удалось восстановить сохранённое изображение из истории, поэтому я не буду подменять его новой картинкой. Повторите исходный запрос, чтобы создать результат заново."
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = answer[:180]
+        packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
+        packaged["render_blocks"] = [{
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+            "text": answer,
+        }]
+
+    elif (
+        not visual_declined_without_plan
+        and not image_task_is_missing_source
+        and (image_generation_failed or (image_intent.get("wants_image") and not image_result and not image_intent.get("reuse_saved_image")))
+    ):
         input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
         language = _text(input_data.get("display_language") or "").lower()
         if language in {"uk", "ua", "uk-ua"}:
