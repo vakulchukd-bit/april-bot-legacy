@@ -494,6 +494,150 @@ def _is_self_portrait_generation_request(text: str) -> bool:
     ))
 
 
+def _has_affirmative_visual_instruction(text: str) -> bool:
+    """Return True only when the current turn contains an affirmative visual action.
+
+    This intentionally looks for command/request forms rather than any occurrence
+    of verbs such as "created", "drew", or "edited". Those often describe an
+    earlier result during ordinary conversation and must not start another render.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    negated_prefix = re.compile(
+        r"(?:\bне|\bни|\bникогда|\bnever|\bnot|\bdon't|\bdo\s+not|\bdidn't|\bdoesn't|"
+        r"\b(?:i\s+)?(?:did\s+not|didn't)\s+ask\s+you\s+to|"
+        r"\b(?:i\s+)?(?:do\s+not|don't|never)\s+want\s+you\s+to|"
+        r"\bне\s+(?:надо|нужно|следует)|"
+        r"\bне\s+(?:просил\w*|просила|попросил\w*|попросила|хотел\w*|хотела))\s*$",
+        re.IGNORECASE,
+    )
+
+    # Explicit generation imperatives. A concrete subject ("лес", "дом", etc.)
+    # is enough even when the user doesn't say "picture".
+    generation_command = re.compile(
+        r"\b(?:нарисуй(?:те)?|изобрази(?:те)?|создай(?:те)?|сгенерируй(?:те)?|сделай(?:те)?|"
+        r"покажи(?:те)?|показать|draw|create|generate|make|show|display|illustrate)\b",
+        re.IGNORECASE,
+    )
+    for match in generation_command.finditer(low):
+        prefix = low[max(0, match.start() - 45):match.start()]
+        if negated_prefix.search(prefix):
+            continue
+        tail = low[match.end():match.end() + 145]
+        # Do not treat explanatory questions ("покажи, как ты создала...") as a
+        # fresh visual operation. These verbs are not generation commands themselves.
+        if re.match(r"\s*[,—:-]?\s*(?:как\s+ты|как\s+это|что\s+ты|почему\s+ты|how\s+you|how\s+did\s+you|why\s+did\s+you)\b", tail) or re.search(r"(?:\bкак\s+ты|\bзачем\s+ты|\bпочему\s+ты|\bhow\s+did\s+you|\bhow\s+do\s+you|\bwhy\s+did\s+you)\s*$", prefix):
+            continue
+        if re.search(image_noun, tail, re.IGNORECASE) or re.search(
+            r"\b(?:лес\w*|опушк\w*|зайц\w*|кролик\w*|дом\w*|машин\w*|пейзаж\w*|"
+            r"кот\w*|собак\w*|человек\w*|персонаж\w*|планет\w*|корабл\w*|сцен\w*|"
+            r"forest\w*|rabbit\w*|house\w*|car\w*|landscape\w*|cat\w*|dog\w*|person\w*|scene\w*)\b",
+            tail, re.IGNORECASE,
+        ):
+            return True
+
+    # Image edits often use a short imperative and a deictic target: "добавь туда
+    # зайцев", "дорисуй на этой фотке". Past-tense "дорисовала" never matches.
+    edit_command = re.compile(
+        r"\b(?:добавь|добавьте|дорисуй|дорисуйте|нанеси|нанесите|поставь|поставьте|"
+        r"размести|разместите|помести|поместите|убери|уберите|удали|удалите|замени|замените|"
+        r"измени|измените|отредактируй|отредактируйте|улучши|улучшите|исправь|исправьте|"
+        r"перекрась|перекрасьте|вставь|вставьте|обрежь|обрежьте|"
+        r"сделай|сделайте|add|insert|remove|erase|replace|change|edit|modify|retouch|improve|make)\b",
+        re.IGNORECASE,
+    )
+    for match in edit_command.finditer(low):
+        prefix = low[max(0, match.start() - 45):match.start()]
+        if negated_prefix.search(prefix):
+            continue
+        nearby = low[max(0, match.start() - 100):match.end() + 130]
+        if re.search(image_noun, nearby, re.IGNORECASE) or re.search(
+            r"\b(?:туда|сюда|на\s+ней|на\s+нее|на\s+неё|в\s+ней|в\s+него|на\s+этом|"
+            r"на\s+эту|к\s+этому|this\s+image|this\s+photo|on\s+it|onto\s+it)\b",
+            nearby, re.IGNORECASE,
+        ):
+            return True
+
+    # Polite/modal constructions are also affirmative: "хочу, чтобы ты создала
+    # изображение", "можешь нарисовать фото?", "please generate an image".
+    modal_request = re.compile(
+        r"\b(?:хочу|хотел\w*|хотела|мне\s+(?:нужно|надо)|можешь|мог(?:ла)?\s+бы|"
+        r"пожалуйста|давай|i\s+want\s+you\s+to|could\s+you|would\s+you|please)\b"
+        r".{0,100}\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|добав\w*|дорис\w*|"
+        r"измен\w*|отредактир\w*|draw|create|generate|illustrate|add|edit|modify)\b"
+        r".{0,110}" + image_noun,
+        re.IGNORECASE | re.DOTALL,
+    )
+    modal_match = modal_request.search(low)
+    if modal_match:
+        action_part = modal_match.group(0)
+        if not re.search(r"(?:\bне\b|\bnot\b|\bdon't\b|\bdo\s+not\b|\bnever\b).{0,55}\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|добав\w*|дорис\w*|измен\w*|отредактир\w*|draw|create|generate|illustrate|add|edit|modify)\b", action_part, re.IGNORECASE | re.DOTALL):
+            return True
+    return False
+
+
+def _is_image_discussion_without_new_visual_action(text: str) -> bool:
+    """Identify image-related discussion/correction that is not an image command.
+
+    Use this as a narrow anti-false-positive guard: a clear affirmative command in
+    the same long message wins, so compound requests can still ask for both prose
+    and one or more visual deliverables.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    if not re.search(image_noun, low, re.IGNORECASE):
+        return False
+    if _has_affirmative_visual_instruction(low):
+        return False
+
+    # Explicit refusal/correction: "я не просил, чтобы ты создавала картинку",
+    # "не создавай изображение, просто объясни". Keep this broader than one exact
+    # wording, while requiring an image-related target in the same turn.
+    negated_visual_request = bool(re.search(
+        r"(?:\bне\s+(?:создавай\w*|рисуй|рисуйте|изображай|генерируй|редактируй|изменяй)"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:do\s+not|don't|never)\s+(?:create|draw|generate|make|edit|modify)\b"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:i\s+)?(?:do\s+not|don't|never)\s+want\s+you\s+to\s+(?:create|draw|generate|make|edit|modify)\b"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:i\s+(?:did\s+not|didn't)\s+ask)\b.{0,140}(?:create|draw|generate|make|edit|modify)"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:я\s+(?:же\s+)?не\s+(?:просил\w*|просила|попросил\w*|попросила|хотел\w*|хотела|говорил\w*|говорила))"
+        r".{0,180}(?:созда\w*|нарис\w*|изобраз\w*|сгенерир\w*|дорис\w*|измен\w*|отредактир\w*)"
+        r".{0,100}" + image_noun + r")",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if negated_visual_request:
+        return True
+
+    # Past-result narration, appreciation, capability discussion, and questions
+    # about how/why an earlier picture was made are dialogue, not fresh work.
+    retrospective_image_talk = bool(re.search(
+        r"(?:\b(?:получил\w*|понравил\w*|созда(?:л|ла|ли|ло|вал|вала|вали)\w*|"
+        r"нарисова(?:л|ла|ли|ло)\w*|дорисова(?:л|ла|ли|ло)\w*|"
+        r"сгенерирова(?:л|ла|ли|ло)\w*|изменил(?:а|и|о)?\w*|отредактировал(?:а|и|о)?\w*|"
+        r"created|made|drew|generated|edited|modified)\b|"
+        r"\bумеешь\s+(?:создавать|рисовать|нарисовывать|изменять|редактировать|генерировать)\b|"
+        r"\b(?:зачем|почему|как)\s+ты\b.{0,90}(?:созда\w*|нарис\w*|дорис\w*|сгенерир\w*|измен\w*|отредактир\w*)|"
+        r"\b(?:how|why)\s+did\s+you\s+(?:create|draw|generate|make|edit|modify)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    discussion_context = bool(re.search(
+        r"(?:\b(?:понравил\w*|молодец|классн\w*|прикольн\w*|получил\w*|научил\w*|объясн\w*|"
+        r"расскажи\w*|расскажи|обсуд\w*|поговор\w*|умеешь|зачем|почему|как|explain|tell\s+me|"
+        r"describe|discuss|thanks)\b|"
+        r"\bwho\s+(?:taught|created)\b|\bhow\s+(?:(?:did|do)\s+you|you)\b|"
+        r"\bwhy\s+(?:(?:did|do)\s+you|you)\b)",
+        low, re.IGNORECASE,
+    ))
+    return retrospective_image_talk and discussion_context
+
+
 def _detect_image_modification(text: str) -> bool:
     """Detect edits to an explicitly identified existing image, not a generic canvas.
 
@@ -505,6 +649,8 @@ def _detect_image_modification(text: str) -> bool:
     """
     low = _text(text).lower().replace("ё", "е")
     if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
+        return False
+    if _is_image_discussion_without_new_visual_action(low):
         return False
     if _is_self_portrait_generation_request(low):
         return False
@@ -587,6 +733,8 @@ def _detect_image_generation_request(text: str) -> bool:
     if not low:
         return False
     if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
+        return False
+    if _is_image_discussion_without_new_visual_action(low):
         return False
     if _is_self_portrait_generation_request(low):
         return True
@@ -698,7 +846,7 @@ def _has_drawable_subject(text: str) -> bool:
 def _detect_portrait_request(text: str) -> bool:
     """Detect a requested portrait/photo, including an omitted-verb follow-up."""
     low = _text(text).lower().replace("ё", "е")
-    if not low:
+    if not low or _is_image_discussion_without_new_visual_action(low):
         return False
     photo = r"(?:фотограф\w*|фотк\w*|фото\b|снимк\w*|портрет\w*|\bphoto\b|\bpicture\w*|\bimage\w*|\bportrait\w*)"
     final_slot = bool(re.search(
@@ -928,6 +1076,8 @@ def _detect_requested_outputs(text: str) -> list[str]:
             # is a structured spatial object request in April's adaptive visual layer.
             result.append("graph")
 
+    if _is_image_discussion_without_new_visual_action(low):
+        result = [kind for kind in result if kind != "image"]
     if not result:
         result.append("text")
     elif "text" not in result:
@@ -1080,6 +1230,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     )) and "formula" not in outputs and "graph" not in outputs:
         outputs.append("formula")
 
+    if _is_image_discussion_without_new_visual_action(low):
+        outputs = [kind for kind in outputs if kind != "image"]
     if "text" not in outputs:
         outputs.insert(0, "text")
     return list(dict.fromkeys(outputs))
@@ -3943,7 +4095,8 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
-    explicit_image_edit = False if (ui_instruction_request or dialogue_profile_request) else _detect_image_modification(normalized_visual_request)
+    image_discussion_only = _is_image_discussion_without_new_visual_action(normalized_visual_request)
+    explicit_image_edit = False if (ui_instruction_request or dialogue_profile_request or image_discussion_only) else _detect_image_modification(normalized_visual_request)
     if (
         explicit_image_edit
         and not has_original_image
@@ -3953,7 +4106,7 @@ def build_interpretation(
         # changing a named/attached photo. Keep the image output and let the
         # registered generator create a new picture instead of asking for upload.
         explicit_image_edit = False
-    contextual_image_edit = bool(not ui_instruction_request and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
+    contextual_image_edit = bool(not ui_instruction_request and not image_discussion_only and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
     image_edit_requested = bool((explicit_image_edit or contextual_image_edit) and not dialogue_profile_request)
     # A contextual command such as "Добавь зелёную галочку" becomes an image
     # edit only when a source image is actually available. An explicit edit request
@@ -4065,6 +4218,42 @@ def build_interpretation(
     reuse_saved_image = image_followup and has_saved_output_image
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
+
+    # Active visual history is context, not permission to render again. A turn that
+    # discusses, praises, questions, or rejects a previous image stays text-only
+    # unless the current wording contains an affirmative visual operation.
+    image_generation_blocked = bool(image_discussion_only)
+    if image_generation_blocked:
+        requested_outputs = [name for name in requested_outputs if _text(name).lower() != "image"] or ["text"]
+        for sequence_item in question_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            step_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            sequence_item["output_types"] = step_outputs or ["text"]
+            action_contract = sequence_item.get("action_contract")
+            if isinstance(action_contract, dict):
+                action_contract["output_types"] = list(sequence_item["output_types"])
+                if _text(action_contract.get("action")).upper() == "GENERATE_NEW_IMAGE":
+                    action_contract["action"] = "ANSWER_DIRECTLY"
+                    action_contract["domain"] = "general"
+                    action_contract["target"] = "current_request"
+        cleaned_presentation = []
+        for sequence_item in presentation_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            step_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            if step_outputs:
+                sequence_item["output_types"] = step_outputs
+                cleaned_presentation.append(sequence_item)
+        presentation_sequence = cleaned_presentation
+        image_edit_requested = False
+        reuse_saved_image = False
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
@@ -4191,6 +4380,7 @@ def build_interpretation(
             "task": task,
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
+            "image_generation_blocked": bool(image_generation_blocked),
             "image_operation": "edit" if (image_edit_requested and source_image_available) else ("request_source" if image_edit_requested else ("reuse" if reuse_saved_image else ("generate" if wants_image else "none"))),
             "image_edit_requested": bool(image_edit_requested),
             "source_image_available": bool(source_image_available),
