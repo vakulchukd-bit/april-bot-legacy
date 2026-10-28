@@ -1987,7 +1987,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request"
+            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -2077,6 +2077,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "CURRENT_REQUEST": data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), current_budget),
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
+            "DIALOGUE_BASED_PORTRAIT_PROFILE": data.get("DIALOGUE_BASED_PORTRAIT_PROFILE") or {},
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
             "CONTINUATION_GUIDANCE": guidance_min,
             "SCENE_COMPLEMENTARITY_POLICY": renderer_policy_min,
@@ -2447,7 +2448,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         essential_keys = (
             "CURRENT_REQUEST", "RETURN_LANGUAGE", "OUTPUT_CONTRACT", "REQUEST_SEQUENCE",
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
-            "INTERPRETATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
+            "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
             "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
             "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
@@ -3203,6 +3204,25 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
     }
 
+    portrait_profile_raw = visual.get("dialogue_based_portrait_profile") if isinstance(visual.get("dialogue_based_portrait_profile"), dict) else {}
+    dialogue_profile_request = bool(
+        visual.get("dialogue_profile_request")
+        or structured_intent.get("dialogue_profile_request")
+        or portrait_profile_raw
+    )
+    portrait_profile_card = {
+        "schema": _clip(portrait_profile_raw.get("schema") or "april_dialogue_portrait_profile_v1", 60),
+        "evidence_turn_count": max(0, min(100, int(portrait_profile_raw.get("evidence_turn_count") or 0))),
+        "recurring_themes": [_clip(value, 140) for value in (portrait_profile_raw.get("recurring_themes") or [])[:5] if str(value).strip()],
+        "recent_topic_labels": [_clip(value, 100) for value in (portrait_profile_raw.get("recent_topic_labels") or [])[:8] if str(value).strip()],
+        "observed_communication_style": _clip(portrait_profile_raw.get("observed_communication_style"), 260),
+        "situational_tone_observation": _clip(portrait_profile_raw.get("situational_tone_observation"), 260),
+        "evidence_policy": _clip(portrait_profile_raw.get("evidence_policy"), 260),
+        "visual_direction": _clip(portrait_profile_raw.get("visual_direction"), 360),
+        "do_not_infer": [_clip(value, 100) for value in (portrait_profile_raw.get("do_not_infer") or [])[:8] if str(value).strip()],
+        "do_not_substitute": [_clip(value, 100) for value in (portrait_profile_raw.get("do_not_substitute") or [])[:8] if str(value).strip()],
+    } if dialogue_profile_request else {}
+
     structured = {
         "AUTHENTICATED_IDENTITY": {key: _clip(value, 180) for key, value in identity.items() if value},
         "CURRENT_REQUEST": current,
@@ -3223,7 +3243,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "wants_graph": bool(structured_intent.get("wants_graph")),
             "graph_policy": dict(structured_intent.get("graph_policy") or {}),
             "explicit_generation_request": bool(structured_intent.get("explicit_generation_request")),
+            "dialogue_profile_request": dialogue_profile_request,
         },
+        "DIALOGUE_BASED_PORTRAIT_PROFILE": portrait_profile_card,
         "DIALOGUE_RELATION": relation,
         "CONTINUATION_GUIDANCE": continuation_guidance,
         "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
