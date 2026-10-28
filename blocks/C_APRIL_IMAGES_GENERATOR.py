@@ -402,10 +402,13 @@ class AprilImagesGenerator:
 
         parts.append(
             "Follow the request and visual plan exactly, preserving subject, identity, action, relationships, "
-            "setting, mood, palette and style. Use clear framing, focal hierarchy, coherent perspective, "
-            "consistent lighting and readable textures. Keep anatomy and object geometry consistent. Add no "
-            "unrequested elements; avoid clutter, duplicates, stray text, logos and watermarks unless requested. "
-            "Resolve ambiguities conservatively."
+            "setting, mood, palette and style. Every explicitly requested main subject or object must be "
+            "visibly present, recognizable, and given clear visual priority; an associated background is not "
+            "a substitute for the requested subject. For example, when the user asks for a moon, show a "
+            "clearly visible moon in the sky rather than only a night landscape. Use clear framing, focal "
+            "hierarchy, coherent perspective, consistent lighting and readable textures. Keep anatomy and "
+            "object geometry consistent. Add no unrequested elements; avoid clutter, duplicates, stray text, "
+            "logos and watermarks unless requested. Resolve ambiguities conservatively."
         )
         return "\n".join(parts)
 
