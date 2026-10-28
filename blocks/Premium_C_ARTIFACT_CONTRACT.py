@@ -4885,6 +4885,48 @@ def _fallback_render_explanation_extended(block_type: str, block: Dict[str, Any]
     return t["block_plain"].format(title=title_ref, details=details)
 
 
+def _looks_like_image_prompt_echo(value: Any) -> bool:
+    """Reject user commands and generator instructions masquerading as captions."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return False
+    # A short conversational prefix must not make a copied imperative look like
+    # a real caption (for example, "Вот что получилось: Нарисуй фотку...").
+    text = re.sub(
+        r"(?i)^(?:вот что получилось|вот результат|готово|here(?:'|’)s the result|here is the result|done|voilà le résultat|voici le résultat)\s*[:—-]\s*",
+        "", text,
+    ).strip()
+    if re.match(
+        r"(?i)^(?:user request|openai visual meaning|semantic generation prompt|generation prompt|"
+        r"edit the supplied source image|follow the request|preserve the source image|"
+        r"according to this exact user instruction|image prompt|prompt)\b",
+        text,
+    ):
+        return True
+    # Caption text should describe the result, not repeat the user's imperative.
+    if re.match(
+        r"(?i)^(?:нарисуй|нарисуйте|добавь|добавьте|измени|измените|сделай|сделайте|"
+        r"создай|создайте|сгенерируй|сгенерируйте|покажи|покажите|убери|уберите|"
+        r"удали|удалите|замени|замените|перенеси|перенесите|сохрани|сохраните|"
+        r"draw|create|make|generate|add|edit|change|remove|delete|replace|preserve|"
+        r"show me|put|insert|retouch|transform)\b",
+        text,
+    ):
+        return True
+    return False
+
+
+def _caption_duplicates_answer(caption: str, answer: str) -> bool:
+    """True only when a caption is effectively the same sentence as the answer."""
+    def normalize(value: str) -> str:
+        value = re.sub(r"(?i)^\s*(?:вот что получилось|готово|вот фотография|вот изображение|here(?:'|’)s the result|done)\s*[:—-]?\s*", "", value or "")
+        value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE).lower()
+        return re.sub(r"\s+", " ", value).strip()
+    cap = normalize(caption)
+    ans = normalize(answer)
+    return bool(cap and ans and cap == ans)
+
+
 def _naturalize_image_caption(value: Any, language: str = "ru") -> str:
     """Turn contract-style image explanations into a short conversational caption."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -5348,9 +5390,13 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
 
         payload = _render_payload(block)
         explanation = str(_render_block_field(block, payload, "explanation", "render_explanation", "what_it_shows") or "").strip()
+        if block_type in {"image", "gallery"} and _looks_like_image_prompt_echo(explanation):
+            explanation = ""
         if len(explanation) < 24:
             description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
-            if len(description) >= 48:
+            if len(description) >= 48 and not (
+                block_type in {"image", "gallery"} and _looks_like_image_prompt_echo(description)
+            ):
                 explanation = description
         if len(explanation) < 24:
             explanation = _fallback_render_explanation(block_type, block, answer, language)
@@ -5358,6 +5404,20 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             continue
         if block_type in {"image", "gallery"}:
             explanation = _naturalize_image_caption(explanation, language)
+            if _looks_like_image_prompt_echo(explanation):
+                # If no grounded image-specific description is available, prefer
+                # a brief ready-state caption over exposing an instruction/prompt.
+                explanation = {
+                    "uk": "Готово — зображення створено за твоїм запитом.",
+                    "en": "Done — the image is ready.",
+                    "fr": "C’est prêt — l’image a été créée.",
+                    "es": "Listo: la imagen está preparada.",
+                    "de": "Fertig — das Bild ist erstellt.",
+                }.get(language, "Готово — изображение создано по вашему запросу.")
+            if _caption_duplicates_answer(explanation, answer):
+                # The canonical answer is already shown in the same turn. Do not
+                # repeat that exact sentence as a second block below the image.
+                continue
             already_labeled = True
             prefix = ""
         else:
