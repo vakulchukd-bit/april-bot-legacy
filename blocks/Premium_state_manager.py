@@ -22,7 +22,10 @@ from typing import Any
 import psycopg2
 from rapidfuzz import fuzz
 from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor
-from blocks.Premium_interpretation_identity import extract_temporal_window, extract_topic_count_bounds, intersect_retention_window
+from blocks.Premium_interpretation_identity import (
+    extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
+    _is_image_discussion_without_new_visual_action,
+)
 
 
 
@@ -87,8 +90,11 @@ def load_dialogue_pairs(
 ) -> list[dict[str, Any]]:
     """Load only this active Premium user's USER↔APRIL pairs from the last 24 hours."""
     uid = str(user_id or "").strip()
-    if not uid or not is_authenticated_user(uid):
+    if not uid:
         return []
+    # Do not open a separate authentication connection before the canonical
+    # Premium check below: _active_premium_cursor verifies the same required
+    # account fields and entitlement on the connection used for this read.
     current = _as_utc(timestamp)
     conn = get_conn()
     if not conn:
@@ -4436,11 +4442,18 @@ def search_dialogue_context(
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
+    retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_artifact_kind = (
         _text(query_interpretation.get("saved_artifact_followup_kind"))
         if "saved_artifact_followup_kind" in query_interpretation
         else _explicit_artifact_followup_kind(query)
     )
+    # A recap/praise may contain words like "asked you to edit the photo" but
+    # does not ask to edit that artifact again. Voice transcripts are text turns,
+    # so the semantic continuation route (below) should preserve the active branch
+    # without the expensive saved-image recovery lane.
+    if retrospective_image_discussion and _text(explicit_artifact_kind).lower() == "image":
+        explicit_artifact_kind = ""
     explicit_artifact_followup = bool(explicit_artifact_kind and not history_request and not new_topic_request)
     context_signature = _query_context_signature(query, query_interpretation)
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
@@ -4572,8 +4585,11 @@ def search_dialogue_context(
     # Treat that as an image retrieval operation so continuation narrowing does not
     # collapse the search to the latest unrelated generated render in the hot branch.
     image_edit_reference = bool(
-        re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
-        or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+        not retrospective_image_discussion
+        and (
+            re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
+            or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+        )
     )
     explicit_new_visual = bool(re.search(
         r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|generate|create|draw)\b.{0,45}(?:нов\w*\s+)?(?:картинк\w*|изображени\w*|фото\b|\bimage\b|\bphoto\b|\bpicture\b)",
@@ -4597,7 +4613,7 @@ def search_dialogue_context(
         and not resume_key
     )
     needs_structured_search = bool(
-        _structured_work_requested(query, query_interpretation, query_modalities)
+        (not retrospective_image_discussion and _structured_work_requested(query, query_interpretation, query_modalities))
         or history_request or time_filter.get("applied") or _is_section_request(query)
     )
 
@@ -5291,7 +5307,10 @@ def search_dialogue_context(
             ranked_named_options.sort(key=lambda item: (item[0], item[1]), reverse=True)
             named_option_reanchor_score, _, named_option_reanchor_row = ranked_named_options[0]
     explicit_followup_anchor = _explicit_followup_anchor(query, matches, latest_same_dialog, query_subjects)
-    has_new_attachment = bool(query_modalities)
+    # Voice has already been transcribed into the current query. It is an input
+    # modality, but not a separate visual/file artifact that should block an
+    # authenticated active-branch continuation.
+    has_new_attachment = bool(query_modalities.intersection({"image", "file", "text_file"}))
     explicit_attachment_followup = has_new_attachment and (reference_followup or explicit_followup_anchor is not None)
     user_operation = _user_operation_profile(
         query, query_interpretation,
@@ -5328,7 +5347,8 @@ def search_dialogue_context(
     hot_branch_candidate = _hot_branch_followup_candidate(
         query, query_interpretation, latest_same_dialog,
         query_subjects=query_subjects, reference_followup=reference_followup,
-        marker=marker, conversation_id=str(conversation_id or ""), has_attachment=bool(query_modalities),
+        marker=marker, conversation_id=str(conversation_id or ""),
+        has_attachment=bool(query_modalities.intersection({"image", "file", "text_file"})),
         history_request=history_request, new_topic_request=new_topic_request,
     )
     new_work_root_request = _looks_like_new_work_root_request(query, active_work_branch)
