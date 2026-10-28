@@ -943,6 +943,70 @@ def _is_missing_source_reply(text: str) -> bool:
     ))
 
 
+def _dialogue_profile_text(interpretation: dict[str, Any], *, image_ready: bool = False) -> str:
+    """Create a concise, evidence-bound profile summary if the provider answers with a source-photo request."""
+    visual = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+    profile = visual.get("dialogue_based_portrait_profile") if isinstance(visual.get("dialogue_based_portrait_profile"), dict) else {}
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    language = _text(input_data.get("display_language") or "ru").lower()
+    themes = [str(value).strip()[:110] for value in (profile.get("recurring_themes") or []) if str(value).strip()][:3]
+    style = _text(profile.get("observed_communication_style"))
+    tone = _text(profile.get("situational_tone_observation"))
+
+    if language in {"uk", "ua", "uk-ua"}:
+        if themes:
+            body = "У наших діалогах повторюються теми: " + "; ".join(themes) + ". "
+        else:
+            body = "У доступній історії недостатньо повторюваних тем для впевненого висновку. "
+        if style:
+            body += "За способом постановки завдань помітно: " + style + ". "
+        if tone:
+            body += tone[:220].capitalize() + ". Це спостереження про поточну ситуацію, а не діагноз чи характеристика особистості. "
+        body += "Образ буде метафоричним і спиратиметься на ці повторювані теми, а не на вигадану зовнішність. "
+        body += ("Зображення готове — нижче." if image_ready else "На цій основі готую концептуальне зображення.")
+        return body
+    if language in {"en", "en-us", "en-gb"}:
+        if themes:
+            body = "Across our conversations, recurring themes include: " + "; ".join(themes) + ". "
+        else:
+            body = "The available history does not establish recurring themes confidently enough for a specific claim. "
+        if style:
+            body += "Your task-setting style appears to involve " + style + ". "
+        if tone:
+            body += tone[:220].capitalize() + ". This is a situational observation, not a diagnosis or a fixed personality claim. "
+        body += "The image is a metaphorical interpretation of those themes, not an invented reconstruction of your appearance. "
+        body += ("The image is ready below." if image_ready else "I’m preparing the conceptual image from this evidence.")
+        return body
+
+    if themes:
+        body = "В наших диалогах повторяются темы: " + "; ".join(themes) + ". "
+    else:
+        body = "В доступной истории недостаточно повторяющихся тем для уверенного вывода. "
+    if style:
+        body += "По стилю постановки задач заметно: " + style + ". "
+    if tone:
+        if "нельзя надёжно установить" in tone.lower():
+            body += "По текущему сообщению нельзя надёжно установить эмоциональное состояние, поэтому я не закладываю конкретное настроение в образ. "
+        else:
+            body += tone[:220].capitalize() + ". Это наблюдение о текущей ситуации, а не диагноз и не постоянная характеристика личности. "
+    body += "Поэтому образ задуман как метафора, основанная на повторяющихся темах общения, а не как выдуманная реконструкция твоей внешности. "
+    body += ("Изображение готово — ниже; оно дополняет описание, а не заменяет его." if image_ready else "На этой основе готовлю концептуальное изображение.")
+    return body
+
+
+def _profile_answer_is_substantive(answer: str, interpretation: dict[str, Any]) -> bool:
+    """Avoid overwriting useful model analysis, but repair empty/generic profile replies."""
+    value = _text(answer)
+    if len(value) < 160:
+        return False
+    low = value.lower().replace("ё", "е")
+    relevant_markers = (
+        "диалог", "разговор", "истори", "повторя", "стиль общения", "стиль постановки",
+        "задач", "проект", "программирован", "память", "интерпретац", "визуализ", "код",
+    )
+    return sum(1 for marker in relevant_markers if marker in low) >= 2
+
+
 def _reconcile_new_image_source_text(
     answer: str,
     raw: dict[str, Any],
@@ -957,19 +1021,31 @@ def _reconcile_new_image_source_text(
     """
     intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     task = _text(intent.get("task")).lower()
+    profile_source_request = bool(
+        intent.get("dialogue_profile_request")
+        and re.search(
+            r"(?:пришл\w*|прикреп\w*|загруз\w*|отправ\w*|предостав\w*|send|attach|upload|provide)"
+            r".{0,90}(?:исходн\w*|фото|фотограф\w*|изображени\w*|картинк\w*|source\s+(?:photo|image)|photo|image|picture)|"
+            r"(?:исходн\w*|source)\s+(?:фото|фотограф\w*|изображени\w*|photo|image).{0,70}"
+            r"(?:нужн\w*|пришл\w*|загруз\w*|need|send|upload|attach)",
+            _text(answer).lower().replace("ё", "е"), re.I | re.S,
+        )
+    )
     if not (
         bool(intent.get("wants_image"))
-        and task == "generate_image"
+        and (task == "generate_image" or bool(intent.get("dialogue_profile_request")))
         and not bool(intent.get("source_image_available"))
         and not bool(intent.get("image_status_request"))
-        and _is_missing_source_reply(answer)
+        and (_is_missing_source_reply(answer) or profile_source_request)
         and not _provider_declined_visual_output(raw)
     ):
         return answer, False
 
     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
     language = _text(input_data.get("display_language") or "").lower()
-    if language in {"uk", "ua", "uk-ua"}:
+    if bool(intent.get("dialogue_profile_request")):
+        reconciled = _dialogue_profile_text(interpretation, image_ready=False)
+    elif language in {"uk", "ua", "uk-ua"}:
         reconciled = "Зрозуміла: потрібно створити нове зображення за вашим описом, а не редагувати оригінальне фото. Готую результат."
     elif language in {"en", "en-us", "en-gb"}:
         reconciled = "Understood — this request is to create a new image, not edit an existing photo. Preparing the result."
@@ -1095,6 +1171,29 @@ def _has_safe_alternative_visual_plan(raw: dict[str, Any]) -> bool:
     return explicitly_bounded and not unsafe_detail
 
 
+def _dialogue_based_portrait_prompt(profile: dict[str, Any]) -> str:
+    """Compose the actual raster prompt from evidence extracted from recent dialogue."""
+    data = profile if isinstance(profile, dict) else {}
+    topics = [str(item).strip()[:110] for item in (data.get("recurring_themes") or []) if str(item).strip()]
+    style = _text(data.get("observed_communication_style"))
+    tone = _text(data.get("situational_tone_observation"))
+    evidence = "; ".join(topics[:5]) or "the retrieved dialogue does not establish recurring subject themes with confidence"
+    return (
+        "Create one stylized, editorial, non-photorealistic CONCEPTUAL PORTRAIT inspired by the attached conversation-profile evidence. "
+        "This is a metaphorical representation of a conversation partner, NOT a reconstruction of their real face and NOT a claim about their physical appearance. "
+        "Grounded recurring themes from the retrieved dialogue (each theme was found in multiple distinct user turns): " + evidence + ". "
+        "Do NOT turn recent topic labels or a single incidental request into image subjects; use recent labels only as text-analysis context. "
+        + ("Observed communication pattern: " + style + ". " if style else "")
+        + ("Situational tone (only an artistic, low-confidence cue): " + tone + ". " if tone else "")
+        + "Translate only those supported themes into a coherent visual metaphor and a single adult figure or intentionally non-identifying stylized likeness. "
+        "If the evidence supports iterative software/project work, abstract code shapes, linked dialogue nodes, layered plans or a carefully organized workspace may appear; do not force these motifs if the evidence does not support them. "
+        "No random unrelated objects, weapons, stock portrait, photo frame, upload placeholder, text labels, logos, or collage. "
+        "Do not infer exact facial features, ethnicity, medical or psychiatric diagnosis, or unsupported personality traits. "
+        "Use an intentional composition, restrained cinematic light, a clear focal subject, and details that reinforce—not replace—the grounded themes. "
+        "Output one finished image, not a written explanation or an infographic."
+    )
+
+
 def _build_image_spec(
     raw: dict[str, Any],
     interpretation: dict[str, Any],
@@ -1149,7 +1248,24 @@ def _build_image_spec(
         if not semantic:
             semantic = _first_prompt(clean.get("payload")) if isinstance(clean.get("payload"), dict) else ""
         final_portrait_prompt = _final_portrait_prompt(request_text)
-        if final_portrait_prompt:
+        _intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+        _visual_meta = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
+        dialogue_profile_request = bool(_intent.get("dialogue_profile_request") or _visual_meta.get("dialogue_profile_request"))
+        dialogue_portrait_profile = _visual_meta.get("dialogue_based_portrait_profile") if isinstance(_visual_meta.get("dialogue_based_portrait_profile"), dict) else {}
+        dialogue_portrait_prompt = _dialogue_based_portrait_prompt(dialogue_portrait_profile) if dialogue_profile_request else ""
+        if dialogue_portrait_prompt:
+            # The evidence-bound plan outranks the provider's generic/incorrect
+            # prompt. The original request remains in metadata but is not used to
+            # replace the explicit conversation-based portrait subject.
+            semantic = dialogue_portrait_prompt
+            clean["image_subject_only"] = True
+            clean["openai_structured_visual_plan_raw"] = {
+                "rendering_type": "dialogue_based_conceptual_portrait",
+                "evidence_turn_count": int(dialogue_portrait_profile.get("evidence_turn_count") or 0),
+                "recurring_themes": list(dialogue_portrait_profile.get("recurring_themes") or [])[:5],
+                "exclude": ["unrelated subject", "stock portrait", "photo-upload placeholder", "diagnosis", "unsupported physical likeness"],
+            }
+        if final_portrait_prompt and not dialogue_portrait_prompt:
             # The requested image is a final portrait, not a poster that replaces
             # the separate biography/formula/experiment/resource deliverables.
             semantic = final_portrait_prompt
@@ -1171,9 +1287,9 @@ def _build_image_spec(
         clean["schema"] = "april_image_spec_v1"
         clean["generator_signal"] = "C_APRIL_IMAGES_GENERATOR"
         clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
-        clean["prompt"] = final_portrait_prompt or _text(clean.get("prompt") or semantic)
+        clean["prompt"] = dialogue_portrait_prompt or final_portrait_prompt or _text(clean.get("prompt") or semantic)
         clean["openai_structured_visual_plan_semantic"] = semantic
-        if isinstance(raw_plan, dict) and not final_portrait_prompt:
+        if isinstance(raw_plan, dict) and not final_portrait_prompt and not dialogue_portrait_prompt:
             clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
         clean.setdefault("width", 512)
         clean.setdefault("height", 512)
@@ -1194,7 +1310,7 @@ def _build_image_spec(
         # cannot accidentally become a generic/ unrelated image request.
         dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
         continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
-        if _text(dialogue.get("relation")).upper() == "CONTINUE" and not safe_alternative_after_refusal:
+        if _text(dialogue.get("relation")).upper() == "CONTINUE" and not safe_alternative_after_refusal and not dialogue_portrait_prompt:
             branch = continuation.get("active_work_branch") if isinstance(continuation.get("active_work_branch"), dict) else {}
             anchor = continuation.get("anchor") if isinstance(continuation.get("anchor"), dict) else {}
             branch_goal = _text(
@@ -2465,6 +2581,7 @@ async def execute(
             "topic_reference": semantic_interpretation.get("topic_reference"),
             "requires_memory": semantic_interpretation.get("requires_memory"),
             "history_request": semantic_interpretation.get("history_request"),
+            "dialogue_profile_request": bool(semantic_interpretation.get("dialogue_profile_request")),
             "history_inventory_request": semantic_interpretation.get("history_inventory_request"),
             "has_explicit_time_window": semantic_interpretation.get("has_explicit_time_window"),
             "time_window": semantic_interpretation.get("time_window") or {},
@@ -3190,6 +3307,8 @@ async def execute(
         visual_context={
             "items": visual_context or [],
             "has_input_images": bool(visual_context),
+            "dialogue_profile_request": bool((interpretation.get("intent") or {}).get("dialogue_profile_request")),
+            "dialogue_based_portrait_profile": dict((interpretation.get("visual") or {}).get("dialogue_based_portrait_profile") or {}) if isinstance((interpretation.get("visual") or {}).get("dialogue_based_portrait_profile"), dict) else {},
         },
         available_tools=[r.room_id for r in list_registered_rooms()],
         requested_outputs=list(
@@ -4326,12 +4445,29 @@ async def execute(
             if visible_images:
                 if (
                     not is_image_edit_operation
-                    and _text(image_intent.get("task")).lower() == "generate_image"
-                    and _is_missing_source_reply(answer)
+                    and (_text(image_intent.get("task")).lower() == "generate_image" or bool(image_intent.get("dialogue_profile_request")))
+                    and (bool(image_intent.get("dialogue_profile_request")) or _is_missing_source_reply(answer))
                 ):
                     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
                     language = _text(input_data.get("display_language") or "").lower()
-                    if language in {"uk", "ua", "uk-ua"}:
+                    if bool(image_intent.get("dialogue_profile_request")):
+                        # Do not replace a useful profile analysis with a one-line
+                        # "Done" message. Use evidence-derived prose only when the
+                        # Provider supplied an empty/generic/source-photo response;
+                        # otherwise retain its substantive analysis and append image status.
+                        if _is_missing_source_reply(answer) or not _profile_answer_is_substantive(answer, interpretation):
+                            answer = _dialogue_profile_text(interpretation, image_ready=True)
+                        elif not re.search(
+                            r"(?:изображени\w*\s+готов|готов\w*\s*[—-]?\s*(?:ниже|портрет)|ниже\s+концептуальн\w*\s+(?:портрет|изображени\w*)|image\s+is\s+ready|image\s+is\s+below|below\s+is\s+(?:the\s+)?portrait)",
+                            answer.lower().replace("ё", "е"), re.I,
+                        ):
+                            status = "Изображение готово — ниже; оно дополняет анализ, а не заменяет его."
+                            if language in {"uk", "ua", "uk-ua"}:
+                                status = "Зображення готове — нижче; воно доповнює аналіз, а не замінює його."
+                            elif language in {"en", "en-us", "en-gb"}:
+                                status = "The image is ready below; it complements the analysis rather than replacing it."
+                            answer = answer.rstrip() + "\n\n" + status
+                    elif language in {"uk", "ua", "uk-ua"}:
                         answer = "Готово — створено нове зображення за поточним запитом. Нижче — результат."
                     elif language in {"en", "en-us", "en-gb"}:
                         answer = "Done — a new image was created from your current request. The result is below."
@@ -4346,8 +4482,10 @@ async def execute(
                         if isinstance(text_block, dict) and _text(text_block.get("type") or text_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
                             text_block["content"] = answer
                             text_block["text"] = answer
+                            if "markdown" in text_block:
+                                text_block["markdown"] = answer
                             break
-                    _apr_timing_log("image_text_contract_reconciled", None, mode="generated_image_overrode_missing_source_text")
+                    _apr_timing_log("image_text_contract_reconciled", None, mode="preserve_profile_analysis_and_append_image_status")
                 first_artifact = image_results[0].get("artifact") if isinstance(image_results[0].get("artifact"), dict) else image_results[0]
                 image_step_index = 1
                 image_step_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
