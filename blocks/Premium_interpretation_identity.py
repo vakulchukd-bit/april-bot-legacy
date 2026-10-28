@@ -273,6 +273,24 @@ def _should_generate_instead_of_requesting_missing_source(text: str) -> bool:
     if not has_create_action:
         return False
 
+    # A direct creation clause such as "нарисуй картинку к заставке" names a
+    # new output object. Legacy edit markers can misread "картинку" as a missing
+    # source even though the verb creates that picture. Treat this as generation
+    # unless the same wording explicitly points at an existing/uploaded image.
+    direct_creation = bool(re.search(
+        rf"\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate)\b\s+"
+        rf"(?:(?:мне|нам|a|an|the|new|нов\w*|бел\w*|черн\w*|красив\w*|прост\w*|маленьк\w*|больш\w*)\s+){{0,3}}{image_noun}",
+        low, re.IGNORECASE,
+    ))
+    explicit_existing_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+{image_noun}|"
+        rf"\b(?:измени|изменить|редактир\w*|отредактир\w*|добав\w*|дорис\w*|замени|заменить)\s+(?:именно\s+)?(?:эту|этот|эта|это|ту|тот|мою|мое|м\w*|прикрепленн\w*|загруженн\w*)\s+{image_noun}|"
+        rf"{image_noun}.{{0,50}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if direct_creation and not explicit_existing_source:
+        return True
+
     # Negative edit instructions are a strong signal that the user wants a new
     # rendering, not a request to upload an image for editing.
     no_edit_instruction = bool(re.search(
@@ -3004,11 +3022,12 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
     ui_instruction_detector = globals().get("_is_ui_instruction_request")
     ui_help = _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
     composite_detector = globals().get("_detect_image_compositing_request")
-    image_edit = _detect_image_modification(request) or (
+    unambiguous_new_image = _should_generate_instead_of_requesting_missing_source(request)
+    image_edit = (not unambiguous_new_image) and (_detect_image_modification(request) or (
         callable(composite_detector) and bool(composite_detector(request))
         and bool(re.search(r"(?:на\s+(?:это\s+|эту\s+|этой\s+|мою\s+)?фот\w*|фото\s+с\s+монет\w*|присланн\w*\s+фото)", low, re.I))
-    )
-    image_generation = _detect_image_generation_request(request)
+    ))
+    image_generation = _detect_image_generation_request(request) or unambiguous_new_image
     history_detector = globals().get("_is_history_request")
     history_action_phrase = bool(re.search(
         r"(?:во\s+сколько\s+(?:времени\s+)?мы\s+(?:говорил\w*|обсуждал\w*|разговаривал\w*)|"
