@@ -25,7 +25,7 @@ from storage import get_conn, is_authenticated_user as _is_authenticated_user, n
 from blocks.Premium_interpretation_identity import (
     extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
     _is_image_discussion_without_new_visual_action, _detect_image_modification,
-    _has_independent_nonvisual_artifact_request,
+    _is_explicit_visual_revision_request, _has_independent_nonvisual_artifact_request,
 )
 
 
@@ -560,13 +560,37 @@ def hydrate(
             cached_state = _STATES.get(uid)
             cached_at = float(_HYDRATED_AT.get(uid) or 0.0)
             if cached_state is not None and cached_at and cache_now - cached_at <= _HYDRATE_CACHE_SECONDS:
-                # Filter expired rows cheaply without cloning the potentially large
-                # structured_response payloads. Nothing in the current search mutates
-                # the payload contents except derived topic annotations.
-                cached_state["dialogue_pairs"] = [
+                # A limited active-branch request must receive a bounded view even
+                # when the full 24h snapshot is warm. Returning the full cached state
+                # here bypassed limit=16 and could force a later deep scan of every
+                # saved render. Keep the shared snapshot intact and make a shallow view.
+                live_cached_rows = [
                     row for row in (cached_state.get("dialogue_pairs") or [])
                     if isinstance(row, dict) and _row_is_live(row, cache_now, DIALOGUE_WINDOW_HOURS)
                 ]
+                if limit:
+                    did = str(dialog_id or "").strip()
+                    cid = str(conversation_id or "").strip()
+                    if did or cid:
+                        scoped = [row for row in live_cached_rows if (
+                            (did and _text(row.get("dialog_id")) == did)
+                            or (cid and _text(row.get("conversation_id")) == cid)
+                        )]
+                        if scoped:
+                            live_cached_rows = scoped
+                    live_cached_rows = live_cached_rows[-max(1, min(32, int(limit))):]
+                    recent_state = _new_state(uid)
+                    recent_state["dialogue_pairs"] = list(live_cached_rows)
+                    recent_state["last_activity"] = cache_now
+                    recent_state["updated_at"] = cache_now
+                    _apr_timing_log(
+                        "hydrate_cache_recent_view_complete", hydrate_started,
+                        user_key=_apr_diag_ref(uid), retained_pairs=len(live_cached_rows),
+                        requested_limit=max(1, min(32, int(limit))),
+                        cache_age_ms=round((cache_now - cached_at) * 1000, 2),
+                    )
+                    return recent_state
+                cached_state["dialogue_pairs"] = live_cached_rows
                 _apr_timing_log(
                     "hydrate_cache_hit", hydrate_started,
                     user_key=_apr_diag_ref(uid), retained_pairs=len(cached_state["dialogue_pairs"]),
@@ -4338,7 +4362,12 @@ def _image_source_subject_tokens(query: Any) -> set[str]:
         "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
         "которое", "ты", "мне", "ты", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
         "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
-        "замени", "удали", "убери", "переделай", "исправь", "сохрани", "добавить", "какую",
+        "замени", "удали", "убери", "переделай", "переделать", "перерисуй", "исправь", "исправить",
+        "сохрани", "добавить", "какую", "цифрами", "цифры", "цифру", "цифр", "числа", "число",
+        "показание", "показания", "показанием", "дисплей", "дисплея", "дисплее", "стрелка", "стрелки",
+        "стрелку", "стрелкой", "указатель", "указателя", "указателем", "маркер", "маркера", "красный",
+        "красная", "красной", "красную", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только",
+        "выдай", "выдайте", "пришли", "пришлите", "верни", "верните", "покажи", "покажите",
     }
     words = [word for word in raw_words if word not in skip and len(word) >= 3]
     if not words:
@@ -4519,8 +4548,11 @@ def search_dialogue_context(
     uid = _uid(user_id)
     query_interpretation = dict(query_interpretation or {})
     retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
+    explicit_visual_revision = _is_explicit_visual_revision_request(query)
     visual_misroute_correction = _is_visual_misroute_correction(query)
-    targeted_active_repair = bool(retrospective_image_discussion or visual_misroute_correction)
+    targeted_active_repair = bool(
+        retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
+    )
     state = hydrate(
         uid,
         limit=16 if targeted_active_repair else 0,
@@ -4555,7 +4587,9 @@ def search_dialogue_context(
                 user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
                 source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
                 recent_rows=len(same_dialog_rows), reason=(
-                    "retrospective_image_feedback" if retrospective_image_discussion else "explicit_visual_misroute_correction"
+                    "retrospective_image_feedback" if retrospective_image_discussion else (
+                    "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
+                )
                 ),
             )
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
