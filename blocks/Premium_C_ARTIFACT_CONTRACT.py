@@ -2936,6 +2936,236 @@ def _number_for_render(value: Any) -> Optional[float]:
 
 
 
+def _weekly_axis_labels(existing_x: Any = None) -> List[str]:
+    """Create seven in-range labels; preserve calendar dates when both endpoints are dates."""
+    import datetime as _datetime
+
+    values = existing_x if isinstance(existing_x, list) else []
+    if len(values) >= 2:
+        formats = ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y")
+        parsed = []
+        source_format = None
+        for value in (values[0], values[-1]):
+            candidate = None
+            candidate_format = None
+            for fmt in formats:
+                try:
+                    candidate = _datetime.datetime.strptime(str(value).strip(), fmt).date()
+                    candidate_format = fmt
+                    break
+                except (TypeError, ValueError):
+                    continue
+            parsed.append(candidate)
+            if candidate_format:
+                source_format = candidate_format
+        if parsed[0] and parsed[1] and (parsed[1] - parsed[0]).days == 6:
+            return [
+                (_datetime.datetime.combine(parsed[0] + _datetime.timedelta(days=i), _datetime.time()).strftime(source_format))
+                for i in range(7)
+            ]
+    return ["Начало недели", "День 2", "День 3", "День 4", "День 5", "День 6", "Конец недели"]
+
+
+def _interpolate_weekly_graph_payload(
+    payload: Dict[str, Any],
+    current_request: str = "",
+    answer: str = "",
+) -> Dict[str, Any]:
+    """Fill a requested weekly line chart between two known endpoints with labelled estimates.
+
+    This never runs for arbitrary charts: the request/answer or axis must identify a
+    week, the payload must be 2D, and a series must contain exactly two numeric values.
+    Existing source endpoints are preserved verbatim in ``source_endpoints``.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return payload if isinstance(payload, dict) else {}
+
+    representations = {
+        str(payload.get(key) or "").strip().lower().replace("-", "_")
+        for key in ("representation", "graph_type", "chart_type")
+    }
+    if representations & {
+        "scene3d", "scene_3d", "surface3d", "surface_3d", "scatter3d", "scatter_3d",
+        "mesh3d", "mesh_3d", "3d", "3d_scene", "spacetime_curvature",
+        "bar", "bar_chart", "column", "column_chart", "histogram", "pie", "donut",
+    } or payload.get("dimensions") == 3 or payload.get("three_d") is True:
+        return payload
+
+    x_axis = payload.get("x_axis") if isinstance(payload.get("x_axis"), dict) else {}
+    title = str(payload.get("title") or "")
+    temporal_text = " ".join((str(current_request or ""), str(answer or ""), title,
+                              str(x_axis.get("title") or x_axis.get("label") or ""),
+                              str(payload.get("description") or ""))).lower().replace("ё", "е")
+    weekly_request = bool(re.search(r"(?:недел\w*|\bweek(?:ly)?\b|\b7\s*(?:дн\w*|days?)\b)", temporal_text, re.IGNORECASE))
+    if not weekly_request:
+        return payload
+
+    raw_series = payload.get("series") or payload.get("datasets") or payload.get("traces")
+    if isinstance(raw_series, dict):
+        raw_series = list(raw_series.values())
+    elif not isinstance(raw_series, list):
+        raw_series = []
+
+    axis_values = x_axis.get("values") if isinstance(x_axis.get("values"), list) else (
+        payload.get("x_values") if isinstance(payload.get("x_values"), list) else payload.get("x")
+    )
+    axis_values = axis_values if isinstance(axis_values, list) else []
+    normalized_series: List[Dict[str, Any]] = [deepcopy(item) for item in raw_series if isinstance(item, dict)]
+
+    # Support a canonical top-level two-point payload as well as series[].
+    if not normalized_series:
+        top_points = payload.get("points") or payload.get("data_points")
+        top_x = payload.get("x_values") or payload.get("x") or axis_values
+        top_y = payload.get("y_values") or payload.get("y") or payload.get("values")
+        if isinstance(top_points, list) and len(top_points) >= 2:
+            ys = []
+            xs = []
+            for index, point in enumerate(top_points):
+                if isinstance(point, dict):
+                    xs.append(point.get("x", top_x[index] if isinstance(top_x, list) and index < len(top_x) else index + 1))
+                    ys.append(point.get("y", point.get("value")))
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    xs.append(point[0]); ys.append(point[1])
+            if len(ys) >= 2:
+                normalized_series = [{"label": str(payload.get("series_label") or payload.get("y_label") or title or "Значение"), "points": [{"x": x, "y": y} for x, y in zip(xs, ys)]}]
+        elif isinstance(top_y, list) and len(top_y) == 2:
+            xs = top_x if isinstance(top_x, list) and len(top_x) >= 2 else ["Начало недели", "Конец недели"]
+            normalized_series = [{"label": str(payload.get("series_label") or payload.get("y_label") or title or "Значение"), "x": xs[:2], "y": top_y[:2], "values": top_y[:2]}]
+
+    if not normalized_series:
+        return payload
+
+    labels = _weekly_axis_labels(axis_values)
+    changed = False
+    original_endpoint_records: List[Dict[str, Any]] = []
+    new_series: List[Dict[str, Any]] = []
+    for index, item in enumerate(normalized_series):
+        original = deepcopy(item)
+        item_representation = str(
+            item.get("type") or item.get("chart_type") or item.get("representation") or ""
+        ).strip().lower().replace("-", "_")
+        if item_representation in {"bar", "bar_chart", "column", "column_chart", "histogram", "pie", "donut", "scatter"}:
+            new_series.append(original)
+            continue
+        raw_points = item.get("points") or item.get("data_points") or item.get("data")
+        point_x: List[Any] = []
+        point_y: List[Any] = []
+        point_templates: List[Dict[str, Any]] = []
+        if isinstance(raw_points, list):
+            for point_index, point in enumerate(raw_points):
+                if isinstance(point, dict):
+                    x_value = point.get("x", point.get("xValue", point_index + 1))
+                    y_value = point.get("y", point.get("yValue", point.get("value")))
+                    point_templates.append(deepcopy(point))
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    x_value, y_value = point[0], point[1]
+                    point_templates.append({"x": x_value, "y": y_value})
+                else:
+                    continue
+                if _number_for_render(y_value) is not None:
+                    point_x.append(x_value); point_y.append(y_value)
+
+        item_x = item.get("x") if isinstance(item.get("x"), list) else item.get("x_values")
+        item_y = item.get("y") if isinstance(item.get("y"), list) else item.get("y_values")
+        if not isinstance(item_y, list):
+            item_y = item.get("values") if isinstance(item.get("values"), list) else None
+        # If the parallel y-array contains more points than a legacy points array,
+        # prefer it; otherwise keep point metadata from the explicit point objects.
+        if isinstance(item_y, list) and len(item_y) > len(point_y):
+            point_y = list(item_y)
+            chosen_x = item_x if isinstance(item_x, list) and len(item_x) >= len(point_y) else axis_values
+            point_x = list(chosen_x[:len(point_y)]) if isinstance(chosen_x, list) else []
+            point_templates = []
+        elif not point_y and isinstance(item_y, list):
+            point_y = list(item_y)
+            chosen_x = item_x if isinstance(item_x, list) and len(item_x) >= len(point_y) else axis_values
+            point_x = list(chosen_x[:len(point_y)]) if isinstance(chosen_x, list) else []
+
+        numeric_values = [_number_for_render(value) for value in point_y]
+        if len(numeric_values) != 2 or any(value is None for value in numeric_values):
+            new_series.append(original)
+            continue
+
+        start_value = float(numeric_values[0])
+        end_value = float(numeric_values[1])
+        original_x = point_x[:2] if len(point_x) >= 2 else (axis_values[:2] if len(axis_values) >= 2 else ["Начало недели", "Конец недели"])
+        original_endpoint_records.append({
+            "series_label": str(item.get("label") or item.get("name") or f"Ряд {index + 1}"),
+            "x_values": deepcopy(original_x),
+            "values": [point_y[0], point_y[1]],
+        })
+        interpolated_values = [round(start_value + (end_value - start_value) * step / 6, 2) for step in range(7)]
+        interpolated_values[0] = start_value
+        interpolated_values[-1] = end_value
+        generated_points: List[Dict[str, Any]] = []
+        for point_index, (x_value, y_value) in enumerate(zip(labels, interpolated_values)):
+            if point_index == 0 and point_templates:
+                template = deepcopy(point_templates[0])
+            elif point_index == 6 and len(point_templates) >= 2:
+                template = deepcopy(point_templates[-1])
+            else:
+                template = {}
+            template["x"] = x_value
+            template["y"] = y_value
+            if point_index not in {0, 6}:
+                template["label"] = "Расчётная интерполяция"
+                template["estimated"] = True
+            else:
+                template.setdefault("label", "Исходное значение")
+                template["estimated"] = False
+            generated_points.append(template)
+
+        item["points"] = generated_points
+        item["x"] = labels[:]
+        item["y"] = interpolated_values[:]
+        item["values"] = interpolated_values[:]
+        item["interpolation"] = {
+            "method": "linear",
+            "derived_points_are_estimates": True,
+            "observed_endpoints_preserved": True,
+        }
+        label = str(item.get("label") or item.get("name") or "").strip()
+        if label and "расчет" not in label.lower() and "расчёт" not in label.lower() and "estimate" not in label.lower():
+            item["label"] = f"{label} (расчётная интерполяция)"
+        new_series.append(item)
+        changed = True
+
+    if not changed:
+        return payload
+
+    payload["series"] = new_series
+    payload["x_values"] = labels[:]
+    # Keep only the first series in top-level aliases; the canonical series list
+    # remains authoritative for multi-series graphs.
+    first_values = new_series[0].get("values") if new_series and isinstance(new_series[0].get("values"), list) else None
+    if isinstance(first_values, list) and len(first_values) == 7:
+        payload["y_values"] = deepcopy(first_values)
+        payload["points"] = deepcopy(new_series[0].get("points") or [])
+    payload["x_axis"] = {
+        **x_axis,
+        "title": x_axis.get("title") or x_axis.get("label") or "День недели",
+        "values": labels[:],
+        "granularity": "daily",
+    }
+    payload["source_endpoints"] = payload.get("source_endpoints") or original_endpoint_records
+    existing_semantics = payload.get("data_semantics") if isinstance(payload.get("data_semantics"), dict) else {}
+    payload["data_semantics"] = {
+        **existing_semantics,
+        "kind": existing_semantics.get("kind") or "weekly_time_series",
+        "interpolation": "linear",
+        "derived_points_are_estimates": True,
+        "observations_claimed": False,
+    }
+    payload["description"] = (
+        "График соединяет заданные начальное и конечное значения пятью расчётными промежуточными точками; "
+        "они не являются фактическими измерениями или котировками."
+    )
+    payload["interpolation_applied"] = True
+    payload["interpolation_method"] = "linear"
+    payload["estimated_points"] = [2, 3, 4, 5, 6]
+    return payload
+
+
 def _graph_payload_from_request(
     current_request: str,
     answer: str = "",
@@ -2943,10 +3173,11 @@ def _graph_payload_from_request(
 ) -> Dict[str, Any]:
     """Build only a graph that is grounded in the current request/answer.
 
-    Explicit equations are kept verbatim. For a stated start/end range, the
-    graph contains those two endpoints only; it never fabricates intermediate
-    measurements. Common 3D surfaces are allowed as labelled illustrative
-    defaults when the user names the surface but supplies no equation.
+    Explicit equations are kept verbatim. For a weekly line chart with two known
+    endpoints, missing daily points are calculated by linear interpolation and
+    marked as estimates, never as observed measurements. Common 3D surfaces are
+    allowed as labelled illustrative defaults when the user names the surface but
+    supplies no equation.
     """
     request_text = str(current_request or "").strip()
     answer_text = str(answer or "").strip()
@@ -3077,22 +3308,23 @@ def _graph_payload_from_request(
     title = title_match.group(1).strip() if title_match else "Изменение значения за период"
     title = re.sub(r"\s*(?:с|от)\s*-?\d+(?:[.,]\d+)?[\w\s.,]*$", "", title, flags=re.IGNORECASE).strip(" .,:;-") or "Изменение значения за период"
     points = [
-        {"x": x_labels[0], "y": start_value},
-        {"x": x_labels[1], "y": end_value},
+        {"x": x_labels[0], "y": start_value, "label": "Исходное значение", "estimated": False},
+        {"x": x_labels[1], "y": end_value, "label": "Исходное значение", "estimated": False},
     ]
-    return {
+    payload = {
         "representation": "line",
         "chart_type": "line",
         "graph_type": "line",
         "dimensions": 2,
         "title": title[:140],
-        "description": "Показаны только заданные начальное и конечное значения; линия соединяет их без выдумывания промежуточных измерений.",
+        "description": "Начальное и конечное значения заданы явно.",
         "series": [{
             "label": y_title,
             "type": "line",
             "points": points,
             "x": x_labels,
             "y": [start_value, end_value],
+            "values": [start_value, end_value],
         }],
         "points": points,
         "x_values": x_labels,
@@ -3100,8 +3332,9 @@ def _graph_payload_from_request(
         "x_axis": {"title": x_title, "values": x_labels},
         "y_axis": {"title": y_title},
         "source": "explicit_current_request_range",
-        "data_semantics": {"kind": "endpoint_range", "interpolation": "visual_line_only"},
+        "data_semantics": {"kind": "endpoint_range", "interpolation": "not_applied"},
     }
+    return _interpolate_weekly_graph_payload(payload, request_text, answer_text)
 
 
 def _geometry_diagram_payload_from_request(
@@ -4229,6 +4462,7 @@ def prepare_render_blocks_for_room_dispatch(
             )
         if block_type == "graph" and payload:
             payload = _apply_premium_3d_visual_profile(payload, source_answer)
+            payload = _interpolate_weekly_graph_payload(payload, current_request, source_answer)
         if payload:
             block["payload"] = payload
         if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "link", "file"}:
@@ -4300,6 +4534,7 @@ def prepare_render_blocks_for_room_dispatch(
             )
         if graph_payload and _has_render_payload("graph", graph_payload):
             graph_payload = _apply_premium_3d_visual_profile(graph_payload, source_answer)
+            graph_payload = _interpolate_weekly_graph_payload(graph_payload, current_request, source_answer)
             prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
             existing_types.add("graph")
     if ("link" in requested or urls_from_answer) and "link" not in existing_types:
