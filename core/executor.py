@@ -2553,7 +2553,9 @@ async def execute(
     if should_persist_code:
         code_blocks = [block for block in normalized_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() == "code"]
         seen_source_hashes: set[str] = set()
-        import hashlib
+        # hashlib is imported at module scope. Do not import it again inside
+        # execute(): that would make it a local variable for the entire function
+        # and break image hashing earlier in the same request (UnboundLocalError).
         for block_index, block in enumerate(code_blocks[:4], 1):
             extracted = _source_code_from_block(block)
             if not extracted:
