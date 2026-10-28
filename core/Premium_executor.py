@@ -1772,12 +1772,22 @@ def _build_scene(
         "conversation_id": identity["conversation_id"],
         "dialogue_sequence_id": identity["dialog_id"],
     }
+    # The persisted scene is the final answer, not the earlier provisional
+    # stream event. Record terminal lifecycle flags with the durable SceneContract.
+    contract_payload = contract.__dict__
+    contract_payload["status"] = "complete"
+    contract_payload["render_status"] = "complete"
+    contract_payload["partial"] = False
+    contract_payload["image_pending"] = False
+    contract_result_event = contract_payload.get("result_event")
+    if isinstance(contract_result_event, dict):
+        contract_result_event["status"] = "complete"
     return {
         "answer": response.answer,
         "content": response.content or response.answer,
         "summary": response.summary,
         "render_blocks": contract.render_blocks,
-        "scene_contract": contract.__dict__,
+        "scene_contract": contract_payload,
         "artifacts": list(response.artifacts or []),
     }
 
@@ -2448,6 +2458,11 @@ def _restore_selected_assets(
                     "output_type": _text(payload.get("output_type") or ("image" if durable_kind == "image" else "file")),
                     "language": _text(payload.get("language")),
                     "prompt": _text(payload.get("prompt"))[:1200],
+                    "caption": _text(payload.get("caption"))[:600],
+                    "alt": _text(payload.get("alt"))[:240],
+                    "analysis_summary": _text(payload.get("analysis_summary"))[:1200],
+                    "user_request": _text(payload.get("user_request"))[:1000],
+                    "april_response": _text(payload.get("april_response"))[:600],
                     "width": int(payload.get("width") or 0),
                     "height": int(payload.get("height") or 0),
                     "operation": _text(payload.get("operation") or "generate"),
@@ -2478,7 +2493,12 @@ def _restore_selected_assets(
             or asset_metadata.get("asset_role")
             or ("april_output" if source_type in {"april_generated", "generated_image", "april_output", "generated_file"} else "user_input")
         )
-        analysis_summary = _text(asset_metadata.get("analysis_summary"))[:1200]
+        analysis_summary = _text(
+            asset_metadata.get("analysis_summary")
+            or asset_metadata.get("caption")
+            or asset_metadata.get("prompt")
+            or asset_metadata.get("april_response")
+        )[:1200]
         try:
             sequence_index = int(asset_metadata.get("sequence_index")) if asset_metadata.get("sequence_index") is not None else 9999
         except (TypeError, ValueError, OverflowError):
@@ -2506,6 +2526,12 @@ def _restore_selected_assets(
             "requires_original_analysis": restore_original,
         }
         metadata_item = {k: common[k] for k in ("filename", "mime_type", "kind", "sequence_index", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")}
+        metadata_item.update({
+            "prompt": _text(asset_metadata.get("prompt"))[:1200],
+            "caption": _text(asset_metadata.get("caption") or asset_metadata.get("analysis_summary") or asset_metadata.get("prompt"))[:600],
+            "alt": _text(asset_metadata.get("alt") or asset_metadata.get("caption") or asset_metadata.get("prompt"))[:240],
+            "derived_from_message_id": _text(asset_metadata.get("derived_from_message_id")),
+        })
         if asset_role.lower() in {"april_output", "assistant_output", "generated"} and (kind == "image" or mime_type.startswith("image/")):
             # This is an answer artifact, not a user-uploaded picture. Keep its
             # bytes available for the Gallery renderer, but never feed it back as
@@ -2538,8 +2564,15 @@ def _restore_selected_assets(
                     "asset_message_id": common["asset_message_id"],
                     "asset_role": asset_role,
                     "output_type": common["output_type"],
-                    "analysis_summary": analysis_summary,
+                    # Keep the original scene description attached to the raster.
+                    # The selector uses these fields to identify a user's referential
+                    # edit ("add a ship to this ocean photo") after a history restore.
+                    "prompt": _text(asset_metadata.get("prompt"))[:1200],
+                    "caption": _text(asset_metadata.get("caption") or asset_metadata.get("analysis_summary") or asset_metadata.get("prompt"))[:600],
+                    "alt": _text(asset_metadata.get("alt") or asset_metadata.get("caption") or asset_metadata.get("prompt"))[:240],
+                    "analysis_summary": analysis_summary or _text(asset_metadata.get("prompt"))[:1200],
                     "analysis_key_details": analysis_key_details,
+                    "derived_from_message_id": _text(asset_metadata.get("derived_from_message_id")),
                     "requires_original_analysis": True,
                 })
             restored_meta.append(metadata_item)
@@ -5242,6 +5275,11 @@ async def execute(
                     "width": generated_width,
                     "height": generated_height,
                     "prompt": _text(output_result.get("prompt"))[:1200],
+                    "caption": _text(output_result.get("caption") or output_result.get("description") or answer)[:600],
+                    "alt": _text(output_result.get("alt") or output_result.get("caption") or output_result.get("prompt") or answer)[:240],
+                    "analysis_summary": _text(output_result.get("analysis_summary") or output_result.get("caption") or output_result.get("description") or output_result.get("prompt") or answer)[:1200],
+                    "user_request": _text(original or current_text)[:1000],
+                    "april_response": _text(answer)[:600],
                     "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
                     "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
                     "source_asset_role": _text(output_result.get("source_asset_role")),
@@ -5256,6 +5294,11 @@ async def execute(
                     "source_type": "april_generated", "asset_role": "april_output", "output_type": "image",
                     "width": generated_width, "height": generated_height,
                     "prompt": _text(output_result.get("prompt"))[:1200],
+                    "caption": _text(output_result.get("caption") or output_result.get("description") or answer)[:600],
+                    "alt": _text(output_result.get("alt") or output_result.get("caption") or output_result.get("prompt") or answer)[:240],
+                    "analysis_summary": _text(output_result.get("analysis_summary") or output_result.get("caption") or output_result.get("description") or output_result.get("prompt") or answer)[:1200],
+                    "user_request": _text(original or current_text)[:1000],
+                    "april_response": _text(answer)[:600],
                     "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
                     "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
                     "source_asset_role": _text(output_result.get("source_asset_role")),
