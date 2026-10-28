@@ -2565,7 +2565,7 @@ class AprilHandler(BaseHTTPRequestHandler):
             # events without changing the legacy JSON response for Free users.
             wants_progress_stream = (
                 "application/x-ndjson" in _text(self.headers.get("Accept")).lower()
-                and content_type.lower().startswith("application/json")
+                and content_type.lower().startswith(("application/json", "multipart/form-data"))
                 and _voice_attachment(attachments) is None
                 and _text(get_user_plan(canonical_user_id)).lower() == "premium"
             )
