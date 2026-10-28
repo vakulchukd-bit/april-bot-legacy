@@ -21,7 +21,7 @@ from typing import Any
 
 import psycopg2
 from rapidfuzz import fuzz
-from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor
+from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor, load_dialogue_history_index as _load_dialogue_history_index, load_dialogue_history_details as _load_dialogue_history_details
 from blocks.Premium_interpretation_identity import extract_temporal_window, extract_topic_count_bounds, intersect_retention_window
 
 
@@ -4406,18 +4406,8 @@ def search_dialogue_context(
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    state = hydrate(uid)
-    # Make per-search top-level copies. The cache is shared between request threads;
-    # this search annotates rows with derived topic provenance, so mutating cached row
-    # dictionaries directly could let concurrent turns overwrite one another's context.
-    # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
-    all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
-    # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
-    # lookup if an explicitly requested time interval contains no saved dialogue pairs.
-    retained_rows = list(all_rows)
-    resume_key = _text(resume_message_id)
-    reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
+    resume_key = _text(resume_message_id)
     dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
     history_request = dialogue_profile_request or bool(query_interpretation.get("history_request")) or _is_history_request(query)
     # In normal Premium routing the interpretation result is authoritative.
@@ -4427,6 +4417,128 @@ def search_dialogue_context(
         if "explicit_topic_switch" in query_interpretation
         else _looks_like_new_topic(query)
     )
+    early_artifact_kind = (
+        _text(query_interpretation.get("saved_artifact_followup_kind"))
+        if "saved_artifact_followup_kind" in query_interpretation
+        else _explicit_artifact_followup_kind(query)
+    )
+    early_time_window = query_interpretation.get("time_window") if isinstance(query_interpretation.get("time_window"), dict) else {}
+    explicit_time_requested = bool(
+        query_interpretation.get("has_explicit_time_window")
+        or early_time_window.get("has_constraint")
+        or _text(query_interpretation.get("time_scope")).upper() in {"TODAY", "YESTERDAY", "RECENT", "SPECIFIC_TIME", "DATE_RANGE"}
+    )
+
+    # Explicit edits of an already-created April image commonly need one exact
+    # image artifact from this same chat, not a full in-memory copy of every
+    # Premium JSON scene. Read the small authenticated 24h index first and hydrate
+    # heavy scene/assets only for likely image turns. If this narrow path cannot
+    # prove a same-chat target, fall back to the unchanged full State Manager.
+    fast_image_rows_loaded = False
+    state = None
+    early_query_text = _text(query).lower().replace("ё", "е")
+    early_edit_action = bool(re.search(
+        r"(?:измен\w*|отредактир\w*|модифицир\w*|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|передел\w*|поправ\w*|исправ\w*|перерис\w*|\bedit\b|\bmodify\b|\badd\b|\bremove\b|\breplace\b|\bredraw\b|\bfill\b)",
+        early_query_text,
+        re.IGNORECASE,
+    ))
+    early_image_reference = bool(re.search(
+        r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\b(?:этот|эта|эту|это|такой|такая|такое)\b|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|this\s+(?:photo|image|picture)|on\s+it)\b)",
+        early_query_text,
+        re.IGNORECASE,
+    ))
+    image_followup_needs_saved_source = bool(
+        early_artifact_kind == "image"
+        and early_edit_action
+        and early_image_reference
+        and not has_image
+        and not has_file
+        and not has_voice
+        and not history_request
+        and not new_topic_request
+        and not explicit_time_requested
+        and not resume_key
+        and bool(_text(dialog_id) or _text(conversation_id))
+    )
+    if image_followup_needs_saved_source:
+        image_index_started = time.perf_counter()
+        try:
+            index_payload = _load_dialogue_history_index(uid)
+            index_rows = index_payload.get("rows") if isinstance(index_payload, dict) and index_payload.get("authenticated") is True else None
+            if isinstance(index_rows, list) and index_rows:
+                if _text(dialog_id):
+                    same_chat_rows = [row for row in index_rows if isinstance(row, dict) and _text(row.get("dialog_id")) == _text(dialog_id)]
+                else:
+                    same_chat_rows = [row for row in index_rows if isinstance(row, dict) and _text(row.get("conversation_id")) == _text(conversation_id)]
+                # The exact dialog is the first choice. Only use conversation-level
+                # fallback when this deployment has older rows without dialog_id.
+                if not same_chat_rows and _text(conversation_id):
+                    same_chat_rows = [row for row in index_rows if isinstance(row, dict) and _text(row.get("conversation_id")) == _text(conversation_id)]
+                if same_chat_rows:
+                    image_words = re.compile(
+                        r"(?:фото|фотк|фотограф|сним|картин|изображ|рисунк|генерир|редакт|передел|перерис|создай|нарис|добав|image|photo|picture|illustration|generated|edit)",
+                        re.IGNORECASE,
+                    )
+                    recent_rows = sorted(
+                        same_chat_rows,
+                        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+                    )
+                    image_marked = [row for row in recent_rows if image_words.search(" ".join((
+                        _text(row.get("title")), _text(row.get("user_text")), _text(row.get("april_text"))[:600],
+                    )))]
+                    chosen_rows = image_marked[-10:] + recent_rows[-4:]
+                    seen_ids: set[str] = set()
+                    chosen_ids: list[str] = []
+                    for row in chosen_rows:
+                        message_key = _text(row.get("message_id") or row.get("id"))
+                        if message_key and message_key not in seen_ids:
+                            seen_ids.add(message_key)
+                            chosen_ids.append(message_key)
+                    chosen_ids = chosen_ids[-12:]
+                    if chosen_ids:
+                        detail_rows = _load_dialogue_history_details(uid, chosen_ids)
+                        # Only keep the narrowed snapshot when it actually contains
+                        # a persisted image artifact. If an older schema stores the
+                        # image in a shape the lightweight index cannot identify, use
+                        # the original full hydration path rather than lose the source.
+                        has_selected_image = bool(
+                            detail_rows
+                            and any(
+                                _row_has_value_bearing_artifact(row, "image")
+                                for row in detail_rows
+                                if isinstance(row, dict)
+                            )
+                        )
+                        if has_selected_image:
+                            state = {"dialogue_pairs": detail_rows}
+                            fast_image_rows_loaded = True
+            _apr_timing_log(
+                "saved_image_index_prefetch",
+                image_index_started,
+                user_key=_apr_diag_ref(uid),
+                same_chat_rows=locals().get("same_chat_rows", []) and len(locals().get("same_chat_rows", [])) or 0,
+                selected_detail_ids=len(locals().get("chosen_ids", [])),
+                loaded_detail_rows=len(locals().get("detail_rows", [])),
+                used=fast_image_rows_loaded,
+            )
+        except Exception as image_index_error:
+            _apr_timing_log(
+                "saved_image_index_prefetch_fallback",
+                image_index_started,
+                user_key=_apr_diag_ref(uid),
+                error=type(image_index_error).__name__,
+            )
+    if state is None:
+        state = hydrate(uid)
+    # Make per-search top-level copies. The cache is shared between request threads;
+    # this search annotates rows with derived topic provenance, so mutating cached row
+    # dictionaries directly could let concurrent turns overwrite one another's context.
+    # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
+    all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
+    # lookup if an explicitly requested time interval contains no saved dialogue pairs.
+    retained_rows = list(all_rows)
+    reference_followup = _looks_like_referential_followup(query)
     interpreted_topic_closure = (
         bool(query_interpretation.get("explicit_topic_closure"))
         if "explicit_topic_closure" in query_interpretation
@@ -4627,6 +4739,7 @@ def search_dialogue_context(
         temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
         temporal_outside_retention=bool(time_filter.get("outside_retention_window")),
         image_edit_reference=bool(image_edit_reference),
+        lightweight_saved_image_prefetch=bool(fast_image_rows_loaded),
     )
 
     scope_started = time.perf_counter()
