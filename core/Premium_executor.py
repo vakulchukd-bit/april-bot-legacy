@@ -4558,52 +4558,51 @@ async def execute(
 
     # Premium graph responses can accidentally expose the provider's internal
     # Python-dict envelope as prose while also returning a valid GraphBlock.
-    # Convert that envelope to readable Markdown and keep the typed graph payload.
+    # Normalize the raw provider result BEFORE package_provider_response() runs.
+    # Do not reference `packaged` here: it is created below, after table recovery.
     _render_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
     _render_request_text = _text(
         _render_input.get("original_request") or _render_input.get("normalized_request") or original or current_text
     )
     _answer_before_graph_cleanup = answer
-    # package_provider_response makes shallow copies of render-block dictionaries.
-    # Clean the exact block list used by the progressive/final response, then also
-    # repair the raw provider list so saved/debug payloads remain consistent.
-    answer, _packaged_graph_dump_cleaned = _sanitize_graph_dump_in_answer(
-        answer, packaged.get("render_blocks")
+    _raw_blocks_for_graph_cleanup = raw.get("render_blocks")
+    answer, _graph_dump_cleaned = _sanitize_graph_dump_in_answer(
+        answer, _raw_blocks_for_graph_cleanup
     )
-    _, _raw_graph_dump_cleaned = _sanitize_graph_dump_in_answer(
-        answer, raw.get("render_blocks")
+    _answer_before_graph_repair = answer
+    answer, _graph_interpolation_text_repaired = _repair_graph_text_answer(
+        answer, _render_request_text, _raw_blocks_for_graph_cleanup
     )
-    _graph_dump_cleaned = _packaged_graph_dump_cleaned or _raw_graph_dump_cleaned
-    if not _graph_dump_cleaned:
-        answer, _graph_interpolation_text_repaired = _repair_graph_text_answer(
-            answer, _render_request_text, packaged.get("render_blocks") or raw.get("render_blocks")
-        )
-    else:
-        _graph_interpolation_text_repaired = False
 
     if answer != _answer_before_graph_cleanup:
         raw["answer"] = answer
         raw["content"] = answer
         raw["summary"] = answer[:180]
-        # Keep all canonical text aliases aligned. Otherwise a repaired answer
-        # could still be followed by the stale serialized dict from the old block.
-        packaged["answer"] = answer
-        packaged["content"] = answer
-        packaged["summary"] = answer[:180]
-        for _block_list in (packaged.get("render_blocks"), raw.get("render_blocks")):
-            if not isinstance(_block_list, list):
-                continue
+        # Keep raw text aliases aligned before the canonical packaging pass.
+        # This prevents a serialized dictionary from reappearing in a stale block.
+        _block_list = raw.get("render_blocks")
+        if isinstance(_block_list, list):
+            _known_prior_texts = {
+                str(value).strip()
+                for value in (_answer_before_graph_cleanup, _answer_before_graph_repair)
+                if isinstance(value, str) and value.strip()
+            }
             for _block in _block_list:
                 if not isinstance(_block, dict):
                     continue
-                _kind = str(_block.get("type") or _block.get("artifact_type") or _block.get("renderer") or "text").lower()
-                if _kind not in {"text", "markdown", "message", "message_text", "message_textblock", "messagetextblock", "answer"}:
+                _kind = str(
+                    _block.get("type") or _block.get("artifact_type") or _block.get("renderer") or "text"
+                ).lower()
+                if _kind not in {
+                    "text", "markdown", "message", "message_text", "message_text_block",
+                    "message_textblock", "messagetextblock", "answer",
+                }:
                     continue
                 _candidate = next((
-                    _block.get(_key) for _key in ("content", "text", "markdown")
+                    _block.get(_key) for _key in ("content", "text", "markdown", "display_text")
                     if isinstance(_block.get(_key), str) and _block.get(_key).strip()
                 ), "")
-                if _candidate.strip() == _answer_before_graph_cleanup.strip() or _parse_serialized_graph_answer(_candidate):
+                if _candidate.strip() in _known_prior_texts or _parse_serialized_graph_answer(_candidate):
                     for _key in ("content", "text", "markdown", "display_text"):
                         if _key in _block:
                             _block[_key] = answer
