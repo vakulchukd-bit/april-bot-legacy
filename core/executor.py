@@ -2252,7 +2252,20 @@ async def execute(
     response_package_started = time.perf_counter()
     answer = _text(raw.get("answer") or raw.get("content"))
     if not answer:
-        raise RuntimeError("CANONICAL_ANSWER_MISSING")
+        # A provider may return an empty top-level answer even when it produced an
+        # artifact-only response. Keep the request renderable and truthful instead
+        # of throwing before the image/diagram packaging path gets a chance to run.
+        intent_for_empty_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+        language_for_empty_answer = _text((interpretation.get("input") or {}).get("display_language")).lower()
+        if language_for_empty_answer.startswith(("uk", "ua")):
+            answer = "Текстова відповідь від моделі порожня. Перевір візуальний результат нижче або повтори запит."
+        elif language_for_empty_answer.startswith("en"):
+            answer = "The model returned no text. Check the visual result below or retry the request."
+        else:
+            answer = "Модель вернула пустой текстовый ответ. Проверь визуальный результат ниже или повтори запрос."
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = _text(raw.get("summary")) or answer[:180]
 
     # The existing TextModule participates only as the canonical response
     # packaging/sanitization layer; it never creates a second Provider call.
