@@ -124,7 +124,7 @@ Always treat these sections as structured input:
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
 4. ATTACHMENT_TASK_MAP / INPUT_MODALITIES / VISUAL_CONTEXT / ATTACHED_TEXT_FILES
 5. REQUEST_SEQUENCE (answer each explicit question/step in supplied order)
-   PRESENTATION_SEQUENCE, when present, is the ordered list of deliverable sections and renderers inside this one request; it is NOT a list of independent memory searches. Use its section/title/output_types, produce each requested section in that order, interleave text with its typed renderer, and reserve every final_output=true item for the very end. For a multi-section sequence, start each prose section with a Markdown heading (`##`) corresponding to that section title so the renderer can preserve exact boundaries. Tag render_blocks with step_index, step_title and sequence_index. Do not let multiple deliverables collapse into one poster/image. For an experiments section, make its diagram depict the requested experiments only; keep biography, formulas, resources and a final portrait as separate deliverables.
+   PRESENTATION_SEQUENCE, when present, is the ordered list of deliverable sections and renderers inside this one request; it is NOT a list of independent memory searches. Use its section/title/output_types, produce each requested section in that order, interleave text with its typed renderer, and reserve every final_output=true item for the very end. For a multi-section sequence, start each prose section with a Markdown heading (`##`) corresponding to that section title so the renderer can preserve exact boundaries. Tag render_blocks with step_index, step_title and sequence_index. When a renderer belongs between prose fragments, add `anchor_text` containing an exact, unique, complete sentence (or short paragraph, max 260 characters) from `answer` after which that renderer must appear. Use the same sentence verbatim, do not paraphrase it, and do not add anchors to final_output=true items. Keep one text block per narrative fragment when practical; never copy the whole answer into every text block. Do not let multiple deliverables collapse into one poster/image. For an experiments section, make its diagram depict the requested experiments only; keep biography, formulas, resources and a final portrait as separate deliverables.
    Each step's dialogue_search.relation, intent and context were retrieved independently
    from the authenticated user's history. Use its selected pairs when relation=CONTINUE OR
    history_request=true; HISTORY_RECALL may deliberately remain relation=NEW so recall does not
@@ -361,7 +361,7 @@ April Provider: one canonical call; processor owns authenticated identity, memor
 `answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` may be empty because the normalizer fills it from `answer`; keep the answer complete, but avoid duplicating it in the JSON. `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
 concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
-When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
+When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. For a renderer that belongs inside a longer explanation, include `anchor_text`: an exact, unique sentence or short paragraph (max 260 characters) copied verbatim from `answer`; the renderer will be inserted immediately after that anchor. Do not use anchor_text for final_output=true items, and do not place every renderer at the end by default. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 When ACTIVE_WORK_BRANCH is active, it is the first retrieval/context lane for this matched turn. Preserve the
 latest task state and its original constraints before generic history search; choices/actions/edits/solution steps
@@ -4278,6 +4278,7 @@ def _artifact_render_block(artifact: dict[str, Any]) -> dict[str, Any] | None:
     for key in (
         "title", "caption", "content", "text", "code", "language", "filename",
         "url", "href", "step_index", "step_title", "artifact_id", "sequence_index",
+        "anchor_text", "insert_after_text", "final_output",
     ):
         if key in artifact and key not in block:
             block[key] = artifact[key]
@@ -4537,6 +4538,43 @@ def _normalize(
             "type": "image",
             "spec": dict(image_spec),
         })
+
+    # Empty image renderer shells are intentionally removed by
+    # normalize_render_blocks until the generator has produced pixels. Preserve
+    # their scene placement metadata on the generator artifact/spec so the final
+    # GalleryBlock can still appear at its requested anchor instead of defaulting
+    # to the last image step.
+    image_placement_hint = None
+    raw_render_blocks = data.get("render_blocks") if isinstance(data.get("render_blocks"), list) else []
+    for candidate in raw_render_blocks:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_type = _text(candidate.get("type") or candidate.get("artifact_type") or candidate.get("kind")).lower()
+        if candidate_type not in {"image", "gallery", "generated_image", "screenshot", "image_gallery"}:
+            continue
+        hint = {
+            key: candidate.get(key)
+            for key in ("anchor_text", "insert_after_text", "step_index", "step_title", "sequence_index", "final_output")
+            if candidate.get(key) not in (None, "")
+        }
+        if hint:
+            image_placement_hint = hint
+            break
+    if image_placement_hint:
+        for artifact in normalized_artifacts:
+            if not isinstance(artifact, dict) or _text(artifact.get("type") or artifact.get("artifact_type")).lower() not in {"image", "generated_image"}:
+                continue
+            for key, value in image_placement_hint.items():
+                artifact.setdefault(key, value)
+            for spec_key in ("spec", "render_spec", "payload", "data"):
+                spec = artifact.get(spec_key)
+                if not isinstance(spec, dict):
+                    continue
+                spec_copy = dict(spec)
+                for key, value in image_placement_hint.items():
+                    spec_copy.setdefault(key, value)
+                artifact[spec_key] = spec_copy
+            break
 
     raw_memory_record = data.get("dialogue_memory_record") or data.get("memory_record") or {}
     if not isinstance(raw_memory_record, dict):
