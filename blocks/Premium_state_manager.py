@@ -4256,6 +4256,53 @@ def _rank_sections_for_row(query: str, row: dict[str, Any]) -> list[dict[str, An
     return ranked
 
 
+def _image_source_subject_tokens(query: Any) -> set[str]:
+    """Extract only the named source-image subject, not objects being added.
+
+    For example, in "добавь к этой фотке пустыни караван с верблюдами" the
+    source is the desert; the caravan and camels are the requested additions.
+    If the phrase does not identify a source subject confidently, return an empty
+    set so active-dialog recency can choose the current image instead of guessing.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    image_match = re.search(
+        r"(?:фотограф\w*|фотк\w*|фото\b|картинк\w*|изображен\w*|снимк\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)",
+        low,
+        re.IGNORECASE,
+    )
+    if not image_match:
+        return set()
+    tail = low[image_match.end():image_match.end() + 120]
+    tail = re.split(r"[.!?;\n]", tail, maxsplit=1)[0]
+    raw_words = re.findall(r"[a-zа-яёіїєґ][a-zа-яёіїєґ-]{1,}", tail, re.IGNORECASE)
+    skip = {
+        "с", "со", "из", "изо", "на", "в", "во", "про", "об", "обо", "о", "от", "для",
+        "with", "of", "from", "about", "in", "on", "the", "a", "an", "this", "that",
+        "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
+        "которое", "ты", "мне", "ты", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
+        "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
+        "замени", "удали", "убери", "переделай", "исправь", "сохрани", "добавить", "какую",
+    }
+    words = [word for word in raw_words if word not in skip and len(word) >= 3]
+    if not words:
+        return set()
+    # Require evidence that the first word describes the source, rather than being
+    # the sole direct object in "добавь к этой фотке кота". A preposition such as
+    # "с/of/with", a second topical word, or an edit verb after the source phrase
+    # gives us that evidence. Otherwise the recent image in this dialogue wins.
+    explicit_source_link = bool(re.match(r"\s*(?:с\b|со\b|из\b|про\b|of\b|with\b|from\b|about\b)", tail, re.I))
+    edit_after_source = bool(re.search(
+        r"\b(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|"
+        r"переделай|исправь|add\w*|edit\w*|change\w*|modify\w*)\b", tail, re.I
+    ))
+    if not (explicit_source_link or len(words) >= 2 or edit_after_source):
+        return set()
+    # First meaningful token after the image noun is the only source hint. Terms
+    # later in the phrase describe what the user wants added/changed.
+    return _subject_tokens(words[0])
+
+
 def _explicit_artifact_followup_kind(query: str) -> str:
     """Return the artifact family when a turn explicitly edits/extends a saved artifact.
 
@@ -4272,7 +4319,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
         ("diagram", r"(?:\bсхем\w*\b|\bдиаграмм\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
-        ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bснимк\w*\b|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
     )
     kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
@@ -4518,9 +4565,9 @@ def search_dialogue_context(
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
     low_query_for_assets = _text(query).lower().replace("ё", "е")
-    image_noun_pattern = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)"
+    image_noun_pattern = r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"
     image_edit_action_pattern = r"(?:измен\w*|отредактир\w*|модифицир\w*|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|передел\w*|поправ\w*|исправ\w*|перерис\w*|\bedit\b|\bmodify\b|\badd\b|\bremove\b|\breplace\b|\bredraw\b)"
-    image_reference_pattern = rf"(?:{image_noun_pattern}|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|эту\s+(?:фотограф\w*|фотк\w*|картинк\w*|иллюстрац\w*|изображени\w*)|this\s+(?:photo|image|picture)|on\s+it)\b)"
+    image_reference_pattern = rf"(?:{image_noun_pattern}|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|(?:к\s+)?эту\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|(?:к\s+)?этой\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|this\s+(?:photo|image|picture)|on\s+it)\b)"
     # A visual correction can refer to an earlier image without uploading it again.
     # Treat that as an image retrieval operation so continuation narrowing does not
     # collapse the search to the latest unrelated generated render in the hot branch.
@@ -6915,6 +6962,11 @@ def search_dialogue_context(
             " ", _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
         )
         artifact_query_subjects = set(_subject_tokens(artifact_subject_query))
+        if explicit_artifact_kind == "image":
+            source_subjects = _image_source_subject_tokens(query)
+            # Never let the requested addition (e.g. "caravan/camels") outrank
+            # the source scene (e.g. "desert") when resolving an image edit.
+            artifact_query_subjects = source_subjects
         # "Give me the whole/full code" is a reference to the saved artifact,
         # not a new subject. Mixed-language voice requests often add filler such
         # as "thank you", "when it writes welcome", or "put it there"; those
@@ -6959,7 +7011,21 @@ def search_dialogue_context(
             )
             artifact_options.append((score, exact_subject, int(source_row.get("turn_index") or 0), source_row, scored))
         if artifact_options:
-            artifact_options.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            if explicit_artifact_kind == "image":
+                # For an image explicitly referenced in the current dialogue, first
+                # use the source-scene hint; among compatible rows, prefer the latest
+                # saved image. Structured-payload richness must not make yesterday's
+                # edited photo win over the image just generated a moment ago.
+                artifact_options.sort(
+                    key=lambda item: (
+                        item[1],
+                        float(item[3].get("created_at") or 0.0),
+                        item[2],
+                    ),
+                    reverse=True,
+                )
+            else:
+                artifact_options.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
             _, _, _, artifact_source_row, artifact_source_candidate = artifact_options[0]
             source_id = _text(artifact_source_row.get("message_id"))
             # Recover user-entered values from the originating turn when it belongs
