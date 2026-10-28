@@ -7113,7 +7113,32 @@ def search_dialogue_context(
     # terms for answer generation, but do not use them to jump to an old branch.
     route_query_subjects = set(query_subjects)
     route_reference_terms = context_signature.get("reference_terms") if isinstance(context_signature.get("reference_terms"), list) else []
-    if route_reference_terms and not query_interpretation.get("explicit_topic_introduction") and not query_interpretation.get("explicit_topic_switch"):
+    # A deictic/reference word must not erase concrete subject terms when the user
+    # explicitly repairs or continues an artifact request. In the affected logs,
+    # the parser found terms such as "автом", "калаш", and "схему", but this
+    # blanket reset reduced route_subject_overlap to zero and detached the hot branch.
+    route_artifact_revisit_signal = bool(
+        route_query_subjects
+        and re.search(
+            r"(?:созда\w*|нарис\w*|сгенерир\w*|изображен\w*|картинк\w*|схем\w*|draw|generate|diagram|image)",
+            query, re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:я\s+(?:же\s+)?(?:не\s+)?(?:просил\w*|просила|попросил\w*|попросила)|"
+            r"я\s+прошу|исправься|не\s+удалось|а\s+теперь|теперь|продолжи(?:те)?|"
+            r"продолжай(?:те)?|дальше|повтори|снова|continue|resume|try\s+again)",
+            query, re.IGNORECASE,
+        )
+        and not query_interpretation.get("explicit_topic_switch")
+        and not history_request
+        and not time_filter.get("applied")
+    )
+    if (
+        route_reference_terms
+        and not route_artifact_revisit_signal
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not query_interpretation.get("explicit_topic_switch")
+    ):
         route_query_subjects = set()
     route_subject_overlap = _subject_overlap(route_query_subjects, latest_route_subjects) if route_query_subjects and latest_route_subjects else 0.0
     route_subject_conflict = _subject_conflicts(route_query_subjects, latest_route_subjects)
@@ -7136,16 +7161,46 @@ def search_dialogue_context(
         and not self_contained_new_information
         and not route_has_independent_payload
     )
+    # A self-contained artifact command can still be a continuation when it repeats
+    # the exact active subject: e.g. "I already asked you to draw the AK diagram. Continue"
+    # or "now draw the complete diagram" after a failed first render. Do not mistake
+    # this for a topic switch merely because it contains a fresh imperative.
+    same_subject_revisit_marker = bool(re.search(
+        r"\b(?:я\s+же\s+(?:просил\w*|просила|попросил\w*|попросила)|"
+        r"а\s+теперь|теперь\s+(?:нарис\w*|покаж\w*|сдела\w*|продолж\w*)|"
+        r"продолжи(?:те)?|продолжай(?:те)?|дальше|далее|"
+        r"почему\s+не\s+удал\w*|не\s+удал\w*\s+(?:созда\w*|показ\w*|получил\w*)|"
+        r"не\s+получил\w*|не\s+сработал\w*|повтори|снова|"
+        r"i\s+(?:already\s+)?asked|continue|resume|try\s+again|again)\b",
+        query, re.IGNORECASE,
+    ))
+    same_subject_active_revisit = bool(
+        latest_route_row
+        and route_query_subjects
+        and latest_route_subjects
+        and route_subject_overlap >= 0.44
+        and not route_subject_conflict
+        and same_subject_revisit_marker
+        and not query_interpretation.get("explicit_topic_switch")
+        and not history_request
+        and not time_filter.get("applied")
+        and not query_modalities
+    )
     prefer_hot_branch = bool(
         not route_blocked
         and latest_route_row
-        and not new_work_root_request
         and not query_modalities
         and not query_interpretation.get("explicit_topic_switch")
         and (
-            underspecified_turn
-            or (contextual_antecedent and (not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
-            or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
+            (
+                not new_work_root_request
+                and (
+                    underspecified_turn
+                    or (contextual_antecedent and (not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
+                    or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
+                )
+            )
+            or same_subject_active_revisit
         )
     )
     route_decision = "UNCHANGED"
@@ -7169,14 +7224,25 @@ def search_dialogue_context(
         # but no longer controls this turn or its saved-asset restoration.
         if active_work_branch:
             active_origin = _text(active_work_branch.get("origin_message_id"))
+            # Prefer a persisted topic-origin marker. If it is missing, fall back
+            # to this row's id as before; only a guarded same-subject revisit may
+            # preserve the branch when that fallback appears to disagree.
             latest_origin = _text(latest_route_row.get("topic_origin_message_id") or latest_route_row.get("message_id"))
             if active_origin and latest_origin and active_origin != latest_origin:
-                active_work_branch = {}
-                active_work_pair = None
-                active_work_row_index = -1
-                active_work_has_marker = False
-                hot_work_followup = False
-                hot_work_match_reason = "detached_stale_work_branch_latest_topic_wins"
+                if same_subject_active_revisit:
+                    _apr_timing_log(
+                        "active_work_branch_preserved_on_same_subject_revisit", None,
+                        active_origin=_apr_diag_ref(active_origin),
+                        latest_origin=_apr_diag_ref(latest_origin),
+                        subject_overlap=round(float(route_subject_overlap or 0.0), 4),
+                    )
+                else:
+                    active_work_branch = {}
+                    active_work_pair = None
+                    active_work_row_index = -1
+                    active_work_has_marker = False
+                    hot_work_followup = False
+                    hot_work_match_reason = "detached_stale_work_branch_latest_topic_wins"
         route_decision = "ACTIVE_BRANCH_FIRST"
     elif (
         not route_blocked
@@ -7439,6 +7505,7 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id),
         route_policy_version=route_policy_version or "legacy_missing_policy",
         route_decision=route_decision,
+        same_subject_active_revisit=bool(same_subject_active_revisit),
         latest_message_key=_apr_diag_ref((latest_route_row or {}).get("message_id")),
         query_subject_count=len(route_query_subjects),
         latest_subject_count=len(latest_route_subjects),
