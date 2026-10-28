@@ -4371,7 +4371,8 @@ def search_dialogue_context(
     resume_key = _text(resume_message_id)
     reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
-    history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
+    dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
+    history_request = dialogue_profile_request or bool(query_interpretation.get("history_request")) or _is_history_request(query)
     # In normal Premium routing the interpretation result is authoritative.
     # The lexical helper remains only as compatibility fallback for direct legacy callers.
     new_topic_request = (
@@ -6048,13 +6049,61 @@ def search_dialogue_context(
     history_matched_count = 0
     contextual_history_match = False
     if history_request:
-        selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
-            query, matches, topic_index, all_rows,
-            requested_topic_count=history_limit,
-            broad_overview=broad_history_overview,
-        )
+        if dialogue_profile_request:
+            # A dialogue-based portrait needs a broad but bounded profile, not the
+            # last rendered object or a keyword-ranked single topic. Use recent
+            # authenticated Premium rows, exclude recall prompts/pending turns,
+            # and choose diverse topic representatives from the retained window.
+            eligible_profile_rows = [
+                row for row in all_rows
+                if isinstance(row, dict)
+                and not _row_is_pending_clarification(row)
+                and not _is_history_recall_question(_text(row.get("user_text") or row.get("user")))
+                and _text(row.get("user_text") or row.get("user") or row.get("april_text") or row.get("april"))
+            ]
+            eligible_profile_rows.sort(
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+                reverse=True,
+            )
+            profile_seen_topics: set[str] = set()
+            profile_seen_signatures: list[set[str]] = []
+            selected_for_context = []
+            for profile_row in eligible_profile_rows:
+                label = _topic_label_lightweight(profile_row) or _row_subject_text_lightweight(profile_row)[:140]
+                signature = re.sub(r"[^a-z0-9а-я]+", " ", _text(label).lower().replace("ё", "е")).strip()
+                subject_signature = _subject_tokens(_row_subject_text_lightweight(profile_row))
+                if signature and signature in profile_seen_topics and not subject_signature:
+                    continue
+                # Coarse labels such as "April" can cover several distinct turns.
+                # Deduplicate near-identical subject signatures, not every row that
+                # happens to share the same coarse topic label.
+                if subject_signature and any(
+                    _subject_overlap(subject_signature, seen) >= 0.82
+                    for seen in profile_seen_signatures
+                ):
+                    continue
+                if signature:
+                    profile_seen_topics.add(signature)
+                if subject_signature:
+                    profile_seen_signatures.append(subject_signature)
+                selected_for_context.append(_compact_pair(_candidate_score(
+                    query, profile_row, dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""), reference_followup=True,
+                    query_modalities=query_modalities,
+                )))
+                if len(selected_for_context) >= 8:
+                    break
+            history_selection_method = "dialogue_profile_recent_diverse"
+            history_matched_count = len(selected_for_context)
+        else:
+            selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
+                query, matches, topic_index, all_rows,
+                requested_topic_count=history_limit,
+                broad_overview=broad_history_overview,
+            )
         if (
-            not selected_for_context
+            not dialogue_profile_request
+            and not selected_for_context
             and broad_history_overview
             and not time_filter.get("applied")
         ):
