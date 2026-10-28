@@ -24,7 +24,8 @@ from rapidfuzz import fuzz
 from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor
 from blocks.Premium_interpretation_identity import (
     extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
-    _is_image_discussion_without_new_visual_action,
+    _is_image_discussion_without_new_visual_action, _detect_image_modification,
+    _has_independent_nonvisual_artifact_request,
 )
 
 
@@ -87,6 +88,8 @@ def load_dialogue_pairs(
     *,
     limit: int = 0,
     timestamp: float | int | datetime | None = None,
+    dialog_id: str = "",
+    conversation_id: str = "",
 ) -> list[dict[str, Any]]:
     """Load only this active Premium user's USER↔APRIL pairs from the last 24 hours."""
     uid = str(user_id or "").strip()
@@ -108,19 +111,43 @@ def load_dialogue_pairs(
             owner_ids = _dialogue_owner_ids_cursor(cur, uid)
             if not owner_ids:
                 return []
-            # Upgrade only unexpired legacy Premium rows still inside the 24 h
-            # retention window before the memory-search query filters them out.
-            cur.execute(
-                """UPDATE dialogue_memory
-                   SET retention_hours = 24
-                   WHERE user_id = ANY(%s)
-                     AND COALESCE(retention_hours, 12) < 24
-                     AND created_at > %s - INTERVAL '24 hours'
-                     AND created_at + INTERVAL '24 hours' > %s""",
-                (owner_ids, current, current),
+            # A short active-branch lookup must not run a migration UPDATE over the
+            # entire 24-hour table. Full-history reads still upgrade unexpired legacy
+            # Premium rows before filtering them; a limited read remains read-only.
+            if not limit:
+                cur.execute(
+                    """UPDATE dialogue_memory
+                       SET retention_hours = 24
+                       WHERE user_id = ANY(%s)
+                         AND COALESCE(retention_hours, 12) < 24
+                         AND created_at > %s - INTERVAL '24 hours'
+                         AND created_at + INTERVAL '24 hours' > %s""",
+                    (owner_ids, current, current),
+                )
+            dialog_filters: list[str] = []
+            dialog_params: list[Any] = []
+            if limit and str(dialog_id or '').strip():
+                dialog_filters.append("dialog_id = %s")
+                dialog_params.append(str(dialog_id).strip())
+            if limit and str(conversation_id or '').strip():
+                dialog_filters.append("conversation_id = %s")
+                dialog_params.append(str(conversation_id).strip())
+            dialog_clause = " AND (" + " OR ".join(dialog_filters) + ")" if dialog_filters else ""
+            order_clause = "ORDER BY created_at DESC, turn_index DESC, id DESC" if limit else "ORDER BY created_at ASC, turn_index ASC, id ASC"
+            limit_clause = " LIMIT %s" if limit else ""
+            # A bounded Premium read mirrors the existing migration's 24-hour
+            # entitlement without running a broad UPDATE over the whole table.
+            retention_clause = (
+                "created_at + INTERVAL '24 hours' > %s"
+                if limit else
+                "created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s"
             )
+            params: list[Any] = [owner_ids, current, current]
+            params.extend(dialog_params)
+            if limit:
+                params.append(max(1, min(32, int(limit))))
             cur.execute(
-                """
+                f"""
                 SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text,
                        user_text_en, april_text_en, language, relation, dialog_id,
                        conversation_id, message_id, interpretation_id,
@@ -128,12 +155,19 @@ def load_dialogue_pairs(
                 FROM dialogue_memory
                 WHERE user_id = ANY(%s)
                   AND created_at <= %s
-                  AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
-                ORDER BY created_at ASC, turn_index ASC, id ASC
+                  AND {retention_clause}
+                  {dialog_clause}
+                {order_clause}{limit_clause}
                 """,
-                (owner_ids, current, current),
+                tuple(params),
             )
             rows = [dict(row) for row in cur.fetchall()]
+            if limit:
+                # This is the same effective retention value as the old full-read
+                # migration UPDATE, represented in the result only (no DB mutation).
+                for row in rows:
+                    row["retention_hours"] = 24
+                rows.reverse()  # expose the same chronological order as full-history reads
             for row in rows:
                 # Canonicalize legacy alias rows before they enter Premium context.
                 row["user_id"] = uid
@@ -513,6 +547,9 @@ def hydrate(
     rows: list[dict[str, Any]] | None = None,
     *,
     force: bool = False,
+    limit: int = 0,
+    dialog_id: str = "",
+    conversation_id: str = "",
 ) -> dict[str, Any]:
     """Refresh in-memory state from the canonical PostgreSQL dialogue store."""
     hydrate_started = time.perf_counter()
@@ -540,7 +577,9 @@ def hydrate(
     load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
     rows_from_store = rows is None
     if rows_from_store:
-        rows = load_dialogue_pairs(uid, limit=0)
+        rows = load_dialogue_pairs(
+            uid, limit=limit, dialog_id=dialog_id, conversation_id=conversation_id,
+        )
     _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
         source=load_source, rows_loaded=len(rows or []))
 
@@ -556,6 +595,17 @@ def hydrate(
         if isinstance(row, dict) and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
     live_rows.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
+    if rows_from_store and limit:
+        # Do not replace the canonical full in-process snapshot with a partial query.
+        # This ephemeral view is used only for a response/repair turn tied to the
+        # current dialogue; explicit history requests still hydrate the full 24h set.
+        state = _new_state(uid)
+        state["dialogue_pairs"] = live_rows
+        state["last_activity"] = stamp
+        state["updated_at"] = stamp
+        _apr_timing_log("hydrate_recent_view_complete", hydrate_started,
+            user_key=_apr_diag_ref(uid), retained_pairs=len(live_rows), requested_limit=limit)
+        return state
     with _LOCK:
         state = _STATES.get(uid)
         if state is None:
@@ -4391,6 +4441,61 @@ def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
             return True
     return False
 
+def _is_visual_misroute_correction(query: Any) -> bool:
+    """True only for an explicit correction of the immediately preceding visual topic.
+
+    This is not a generic image-edit detector. A present-tense edit command must keep
+    the ordinary image workflow; this fast path is for statements such as
+    "Какие зайчики? Я тебе про цифры, ты путаешь".
+    """
+    low = _text(query).lower().replace("ё", "е")
+    if not low or _detect_image_modification(low) or _has_independent_nonvisual_artifact_request(low):
+        return False
+    visual_reference = bool(re.search(
+        r"(?:фото|фотк|картинк|изображен|цифр|циферблат|диспле|табло|\b\d{2,}[:.,]?\d*\b|image|photo|picture|digits|display|screen)",
+        low, re.IGNORECASE,
+    ))
+    misroute_correction = bool(re.search(
+        r"(?:какие\s+[^?!.]{1,35}\??.{0,100}\bя\s+(?:тебе\s+)?про\b|"
+        r"\bты\s+(?:что|шо)[- ]?то\s+путаешь\b|\bты\s+путаешь\b|"
+        r"\bты\s+(?:все|всё)\s+напутал\w*\b|\bты\s+перепутал\w*\b|"
+        r"\bi\s+meant\b.{0,70}\b(?:you\s+(?:mixed|mixing)\s+(?:it\s+)?up|confus\w*)\b|"
+        r"\bwhat\s+(?:about|do\s+you\s+mean)\b.{0,80}\bi\s+(?:asked|meant)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    return bool(visual_reference and misroute_correction)
+
+
+def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    """Select the nearest prior explicit visual task, not an older semantically similar reply."""
+    low_query = _text(query).lower().replace("ё", "е")
+    numeric_query = set(re.findall(r"\d+(?:[.,:]\d+)*", low_query))
+    visual_noun = re.compile(r"(?:фото\w*|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)", re.I)
+    visual_action = re.compile(
+        r"(?:измен\w*|редактир\w*|добав\w*|встав\w*|дорис\w*|замен\w*|исправ\w*|"
+        r"созда\w*|сгенерир\w*|нарис\w*|изобраз\w*|\bedit\w*|\bmodify\w*|\badd\w*|"
+        r"\breplace\w*|\bcreate\w*|\bgenerate\w*|\bdraw\w*)", re.I,
+    )
+    ranked: list[tuple[int, float, int, dict[str, Any]]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        user_text = _text(row.get("user_text") or row.get("user"))
+        if not user_text or not visual_noun.search(user_text) or not visual_action.search(user_text):
+            continue
+        if _is_image_discussion_without_new_visual_action(user_text):
+            continue
+        row_numbers = set(re.findall(r"\d+(?:[.,:]\d+)*", user_text.lower()))
+        numeric_hits = len(numeric_query & row_numbers)
+        timestamp = float(row.get("created_at") or 0.0)
+        turn = int(row.get("turn_index") or 0)
+        ranked.append((numeric_hits, timestamp, turn, row))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return ranked[0][3]
+
+
 def search_dialogue_context(
     user_id: Any,
     query: str,
@@ -4412,18 +4517,52 @@ def search_dialogue_context(
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    state = hydrate(uid)
+    query_interpretation = dict(query_interpretation or {})
+    retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
+    visual_misroute_correction = _is_visual_misroute_correction(query)
+    targeted_active_repair = bool(retrospective_image_discussion or visual_misroute_correction)
+    state = hydrate(
+        uid,
+        limit=16 if targeted_active_repair else 0,
+        dialog_id=str(dialog_id or ""),
+        conversation_id=str(conversation_id or ""),
+    )
     # Make per-search top-level copies. The cache is shared between request threads;
     # this search annotates rows with derived topic provenance, so mutating cached row
     # dictionaries directly could let concurrent turns overwrite one another's context.
     # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
     all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    if targeted_active_repair:
+        same_dialog_rows = [row for row in all_rows if (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )]
+        if same_dialog_rows:
+            all_rows = sorted(same_dialog_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        else:
+            all_rows = sorted(all_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        visual_anchor = _select_recent_visual_task_anchor(all_rows, query)
+        if visual_anchor is not None:
+            # Re-anchor to the original user task so its asset IDs and typed render
+            # data are restored instead of injecting an older, text-similar branch.
+            all_rows = [visual_anchor]
+            _apr_timing_log(
+                "active_visual_branch_reanchored", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
+                recent_rows=len(same_dialog_rows), reason=(
+                    "retrospective_image_feedback" if retrospective_image_discussion else "explicit_visual_misroute_correction"
+                ),
+            )
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
     # lookup if an explicitly requested time interval contains no saved dialogue pairs.
     retained_rows = list(all_rows)
     resume_key = _text(resume_message_id)
     reference_followup = _looks_like_referential_followup(query)
-    query_interpretation = dict(query_interpretation or {})
     dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
     history_request = dialogue_profile_request or bool(query_interpretation.get("history_request")) or _is_history_request(query)
     # In normal Premium routing the interpretation result is authoritative.
@@ -4442,7 +4581,6 @@ def search_dialogue_context(
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
-    retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_artifact_kind = (
         _text(query_interpretation.get("saved_artifact_followup_kind"))
         if "saved_artifact_followup_kind" in query_interpretation
@@ -4484,7 +4622,7 @@ def search_dialogue_context(
     # resolve subjects from that replacement clause only.
     subject_query = query
     low_subject_query = _text(query).lower().replace("ё", "е")
-    positive_replacement = re.search(r"\b(?:я\s+про|я\s+имел\w*\s+в\s+виду|я\s+имела\w*\s+в\s+виду|именно)\s+(.+)$", low_subject_query)
+    positive_replacement = re.search(r"\b(?:я\s+(?:тебе\s+)?про|я\s+имел\w*\s+в\s+виду|я\s+имела\w*\s+в\s+виду|именно)\s+(.+)$", low_subject_query)
     if is_correction and positive_replacement:
         subject_query = positive_replacement.group(1)
     elif is_correction and re.search(r"\bне\s+про\s+[^,.;!?]+(?:\s+(?:спрашивал|спрашивала|говорил|говорила|имел|имела)\b|$)", low_subject_query):
@@ -4493,6 +4631,17 @@ def search_dialogue_context(
     query_subjects = set(_subject_tokens(subject_query)) if subject_query != query else (
         set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
     )
+    if targeted_active_repair and all_rows:
+        # The authenticated source task is the semantic anchor; do not let reaction
+        # wording introduce unrelated entities into the branch selection.
+        anchor_row = all_rows[-1]
+        anchor_text = " ".join((
+            _text(anchor_row.get("user_text") or anchor_row.get("user")),
+            _text(anchor_row.get("user_text_en")),
+        ))
+        anchor_subjects = _subject_tokens(anchor_text)
+        if anchor_subjects:
+            query_subjects = set(anchor_subjects)
     # Referential questions about an object's origin are continuations, not a new
     # "internet/source" topic. The grammar/predicate terms are excluded above; this
     # fallback prevents morphology/typos from creating a false subject conflict.
