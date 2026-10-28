@@ -39,7 +39,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v5_dynamic_quality_input_guard"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v6_contextual_refusal"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -146,6 +146,7 @@ When PROTECTED_STRUCTURED_DATA is present, preserve only its selected source val
 When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adjacent input_text part labeled PROTECTED_CURRENT_INPUT_SOURCE. That labeled source part is the authoritative full current request/data. Preserve every row, value, coordinate, label, unit, sign, formula, equation, ordering and constraint exactly. Do not substitute sampled values, regenerate missing rows, or rely on a compressed paraphrase. Use CURRENT_REQUEST and REQUEST_SEQUENCE for task intent and order; use PROTECTED_CURRENT_INPUT_SOURCE for exact data. Keep that source intact; it is counted in actual API input usage but is not duplicated inside the 3600-token system-plus-structured-card budget.
 
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
+PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
@@ -352,6 +353,7 @@ full source code across answer/content/render_blocks. Compress repeated prose an
 substance. Preserve all requested topics; if output space is tight, shorten explanations per topic
 rather than omit topics. Never return an empty answer or claim source bytes were inspected unless
 actually supplied. For attached text, honor reader_truncated=true/false correctly.
+COMPACT PROVIDER-REFUSAL DIALOGUE RULE: When RECENT_LIMITATIONS contains earlier refusal/explanation events, respond within the same conversation; explain the actual restriction in natural RETURN_LANGUAGE and offer a genuinely allowed next step. Do not repeat raw provider refusal text or bypass the restriction. Do not confuse content restrictions with technical failures or tariff limits; use a verified name only when natural.
 REFERENCE/CLOSURE GUARD: If CURRENT_REQUEST only clarifies the referent (for example, “я про твой предыдущий ответ” / “I mean your previous answer”) without a substantive question or action, acknowledge it in one brief sentence. If the user explicitly closes a topic and gives no new task, acknowledge closure in one brief sentence. In either case, do not repeat or expand earlier explanations or add formulas/render blocks unless the user asks for them.
 
 """.strip()
@@ -363,6 +365,7 @@ place for the full response; `summary` is short metadata. Emit requested structu
 concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. For a renderer that belongs inside a longer explanation, include `anchor_text`: an exact, unique sentence or short paragraph (max 260 characters) copied verbatim from `answer`; the renderer will be inserted immediately after that anchor. Do not use anchor_text for final_output=true items, and do not place every renderer at the end by default. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
+If RECENT_LIMITATIONS contains prior refusal/explanation events, consider them part of this same dialogue: explain the real limitation naturally, retain the current thread, and offer a genuinely permitted alternative without bypassing the restriction. Do not repeat raw provider/system wording or mention the model provider unless explicitly asked; distinguish content restrictions from technical errors and tariff limits. Use the verified display name only when natural.
 When ACTIVE_WORK_BRANCH is active, it is the first retrieval/context lane for this matched turn. Preserve the
 latest task state and its original constraints before generic history search; choices/actions/edits/solution steps
 belong to that work unless the current request clearly switches topic. Only fall back to other history when the
@@ -407,6 +410,7 @@ class _ResponseResult:
     def __init__(self, payload: dict[str, Any]):
         self._payload = payload
         self.output_text = self._extract_output_text(payload)
+        self.refusal_text = _extract_provider_refusal(payload)
         self.usage = _Usage(payload.get("usage") or {})
         self.status = _text(payload.get("status")).lower()
         incomplete = payload.get("incomplete_details")
@@ -780,6 +784,231 @@ def _json_load(raw: str) -> dict[str, Any]:
             continue
 
     raise RuntimeError("PROVIDER_INVALID_JSON")
+
+
+def _extract_provider_refusal(payload: Any) -> str:
+    """Extract an explicit Responses API refusal without treating it as plain output."""
+    if not isinstance(payload, dict):
+        return ""
+    direct = _text(payload.get("refusal"))
+    if direct:
+        return direct[:1800]
+    chunks: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if _text(item.get("type")).lower() == "refusal":
+            value = _text(item.get("refusal") or item.get("text") or item.get("content"))
+            if value:
+                chunks.append(value)
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if _text(content.get("type")).lower() == "refusal" or content.get("refusal"):
+                value = _text(content.get("refusal") or content.get("text") or content.get("content"))
+                if value:
+                    chunks.append(value)
+    return "\n".join(dict.fromkeys(chunks))[:1800]
+
+
+def _looks_like_provider_refusal(value: Any) -> bool:
+    """Conservative detector: only standard refusal phrases with policy-like context."""
+    text = _text(value).lower().replace("ё", "е").replace("’", "'").replace("‘", "'")
+    if not text:
+        return False
+    refusal = bool(re.search(
+        r"(?:i\s+(?:cannot|can't|can not|won't|will not)\s+(?:help|assist|comply|create|generate|provide)"
+        r".{0,80}(?:request|content|that|this)|i'm sorry.{0,100}(?:can't|cannot|unable|won't)|"
+        r"не могу помочь с (?:этим|таким) запросом|не могу выполнить (?:этот|такой) запрос|"
+        r"не могу создать (?:такой|это) (?:контент|содержимое|изображение)|"
+        r"не могу сгенерировать (?:такой|это)|не можу допомогти з цим запитом|"
+        r"не можу виконати цей запит|je ne peux pas vous aider avec cette demande)",
+        text, re.I | re.S
+    ))
+    policy_context = any(marker in text for marker in (
+        "policy", "safety", "guidelines", "prohibited", "disallowed", "copyright",
+        "privacy", "personal data", "sexual content", "content rules", "harmful",
+        "правила", "ограничени", "безопасност", "запрещ", "недопустим", "авторск",
+        "конфиденциаль", "персональн", "насили", "сексуальн", "обмеженн", "авторськ",
+        "конфіденційн", "правилами безпеки",
+    ))
+    standard_close = any(marker in text for marker in (
+        "can't help with that", "cannot help with that", "can't help with this request", "cannot help with this request",
+        "can't assist with that", "cannot assist with that", "can't assist with this request",
+        "cannot assist with this request", "can't comply with that request", "cannot comply with that request",
+        "не могу помочь с этим запросом", "не могу выполнить этот запрос",
+        "не могу создать такое содержимое", "не могу сгенерировать такой контент",
+        "не можу допомогти з цим запитом", "не можу виконати цей запит",
+    ))
+    return bool(refusal and (policy_context or standard_close))
+
+
+def _visible_refusal_from_output(raw: Any) -> str:
+    """Return only the visible answer when a JSON envelope contains a standard refusal."""
+    text = _text(raw)
+    if not text:
+        return ""
+    try:
+        decoded = _json_load(text)
+    except Exception:
+        return text if _looks_like_provider_refusal(text) else ""
+    for key in ("answer", "content", "response", "text", "message"):
+        candidate = _text(decoded.get(key))
+        if candidate and _looks_like_provider_refusal(candidate):
+            return candidate[:1800]
+    return ""
+
+
+def _refusal_fallback(request: Any, current_request: str = "", language: str = "", user_name: str = "") -> str:
+    """Local fallback if the refusal cannot be rewritten; it never retries the blocked task."""
+    current = _text(current_request or getattr(request, "goal", ""))
+    constraints = getattr(request, "constraints", {})
+    constraints = constraints if isinstance(constraints, dict) else {}
+    lang_hint = _text(language or constraints.get("provider_output_language") or constraints.get("display_language"))
+    low = current.lower()
+    if re.search(r"[іїєґ]|\b(що|цей|ця|будь ласка|можу|зроби|потрібно|підключити|чому|як)\b", low):
+        lang = "uk"
+    elif re.search(r"[а-яё]", low):
+        lang = "ru"
+    elif re.search(r"\b(je|vous|pourquoi|peux|cette|demande)\b|[àâçéèêëîïôùûüÿœæ]", low):
+        lang = "fr"
+    elif lang_hint.lower().startswith(("ru", "uk", "fr", "en")):
+        lang = lang_hint.lower()[:2]
+    else:
+        lang = "en"
+    name = _text(user_name)[:70]
+    # Only use the name in repeated-context cases; this helper is called after context is assembled.
+    lead = (name + ", ") if name else ""
+    if lang == "ru":
+        return lead + "я не могу выполнить именно эту часть запроса в таком виде. Давайте сохраним вашу основную цель и изменим тот элемент, который мешает её выполнить. Я помогу подобрать допустимый вариант, продолжая нашу тему."
+    if lang == "uk":
+        return lead + "я не можу виконати саме цю частину запиту в такому вигляді. Збережімо вашу основну мету й змінимо елемент, який заважає її виконати. Я допоможу підібрати прийнятний варіант, продовжуючи нашу тему."
+    if lang == "fr":
+        return lead + "je ne peux pas réaliser cette partie de la demande sous cette forme. Conservons votre objectif principal et adaptons l’élément qui bloque, afin de trouver une option acceptable sans perdre le fil de notre conversation."
+    return lead + "I can’t complete this part of the request in its current form. Let’s preserve your main goal and adjust the element that prevents it, so we can find an allowed option without losing the thread of our conversation."
+
+
+def _refusal_rewrite_context(request: Any, refusal_text: str, *, premium: bool = False) -> tuple[list[dict[str, str]], dict[str, Any], str, str]:
+    """Build a small adapter prompt from the authenticated request and selected same-topic pairs."""
+    intent = getattr(request, "intent", {})
+    intent = intent if isinstance(intent, dict) else {}
+    interpretation = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else intent
+    interpretation = interpretation if isinstance(interpretation, dict) else {}
+    identity = interpretation.get("identity") if isinstance(interpretation.get("identity"), dict) else intent.get("identity", {})
+    identity = identity if isinstance(identity, dict) else {}
+    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+    dialogue = dialogue if isinstance(dialogue, dict) else {}
+    continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+    request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    conversation = getattr(request, "conversation", {})
+    conversation = conversation if isinstance(conversation, dict) else {}
+    memory = getattr(request, "memory", {})
+    memory = memory if isinstance(memory, dict) else {}
+    constraints = getattr(request, "constraints", {})
+    constraints = constraints if isinstance(constraints, dict) else {}
+    current = _text(conversation.get("current_request") or conversation.get("current_text") or conversation.get("resolved_request") or request_input.get("original_request") or getattr(request, "goal", ""))[:1000]
+    raw_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
+    pairs: list[dict[str, str]] = []
+    if isinstance(raw_pairs, list):
+        for pair in raw_pairs[:3]:
+            if not isinstance(pair, dict):
+                continue
+            user_text = _text(pair.get("source_user_text") or pair.get("user") or pair.get("user_text") or pair.get("request"))
+            april_text = _text(pair.get("source_april_text") or pair.get("april") or pair.get("april_text") or pair.get("assistant") or pair.get("answer"))
+            if user_text or april_text:
+                pairs.append({"user": user_text[:220], "april": april_text[:260]})
+    recent = dialogue.get("recent_limitations") if isinstance(dialogue.get("recent_limitations"), dict) else {}
+    lang = _text(constraints.get("provider_output_language") or request_input.get("display_language") or constraints.get("display_language") or "auto")[:24]
+    display_name = _text(identity.get("display_name") or identity.get("user_display_name") or identity.get("name"))[:70]
+    # The personal name is supplied only as verified profile data; the adapter decides whether it is natural to use it.
+    data = {
+        "current_request": current,
+        "dialogue_relation": _text(dialogue.get("relation") or memory.get("relation") or "NEW")[:24],
+        "active_topic": _text(continuation.get("active_topic") or memory.get("active_topic") or memory.get("topic"))[:180],
+        "return_language_setting": lang,
+        "authenticated_display_name_if_available": display_name,
+        "tier": "Premium" if premium else "Free",
+        "selected_same_dialogue_pairs": pairs,
+        "recent_limitation_events": recent.get("events", [])[:3] if isinstance(recent.get("events"), list) else [],
+        "provider_refusal_text": _text(refusal_text)[:1400],
+    }
+    fallback = _refusal_fallback(request, current, lang, display_name if len(pairs) >= 2 or recent.get("has_recent_limitation") else "")
+    system = (
+        "You are April's conversational response adapter. The provider has already refused the original operation. "
+        "Your sole task is to explain the limitation naturally and continue the existing dialogue. Never fulfil, retry, "
+        "paraphrase to evade, or otherwise bypass the refused operation. Use the current request, selected same-dialogue pairs, "
+        "active topic and prior limitation events to explain what part cannot be done and why only to the extent supported by the refusal. "
+        "If helpful, offer one genuinely allowed alternative that preserves the user's main aim. Do not invent policy details, "
+        "legal conclusions, creator identity, product features or interface routes. Do not mention OpenAI, system messages, moderation, "
+        "or internal provider machinery unless the current user directly asks about the provider/model. Use the current message's language "
+        "when evident; do not follow a stale UI language over the current request. Use authenticated name only if present and natural; "
+        "never force it into the answer. Be concise, warm, specific, and non-robotic. Return only a JSON object with keys answer, content, "
+        "summary, render_blocks, and dialogue_memory_record. Keep answer and content aligned; render_blocks may contain one text block; "
+        "do not emit images, artifacts, or claim an operation succeeded."
+    )
+    adapter_input = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(data, ensure_ascii=False, separators=(",", ":"))},
+    ]
+    return adapter_input, data, fallback, current
+
+
+async def _adapt_provider_refusal(client: Any, request: Any, refusal_text: str, *, premium: bool = False) -> tuple[str, str, dict[str, int]]:
+    """Rewrite refusal wording only; never resubmit the original operation for execution."""
+    adapter_input, data, fallback, current = _refusal_rewrite_context(request, refusal_text, premium=premium)
+    usage_data: dict[str, int] = {}
+    try:
+        response = await asyncio.to_thread(client.responses.create, model=MODEL, input=adapter_input)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            usage_data = {
+                "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                "cached_input_tokens": int(getattr(usage, "cached_input_tokens", 0) or 0),
+                "cache_write_tokens": int(getattr(usage, "cache_write_tokens", 0) or 0),
+                "reasoning_tokens": int(getattr(usage, "reasoning_tokens", 0) or 0),
+            }
+        rewritten = _text(getattr(response, "output_text", ""))
+        if rewritten:
+            try:
+                decoded = _json_load(rewritten)
+            except Exception:
+                decoded = {"answer": rewritten, "content": rewritten, "summary": rewritten}
+            answer = _text(decoded.get("answer") or decoded.get("content") or decoded.get("response") or decoded.get("text"))
+            if answer and not _looks_like_provider_refusal(answer):
+                decoded["answer"] = answer
+                decoded.setdefault("content", answer)
+                decoded.setdefault("summary", answer[:320])
+                decoded.setdefault("render_blocks", [{"type": "text", "content": answer}])
+                decoded.setdefault("dialogue_memory_record", {
+                    "topic": _text(data.get("active_topic") or current)[:180],
+                    "summary": answer[:320],
+                    "sections": [],
+                })
+                return json.dumps(decoded, ensure_ascii=False, separators=(",", ":")), "rewritten", usage_data
+    except Exception as exc:
+        # Do not log the raw refusal, request, user name, or provider exception text.
+        _apr_timing_log("refusal_adapter_unavailable", None, error=type(exc).__name__, tier="premium" if premium else "free")
+    fallback_payload = {
+        "answer": fallback,
+        "content": fallback,
+        "summary": fallback[:320],
+        "render_blocks": [{"type": "text", "content": fallback}],
+        "dialogue_memory_record": {
+            "topic": _text(data.get("active_topic") or current)[:180],
+            "summary": fallback[:320],
+            "sections": [],
+        },
+    }
+    return json.dumps(fallback_payload, ensure_ascii=False, separators=(",", ":")), "fallback", usage_data
+
+
+def _merge_refusal_usage(existing: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
+    merged = dict(existing or {})
+    for key, value in (extra or {}).items():
+        merged[key] = int(merged.get(key, 0) or 0) + int(value or 0)
+    return merged
 
 
 def _request_key(req: MachineRequest) -> str:
@@ -2072,6 +2301,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if item.get("analysis_summary") and summary_budget >= 20:
                 row["a"] = _semantic_compress(item.get("analysis_summary"), summary_budget)
             assets_min.append(row)
+        raw_limitations = data.get("RECENT_LIMITATIONS") if isinstance(data.get("RECENT_LIMITATIONS"), dict) else {}
+        limitation_events_min = []
+        for event in (raw_limitations.get("events") or [])[:2]:
+            if not isinstance(event, dict):
+                continue
+            event_min = {
+                "user_request": _semantic_compress(event.get("user_request"), max(12, summary_budget // 2)),
+                "april_explanation": _semantic_compress(event.get("april_explanation"), max(18, summary_budget)),
+            }
+            if event_min["user_request"] or event_min["april_explanation"]:
+                limitation_events_min.append(event_min)
+        recent_limitations_min = {
+            "has_recent_limitation": bool(raw_limitations.get("has_recent_limitation") or limitation_events_min),
+            "count": max(len(limitation_events_min), int(raw_limitations.get("count") or 0)),
+            "events": limitation_events_min,
+        }
+
         return {
             "AUTHENTICATED_IDENTITY": identity_min,
             "CURRENT_REQUEST": data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), current_budget),
@@ -2079,6 +2325,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "INTERPRETATION": keep_intent,
             "DIALOGUE_BASED_PORTRAIT_PROFILE": data.get("DIALOGUE_BASED_PORTRAIT_PROFILE") or {},
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
+            "RECENT_LIMITATIONS": recent_limitations_min,
             "CONTINUATION_GUIDANCE": guidance_min,
             "SCENE_COMPLEMENTARITY_POLICY": renderer_policy_min,
             "ACTIVE_WORK_BRANCH": {
@@ -2432,6 +2679,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # This prompt is intentionally tiny and only activates for pathological
         # metadata/sequence sizes; it still preserves the contract and source data.
         system = ("April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Preserve every REQUEST_SEQUENCE step in order. "
+                  "If RECENT_LIMITATIONS contains prior refusals, continue that dialogue naturally, explain the real limitation and offer a genuinely allowed alternative without bypassing it. Do not expose raw provider wording. "
                   "Use PROTECTED_STRUCTURED_DATA exactly; if PROTECTED_STRUCTURED_DATA_EXTERNAL is present, "
                   "read PROTECTED_STRUCTURED_DATA_SOURCE as its exact payload. Preserve protected values and "
                   "valid render_blocks/artifacts; do not invent data. Return valid JSON matching OUTPUT_CONTRACT.\n\n"
@@ -2454,7 +2702,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
-            "REQUESTED_OUTPUTS",
+            "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
         )
         emergency = {key: minimal[key] for key in essential_keys if key in minimal}
 
@@ -3247,6 +3495,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "DIALOGUE_BASED_PORTRAIT_PROFILE": portrait_profile_card,
         "DIALOGUE_RELATION": relation,
+        "RECENT_LIMITATIONS": dialogue.get("recent_limitations") if isinstance(dialogue.get("recent_limitations"), dict) else {"has_recent_limitation": False, "count": 0, "events": []},
         "CONTINUATION_GUIDANCE": continuation_guidance,
         "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
         "ACTIVE_WORK_BRANCH": active_work_branch,
@@ -4705,23 +4954,32 @@ async def generate_text(
             prior_usage_data: dict[str, int] = {}
             first_status = _text(getattr(response, "status", "")).lower()
             first_raw_output = _text(getattr(response, "output_text", ""))
+            first_provider_refusal = _text(getattr(response, "refusal_text", ""))
             recovery_language = _text(
                 (request.constraints or {}).get("display_language")
                 or (request.constraints or {}).get("provider_output_language")
                 or ""
             )
             first_recovery_reason = ""
-            if first_status == "incomplete":
+            # A refusal is an intentional provider result, not an empty/truncated
+            # answer to recover by re-submitting the original operation.
+            if first_provider_refusal:
+                first_recovery_reason = ""
+            elif first_status == "incomplete":
                 first_recovery_reason = _text(getattr(response, "incomplete_reason", "")) or "incomplete"
             elif not first_raw_output:
                 first_recovery_reason = "empty_output"
             else:
                 try:
                     first_decoded = _json_load(first_raw_output)
-                    if not _canonical_display_answer(first_decoded, display_language=recovery_language):
+                    refusal_candidate = _visible_refusal_from_output(first_raw_output)
+                    if refusal_candidate:
+                        first_recovery_reason = ""
+                    elif not _canonical_display_answer(first_decoded, display_language=recovery_language):
                         first_recovery_reason = "missing_public_answer"
                 except Exception:
-                    first_recovery_reason = "invalid_json_or_contract"
+                    if not _looks_like_provider_refusal(first_raw_output):
+                        first_recovery_reason = "invalid_json_or_contract"
             first_usage = getattr(response, "usage", None)
             if first_usage is not None:
                 prior_usage_data = {
@@ -4784,9 +5042,19 @@ async def generate_text(
                 }
                 usage_data = {name: prior_usage_data.get(name, 0) + final_usage.get(name, 0)
                               for name in set(prior_usage_data) | set(final_usage)}
+            refusal_adapter_status = "not_needed"
+            refusal_adapter_applied = False
+            refusal_candidate = _text(getattr(response, "refusal_text", "")) or _visible_refusal_from_output(raw)
+            if refusal_candidate:
+                rewritten_raw, refusal_adapter_status, adapter_usage = await _adapt_provider_refusal(client, request, refusal_candidate, premium=True)
+                raw = rewritten_raw
+                usage_data = _merge_refusal_usage(usage_data, adapter_usage)
+                refusal_adapter_applied = True
+                _log_json("REFUSAL_ADAPTER", {"request_fingerprint": key[:16], "status": refusal_adapter_status, "tier": "premium", "refusal_detected": True})
             response_summary = {
                 "status": response_status or "unknown",
                 "output_chars": len(raw),
+                "refusal_adapter": refusal_adapter_status,
                 "output_limit_mode": "premium_explicit_12000_token_cap",
                 "incomplete_reason": _text(getattr(response, "incomplete_reason", "")) or None,
                 "usage": usage_data or None,
@@ -4798,7 +5066,7 @@ async def generate_text(
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
                 **response_summary,
             })
-            if response_status == "incomplete":
+            if response_status == "incomplete" and not refusal_adapter_applied:
                 failure_code = "PROVIDER_OUTPUT_INCOMPLETE"
                 reason = _text(getattr(response, "incomplete_reason", "")) or "unknown"
                 print(
