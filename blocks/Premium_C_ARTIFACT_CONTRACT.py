@@ -4885,12 +4885,93 @@ def _fallback_render_explanation_extended(block_type: str, block: Dict[str, Any]
     return t["block_plain"].format(title=title_ref, details=details)
 
 
+def _naturalize_image_caption(value: Any, language: str = "ru") -> str:
+    """Turn contract-style image explanations into a short conversational caption."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"(?i)^\s*(?:\*\*|__)?(?:что показывает изображение|что показывает картинка|"
+        r"описание изображения|пояснение к изображению|що показує зображення|"
+        r"ce que montre l’image|what the image shows|what the picture shows|"
+        r"was das bild zeigt|qué muestra la imagen)\s*[:.\-—]*\s*(?:\*\*|__)?",
+        "", text,
+    ).strip()
+    # Remove the generated contract's mechanical lead-in but keep its specific detail.
+    generic_leadins = (
+        r"(?i)^это сгенерированная иллюстрация к текущему разделу\s*[:—-]\s*",
+        r"(?i)^изображение связано с разделом.{0,180}?(?:наглядно|визуально )?показывает\s*[:—-]\s*",
+        r"(?i)^картинка связана с разделом.{0,180}?(?:наглядно|визуально )?показывает\s*[:—-]\s*",
+        r"(?i)^це згенерована ілюстрація до поточного розділу\s*[:—-]\s*",
+        r"(?i)^зображення пов.?язане з розділом.{0,180}?(?:наочно|візуально )?показує\s*[:—-]\s*",
+        r"(?i)^this image is associated with the section.{0,180}?(?:and )?(?:illustrates|shows)\s*[:—-]\s*",
+        r"(?i)^this is a generated illustration for the current section\s*[:—-]\s*",
+        r"(?i)^l’image est liée à la section.{0,180}?(?:et )?(?:illustre|montre)\s*[:—-]\s*",
+    )
+    for pattern in generic_leadins:
+        text = re.sub(pattern, "", text, count=1).strip()
+    text = re.sub(r"\s*([,;])\s*", r"\1 ", text)
+    text = re.sub(r"\s{2,}", " ", text).strip(" .;:-—")
+    if not text:
+        return ""
+    # Keep first-person, natural phrasing when present; otherwise add a small
+    # conversational bridge instead of a machine-generated heading.
+    low = text.lower()
+    if language == "uk":
+        if not re.match(r"^(?:ось|готово|додала|змінила|зберегла|підготувала|я\s|зрозуміла)", low):
+            text = "Ось що вийшло: " + text
+    elif language in {"en", "en-us", "en-gb"}:
+        if not re.match(r"^(?:here|done|i\s|i've|i’ve|understood|i understand)", low):
+            text = "Here’s how it turned out: " + text
+    elif language == "fr":
+        if not re.match(r"^(?:voici|c’est prêt|j’ai|j'ai|j’ajoute|j'ajoute|j’ai ajouté|j'ai ajouté|j’ai compris|j'ai compris)", low):
+            text = "Voilà le résultat : " + text
+    else:
+        if not re.match(r"^(?:вот|готово|добавила|добавляю|изменила|сохранила|подготовила|сделала|внесла|поняла|я\s)", low):
+            text = "Вот что получилось: " + text
+    return text[:900].rstrip()
+
+
 def _fallback_render_explanation(block_type: str, block: Dict[str, Any], answer: str, language: str) -> str:
     payload = _render_payload(block)
     section, context = _render_section_context(block_type, block, answer)
     block_title = str(_render_block_field(block, payload, "step_title", "title", "section") or "").strip()
     title = str(section or block_title).strip()
     title_for_text = f" «{title[:100]}»" if title else ""
+    if block_type in {"image", "gallery"}:
+        edit_note = str(_render_block_field(block, payload, "edit_description", "modification_summary", "changes", "change_summary") or "").strip()
+        images = payload.get("images") or payload.get("items") or []
+        if not isinstance(images, list):
+            images = [images]
+        descriptions = []
+        for item in images[:4]:
+            desc = (item.get("description") or item.get("alt") or item.get("title") or item.get("caption") or "") if isinstance(item, dict) else item
+            desc = re.sub(r"\s+", " ", str(desc or "")).strip()
+            if desc:
+                descriptions.append(desc[:220])
+        described = "; ".join(descriptions)
+        detail = edit_note or described or context or title
+        lang = str(language or "ru").lower()
+        if edit_note:
+            if lang in {"uk", "ua", "uk-ua"}:
+                caption = f"Готово — я внесла цю зміну: {detail}. Інші деталі сцени залишила без змін."
+            elif lang in {"en", "en-us", "en-gb"}:
+                caption = f"Done — I made this change: {detail}. I left the rest of the scene as it was."
+            elif lang == "fr":
+                caption = f"C’est fait — j’ai appliqué cette modification : {detail}. J’ai conservé le reste de la scène."
+            else:
+                caption = f"Готово — я внесла эту правку: {detail}. Остальную сцену оставила как была."
+        elif detail:
+            caption = _naturalize_image_caption(str(detail), lang)
+        elif lang in {"uk", "ua", "uk-ua"}:
+            caption = "Ось результат за твоїм запитом."
+        elif lang in {"en", "en-us", "en-gb"}:
+            caption = "Here’s the result based on your request."
+        elif lang == "fr":
+            caption = "Voici le résultat selon ta demande."
+        else:
+            caption = "Вот результат по твоему запросу."
+        return caption[:1000]
     if language in {"es", "de", "it", "pl", "pt", "nl", "ja", "zh", "ko", "ar", "hi", "el"}:
         return _fallback_render_explanation_extended(block_type, block, answer, language)
     if context:
@@ -5275,14 +5356,19 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             explanation = _fallback_render_explanation(block_type, block, answer, language)
         if not explanation:
             continue
-        already_labeled = bool(re.match(
-            r"(?i)^\s*(?:\*\*|__)?\s*(?:пояснение|пояснення|explication|explanation|formula explanation|what the image shows|what the graph shows|how to read the table|what the code does|what the diagram shows|explicación|explicação|explicacao|erklärung|spiegazione|objaśnienie|wyjaśnienie|uitleg|説明|说明|설명|شرح|व्याख्या|επεξήγηση)\b",
-            explanation,
-        ))
-        already_labeled = already_labeled or explanation.lstrip().startswith(("数式の説明", "画像の内容", "コードの動作", "公式说明", "图像内容", "代码的作用", "수식 설명", "이미지 설명", "코드의 기능"))
-        prefix = _localized_explanation_prefix(language, block_type)
-        if not already_labeled and not explanation.lstrip().lower().startswith(prefix.lower()):
-            explanation = f"**{prefix}.** {explanation}"
+        if block_type in {"image", "gallery"}:
+            explanation = _naturalize_image_caption(explanation, language)
+            already_labeled = True
+            prefix = ""
+        else:
+            already_labeled = bool(re.match(
+                r"(?i)^\s*(?:\*\*|__)?\s*(?:пояснение|пояснення|explication|explanation|formula explanation|what the image shows|what the graph shows|how to read the table|what the code does|what the diagram shows|explicación|explicação|explicacao|erklärung|spiegazione|objaśnienie|wyjaśnienie|uitleg|説明|说明|설명|شرح|व्याख्या|επεξήγηση)\b",
+                explanation,
+            ))
+            already_labeled = already_labeled or explanation.lstrip().startswith(("数式の説明", "画像の内容", "コードの動作", "公式说明", "图像内容", "代码的作用", "수식 설명", "이미지 설명", "코드의 기능"))
+            prefix = _localized_explanation_prefix(language, block_type)
+            if not already_labeled and not explanation.lstrip().lower().startswith(prefix.lower()):
+                explanation = f"**{prefix}.** {explanation}"
         explanation = explanation[:1400]
 
         step_index = block.get("step_index", 1)
@@ -5297,7 +5383,7 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             "explanation_for_block_id": block_id,
             "related_block_ids": [block_id],
             "step_index": step_index,
-            "step_title": f"{_localized_explanation_prefix(language, block_type)}"[:100],
+            "step_title": ("" if block_type in {"image", "gallery"} else f"{_localized_explanation_prefix(language, block_type)}"[:100]),
             "sequence_index": len(ordered),
             "source": "premium_render_explanation_contract",
         }
