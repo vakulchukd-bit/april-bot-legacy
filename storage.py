@@ -1191,14 +1191,20 @@ def dialogue_message_saved(
     try:
         with conn:
             with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
+                # Older deployments could store a row under the public April ID
+                # rather than the internal user_id. Resolve only aliases belonging
+                # to this authenticated account, then use the same ownership set as
+                # history restore. Otherwise chat recovery can report a saved turn
+                # as missing and revive a stale generator indicator after login.
+                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+                if not owner_ids:
                     return False
                 cur.execute(
                     """
                     SELECT EXISTS (
                         SELECT 1
                         FROM dialogue_memory
-                        WHERE user_id = %s
+                        WHERE user_id = ANY(%s)
                           AND message_id = %s
                           AND created_at <= %s
                           AND created_at > %s - INTERVAL '24 hours'
@@ -1208,7 +1214,7 @@ def dialogue_message_saved(
                           ) > %s
                     ) AS saved
                     """,
-                    (uid, mid, current, current),
+                    (owner_ids, mid, current, current, current),
                 )
                 row = cur.fetchone() or {}
                 return bool(row.get("saved")) if isinstance(row, dict) else bool(row[0])
