@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
+import ast
 import base64
 import hashlib
 import json
@@ -63,6 +64,242 @@ from blocks.Premium_state_manager import (
 PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v6_hot_work_branch_priority"
 CANONICAL_ROUTE = "/api/v1/chat"
 
+
+def _parse_serialized_graph_answer(value: Any) -> dict[str, Any] | None:
+    """Safely recognize a machine graph object accidentally placed in user-visible prose."""
+    text = str(value or "").strip()
+    if not text or len(text) > 30000 or not (text.startswith("{") and text.endswith("}")):
+        return None
+    if not re.search(r"(?i)(?:['\"]graph['\"]\s*:|['\"]source_endpoints['\"]\s*:|['\"]assumption['\"]\s*:)", text):
+        return None
+    parsed: Any = None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    graph = parsed.get("graph") or parsed.get("graph_payload")
+    if isinstance(graph, dict) and any(key in graph for key in ("series", "points", "values", "x_values", "x_axis")):
+        return parsed
+    # Some older responses put graph data at the root but still include an
+    # assumption/source_endpoints envelope. Require clear machine-data signals.
+    if any(key in parsed for key in ("source_endpoints", "assumption")) and any(key in parsed for key in ("series", "points", "values", "x_axis")):
+        return {"graph": parsed, "assumption": parsed.get("assumption", ""), "source_endpoints": parsed.get("source_endpoints", {})}
+    return None
+
+
+def _graph_object_value(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _format_estimate_number(value: Any) -> str:
+    try:
+        number = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _serialized_graph_to_user_markdown(parsed: dict[str, Any]) -> str:
+    """Turn a valid internal graph envelope into readable Russian Markdown."""
+    graph = parsed.get("graph") or parsed.get("graph_payload")
+    graph = graph if isinstance(graph, dict) else parsed
+    title = str(graph.get("title") or graph.get("name") or "График").strip()
+    assumption = str(parsed.get("assumption") or graph.get("description") or "").strip()
+    x_axis = graph.get("x_axis") if isinstance(graph.get("x_axis"), dict) else graph.get("xAxis") if isinstance(graph.get("xAxis"), dict) else {}
+    y_axis = graph.get("y_axis") if isinstance(graph.get("y_axis"), dict) else graph.get("yAxis") if isinstance(graph.get("yAxis"), dict) else {}
+    x_labels = _graph_object_value(x_axis, "values", "labels", "categories")
+    x_labels = x_labels if isinstance(x_labels, list) else []
+    y_label = str(_graph_object_value(y_axis, "label", "title", "unit") or "Значение").strip()
+    if y_axis.get("unit") and str(y_axis.get("unit")) not in y_label:
+        y_label = f"{y_label}, {y_axis['unit']}" if y_label != "Значение" else str(y_axis["unit"])
+
+    series = graph.get("series") or graph.get("datasets") or graph.get("traces") or []
+    if isinstance(series, dict):
+        series = list(series.values())
+    first_series = next((item for item in series if isinstance(item, dict)), {}) if isinstance(series, list) else {}
+    values = _graph_object_value(first_series, "values", "y", "y_values")
+    points = first_series.get("points") or first_series.get("data_points") or []
+    if not isinstance(values, list) and isinstance(points, list):
+        values = [point.get("y", point.get("value")) for point in points if isinstance(point, dict)]
+        if not values:
+            values = [point[1] for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+    if not isinstance(values, list):
+        values = _graph_object_value(graph, "values", "y_values", "y")
+    values = values if isinstance(values, list) else []
+
+    if len(x_labels) != len(values):
+        x_labels = [f"Точка {index + 1}" for index in range(len(values))]
+    series_label = str(first_series.get("label") or first_series.get("name") or "").strip()
+    if y_label == "Значение" and series_label:
+        y_label = series_label
+
+    output = [f"### {title}"]
+    if assumption:
+        # Keep the claim, but not the model's Python/JSON wrapper punctuation.
+        output.append(assumption.rstrip(" .;" ) + ".")
+    is_interpolation = bool(re.search(r"интерпол|interpolat|расчетн|расчётн|estimate|оценоч", " ".join((assumption, str(graph.get("description") or ""))), re.IGNORECASE))
+    assumption_already_states_estimate = bool(
+        re.search(r"расчетн|расчётн|estimate|оценоч", assumption, re.IGNORECASE)
+        and re.search(r"не\s+фактич|not\s+(?:actual|observed)|не\s+наблюдал", assumption, re.IGNORECASE)
+    )
+    if is_interpolation and values and not assumption_already_states_estimate:
+        output.append("Промежуточные значения — расчётные оценки, а не фактические котировки или измерения.")
+
+    if values:
+        measure_label = str(y_axis.get("unit") or y_label).strip()
+        output.append(f"**Значения по дням ({measure_label.lower()}):**")
+        output.append("\n".join(
+            f"- **{str(x_labels[index])}:** {_format_estimate_number(value)}"
+            for index, value in enumerate(values)
+        ))
+
+    endpoints = parsed.get("source_endpoints")
+    if isinstance(endpoints, dict):
+        endpoint_values = endpoints.get("values")
+    else:
+        endpoint_values = None
+    if isinstance(endpoint_values, list) and len(endpoint_values) >= 2 and len(values) > 2 and is_interpolation:
+        try:
+            start_number = float(str(endpoint_values[0]).replace(",", "."))
+            end_number = float(str(endpoint_values[-1]).replace(",", "."))
+        except (TypeError, ValueError):
+            start_number = end_number = None
+        if start_number is not None and end_number is not None:
+            start = _format_estimate_number(start_number)
+            end = _format_estimate_number(end_number)
+            intervals = len(values) - 1
+            step = _format_estimate_number((end_number - start_number) / intervals)
+            step_unit = str(y_axis.get("unit") or "").strip()
+            unit_phrase = f" {step_unit}" if step_unit else ""
+            output.append(f"Шаг линейной интерполяции: ({end} − {start}) / {intervals} ≈ {step}{unit_phrase} за интервал.")
+
+    if len(output) == 1:
+        description = str(graph.get("description") or parsed.get("summary") or "График построен по заданным данным.").strip()
+        output.append(description)
+    return "\n\n".join(output)
+
+
+def _repair_graph_text_answer(answer: str, current_request: str, render_blocks: Any) -> tuple[str, bool]:
+    """Replace a contradictory 'no intermediate points' explanation for a weekly endpoint chart."""
+    text = str(answer or "").strip()
+    lowered = text.lower().replace("ё", "е")
+    contradiction = bool(re.search(
+        r"(?:промежуточн\w*\s+(?:значени\w*|точк\w*)\s+(?:не\s+(?:указан\w*|задан\w*|приведен\w*|показан\w*)|отсутств\w*)|"
+        r"intermediate\s+(?:values|points)\s+(?:are\s+)?(?:not\s+(?:specified|provided|shown)|missing)|"
+        r"only\s+(?:the\s+)?(?:start|beginning)\s+and\s+(?:end|ending)\s+(?:points|values))",
+        lowered, re.IGNORECASE,
+    ))
+    if not contradiction:
+        return text, False
+    blocks = render_blocks if isinstance(render_blocks, list) else []
+    has_graph = any(isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or block.get("renderer") or "").lower() in {"graph", "chart", "plot", "graphblock"} for block in blocks)
+    if not has_graph:
+        return text, False
+    combined = " ".join((str(current_request or ""), text)).lower().replace("ё", "е")
+    if not re.search(r"(?:недел\w*|\bweek(?:ly)?\b)", combined, re.IGNORECASE):
+        return text, False
+    range_pattern = re.compile(
+        r"(?i)(?:\b(?:с|от|from)\s*)"
+        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|uah|usd|eur|€|\$|доллар\w*|дол\.?|баррел\w*)?\s*"
+        r"(?:до|to|по|through)\s*"
+        r"(-?\d+(?:[.,]\d+)?)\s*(грн\.?|uah|usd|eur|€|\$|доллар\w*|дол\.?|баррел\w*)?"
+    )
+    match = range_pattern.search(combined)
+    if not match:
+        return text, False
+    try:
+        start_value = float(match.group(1).replace(",", "."))
+        end_value = float(match.group(2).replace(",", "."))
+    except (TypeError, ValueError):
+        return text, False
+
+    labels = ["Начало недели", "День 2", "День 3", "День 4", "День 5", "День 6", "Конец недели"]
+    values = [round(start_value + (end_value - start_value) * index / 6, 2) for index in range(7)]
+    values[0], values[-1] = start_value, end_value
+    unit_context = " ".join((current_request, text))
+    if re.search(r"баррел", unit_context, re.IGNORECASE):
+        unit = "долларов за баррель"
+        y_label = "Цена нефти"
+    else:
+        unit = str(match.group(3) or "единиц")
+        y_label = "Значение"
+    rendered = [
+        f"За неделю {y_label.lower()} изменяется с {_format_estimate_number(start_value)} до {_format_estimate_number(end_value)} {unit}.",
+        "Промежуточные точки рассчитаны линейной интерполяцией: это оценки, а не фактические измерения или котировки.",
+        "**Расчётные значения по дням:**",
+    ]
+    rendered.append("\n".join(
+        f"- **{label}:** {_format_estimate_number(value)}"
+        for label, value in zip(labels, values)
+    ))
+    interval_step = (end_value - start_value) / 6
+    rendered.append(
+        f"Шаг между соседними точками: ({_format_estimate_number(end_value)} − {_format_estimate_number(start_value)}) / 6 ≈ {_format_estimate_number(interval_step)} {unit} за день."
+    )
+    return "\n\n".join(rendered), True
+
+
+def _sanitize_graph_dump_in_answer(answer: str, render_blocks: Any) -> tuple[str, bool]:
+    """Hide accidental serialized graph dictionaries from the user without discarding their data."""
+    blocks = render_blocks if isinstance(render_blocks, list) else []
+    parsed = _parse_serialized_graph_answer(answer)
+    clean_text = _serialized_graph_to_user_markdown(parsed) if parsed else str(answer or "").strip()
+    changed = bool(parsed and clean_text != str(answer or "").strip())
+    if not changed:
+        # A malformed answer field can coexist with a clean canonical answer; repair
+        # only text blocks which independently contain the serialized graph wrapper.
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = str(block.get("type") or block.get("artifact_type") or block.get("renderer") or "text").lower()
+            if kind not in {"text", "markdown", "message", "message_text", "message_textblock", "messagetextblock", "answer"}:
+                continue
+            candidate = next((block.get(key) for key in ("content", "text", "markdown") if isinstance(block.get(key), str) and block.get(key).strip()), "")
+            parsed_block = _parse_serialized_graph_answer(candidate)
+            if parsed_block:
+                clean_text = _serialized_graph_to_user_markdown(parsed_block)
+                changed = True
+                break
+    if changed:
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = str(block.get("type") or block.get("artifact_type") or block.get("renderer") or "text").lower()
+            if kind in {"text", "markdown", "message", "message_text", "message_textblock", "messagetextblock", "answer"}:
+                candidate = next((block.get(key) for key in ("content", "text", "markdown") if isinstance(block.get(key), str) and block.get(key).strip()), "")
+                if _parse_serialized_graph_answer(candidate):
+                    for key in ("content", "text", "markdown", "display_text"):
+                        if key in block:
+                            block[key] = clean_text
+                    if isinstance(block.get("payload"), dict):
+                        for key in ("content", "text", "markdown", "display_text", "answer", "summary"):
+                            if key in block["payload"]:
+                                block["payload"][key] = clean_text
+            elif kind in {"graph", "chart", "plot", "graphblock"}:
+                # An explanation copied from the machine wrapper would re-leak the
+                # same dictionary beneath the actual graph. Drop only that bad field.
+                for key in ("explanation", "render_explanation", "what_it_shows", "caption"):
+                    field_value = block.get(key)
+                    if isinstance(field_value, str) and ( _parse_serialized_graph_answer(field_value) or re.search(r"(?i)\{\s*['\"]?(?:assumption|source_endpoints)['\"]?\s*:", field_value)):
+                        block.pop(key, None)
+                payload = block.get("payload")
+                if isinstance(payload, dict):
+                    for key in ("explanation", "render_explanation", "what_it_shows", "caption"):
+                        field_value = payload.get(key)
+                        if isinstance(field_value, str) and (_parse_serialized_graph_answer(field_value) or re.search(r"(?i)\{\s*['\"]?(?:assumption|source_endpoints)['\"]?\s*:", field_value)):
+                            payload.pop(key, None)
+    return clean_text, changed
 
 
 class _AprilHtmlTableParser(HTMLParser):
@@ -4319,6 +4556,69 @@ async def execute(
         if _image_text_reconciled:
             _apr_timing_log("image_text_contract_reconciled", None, mode="new_image_intent_corrected_before_progressive_text")
 
+    # Premium graph responses can accidentally expose the provider's internal
+    # Python-dict envelope as prose while also returning a valid GraphBlock.
+    # Convert that envelope to readable Markdown and keep the typed graph payload.
+    _render_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    _render_request_text = _text(
+        _render_input.get("original_request") or _render_input.get("normalized_request") or original or current_text
+    )
+    _answer_before_graph_cleanup = answer
+    # package_provider_response makes shallow copies of render-block dictionaries.
+    # Clean the exact block list used by the progressive/final response, then also
+    # repair the raw provider list so saved/debug payloads remain consistent.
+    answer, _packaged_graph_dump_cleaned = _sanitize_graph_dump_in_answer(
+        answer, packaged.get("render_blocks")
+    )
+    _, _raw_graph_dump_cleaned = _sanitize_graph_dump_in_answer(
+        answer, raw.get("render_blocks")
+    )
+    _graph_dump_cleaned = _packaged_graph_dump_cleaned or _raw_graph_dump_cleaned
+    if not _graph_dump_cleaned:
+        answer, _graph_interpolation_text_repaired = _repair_graph_text_answer(
+            answer, _render_request_text, packaged.get("render_blocks") or raw.get("render_blocks")
+        )
+    else:
+        _graph_interpolation_text_repaired = False
+
+    if answer != _answer_before_graph_cleanup:
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = answer[:180]
+        # Keep all canonical text aliases aligned. Otherwise a repaired answer
+        # could still be followed by the stale serialized dict from the old block.
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = answer[:180]
+        for _block_list in (packaged.get("render_blocks"), raw.get("render_blocks")):
+            if not isinstance(_block_list, list):
+                continue
+            for _block in _block_list:
+                if not isinstance(_block, dict):
+                    continue
+                _kind = str(_block.get("type") or _block.get("artifact_type") or _block.get("renderer") or "text").lower()
+                if _kind not in {"text", "markdown", "message", "message_text", "message_textblock", "messagetextblock", "answer"}:
+                    continue
+                _candidate = next((
+                    _block.get(_key) for _key in ("content", "text", "markdown")
+                    if isinstance(_block.get(_key), str) and _block.get(_key).strip()
+                ), "")
+                if _candidate.strip() == _answer_before_graph_cleanup.strip() or _parse_serialized_graph_answer(_candidate):
+                    for _key in ("content", "text", "markdown", "display_text"):
+                        if _key in _block:
+                            _block[_key] = answer
+                    if isinstance(_block.get("payload"), dict):
+                        for _key in ("content", "text", "markdown", "display_text", "answer", "summary"):
+                            if _key in _block["payload"]:
+                                _block["payload"][_key] = answer
+        _apr_timing_log(
+            "graph_user_text_repaired", None,
+            serialized_payload_removed=_graph_dump_cleaned,
+            interpolation_narrative_repaired=_graph_interpolation_text_repaired,
+            before_chars=len(_answer_before_graph_cleanup),
+            after_chars=len(answer),
+        )
+
     # Recover HTML tables emitted into prose or text render blocks. This is a
     # post-provider compatibility repair: an actual table must never reach React
     # as literal <table>/<td> tags. Existing text/table blocks are kept distinct.
@@ -4469,6 +4769,7 @@ async def execute(
                 answer=answer,
                 requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs") or [],
                 graph_policy=graph_policy,
+                current_request=_render_request_text,
             )
             progressive_blocks = [block for block in progressive_blocks if str(block.get("type") or "").lower() not in {"image", "gallery"}]
             progressive_blocks = _apply_presentation_sequence(progressive_blocks, answer, presentation_sequence)
