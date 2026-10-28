@@ -4584,6 +4584,18 @@ def search_dialogue_context(
     query_modalities = {modality for modality, enabled in (
         ("image", bool(has_image or image_edit_reference)), ("file", bool(has_file)), ("voice", bool(has_voice)),
     ) if enabled}
+    # A historical-image edit needs exact source retrieval, but it should not
+    # trigger expensive full-JSON scoring for every retained message. The targeted
+    # fast path below includes all image-bearing rows in this same dialogue and
+    # ranks a smaller semantic set for the active-work branch.
+    image_edit_history_fast_path = bool(
+        image_edit_reference
+        and not has_image
+        and not has_file
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+    )
     needs_structured_search = bool(
         _structured_work_requested(query, query_interpretation, query_modalities)
         or history_request or time_filter.get("applied") or _is_section_request(query)
@@ -4756,11 +4768,14 @@ def search_dialogue_context(
         )
     )
     needs_full_candidate_rank = bool(
-        (history_request and not history_inventory_fast_path)
-        or needs_structured_search or _is_section_request(query)
-        or query_modalities or is_correction or is_short_acknowledgement
-        or reference_followup or explicit_artifact_followup or resume_key
-        or continuation_intent or pending_clarification
+        not image_edit_history_fast_path
+        and (
+            (history_request and not history_inventory_fast_path)
+            or needs_structured_search or _is_section_request(query)
+            or query_modalities or is_correction or is_short_acknowledgement
+            or reference_followup or explicit_artifact_followup or resume_key
+            or continuation_intent or pending_clarification
+        )
     )
     if len(rows) > 18 and not needs_full_candidate_rank:
         # First pass considers every scoped row cheaply; the expensive scoring pass
@@ -4796,6 +4811,135 @@ def search_dialogue_context(
             if _text(latest_same_dialog_row.get("message_id")) not in seen_scoring_ids:
                 scoring_rows.append(latest_same_dialog_row)
         light_prefilter_used = True
+
+    # Preserve source recall while avoiding a full deep-score pass over every
+    # dialogue row. Keep all image-bearing rows from the authenticated active
+    # dialogue/conversation, even if they fall outside the lightweight top 18.
+    if image_edit_history_fast_path:
+        source_image_terms = _image_source_subject_tokens(query)
+        image_source_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            same_dialogue = bool(
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+            )
+            if (dialog_id or conversation_id) and not same_dialogue:
+                continue
+
+            response_data = _parse_json(row.get("structured_response"))
+            request_data = _parse_json(row.get("structured_request"))
+            if not isinstance(response_data, dict):
+                response_data = {}
+            if not isinstance(request_data, dict):
+                request_data = {}
+
+            # Asset references are the cheapest and most reliable signal. Legacy
+            # scenes may lack them, so also recognize typed image blocks/inputs.
+            asset_refs = response_data.get("asset_refs") if isinstance(response_data.get("asset_refs"), dict) else {}
+            has_saved_image = False
+            for ref_group in ("source_inputs", "april_outputs"):
+                refs = asset_refs.get(ref_group) if isinstance(asset_refs.get(ref_group), list) else []
+                if any(
+                    isinstance(ref, dict) and (
+                        _text(ref.get("kind")).lower() == "image"
+                        or _text(ref.get("mime_type")).lower().startswith("image/")
+                        or _text(ref.get("filename")).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                    )
+                    for ref in refs
+                ):
+                    has_saved_image = True
+                    break
+
+            if not has_saved_image:
+                for block_list in (
+                    response_data.get("render_blocks"),
+                    (response_data.get("scene_contract") or {}).get("render_blocks")
+                    if isinstance(response_data.get("scene_contract"), dict) else None,
+                    response_data.get("artifacts"),
+                ):
+                    if isinstance(block_list, list) and any(
+                        isinstance(block, dict) and (
+                            _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+                            in {"image", "gallery", "generated_image", "image_gallery"}
+                            or "galleryblock" in _text(block.get("renderer") or block.get("viewer")).lower()
+                        )
+                        for block in block_list
+                    ):
+                        has_saved_image = True
+                        break
+
+            if not has_saved_image:
+                visual_context = request_data.get("visual_context") if isinstance(request_data.get("visual_context"), dict) else {}
+                attachments = request_data.get("attachments") if isinstance(request_data.get("attachments"), list) else []
+                visual_items = visual_context.get("items") if isinstance(visual_context.get("items"), list) else []
+                has_saved_image = bool(
+                    visual_context.get("has_input_images")
+                    or any(isinstance(item, dict) and (
+                        _text(item.get("type")).lower() in {"input_image", "image"}
+                        or _text(item.get("mime_type")).lower().startswith("image/")
+                    ) for item in visual_items)
+                    or any(isinstance(item, dict) and (
+                        _text(item.get("kind") or item.get("source_type")).lower() == "image"
+                        or _text(item.get("mime_type")).lower().startswith("image/")
+                    ) for item in attachments)
+                )
+            if not has_saved_image:
+                continue
+
+            if source_image_terms:
+                evidence_parts = [
+                    _row_subject_text_lightweight(row),
+                    _text(row.get("user_text")),
+                    _text(row.get("april_text"))[:1800],
+                ]
+                for ref_group in ("source_inputs", "april_outputs"):
+                    refs = asset_refs.get(ref_group) if isinstance(asset_refs.get(ref_group), list) else []
+                    for ref in refs:
+                        if not isinstance(ref, dict):
+                            continue
+                        metadata = ref.get("metadata") if isinstance(ref.get("metadata"), dict) else {}
+                        evidence_parts.extend(
+                            _text(value) for value in (
+                                metadata.get("prompt"), metadata.get("analysis_summary"),
+                                metadata.get("caption"), metadata.get("user_request"),
+                                metadata.get("april_response"),
+                            ) if _text(value)
+                        )
+                evidence_tokens = _subject_tokens(" ".join(evidence_parts))
+                if not _subject_overlap(source_image_terms, evidence_tokens):
+                    continue
+            image_source_rows.append(row)
+
+        if image_source_rows:
+            existing_ids = {_text(row.get("message_id")) for row in scoring_rows if isinstance(row, dict)}
+            added_rows = [
+                row for row in image_source_rows
+                if _text(row.get("message_id")) not in existing_ids
+            ]
+            if added_rows:
+                scoring_rows = list(scoring_rows) + added_rows
+            _apr_timing_log(
+                "image_edit_history_fast_path",
+                None,
+                source_terms=sorted(source_image_terms)[:4],
+                image_rows_found=len(image_source_rows),
+                image_rows_added=len(added_rows),
+                candidates_scored=len(scoring_rows),
+                full_history_rows=len(rows),
+            )
+        else:
+            _apr_timing_log(
+                "image_edit_history_fast_path",
+                None,
+                source_terms=sorted(source_image_terms)[:4],
+                image_rows_found=0,
+                image_rows_added=0,
+                candidates_scored=len(scoring_rows),
+                full_history_rows=len(rows),
+            )
+
     matches = [_candidate_score(
         query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
         reference_followup=reference_followup, query_modalities=query_modalities,
