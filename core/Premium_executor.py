@@ -4451,6 +4451,7 @@ async def execute(
     _visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
     image_pending = bool(
         _early_image_intent.get("wants_image")
+        and not bool(_early_image_intent.get("image_generation_blocked"))
         and not _source_missing_only
         and not _visual_declined_without_plan
         and not bool(_early_image_intent.get("image_status_request"))
@@ -4541,6 +4542,7 @@ async def execute(
     visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
     image_generation_allowed = bool(
         image_intent.get("wants_image")
+        and not bool(image_intent.get("image_generation_blocked"))
         and not image_task_is_missing_source
         and not bool(image_intent.get("image_status_request"))
         and not visual_declined_without_plan
@@ -4549,6 +4551,7 @@ async def execute(
     _apr_timing_log(
         "image_generation_gate", None,
         wants_image=bool(image_intent.get("wants_image")),
+        image_generation_blocked=bool(image_intent.get("image_generation_blocked")),
         task=_text(image_intent.get("task")),
         image_operation=_text(image_intent.get("image_operation")),
         source_missing_only=bool(image_task_is_missing_source),
