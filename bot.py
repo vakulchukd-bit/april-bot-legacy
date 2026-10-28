@@ -700,6 +700,17 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
     # Keep the nested and top-level contracts synchronized so clients that read
     # either path see the same complete block sequence.
     scene["render_blocks"] = blocks
+    # A streamed request can first publish a provisional SceneContract with
+    # status="rendering". Always make the final HTTP/NDJSON answer authoritative:
+    # no pending image or partial state may survive into refreshed chat history.
+    scene["status"] = "complete"
+    scene["render_status"] = "complete"
+    scene["partial"] = False
+    scene["image_pending"] = False
+    result_event = scene.get("result_event") if isinstance(scene.get("result_event"), dict) else {}
+    result_event = dict(result_event)
+    result_event["status"] = "complete"
+    scene["result_event"] = result_event
     answer = _text(result.get("answer") or result.get("content"))
     if not answer:
         raise RuntimeError("CANONICAL_ANSWER_MISSING")
@@ -708,6 +719,9 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "canonical_route": CANONICAL_CHAT_ROUTE,
         "route_version": CANONICAL_ROUTE_VERSION,
         "single_route": True,
+        "render_status": "complete",
+        "partial": False,
+        "image_pending": False,
         "answer": answer,
         "content": result.get("content") or answer,
         "summary": result.get("summary", ""),
@@ -1308,13 +1322,23 @@ def _history_attach_saved_image(
         width = width or int(struct.unpack(">I", raw[16:20])[0])
         height = height or int(struct.unpack(">I", raw[20:24])[0])
     data_uri = f"data:{mime};base64,{encoded}"
+    saved_prompt = str(image_asset.get("prompt") or "").strip()
+    saved_caption = str(
+        image_asset.get("caption")
+        or image_asset.get("april_response")
+        or image_asset.get("analysis_summary")
+        or "Восстановлено из сохранённой сцены"
+    ).strip()
     image_item = {
         "src": data_uri,
         "mime_type": mime,
         "width": width,
         "height": height,
-        "alt": str(image_asset.get("prompt") or "Сохранённое изображение April")[:180],
-        "caption": "Восстановлено из сохранённой сцены",
+        "alt": str(image_asset.get("alt") or saved_caption or saved_prompt or "Сохранённое изображение April")[:240],
+        "caption": saved_caption[:600],
+        "prompt": saved_prompt[:1200],
+        "user_request": str(image_asset.get("user_request") or "")[:1000],
+        "april_response": str(image_asset.get("april_response") or "")[:600],
     }
 
     def rehydrate(block_list: list[Any]) -> list[Any]:
@@ -1537,6 +1561,19 @@ def _history_payload(
                     render_blocks = [block for block in render_blocks if isinstance(block, dict) and str(block.get("type") or "").lower() not in {"graph", "diagram", "formula", "table", "code", "link", "file", "image", "gallery"}]
             if render_blocks and not scene_contract.get("render_blocks"):
                 scene_contract = {**scene_contract, "render_blocks": render_blocks}
+            # History must never revive a stale in-progress indicator for a turn
+            # that has already been persisted. Older stored scene contracts may
+            # still contain status="rendering" or image_pending=true.
+            scene_contract = dict(scene_contract or {})
+            scene_contract["status"] = "complete"
+            scene_contract["render_status"] = "complete"
+            scene_contract["partial"] = False
+            scene_contract["image_pending"] = False
+            if isinstance(scene_contract.get("result_event"), dict):
+                scene_contract["result_event"] = {
+                    **scene_contract["result_event"],
+                    "status": "complete",
+                }
             if item["message_id"] in image_restore_ids:
                 row_asset_payloads = _history_asset_payload_list(_row.get("asset_payloads"))
                 has_durable_image = any(
@@ -1597,6 +1634,11 @@ def _history_payload(
                 "summary": _text(structured_response.get("summary")),
                 "scene_contract": scene_contract,
                 "render_blocks": render_blocks,
+                # History is always a completed snapshot, never a restored
+                # transient typing/rendering state from an interrupted stream.
+                "render_status": "complete",
+                "partial": False,
+                "image_pending": False,
                 "time": stamp_time,
                 "created_at": stamp_iso,
                 "message_id": item["message_id"],
