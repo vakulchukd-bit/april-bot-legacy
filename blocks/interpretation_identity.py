@@ -1,4 +1,4 @@
-"""April Interpretation Identity + request interpretation layer.
+"""April Premium Interpretation Identity + request interpretation layer.
 
 This is the single semantic-structuring layer between Exkrutor and the Provider.
 It binds the authenticated identity and converts every input modality into one
@@ -17,10 +17,11 @@ import re
 
 
 
+
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
     try:
-        payload = {"component": "interpretation", "stage": stage}
+        payload = {"component": "premium_interpretation", "stage": stage}
         if started is not None:
             payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
         payload.update(fields)
@@ -38,6 +39,74 @@ def _apr_diag_ref(value: Any) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+# Provider refusals are kept as context inside the existing dialogue thread.
+# This helper inspects only the small, already-selected same-dialogue pairs;
+# it does not scan unrelated history or create a second memory.
+_DIALOGUE_LIMITATION_MARKERS = (
+    "не могу выполнить эту часть запроса", "не могу выполнить этот запрос",
+    "не могу помочь с этим запросом", "не могу создать это содержимое",
+    "не могу сгенерировать это", "не могу предоставить это",
+    "не могу допомогти з цим запитом", "не можу виконати цей запит",
+    "не можу створити такий вміст", "i can't help with that request",
+    "i cannot help with that request", "i can't assist with this request",
+    "i cannot assist with this request", "i can't create that content",
+    "i cannot create that content", "i can't generate that content",
+    "i cannot generate that content", "in this form", "under these rules",
+    "content policy", "safety policy", "copyright restrictions", "privacy rules",
+    "ограничения безопасности", "правила безопасности", "авторских прав",
+    "конфиденциальности", "правилами безопасности", "обмеження безпеки",
+    "авторських прав", "конфіденційності",
+)
+
+def _recent_dialogue_limitations(selected_pairs: Any) -> dict[str, Any]:
+    """Compact record of recent refusal/explanation events from ranked dialog pairs."""
+    if not isinstance(selected_pairs, list):
+        return {"has_recent_limitation": False, "count": 0, "events": []}
+    events: list[dict[str, str]] = []
+    for pair in selected_pairs[:5]:
+        if not isinstance(pair, dict):
+            continue
+        user_text = _text(
+            pair.get("source_user_text") or pair.get("user") or pair.get("user_text")
+            or pair.get("request") or pair.get("question")
+        )
+        april_text = _text(
+            pair.get("source_april_text") or pair.get("april") or pair.get("april_text")
+            or pair.get("assistant") or pair.get("assistant_text") or pair.get("answer")
+            or pair.get("response")
+        )
+        if not april_text:
+            continue
+        low = april_text.lower().replace("ё", "е").replace("’", "'")
+        explicit_limiter = any(marker in low for marker in _DIALOGUE_LIMITATION_MARKERS)
+        refusal_language = bool(re.search(
+            r"(?:\bне могу\b|\bне смогу\b|\bне вправе\b|\bне можу\b|"
+            r"\bi can't\b|\bi cannot\b|\bi won't\b|\bi will not\b|"
+            r"\bje ne peux pas\b)", low, re.I
+        ))
+        contextual_path = any(marker in low for marker in (
+            "другой допустимый вариант", "можем изменить", "сохраним основную цель",
+            "в таком виде", "допустимый вариант", "allowed alternative",
+            "adjust the request", "preserve your main goal", "another version",
+            "збережімо вашу основну мету", "прийнятний варіант",
+        ))
+        if explicit_limiter or (refusal_language and contextual_path):
+            events.append({
+                "user_request": user_text[:240],
+                "april_explanation": april_text[:300],
+            })
+        if len(events) >= 3:
+            break
+    return {
+        "has_recent_limitation": bool(events),
+        "count": len(events),
+        "events": events,
+        "instruction": (
+            "Treat these as prior events in the same dialogue. Do not repeat a canned refusal; "
+            "explain the actual limitation naturally and offer a genuinely allowed next step. "
+            "Never bypass the underlying restriction."
+        ) if events else "",
+    }
 
 
 @dataclass(frozen=True)
@@ -155,6 +224,8 @@ _OUTPUT_MARKERS = {
     "link": {
         "give me a link", "send a link", "show link", "open link", "дай ссылку",
         "отправь ссылку", "покажи ссылку", "пришли ссылку", "ссылка на сайт",
+        "ссылки на ресурсы", "ссылка на ресурс", "ссылки на источники",
+        "ссылки на сайты", "ресурсы с описанием", "ссылки с описанием",
     },
     "code": {
         "write code", "show code", "generate code", "provide code", "fix code",
@@ -165,11 +236,8 @@ _OUTPUT_MARKERS = {
         "выдай новый код", "выдай новый файл с кодом", "напиши скрипт", "создай скрипт",
     },
     "formula": {
-        "write formula", "show formula", "draw formula", "display formula", "derive formula",
-        "solve equation", "write an equation", "draw an equation", "show equation",
-        "напиши формулу", "покажи формулу", "нарисуй формулу", "нарисовать формулу",
-        "изобрази формулу", "отобрази формулу", "выведи формулу", "запиши формулу",
-        "реши уравнение", "запиши уравнение", "нарисуй уравнение", "покажи уравнение",
+        "write formula", "show formula", "solve equation", "write an equation",
+        "напиши формулу", "покажи формулу", "реши уравнение", "запиши уравнение",
     },
     "diagram": {
         "create diagram", "draw diagram", "show diagram", "создай диаграмму",
@@ -190,34 +258,152 @@ _OUTPUT_MARKERS = {
     },
 }
 
-# Direct edit/retouch verbs mean the user wants to change an existing image.
-# In the Free chain this is a restricted operation, not a reason to call the generator.
 _IMAGE_MODIFICATION_MARKERS = {
     "edit image", "edit the image", "modify image", "change image", "alter image",
-    "edit photo", "modify photo", "change photo", "retouch photo", "enhance photo",
-    "improve the image", "improve photo", "remove object from photo", "change the background",
-    "измени фото", "измени фотографию", "изменить фотографию", "измени картинку",
-    "измени изображение", "изменить изображение", "отредактируй фото",
-    "отредактируй фотографию", "отредактируй картинку", "улучши фото",
-    "улучши фотографию", "улучши картинку", "улучши изображение", "обработай фото",
-    "обработай фотографию", "ретушируй фото", "сделай ретушь",
-    "измени диаграмму", "изменить диаграмму", "измени схему", "изменить схему",
-    "измени чертеж", "изменить чертеж", "переделай диаграмму", "переделай схему",
-    "modify the diagram", "change the diagram", "edit the diagram",
-    "modify the chart", "change the chart", "edit the chart",
+    "edit photo", "modify photo", "change photo", "замени на фото", "измени фото",
+    "измени картинку", "измени изображение", "отредактируй фото", "отредактируй картинку",
+    "добавь на фото", "убери с фото", "замени на картинке", "измени на картинке",
+    "нарисуй на фото", "нарисовать на фото", "дорисуй на фото", "дорисовать на фото",
+    "добавь на фотографию", "добавь на картинку", "добавь на изображение",
+    "добавь на эту фотографию", "добавь на эту картинку", "добавь на это изображение",
+    "улучши фото", "улучши фотографию", "улучши картинку", "улучши изображение",
 }
 
-# These phrases imply compositing only when an existing/source image is available.
-# Without an image, a request such as "нарисуй на фото кота" means create a new picture.
-_IMAGE_COMPOSITING_MARKERS = {
-    "draw on the photo", "draw on the image", "add to the photo", "add to the image",
-    "place on the photo", "put on the photo", "remove from the photo", "replace in the photo",
-    "нарисуй на фото", "нарисовать на фото", "нарисуй на фотографии", "нарисуй на картинке",
-    "нарисуй на изображении", "добавь на фото", "добавить на фото", "добавь на фотографии",
-    "добавь на картинке", "добавь на изображении", "помести на фото", "помести на картинку",
-    "убери с фото", "убери с фотографии", "убери с картинки", "замени на фото",
-    "замени на фотографии", "замени на картинке", "измени на картинке",
-}
+_IMAGE_EDIT_ACTION_RE = re.compile(
+    r"\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|"
+    r"draw|redraw|paint|place|move|crop|enhance|mark|point|annotate|highlight|outline|circle|redo|revise|"
+    r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
+    r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|"
+    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
+    r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|сделай|сделать|поправ\w*)\b",
+    re.IGNORECASE,
+)
+_IMAGE_EDIT_TARGET_RE = re.compile(
+    r"(?:галоч\w*|отметк\w*|фон\w*|качеств\w*|ярче|светлее|темнее|резкост\w*|"
+    r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
+    r"монет\w*|банкнот\w*|купюр\w*|евро|деньг\w*|доллар\w*|гривн\w*|ценник\w*|"
+    r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
+    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|стрелк\w*|указател\w*|маркер\w*|"
+    r"кнопк\w*|точк\w*|област\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
+    r"check\s?mark|tick|arrow|pointer|marker|highlight|annotat\w*|outline|circle|button|click|"
+    r"background|quality|sharpen|contrast|brightness|text|logo|realistic|remove|red|green)",
+    re.IGNORECASE,
+)
+
+
+def _detect_contextual_image_edit(text: str) -> bool:
+    """Detect a concrete modification whose image target is supplied by context.
+
+    Examples: "Добавь зелёную галочку", "сделай фон светлее". This detector is
+    used only when original image bytes are available, so it does not turn an
+    arbitrary short instruction into a raster-generation request.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    # An attribute correction (e.g. the pointer was green but should be red) is
+    # an edit intent even when the user omits the word "изменить".
+    visual_target = bool(re.search(
+        r"(?:стрелк\w*|arrow|указател\w*|pointer|маркер\w*|marker|цвет\w*|красн\w*|зелен\w*|red|green|обводк\w*|highlight|кнопк\w*|button|надпис\w*|text)",
+        low, re.IGNORECASE,
+    ))
+    revision_of_visual = bool(
+        re.search(r"(?:передел\w*|исправ\w*|поправ\w*|я\s+просил\w*|я\s+просила|не\s+то|вместо|wrong|redo|revise|i\s+asked|not\s+the)", low, re.IGNORECASE)
+        and visual_target
+    )
+    natural_desired_visual = bool(
+        re.search(r"(?:хочу\w*|хотел\w*|хотела|мне\s+нужно|мне\s+надо|пусть|чтобы|i\s+want|i(?:'d|\s+would)\s+like)", low, re.IGNORECASE)
+        and visual_target
+        and re.search(r"(?:на\s+(?:этой\s+|присланной\s+|предыдущей\s+)?(?:картинк\w*|изображени\w*|фото|скриншот\w*)|\bon\s+(?:this\s+)?(?:picture|image|photo|screenshot)\b|(?:стрелк\w*|кнопк\w*|arrow|button))", low, re.IGNORECASE)
+    )
+    return bool((_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low)) or revision_of_visual or natural_desired_visual)
+
+
+def _should_generate_instead_of_requesting_missing_source(text: str) -> bool:
+    """Resolve an unanchored ``draw on a photo`` request when no source exists.
+
+    ``нарисуй на фото ...`` is ambiguous in Russian: it can mean an edit, but in
+    normal chat it is also used loosely to ask for a picture to be created. Do
+    not turn that wording into a hard source-photo requirement when no source
+    image was uploaded. Explicit edit verbs (``добавь``, ``дорисуй``, ``измени``)
+    and references to a particular photo still retain the edit route.
+
+    A clear instruction not to modify anything (for example, ``не надо ничего
+    изменять, просто нарисуй...``) resolves the ambiguity in favour of creating
+    a new image. This helper is intentionally used only when there is no original
+    image in the current input; it does not override edits to a real attachment.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|\bphoto\b|\bimage\b|\bpicture\b)"
+    create_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|\bdraw\b|\bcreate\b|\bgenerate\b)"
+    has_create_action = bool(re.search(rf"(?<![\w\u0080-\uffff]){create_action}", low, re.IGNORECASE))
+    if not has_create_action:
+        return False
+
+    # A direct creation clause such as "нарисуй картинку к заставке" names a
+    # new output object. Legacy edit markers can misread "картинку" as a missing
+    # source even though the verb creates that picture. Treat this as generation
+    # unless the same wording explicitly points at an existing/uploaded image.
+    direct_creation = bool(re.search(
+        rf"\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate)\b\s+"
+        rf"(?:(?:мне|нам|a|an|the|new|нов\w*|бел\w*|черн\w*|красив\w*|прост\w*|маленьк\w*|больш\w*)\s+){{0,3}}{image_noun}",
+        low, re.IGNORECASE,
+    ))
+    explicit_existing_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+{image_noun}|"
+        rf"\b(?:измени|изменить|редактир\w*|отредактир\w*|добав\w*|дорис\w*|замени|заменить)\s+(?:именно\s+)?(?:эту|этот|эта|это|ту|тот|мою|мое|м\w*|прикрепленн\w*|загруженн\w*)\s+{image_noun}|"
+        rf"{image_noun}.{{0,50}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if direct_creation and not explicit_existing_source:
+        return True
+
+    # Negative edit instructions are a strong signal that the user wants a new
+    # rendering, not a request to upload an image for editing.
+    no_edit_instruction = bool(re.search(
+        r"(?:\bне\s+(?:надо|нужно|требуется)\s+(?:ничего\s+)?(?:менять|изменять|редактировать|править|исправлять)\b|"
+        r"\bничего\s+не\s+(?:меняй|менять|изменяй|изменять|редактируй|редактировать|правь|править)\b|"
+        r"\bне\s+(?:меняй|изменяй|редактируй|правь)\b|"
+        r"\b(?:do\s+not|don't)\s+(?:edit|modify|change)\b)",
+        low,
+        re.IGNORECASE,
+    ))
+    if no_edit_instruction:
+        return True
+
+    # Only handle the ambiguous canvas wording. Other edit requests keep the
+    # established missing-source behaviour below.
+    generic_canvas = bool(re.search(
+        rf"\b(?:на|в|по)\s+(?:{image_noun})",
+        low,
+        re.IGNORECASE,
+    ))
+    if not generic_canvas:
+        return False
+
+    # A demonstrative, possessive or explicit upload/source reference means a
+    # particular existing image is intended, so keep asking for that source.
+    particular_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|исходн\w*|прикрепл\w*|загруженн\w*|предыдущ\w*)\s+{image_noun}|"
+        rf"\b(?:это|эта|эту|тот|ту|мой|моя|мое|мое|мою|мои|исходн\w*|прикрепл\w*|загруженн\w*)\s+{image_noun}|"
+        rf"{image_noun}.{{0,50}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше)\b)",
+        low,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    if particular_source:
+        return False
+
+    # Verbs that clearly modify an existing object are not reinterpreted as
+    # creation. Plain ``нарисуй``/``draw`` is the ambiguous case being fixed.
+    explicit_mutation_near_canvas = bool(re.search(
+        rf"\b(?:добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|"
+        rf"обработ\w*|улучш\w*|перекрас\w*|подправ\w*|crop|edit|modify|replace|remove|erase)\b"
+        rf".{{0,100}}\b(?:на|в|по|с)\s+(?:{image_noun})",
+        low,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    return not explicit_mutation_near_canvas
 
 
 def _contains_marker(text: str, marker: str) -> bool:
@@ -232,161 +418,408 @@ def _contains_marker(text: str, marker: str) -> bool:
     return phrase in low
 
 
-def _detect_contextual_image_edit(text: str) -> bool:
-    """Recognize image annotation by its action and target, without requiring 'edit image'."""
-    low = _text(text).lower().replace("ё", "е")
-    action = re.search(
-        r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
-        r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|поправ\w*|перерис\w*|"
-        r"хочу\w*|хотел\w*|хотела|мне\s+нужно|мне\s+надо|пусть|чтобы|"
-        r"add|draw|mark|point|annotate|highlight|redo|revise|change|edit|modify|i\s+want|i(?:'d|\s+would)\s+like)", low, re.IGNORECASE)
-    target = re.search(
-        r"(?:стрелк\w*|указател\w*|маркер\w*|кнопк\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|"
-        r"галоч\w*|цвет\w*|красн\w*|зелен\w*|фон\w*|надпис\w*|текст\w*|arrow|pointer|marker|button|click|red|green|highlight|circle|outline)",
-        low, re.IGNORECASE)
-    return bool(action and target)
+def _is_ui_instruction_request(text: Any) -> bool:
+    """Recognize help operating the existing app/account, not image generation.
 
-
-def _detect_image_modification(text: str) -> bool:
-    """Detect a request to alter an existing image or diagram.
-
-    In Free, detected edits are restricted instead of being silently converted
-    into new image generation. Ordinary new-image and new-diagram requests use
-    their existing routes.
+    This takes priority over generic visual verbs. Mentions of a picture, buttons,
+    or "show me" inside instructions must not trigger a paid raster-image request.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    # "Нарисуй картинку к заставке" is a new-image deliverable, not an edit of
-    # a missing source image. This direct-object rule intentionally does not
-    # swallow ambiguous "нарисуй на этой картинке" instructions.
-    direct_new_image = bool(re.search(
-        r"(?<![\w\u0080-\uffff])(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate)\b\s+"
-        r"(?:(?:мне|нам|a|an|the|new|нов\w*|бел\w*|черн\w*|красив\w*|прост\w*|маленьк\w*|больш\w*)\s+){0,3}"
-        r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bpicture\b|\bphoto\b)",
+    media = r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|рисунок\w*|image\w*|picture\w*|photo\w*|visual\w*)"
+    operation = r"(?:скача\w*|загруз\w*\s+на\s+устройств\w*|сохран\w*|скопир\w*|встав\w*|откро\w*|увелич\w*|поделит\w*|пересла\w*|download\w*|save\w*|copy\w*|paste\w*|open\w*|share\w*)"
+    account_ui = bool(re.search(
+        r"(?:переключ\w*\s+(?:язык|языка)|смен\w*\s+язык|измен\w*\s+язык|выбрат\w*\s+язык|"
+        r"язык\w*.{0,35}(?:кабинет\w*|профил\w*|настройк\w*|аккаунт\w*)|"
+        r"(?:кабинет\w*|профил\w*|настройк\w*|аккаунт\w*).{0,45}(?:язык|локализац\w*)|"
+        r"where\s+(?:do\s+i\s+)?click|what\s+(?:button|menu)\s+(?:do\s+i\s+)?click|"
+        r"change\s+(?:the\s+)?language|switch\s+(?:the\s+)?language|account\s+settings|profile\s+settings)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    attach_photo_tutorial = bool(re.search(
+        r"(?:как|расскажи|объясни|подскажи|покажи|how\s+to|explain\s+how|show\s+me\s+how).{0,110}"
+        r"(?:добав\w*|прикреп\w*|загруз\w*|выбрат\w*|attach\w*|upload\w*|add\w*|select\w*).{0,100}"
+        r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|image\w*|photo\w*)"
+        r"|(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|picture\w*|image\w*).{0,90}"
+        r"(?:в\s+(?:тво[её]м\s+)?(?:пространств\w*|чат\w*|переписк\w*)|чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*|прочитал\w*))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    navigation_cue = bool(re.search(
+        r"(?:куда\s+(?:надо\s+)?нажат\w*|что\s+нажать|куда\s+кликнут\w*|по\s+шагам|покажи\w*.{0,30}(?:оба\s+вариант\w*|шаг\w*|куда\s+нажать)|"
+        r"нажми\w*.{0,35}(?:кабинет\w*|профил\w*|настройк\w*|язык)|"
+        r"how\s+to\s+navigat|step[- ]by[- ]step|click\s+path)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    how_to = bool(re.search(
+        rf"(?:как|подскажи\w*\s+как|объясни\w*\s+как|покажи\w*\s+как|how\s+(?:do\s+i|to)|explain\s+how|show\s+me\s+how).{{0,100}}?{operation}.{{0,100}}?{media}"
+        rf"|{operation}.{{0,70}}?{media}.{{0,45}}?(?:в\s+(?:чате|април\w*|приложени\w*)|из\s+чата|на\s+устройств\w*|in\s+(?:this\s+)?chat|from\s+(?:this\s+)?chat|on\s+(?:my\s+)?device)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_ui_terms = bool(re.search(
+        r"(?:кнопк\w*|значок\w*|меню\s+действи\w*|из\s+чата|в\s+чате\s+april|в\s+интерфейс\w*|нажать|куда\s+нажать|с\s+телефон\w*|на\s+телефон\w*|на\s+устройств\w*)",
         low, re.IGNORECASE,
     ))
-    if direct_new_image:
-        return False
-    how_to_question = bool(re.search(
-        r"^\s*(?:как\s+(?:(?:мне|можно|самому|самой)\s+)?(?:редактир|измен|улучш|обработ|ретуш|поменя)"
-        r"|как\s+делать\s+ретуш|объясни\w*\s*,?\s*как\b|расскажи\w*\s*,?\s*как\b"
-        r"|how\s+(?:do\s+i|can\s+i|to)\s+(?:edit|change|improve|enhance|retouch|modify)"
-        r"|what\s+is\s+the\s+best\s+way\s+to\s+(?:edit|change|improve|enhance|retouch))",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    if _is_attachment_tutorial_request(low) or how_to_question:
-        return False
-
-    # A concrete object placement on an already identified photo is an edit.
-    # In Free it will still be handled by the existing Premium restriction lane;
-    # it must not be re-labelled as a request to create a new picture.
-    explicit_existing_source = bool(re.search(
-        r"(?:на\s+(?:это\s+|эту\s+|этой\s+|мою\s+)?фот\w*|"
-        r"(?:фото|фотограф\w*|фотк\w*)\s+с\s+(?:монет\w*|купюр\w*|деньг\w*|человеком|машин\w*|надпис\w*)|"
-        r"(?:присланн\w*|прикрепл\w*|загруженн\w*|предыдущ\w*)\s+(?:фото|фотограф\w*|картинк\w*|изображени\w*))",
-        low, re.IGNORECASE,
-    ))
-    composite_detector = globals().get("_detect_image_compositing_request")
-    if explicit_existing_source and callable(composite_detector) and composite_detector(low):
-        return True
-
-    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
-        return True
-
-    # `фотку`, `фотке`, `фотографии` and related colloquial/inflected forms must
-    # match the same source-image concept; limiting this to `фото` missed the
-    # exact phrasing observed in production logs ("измени эту фотку").
-    image_noun = (
-        r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?|"
-        r"диаграмм\w*|схем\w*|черт[её]ж\w*|chart\w*|diagram\w*|sketch\w*)"
+    return attach_photo_tutorial or account_ui or navigation_cue or how_to or (
+        explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S))
     )
-    # Direct forms like "измени именно ту фотографию" are missed by simple
-    # substring markers because polite/reference words are inserted between the
-    # verb and the image noun. Keep this pattern limited to actual edit verbs.
-    direct_edit = r"(?:edit|modify|change|alter|retouch|enhance|improve|измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*)"
-    image_reference_words = r"(?:(?:the|this|that|same|exact|мне|нам|ту|эту|этот|эта|это|эти|той|такую|такой|эту\s+самую|ту\s+самую|именно|саму|самую|присланную|загруженную|прикрепл[её]нную|мою|твою)\s+){0,5}"
-    if re.search(
-        rf"(?<![\w\u0080-\uffff]){direct_edit}\b\s+{image_reference_words}{image_noun}\b",
-        low,
-        flags=re.IGNORECASE,
-    ):
-        return True
-
-    # Also catch object-level changes explicitly tied to a source supplied by
-    # the user, e.g. "добавь мячик к той фотографии, что я тебе прислал".
-    # Requiring both a sent/uploaded-source reference and an edit action avoids
-    # restricting ordinary image creation based on a casual image mention.
-    sent_source = bool(re.search(
-        rf"\b{image_noun}\b.{{0,120}}\b(?:котор\w*|что|которую)\b.{{0,40}}"
-        r"\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|передал\w*|sent|uploaded|attached|shared)\b"
-        r"|\b(?:именно\s+)?(?:ту|эту|ту\s+самую|эту\s+самую)\s+"
-        rf"{image_noun}\b.{{0,120}}\b(?:я\s+)?(?:тебе\s+)?(?:прислал\w*|отправил\w*|загрузил\w*|прикрепил\w*|sent|uploaded|attached|shared)\b",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    edit_action = bool(re.search(
-        r"\b(?:edit\w*|modify\w*|change\w*|alter\w*|retouch\w*|enhance\w*|improve\w*|"
-        r"измени\w*|поменя\w*|отредактир\w*|обработ\w*|ретуш\w*|улучш\w*|передел\w*|"
-        r"добав\w*|убер\w*|замен\w*|встав\w*)\b",
-        low,
-        flags=re.IGNORECASE,
-    ))
-    return sent_source and edit_action
 
 
-def _detect_image_compositing_request(text: str) -> bool:
-    """Detect object placement/removal wording, interpreted as edit only with a source image."""
+def _is_structured_visual_explanation_request(text: Any) -> bool:
+    """Distinguish a formula/diagram explanation from editing or generating a photo."""
     low = _text(text).lower().replace("ё", "е")
-    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_COMPOSITING_MARKERS):
+    has_math = bool(re.search(
+        r"(?:формул\w*|уравнен\w*|equation\w*|formula\w*|e\s*=\s*m\s*c|\bmc\s*\^?\s*2\b)", low, re.I
+    ))
+    if not has_math:
+        return False
+    existing_image = bool(re.search(
+        r"(?:на\s+(?:эт\w*|мо\w*|присланн\w*|загруженн\w*|прикрепленн\w*)\s*(?:картинк\w*|фото\w*|изображени\w*)|"
+        r"(?:эт\w*|присланн\w*|загруженн\w*|прикрепленн\w*)\s+(?:картинк\w*|фото\w*|изображени\w*)|"
+        r"on\s+(?:this|the uploaded|the attached|my)\s+(?:image|photo|picture))", low, re.I
+    ))
+    explicit_new_picture = bool(re.search(
+        r"(?:созда\w*|сгенерир\w*|нарис\w*|изобраз\w*|generate|create|draw).{0,45}(?:картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bpicture\b|\billustration\b)",
+        low, re.I | re.S
+    ))
+    visual_explanation = bool(re.search(
+        r"(?:на\s+картинк\w*|наглядн\w*|визуальн\w*|визуализир\w*.{0,50}(?:формул\w*|уравнен\w*)|"
+        r"show.{0,45}(?:formula|equation).{0,30}(?:visually|in\s+(?:an?\s+)?image|as\s+a\s+diagram)|visuali[sz]e.{0,45}(?:formula|equation))",
+        low, re.I | re.S
+    ))
+    return visual_explanation and not existing_image and not explicit_new_picture
+
+
+def _is_dialogue_based_self_portrait_request(text: str) -> bool:
+    """Detect an intent to CREATE a conceptual self-portrait from dialogue history.
+
+    The phrase "нарисуй моё изображение на фото" is often a casual way to ask
+    for an image output, not an edit of a photo upload. A source-image operation
+    needs a concrete deictic/source reference ("на этой фотографии", "на моём
+    загруженном фото", "добавь на снимок"). We also require a first-person
+    self-representation cue and an explicit conversation/history basis.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    source_edit = bool(re.search(
+        r"(?:(?:добав\w*|дорис\w*|встав\w*|нанес\w*|измени\w*|отредактир\w*|"
+        r"замени\w*|убери\w*|удали\w*|перекрась\w*|обработ\w*)|"
+        r"(?:на|в)\s+(?:эт\w*|мо\w*\s+загруженн\w*|присланн\w*|прикрепленн\w*|исходн\w*)\s*"
+        r"(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|снимк\w*)|"
+        r"(?:this|uploaded|attached|original)\s+(?:photo|image|picture))",
+        low, re.I | re.S,
+    ))
+    if source_edit:
+        return False
+    self_reference = bool(re.search(
+        r"(?:как\s+ты\s+(?:меня\s+)?(?:себе\s+)?(?:представля\w*|вид\w*|вообража\w*)|"
+        r"как\s+ты\s+меня\s+вид\w*|как\s+я\s+выгляжу\s+в\s+твоем\s+представлени\w*|"
+        r"мо\w*\s+(?:изображени\w*|портрет\w*|аватар\w*)|"
+        r"образ\s+меня|представь\s+меня|изобрази\s+меня|"
+        r"how\s+you\s+(?:imagine|picture|see)\s+me|"
+        r"how\s+do\s+you\s+see\s+me|my\s+(?:portrait|image|avatar)|"
+        r"a\s+portrait\s+of\s+me)", low, re.I | re.S,
+    ))
+    history_basis = bool(re.search(
+        r"(?:из\s+(?:наших|моих)\s+(?:диалог\w*|разговор\w*|переписк\w*)|"
+        r"по\s+(?:истори\w*|содержани\w*)\s+(?:наших\s+)?(?:диалог\w*|разговор\w*|общени\w*)|"
+        r"исходя\s+из\s+(?:истори\w*|нашего\s+общени\w*|наших\s+диалог\w*)|"
+        r"на\s+основе\s+(?:наших\s+)?(?:диалог\w*|разговор\w*|общени\w*|истори\w*)|"
+        r"по\s+нашим\s+разговор\w*|из\s+того,\s+что\s+мы\s+обсуждал\w*|"
+        r"based\s+on\s+(?:our\s+)?(?:conversation|dialogue|chat|discussion|history)|"
+        r"from\s+our\s+(?:conversations|chats|talks))", low, re.I | re.S,
+    ))
+    image_action = bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|покаж\w*|сдела\w*|" 
+        r"draw|create|generate|make|show|render|изображени\w*|портрет\w*|картинк\w*)",
+        low, re.I,
+    ))
+    return bool(self_reference and history_basis and image_action)
+
+
+def _is_self_portrait_generation_request(text: str) -> bool:
+    """Detect new-image self-portrait requests, not edits to a supplied photo."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    if _is_dialogue_based_self_portrait_request(low):
         return True
-    # Object nouns often occur between the verb and "на фото" ("добавь кота на фото").
-    # Recognize that natural word order without classifying it as editing when no image exists.
-    object_placement = re.search(
-        r"(?:\b(?:add|put|place|draw|insert|remove|replace)\w*\b.{0,70}\b(?:to|on|in|from)\s+(?:the\s+)?(?:photo|photograph|image|picture)\b)"
-        r"|(?:\b(?:добав\w*|нарис\w*|гарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b.{0,70}\b(?:на|в|с)\s+(?:этом\s+|этой\s+|это\s+|эту\s+|той\s+|такой\s+)?(?:фот\w*|картинк\w*|изображени\w*))"
-        r"|(?:\b(?:на|в|с)\s+(?:этот\s+|этой\s+|эту\s+|это\s+|той\s+|такой\s+)?(?:фот\w*|картинк\w*|изображени\w*).{0,70}\b(?:добав\w*|нарис\w*|помест\w*|размест\w*|убер\w*|замен\w*|встав\w*)\b)",
-        low,
-        flags=re.IGNORECASE,
+    # General self-avatar/portrait creation. Explicitly named existing source-image
+    # edits are left to _detect_image_modification.
+    source_edit = bool(re.search(
+        r"(?:добав\w*|дорис\w*|встав\w*|нанес\w*|измени\w*|отредактир\w*|" 
+        r"на\s+(?:эт\w*|мо\w*\s+загруженн\w*|прикрепленн\w*|присланн\w*)\s*"
+        r"(?:фото\b|фотограф\w*|изображени\w*|картинк\w*|снимк\w*))", low, re.I | re.S,
+    ))
+    if source_edit:
+        return False
+    return bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|сдела\w*|покаж\w*|draw|create|generate|make|show)"
+        r".{0,70}?(?:меня|себя|мой\s+портрет|мо\w*\s+(?:изображени\w*|аватар\w*|портрет\w*)|"
+        r"myself|yourself|my\s+(?:portrait|avatar|image)|your\s+(?:portrait|avatar))",
+        low, re.I | re.S,
+    ))
+
+
+def _has_affirmative_visual_instruction(text: str) -> bool:
+    """Return True only when the current turn contains an affirmative visual action.
+
+    This intentionally looks for command/request forms rather than any occurrence
+    of verbs such as "created", "drew", or "edited". Those often describe an
+    earlier result during ordinary conversation and must not start another render.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    negated_prefix = re.compile(
+        r"(?:\bне|\bни|\bникогда|\bnever|\bnot|\bdon't|\bdo\s+not|\bdidn't|\bdoesn't|"
+        r"\b(?:i\s+)?(?:did\s+not|didn't)\s+ask\s+you\s+to|"
+        r"\b(?:i\s+)?(?:do\s+not|don't|never)\s+want\s+you\s+to|"
+        r"\bне\s+(?:надо|нужно|следует)|"
+        r"\bне\s+(?:просил\w*|просила|попросил\w*|попросила|хотел\w*|хотела))\s*$",
+        re.IGNORECASE,
     )
-    return bool(object_placement)
+
+    # Explicit generation imperatives. A concrete subject ("лес", "дом", etc.)
+    # is enough even when the user doesn't say "picture".
+    generation_command = re.compile(
+        r"\b(?:нарисуй(?:те)?|изобрази(?:те)?|создай(?:те)?|сгенерируй(?:те)?|сделай(?:те)?|"
+        r"покажи(?:те)?|показать|draw|create|generate|make|show|display|illustrate)\b",
+        re.IGNORECASE,
+    )
+    for match in generation_command.finditer(low):
+        prefix = low[max(0, match.start() - 45):match.start()]
+        if negated_prefix.search(prefix):
+            continue
+        tail = low[match.end():match.end() + 145]
+        # Do not treat explanatory questions ("покажи, как ты создала...") as a
+        # fresh visual operation. These verbs are not generation commands themselves.
+        if re.match(r"\s*[,—:-]?\s*(?:как\s+ты|как\s+это|что\s+ты|почему\s+ты|how\s+you|how\s+did\s+you|why\s+did\s+you)\b", tail) or re.search(r"(?:\bкак\s+ты|\bзачем\s+ты|\bпочему\s+ты|\bhow\s+did\s+you|\bhow\s+do\s+you|\bwhy\s+did\s+you)\s*$", prefix):
+            continue
+        if re.search(image_noun, tail, re.IGNORECASE) or re.search(
+            r"\b(?:лес\w*|опушк\w*|зайц\w*|кролик\w*|дом\w*|машин\w*|пейзаж\w*|"
+            r"кот\w*|собак\w*|человек\w*|персонаж\w*|планет\w*|корабл\w*|сцен\w*|"
+            r"forest\w*|rabbit\w*|house\w*|car\w*|landscape\w*|cat\w*|dog\w*|person\w*|scene\w*)\b",
+            tail, re.IGNORECASE,
+        ):
+            return True
+
+    # Image edits often use a short imperative and a deictic target: "добавь туда
+    # зайцев", "дорисуй на этой фотке". Past-tense "дорисовала" never matches.
+    edit_command = re.compile(
+        r"\b(?:добавь|добавьте|дорисуй|дорисуйте|нанеси|нанесите|поставь|поставьте|"
+        r"размести|разместите|помести|поместите|убери|уберите|удали|удалите|замени|замените|"
+        r"измени|измените|отредактируй|отредактируйте|улучши|улучшите|исправь|исправьте|"
+        r"перекрась|перекрасьте|вставь|вставьте|обрежь|обрежьте|"
+        r"сделай|сделайте|add|insert|remove|erase|replace|change|edit|modify|retouch|improve|make)\b",
+        re.IGNORECASE,
+    )
+    for match in edit_command.finditer(low):
+        prefix = low[max(0, match.start() - 45):match.start()]
+        if negated_prefix.search(prefix):
+            continue
+        nearby = low[max(0, match.start() - 100):match.end() + 130]
+        if re.search(image_noun, nearby, re.IGNORECASE) or re.search(
+            r"\b(?:туда|сюда|на\s+ней|на\s+нее|на\s+неё|в\s+ней|в\s+него|на\s+этом|"
+            r"на\s+эту|к\s+этому|this\s+image|this\s+photo|on\s+it|onto\s+it)\b",
+            nearby, re.IGNORECASE,
+        ):
+            return True
+
+    # Polite/modal constructions are also affirmative: "хочу, чтобы ты создала
+    # изображение", "можешь нарисовать фото?", "please generate an image".
+    modal_request = re.compile(
+        r"\b(?:хочу|хотел\w*|хотела|мне\s+(?:нужно|надо)|можешь|мог(?:ла)?\s+бы|"
+        r"пожалуйста|давай|i\s+want\s+you\s+to|could\s+you|would\s+you|please)\b"
+        r".{0,100}\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|добав\w*|дорис\w*|"
+        r"измен\w*|отредактир\w*|draw|create|generate|illustrate|add|edit|modify)\b"
+        r".{0,110}" + image_noun,
+        re.IGNORECASE | re.DOTALL,
+    )
+    modal_match = modal_request.search(low)
+    if modal_match:
+        action_part = modal_match.group(0)
+        if not re.search(r"(?:\bне\b|\bnot\b|\bdon't\b|\bdo\s+not\b|\bnever\b).{0,55}\b(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|добав\w*|дорис\w*|измен\w*|отредактир\w*|draw|create|generate|illustrate|add|edit|modify)\b", action_part, re.IGNORECASE | re.DOTALL):
+            return True
+    return False
+
+
+def _is_image_discussion_without_new_visual_action(text: str) -> bool:
+    """Identify image-related discussion/correction that is not an image command.
+
+    Use this as a narrow anti-false-positive guard: a clear affirmative command in
+    the same long message wins, so compound requests can still ask for both prose
+    and one or more visual deliverables.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    if not re.search(image_noun, low, re.IGNORECASE):
+        return False
+    if _has_affirmative_visual_instruction(low):
+        return False
+
+    # Explicit refusal/correction: "я не просил, чтобы ты создавала картинку",
+    # "не создавай изображение, просто объясни". Keep this broader than one exact
+    # wording, while requiring an image-related target in the same turn.
+    negated_visual_request = bool(re.search(
+        r"(?:\bне\s+(?:создавай\w*|рисуй|рисуйте|изображай|генерируй|редактируй|изменяй)"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:do\s+not|don't|never)\s+(?:create|draw|generate|make|edit|modify)\b"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:i\s+)?(?:do\s+not|don't|never)\s+want\s+you\s+to\s+(?:create|draw|generate|make|edit|modify)\b"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:i\s+(?:did\s+not|didn't)\s+ask)\b.{0,140}(?:create|draw|generate|make|edit|modify)"
+        r".{0,100}" + image_noun + r"|"
+        r"\b(?:я\s+(?:же\s+)?не\s+(?:просил\w*|просила|попросил\w*|попросила|хотел\w*|хотела|говорил\w*|говорила))"
+        r".{0,180}(?:созда\w*|нарис\w*|изобраз\w*|сгенерир\w*|дорис\w*|измен\w*|отредактир\w*)"
+        r".{0,100}" + image_noun + r")",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if negated_visual_request:
+        return True
+
+    # Past-result narration, appreciation, capability discussion, and questions
+    # about how/why an earlier picture was made are dialogue, not fresh work.
+    retrospective_image_talk = bool(re.search(
+        r"(?:\b(?:получил\w*|понравил\w*|созда(?:л|ла|ли|ло|вал|вала|вали)\w*|"
+        r"нарисова(?:л|ла|ли|ло)\w*|дорисова(?:л|ла|ли|ло)\w*|"
+        r"сгенерирова(?:л|ла|ли|ло)\w*|изменил(?:а|и|о)?\w*|отредактировал(?:а|и|о)?\w*|"
+        r"created|made|drew|generated|edited|modified)\b|"
+        r"\bумеешь\s+(?:создавать|рисовать|нарисовывать|изменять|редактировать|генерировать)\b|"
+        r"\b(?:зачем|почему|как)\s+ты\b.{0,90}(?:созда\w*|нарис\w*|дорис\w*|сгенерир\w*|измен\w*|отредактир\w*)|"
+        r"\b(?:how|why)\s+did\s+you\s+(?:create|draw|generate|make|edit|modify)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    discussion_context = bool(re.search(
+        r"(?:\b(?:понравил\w*|молодец|классн\w*|прикольн\w*|получил\w*|научил\w*|объясн\w*|"
+        r"расскажи\w*|расскажи|обсуд\w*|поговор\w*|умеешь|зачем|почему|как|explain|tell\s+me|"
+        r"describe|discuss|thanks)\b|"
+        r"\bwho\s+(?:taught|created)\b|\bhow\s+(?:(?:did|do)\s+you|you)\b|"
+        r"\bwhy\s+(?:(?:did|do)\s+you|you)\b)",
+        low, re.IGNORECASE,
+    ))
+    return retrospective_image_talk and discussion_context
+
+
+def _detect_image_modification(text: str) -> bool:
+    """Detect edits to an explicitly identified existing image, not a generic canvas.
+
+    Russian voice requests often say "нарисуй на картинке/изображении X" to ask
+    for a new illustration. A specific source is indicated by a demonstrative,
+    possessive/upload reference, a deictic pronoun ("на ней"), or an edit verb such
+    as "добавь/дорисуй/измени". Without that evidence, a create/draw verb plus a
+    generic canvas noun is not enough to request image editing.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
+        return False
+    if _is_image_discussion_without_new_visual_action(low):
+        return False
+    if _is_self_portrait_generation_request(low):
+        return False
+
+    # Explicit correction language outranks legacy edit markers. Voice transcripts
+    # may contain both "не просил изменять фото" and "создай новую фотографию".
+    # Without this guard, the word "фотография" alone caused a source-image request.
+    correction_rejects_edit = bool(re.search(
+        r"(?:я\s+(?:же\s+)?не\s+(?:просил\w*|попросил\w*|говорил\w*).{0,100}(?:измен\w*|редактир\w*|обрабатыва\w*|дорис\w*)|"
+        r"не\s+(?:надо|нужно|просил\w*|попросил\w*)\s+(?:измен\w*|редактир\w*|обрабатыва\w*)|"
+        r"(?:не\s+изменяй|не\s+редактируй|не\s+обрабатывай|i\s+did\s+not\s+ask\s+you\s+to\s+edit|don't\s+edit|do\s+not\s+edit))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_new_creation = bool(re.search(
+        r"(?:я\s+(?:же\s+)?(?:просил\w*|попросил\w*|хотел\w*|говорил\w*).{0,100}(?:созда\w*|нарис\w*|сгенерир\w*|изобраз\w*).{0,65}(?:нов\w*\s+)?(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b)|"
+        r"(?:создай|создайте|сгенерируй|нарисуй|изобрази|generate|create|draw)\s+(?:мне\s+)?нов\w*\s+(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b)|"
+        r"(?:создай|создайте|сгенерируй|нарисуй|изобрази|generate|create|draw)\s+(?:мне\s+)?(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bimage\b|\bphoto\b|\bpicture\b))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    correction_explicitly_requests_new_image = bool(re.search(
+        r"(?:исправься|исправь|повтори|создай\s+мне\s+нов|нов\w*\s+фотограф|нов\w*\s+изображен|i\s+asked|create\s+a\s+new)",
+        low, re.IGNORECASE,
+    ))
+    if explicit_new_creation and (correction_rejects_edit or correction_explicitly_requests_new_image):
+        return False
+
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    create_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|\bdraw\b|\bcreate\b|\bgenerate\b)"
+    edit_action = r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|укаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|redraw)\b)"
+    generic_canvas_creation = bool(re.search(
+        rf"\b{create_action}\b.{{0,100}}?\b(?:на|в|по)\s+{image_target}",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    specific_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|тво\w*|исходн\w*|прикрепл\w*|загруженн\w*|предыдущ\w*)\s+{image_target}|"
+        rf"\b(?:на|в)\s+(?:ней|нее|неё|нем|нём|них|this\s+(?:image|photo|picture)|the\s+(?:uploaded|attached)\s+(?:image|photo|picture))\b|"
+        rf"{image_target}.{{0,60}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше|uploaded|attached)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicit_edit_action = bool(re.search(rf"\b{edit_action}\b", low, re.IGNORECASE))
+    if generic_canvas_creation and not explicit_edit_action and not specific_source:
+        return False
+    if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
+        # Bare "draw on image" markers are overridden above; the remaining
+        # markers describe actual mutation/edit operations.
+        return True
+    action = (
+        r"(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|brighten|darken|draw|redraw|paint|"
+        r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
+        r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
+        r"нарис\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*)"
+    )
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    # Explicit image target can appear after an action ("нарисуй на фото") or
+    # before it ("на фотографии дорисуй"). Keep this phrase-aware rather than
+    # treating every occurrence of "draw" or "photo" as editing.
+    if re.search(rf"\b{action}\b.{{0,120}}?\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}", low, re.IGNORECASE | re.DOTALL):
+        return True
+    if re.search(rf"\b(?:на|в|по|с|из|к)\s+(?:эт\w*\s+)?{image_target}.{{0,80}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
+    # Common conversational Russian orders omit a preposition before the image:
+    # "измени эту фотку", "добавь на неё сумму", "я про фото с монетами — добавь...".
+    # Require an explicit edit verb and an image noun within the same short turn so
+    # ordinary mentions like "расскажи про фото" do not become editing requests.
+    if re.search(rf"\b{action}\b.{{0,100}}?\b(?:этот|эта|эту|этом|этой|эти|те|ту|мое|мою|мой|предыдущ\w*)?\s*{image_target}", low, re.IGNORECASE | re.DOTALL):
+        return True
+    if re.search(rf"\b{image_target}\b.{{0,140}}?\b{action}\b", low, re.IGNORECASE | re.DOTALL):
+        return True
+    return False
 
 
 def _detect_image_generation_request(text: str) -> bool:
     """Detect a picture as the requested output, not a picture used as context.
 
-    Explicit image-surface wording ("on a picture/photo/image") wins over a
-    generic diagram interpretation. A bare drawing verb remains semantic and
-    can route to geometry, a diagram, a graph, or image generation by subject.
+    This intentionally checks the first visual object after the action. For
+    example, "нарисуй картинку со схемой" is an image-generation request, while
+    "нарисуй схему на картинке" remains a structured diagram request.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    # How-to-upload requests are interface guidance, never new raster outputs.
-    if _is_attachment_tutorial_request(low):
+    if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
         return False
-    # Explicit editing is not image generation in the Free chain. The caller will
-    # issue a Premium-limit explanation and suppress all image artifacts.
-    if _detect_image_modification(low):
+    if _is_image_discussion_without_new_visual_action(low):
         return False
-
-    # Explicitly asking to render the subject *on a picture/photo/image* means
-    # raster image generation. Existing-image edits have already been excluded
-    # above; without a source image this is still a new image request.
-
-    action = r"(?:draw|show|display|create|make|generate|render|add|place|put|remove|replace|нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*)"
-    image_noun = r"(?:picture|image|illustration|photo|photograph|картинк(?:у|а|и|е)\b|изображени(?:е|я|и|и\s+на)\b|иллюстраци(?:ю|я|и)\b|фот\w*)"
-    # Explicitly placing any requested subject on an image surface is an image
-    # request even if the subject itself is a diagram, formula, or chart.
-    explicit_surface = re.search(
-        rf"(?<![\w\u0080-\uffff]){action}\b.{{0,90}}?\b(?:on|in|onto|на|в)\s+"
-        r"(?:(?:the|this|that|этой|этот|эту|этом|такой|таком|той|тои)\s+)?"
-        r"(?:picture|image|illustration|photo|photograph|картинк\w*|изображени\w*|иллюстраци\w*|фот\w*)",
-        low, flags=re.IGNORECASE,
-    )
-    if explicit_surface:
+    if _is_self_portrait_generation_request(low):
         return True
+    if _detect_image_modification(low):
+        return True
+
+    # Self-representation is a real image deliverable even without the noun
+    # "picture": e.g. "нарисуй себя" / "покажи, как выглядит April".
+    self_portrait = bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|покаж\w*|созда\w*|сдела\w*|draw|show|create|make).{0,55}?(?:себя|свой\s+портрет|свой\s+аватар|как\s+(?:ты|april|април)\s+выгляд\w*|yourself|your\s+portrait|your\s+avatar)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if self_portrait:
+        return True
+
+    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
+    image_noun = r"(?:picture|image|illustration|photo|картинк\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -394,18 +827,167 @@ def _detect_image_generation_request(text: str) -> bool:
     # Support inverted Russian requests such as "картинку нарисуй". The
     # accusative/nominative object forms deliberately exclude "на картинке".
     reverse = rf"(?<![\w\u0080-\uffff]){image_noun}\s+(?:мне\s+|нам\s+)?{action}\b"
-    return bool(re.search(forward, low, flags=re.IGNORECASE) or re.search(reverse, low, flags=re.IGNORECASE))
+
+    # Composite requests commonly put an explicit renderer first and the image
+    # second: "покажи таблицу и его фотку". The earlier object-order guard kept
+    # this from becoming an image request at all. Preserve both outputs instead
+    # of making the table and photo mutually exclusive.
+    structured_noun = r"(?:\btable\b|таблиц\w*|\bgraph\b|\bchart\b|график\w*|диаграмм\w*|схем\w*|примеры|\bexamples?\b)"
+    coordinated_after = rf"(?<![\w\u0080-\uffff]){action}\b.{{0,100}}{structured_noun}.{{0,48}}(?:и|and|plus|а также).{{0,28}}{image_noun}"
+
+    # In a follow-up, people frequently omit the verb because the operation is
+    # obvious from the preceding turn: "А фотку его и таблица каличная — сделай
+    # красивей". Accept this elliptical image target only when it is coordinated
+    # with another requested output and an actual edit/beautify action.
+    photo_noun = r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|picture\w*|photo\w*|image\w*)"
+    possessive = r"(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)"
+    coordinated_before = rf"(?<![\w\u0080-\uffff])(?:а\s+|и\s+|еще\s+|ещё\s+|also\s+)?{photo_noun}\s+(?:{possessive}\s+)?(?:.{0,48})?(?:и|and|а также).{{0,60}}(?:таблиц\w*|\btable\b|график\w*|диаграмм\w*).{{0,60}}(?:сдела\w*|улучш\w*|исправ\w*|оформ\w*|красив\w*|make\b|improve\b|beautif\w*)"
+    explicit_image_noun_action = bool(
+        re.search(forward, low, flags=re.IGNORECASE)
+        or re.search(reverse, low, flags=re.IGNORECASE)
+        or re.search(coordinated_after, low, flags=re.IGNORECASE)
+        or re.search(coordinated_before, low, flags=re.IGNORECASE)
+    )
+    if explicit_image_noun_action:
+        return True
+
+    # "Draw a tractor/model/person" is an image request even when the user does
+    # not say "draw a picture". Keep diagrams, tables and charts on their own
+    # renderer path; no lexical hard-coding of any particular subject is used.
+    structured_target = bool(re.search(
+        r"(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*|\bflowchart\b|\bdiagram\b|\bgraph\b|\bchart\b|\btable\b)",
+        low, re.IGNORECASE,
+    ))
+    visual_action = bool(re.search(r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate|illustrat\w*)", low, re.I))
+    if visual_action and not structured_target and _has_drawable_subject(low):
+        return True
+    return False
 
 
-
-def _detect_explicit_portrait_generation_request(text: str) -> bool:
-    """Only treat portrait/photo as output when user asks to create or show one."""
+def _detect_link_request(text: str) -> bool:
+    """Recognize explicit plural/resource link requests without mistaking recall for generation."""
     low = _text(text).lower().replace("ё", "е")
-    if not low or _detect_image_modification(low):
+    if not low:
         return False
-    action = r"(?:сгенерир\w*|созда\w*|нарис\w*|изобраз\w*|покаж\w*|отобраз\w*|generate|create|draw|render|show|make)"
-    subject = r"(?:портрет\w*|portrait\w*|фотограф\w*|фото\b|photo\w*|снимок\w*)"
-    return bool(re.search(rf"\b{action}\b.{{0,100}}\b{subject}\b", low, re.IGNORECASE))
+    action = r"(?:дай\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|найд\w*|подбер\w*|привед\w*|собер\w*|объясн\w*|опиш\w*|give|show|send|share|find|provide|list|explain|describe)"
+    link_noun = r"(?:ссылк\w*|веб-?ссылк\w*|url-?адрес\w*|\burls?\b|\blinks?\b)"
+    resource_noun = r"(?:ресурс\w*|источник\w*|сайт\w*|resource\w*|source\w*|website\w*)"
+    action_request = re.search(rf"(?<![\w\u0080-\uffff]){action}\b.{{0,72}}{link_noun}", low, re.IGNORECASE)
+    noun_request = re.search(rf"{link_noun}.{{0,36}}{resource_noun}|{resource_noun}.{{0,36}}{link_noun}", low, re.IGNORECASE)
+    resource_explanation = re.search(rf"{resource_noun}.{{0,44}}(?:с\s+описани\w*|что\s+объясня\w*|куда\s+вед\w*|explain\w*|describe\w*)", low, re.IGNORECASE)
+    return bool(action_request or noun_request or resource_explanation)
+
+
+def _has_drawable_subject(text: str) -> bool:
+    """True when a visual verb has a concrete drawable object, not just style words."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low or _is_ui_instruction_request(low):
+        return False
+    drawable_objects = (
+        r"(?:\bcat\b|\bdog\b|\bperson\b|\bportrait\b|\blandscape\b|\bhouse\b|"
+        r"\btree\b|\bflower\b|\bcar\b|\bship\b|\bplanet\b|\bdinosaur\w*\b|"
+        r"\bduck\b|\bmap\b|\bavatar\b|\bcharacter\b|\bobject\b|\bmodel\b|"
+        r"кот\w*|собак\w*|человек\w*|портрет\w*|пейзаж\w*|дом\w*|дерев\w*|цвет\w*|"
+        r"машин\w*|корабл\w*|планет\w*|динозавр\w*|утк\w*|карт\w*|аватар\w*|"
+        r"персонаж\w*|объект\w*|макет\w*|модель\w*|предмет\w*|иллюстрац\w*)"
+    )
+    if re.search(drawable_objects, low, flags=re.IGNORECASE):
+        return True
+    # Generic drawable noun phrase fallback. Do not require a hard-coded entity
+    # list (tractor, bicycle, robot, building, etc.); the action plus a concrete
+    # object phrase is enough unless the request explicitly names another renderer.
+    visual_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|illustrat\w*|draw|create|generate)"
+    abstract_targets = r"(?:ответ\w*|вывод\w*|анализ\w*|объяснен\w*|инструкц\w*|план\w*|отчет\w*|отч[её]т\w*|документ\w*|формул\w*|таблиц\w*|схем\w*|диаграмм\w*|график\w*|код\w*|скрипт\w*|текст\w*|перевод\w*|список|summary|answer|analysis|instructions|plan|report|document|formula|table|diagram|chart|graph|code|script|text|translation|list)"
+    generic_subject = re.search(
+        rf"(?<![\w\u0080-\uffff]){visual_action}\b\s+(?:мне\s+|нам\s+|a\s+|an\s+|the\s+)?(?P<object>[\w-]+(?:\s+[\w-]+){{0,4}})",
+        low, re.IGNORECASE,
+    )
+    if generic_subject:
+        words = re.findall(r"[\w-]+", generic_subject.group("object"), re.UNICODE)
+        head = words[-1] if words else ""
+        if head and not re.fullmatch(abstract_targets, head, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+
+def _detect_portrait_request(text: str) -> bool:
+    """Detect a requested portrait/photo, including an omitted-verb follow-up."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low or _is_image_discussion_without_new_visual_action(low):
+        return False
+    photo = r"(?:фотограф\w*|фотк\w*|фото\b|снимк\w*|портрет\w*|\bphoto\b|\bpicture\w*|\bimage\w*|\bportrait\w*)"
+    final_slot = bool(re.search(
+        rf"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)[\s\S]{{0,150}}?{photo}",
+        low, re.IGNORECASE,
+    ))
+    possessive = bool(re.search(
+        rf"(?:\b(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)\s+{photo}|{photo}\s+(?:его|ее|её|их|мой|моя|мое|мои|наш|наша|наше|наши|his|her|their|my|our)\b)",
+        low, re.IGNORECASE,
+    ))
+    explicit_photo_of = bool(re.search(
+        rf"(?:\bphoto\s+of\b|\bpicture\s+of\b|\bimage\s+of\b|\bportrait\s+of\b|фото\s+(?:о|об|про|для)\b|портрет\s+(?:о|об|для)\b)",
+        low, re.IGNORECASE,
+    ))
+    missing_or_elliptical = bool(re.search(
+        rf"(?:где|куда\s+дел\w*|не\s+показал\w*|не\s+прикрепил\w*|пропал\w*|missing|where\s+is|where's|where\s+are)[\s\S]{{0,40}}?{photo}|(?:^|\b)а\s+{photo}(?:\s+где)?\b|{photo}[\s\S]{{0,30}}?(?:где|missing|not\s+shown)",
+        low, re.IGNORECASE,
+    ))
+    appearance = bool(re.search(
+        r"(?:как\s+(?:он|она|они|это)\s+выгляд\w*|как\s+выгляд\w*|внешност\w*|what\s+(?:did|does)\s+.{0,60}\s+look\s+like|appearance|portrait)",
+        low, re.IGNORECASE,
+    ))
+    return final_slot or possessive or explicit_photo_of or missing_or_elliptical or appearance
+
+def _explicit_saved_artifact_followup_kind(text: str) -> str:
+    """Recognize edits to an existing structured artifact before the fast path.
+
+    A plain "build a graph" is a new task. Requests such as "add intermediate
+    points to the graph" or "show this graph again" require the saved dialogue
+    payload and must be sent through Premium State Manager.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return ""
+    artifact_patterns = (
+        ("graph", r"(?:\bграфик\w*\b|\bдиаграмм\w*\b|\bgraph\b|\bchart\b|\bplot\b)"),
+        ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
+        ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
+        ("diagram", r"(?:\bсхем\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
+        ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
+    )
+    kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
+    if not kind:
+        return ""
+    # Explicitly creating a new/another artifact is not a saved-artifact edit.
+    fresh_artifact_request = bool(re.search(
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
+        r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
+        low, re.IGNORECASE,
+    ))
+    if fresh_artifact_request:
+        return ""
+    edit_or_extend = bool(re.search(
+        r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
+        r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
+        r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
+        low, re.IGNORECASE,
+    ))
+    # Possessives describe the subject of a new deliverable; they do not by
+    # themselves identify a previously rendered artifact. Reuse needs an actual
+    # saved-item reference or a clear edit/extension operation.
+    saved_reference = bool(re.search(
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
+        low, re.IGNORECASE,
+    ))
+    return kind if (edit_or_extend or saved_reference) else ""
 
 
 def _is_feedback_control_help_request(text: Any) -> bool:
@@ -459,22 +1041,35 @@ def _detect_requested_outputs(text: str) -> list[str]:
     ):
         return ["text", "diagram"]
 
+    ui_instruction_request = _is_ui_instruction_request(low)
     for output, markers in _OUTPUT_MARKERS.items():
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
+    if ui_instruction_request:
+        # Existing-media / account-navigation guidance is never a generated image.
+        result = [kind for kind in result if kind != "image"]
+        if re.search(
+            r"(?:оба\s+вариант\w*|по\s+шагам|куда\s+(?:надо\s+)?нажат\w*|что\s+нажать|step[- ]by[- ]step|both\s+options|where\s+to\s+click)",
+            low, re.IGNORECASE,
+        ) and "diagram" not in result:
+            result.append("diagram")
 
     # A plain image/photo mention is input context, not an output request.
     # The object-order-aware detector captures explicit image requests even
     # when users insert "мне", an adjective, or other polite filler.
-    explicit_image_request = _detect_image_generation_request(low)
-    explicit_portrait_request = _detect_explicit_portrait_generation_request(low)
-    if (explicit_image_request or explicit_portrait_request) and "image" not in result:
+    explicit_image_request = False if ui_instruction_request else _detect_image_generation_request(low)
+    portrait_request = False if ui_instruction_request else _detect_portrait_request(low)
+    if (explicit_image_request or portrait_request) and "image" not in result:
         result.append("image")
+    explicit_link_request = _detect_link_request(low)
+    if explicit_link_request and "link" not in result:
+        result.append("link")
     if explicit_image_request:
         # The requested output is the picture itself. Do not also classify
         # words describing the picture (e.g. "картинку со схемой") as a
-        # separate diagram, graph, formula, or table artifact.
-        result = [kind for kind in result if kind not in {"diagram", "graph", "formula", "table"}]
+        # separate schematic artifact. A scheme named before "на картинке"
+        # does not enter this branch and keeps the diagram route.
+        result = [kind for kind in result if kind != "diagram"]
 
     # Catch compound/hyphenated programming requests such as "Python-код" even when
     # the exact phrase is absent from the phrase table. A code noun alone is not enough.
@@ -494,13 +1089,13 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Common compound requests say "build a table and graph" only once. Recognize
     # the chart noun together with an explicit construction/visualization verb.
     has_graph_noun = bool(re.search(
-        r"\b(?:graph|chart|plot|график|графика|графики|графиков)\b|(?:столбчат\w*|линейн\w*)\s+(?:диаграмм\w*|график\w*)|\bbar\s+chart\b",
+        r"\b(?:graph|chart|plot)\b|график\w*|(?:столбчат\w*|линейн\w*)\s+(?:диаграмм\w*|график\w*)|\bbar\s+chart\b",
         low,
     ))
     has_graph_action = bool(re.search(
         # Stem matching catches inflected forms like "построим", "построила",
         # and polite/imperative variants without depending on exact endings.
-        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*)\b",
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*|пришл\w*|выдай\w*|вывед\w*|дай\w*|отобраз\w*|представ\w*|добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|редакт\w*|улучш\w*)\b",
         low,
     ))
     if has_graph_noun and has_graph_action and "graph" not in result:
@@ -510,16 +1105,47 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Treat an explicit create/build/show action plus 3D + visualization/scene/model
     # terminology as a graph artifact request, not as a text-only explanation.
     has_3d_marker = bool(re.search(
-        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|visuali[sz]ation)\b|тр[её]хмерн\w*)",
+        r"(?:\b3\s*[- ]?[dд]\b|\bthree[- ]dimensional\b|\b3d\s+(?:graph|plot|scene|model|visuali[sz]ation)\b|\b3д\b|в\s+3д|тр[её]хмерн\w*)",
         low,
     ))
     has_visual_noun = bool(re.search(
-        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|\bсцен\w*|\bмодел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*)",
+        r"(?:visuali[sz]ation|visualisation|visualization|3d[- ]?scene|3d[- ]?model|\bscene\b|\bmodel\b|визуализац\w*|сцен\w*|модел\w*|поверхност\w*|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|\bmesh(?:es)?\b|\bsphere(?:s)?\b|\bcube(?:s)?\b|\btriangle(?:s)?\b|\bfunnel(?:s)?\b|\bsurface\w*|\bplot\b|\bchart\b|\bgraph\b|график\w*|диаграмм\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|комет\w*|астероид\w*|гравитац\w*|орбит\w*|траектор\w*|пространственн\w*)",
         low,
     ))
     if has_3d_marker and has_graph_action and has_visual_noun and "graph" not in result:
         result.append("graph")
 
+    # Strong spatial-physics phrasing also implies a structured graph even when
+    # the user does not spell out "3D": e.g. a comet approaching Earth over time.
+    # Keep this narrow to explicit visualization verbs + spatial bodies + dynamics.
+    has_spatial_body = bool(re.search(
+        r"(?:юпитер\w*|сатурн\w*|земл\w*|марс\w*|планет\w*|спутник\w*|лу[нн]\w*|комет\w*|астероид\w*|звезд\w*|\bsatellites?\b|\bmoons?\b|\bplanets?\b|\bcomets?\b|\basteroids?\b|\bstars?\b|\bcelestial bodies\b)",
+        low,
+    ))
+    has_spatial_dynamics = bool(re.search(
+        r"(?:гравитац\w*|тяготен\w*|орбит\w*|траектор\w*|вращен\w*|приближа\w*|удаля\w*|лет\w*|движен\w*|пол[яе]\s+сил|гравитац\w*\s+пол[яе]|\bgravity\b|\borbit\w*|\btrajectory\w*|\bmoving\b|\bapproach\w*|\bmotion\b|\bfield lines\b)",
+        low,
+    ))
+    has_spatial_primitive = bool(re.search(
+        r"(?<![\w\u0080-\uffff])(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|сетк\w*|поверхност\w*|sphere\w*|cube\w*|cone\w*|cylinder\w*|torus|plane|mesh)(?![\w\u0080-\uffff])",
+        low,
+    ))
+    if has_graph_action and has_spatial_body and has_spatial_dynamics and not explicit_image_request and "graph" not in result:
+        result.append("graph")
+    elif has_graph_action and has_spatial_primitive and has_3d_marker and not explicit_image_request and "graph" not in result:
+        result.append("graph")
+    else:
+        image_or_photo_noun = bool(re.search(
+            r"(?:фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+            low,
+        ))
+        if has_graph_action and has_spatial_primitive and not explicit_image_request and not image_or_photo_noun and "graph" not in result:
+            # Asking to show a geometric primitive without mentioning a raster image
+            # is a structured spatial object request in April's adaptive visual layer.
+            result.append("graph")
+
+    if _is_image_discussion_without_new_visual_action(low):
+        result = [kind for kind in result if kind != "image"]
     if not result:
         result.append("text")
     elif "text" not in result:
@@ -530,11 +1156,14 @@ def _detect_requested_outputs(text: str) -> list[str]:
 def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
     """Add only high-confidence structured views implied by the user's task.
 
-    This never infers image generation, invented data, or external-source URLs.
+    Image output is inferred only by the object-aware request detector, never by a
+    generic style verb alone; this does not invent data or external-source URLs.
     """
     low = _text(text).lower().replace("ё", "е")
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     explicit_image_request = _detect_image_generation_request(low)
+    portrait_request = _detect_portrait_request(low)
+    structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
         r"\b(?:compare|comparison|compare\s+with|versus|vs\.?|differences?\s+between|pros\s+and\s+cons)\b"
@@ -547,10 +1176,35 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         low,
     ))
     mathematical_function = bool(re.search(
-        r"\b(?:function|exponential|exponent|equation|derivative|integral|sin|cos|tan|cot)\b"
-        r"|(?:функци\w*|экспонент\w*|уравнен\w*|производн\w*|интеграл\w*|синус\w*|косинус\w*|тангенс\w*|тригонометр\w*)",
+        r"\b(?:function|exponential|exponent|equation|derivative|integral|sin|cos|tan|cot|formula)\b"
+        r"|(?:функци\w*|экспонент\w*|уравнен\w*|производн\w*|интеграл\w*|синус\w*|косинус\w*|тангенс\w*|тригонометр\w*|формул\w*|теорем\w*)",
         low,
     ))
+    formula_cue = bool(re.search(
+        r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*|mass[- ]energy)", low
+    ))
+    application_cue = bool(re.search(
+        r"(?:пример\w*|где\s+примен\w*|применен\w*|использован\w*|област\w*\s+применен\w*|"
+        r"application\w*|use\s+cases?|used\s+in|examples?)", low
+    ))
+    appearance_cue = bool(re.search(
+        r"(?:как\s+(?:он|она|они)\s+выгляд\w*|как\s+выгляд\w*|внешност\w*|портрет\w*|"
+        r"what\s+(?:did|does)\s+.{0,60}\s+look\s+like|appearance|portrait)", low
+    ))
+
+    # Semantic contract: formula language requests a FormulaRenderer, applications/examples
+    # request a populated TableBlock, and an explicit appearance question requests an
+    # illustrative image. These cues are independent and cumulative, not exclusive.
+    if formula_cue and "formula" not in outputs:
+        outputs.append("formula")
+    if structured_visual_explanation and "diagram" not in outputs:
+        outputs.append("diagram")
+    if application_cue and "table" not in outputs:
+        outputs.append("table")
+    if appearance_cue and "image" not in outputs:
+        outputs.append("image")
+    if portrait_request and "image" not in outputs:
+        outputs.append("image")
 
     if comparison and "table" not in outputs:
         outputs.append("table")
@@ -563,114 +1217,79 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # inference, so "show the table" can never accidentally invoke Images 2.0.
     table_noun = r"(?:\btable\b|\bтаблиц\w*)"
     table_action = (
-        r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present)\b|"
+        r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present|print|output|export)\b|"
         r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|"
-        r"состав\w*|вывед\w*|представ\w*|нарис\w*)"
+        r"состав\w*|вывед\w*|вывел\w*|выдай\w*|выда\w*|распечат\w*|напечат\w*|"
+        r"представ\w*|нарис\w*|перечисл\w*|предостав\w*|выстав\w*|собер\w*|"
+        r"створи\w*|покажи|виведи\w*|надруку\w*|зроби\w*)"
     )
+    # Requests often contain an inflected table noun and an output verb in a
+    # different clause: "элементы в таблице, вывел каждый в своё окошко; выдай
+    # всю таблицу Менделеева". Check the full turn, not just exact phrase markers.
     table_request = bool(
-        re.search(table_action + r".{0,120}" + table_noun, low, flags=re.IGNORECASE | re.DOTALL)
-        or re.search(table_noun + r".{0,120}" + table_action, low, flags=re.IGNORECASE | re.DOTALL)
+        re.search(table_action + r".{0,100}" + table_noun, low, flags=re.IGNORECASE)
+        or re.search(table_noun + r".{0,100}" + table_action, low, flags=re.IGNORECASE)
     )
-    # Voice transcripts and compound turns often put the table noun and action
-    # in different clauses: "в таблице, вывел каждую ... выдай всю таблицу
-    # Менделеева". Treat the requested view as cumulative, not as plain text.
     table_grid_request = bool(re.search(
         r"(?:периодическ\w*.{0,80}таблиц\w*|таблиц\w*.{0,80}(?:менделеев\w*|периодическ\w*)|"
         r"(?:всю|полную|все\s+118|все\s+элемент\w*).{0,45}таблиц\w*|"
         r"таблиц\w*.{0,80}(?:ячейк\w*|окошк\w*|порядков\w+\s+номер\w*|атомн\w+\s+номер\w*)|"
         r"(?:show|display|list|print|give|provide|build|create).{0,60}(?:periodic\s+table)|"
         r"(?:full\s+periodic\s+table).{0,50}(?:table|elements))",
-        low, re.IGNORECASE | re.DOTALL,
+        low, re.IGNORECASE,
     ))
     if (table_request or table_grid_request) and "table" not in outputs:
         outputs.append("table")
 
-    # Semantic visual policy: generic drawing verbs do not imply raster image
-    # generation. Formulae, geometry, diagrams, plots and 3D constructions use
-    # typed renderers; Images Generator is reserved for explicit picture/photo/
-    # illustration wording or unmistakable artistic/photorealistic intent.
+    # Semantic drawing policy: ordinary requests to draw/create/show a picture
+    # go to Images Generator. Diagram is reserved for explicit schematic,
+    # blueprint, technical drawing, or measured-drawing intent. Graphs remain
+    # a separate mathematical/data visualization route.
     visual_action = bool(re.search(
-        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|add|place|put|remove|replace|"
-        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
+        r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
+        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
         low,
     ))
-    # Geometry, measured figures and mathematical constructions are structured
-    # diagrams by default. This is intentionally independent of the renderer:
-    # the SceneContract still decides how the concrete diagram payload is shown.
     explicit_diagram_intent = bool(re.search(
-        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart|"
-        r"geometry|geometric figure|triangle|square|rectangle|circle|point|segment|angle|polygon|"
-        r"radius|diameter|perimeter|area|dimension|dimensions|measurement|vector|chessboard|chess board|grid|"
-        r"sphere|cube|pyramid|cone|cylinder)\b|"
-        r"диаграмм\w*|схем\w*|чертеж\w*|чертёж\w*|креслен\w*|блок[- ]схем\w*|"
-        r"геометр\w*|(?:математич\w*|геометрическ\w*)\s+фигур\w*|точк\w*|отрез\w*|"
-        r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|трапец\w*|многоугольн\w*|"
-        r"окружност\w*|круг\w*|эллипс\w*|сфер\w*|шар\w*|куб\w*|пирамид\w*|конус\w*|цилиндр\w*|угол\w*|вектор\w*|координат\w*|"
-        r"сторон\w*|радиус\w*|диаметр\w*|периметр\w*|площад\w*|размер\w*|"
-        r"измерен\w*|черт[её]ж\w*|стрелк\w*|размерн\w*\s+лини\w*|"
-        r"шахматн\w*\s+доск\w*|электрическ\w*\s+цеп\w*|сетка\w*|контур\w*)",
+        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart)\b|"
+        r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
         low,
     ))
     explicit_graph_intent = bool(re.search(
-        r"(?:\b(?:graph|chart|plot|3d graph|curve|surface plot)\b|график\w*|график\s+функци\w*|"
-        r"парабол\w*|гипербол\w*|(?:волна|волн\w*|\bwave\b|\bwaves\b)(?:\s+(?:график\w*|функци\w*|поверхност\w*|эффект\w*))?|"
-        r"волнов\w*\s+(?:график\w*|функци\w*|поверхност\w*)|"
-        r"поверхност\w*\s+(?:график\w*|функци\w*|визуализац\w*)|"
+        r"(?:\b(?:graph|chart|plot|3d graph)\b|график\w*|график\s+функци\w*|"
         r"постро\w*\s+(?:график|поверхност))",
         low,
     ))
-    visual_explanation_intent = bool(re.search(
-        r"(?:наглядн\w*|с\s+помощью\s+(?:стрелок|фигур|схем)|стрелк\w*|"
-        r"визуальн\w*\s+объясн|объясни\w*.{0,35}(?:схем\w*|диаграмм\w*|фигур\w*))",
-        low,
-    ))
-    if (visual_action and explicit_diagram_intent or visual_explanation_intent) and not explicit_image_request and "diagram" not in outputs and "graph" not in outputs:
+    if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
-
-    # A formula/equation is a typed mathematical object even when the user says
-    # "draw/show it" rather than "write the formula". Keep it out of Images 2.0.
-    formula_noun = bool(re.search(r"(?:\bformula\b|\bequation\b|формул\w*|уравнен\w*)", low, re.I))
-    formula_action = bool(re.search(
-        r"(?:\b(?:write|show|draw|display|render|derive|solve|give|present)\w*\b|"
-        r"напиш\w*|покаж\w*|нарис\w*|гарис\w*|запиш\w*|вывед\w*|получ\w*|реш\w*|представ\w*|отобраз\w*)",
-        low, re.I,
-    ))
-    if formula_noun and formula_action and not explicit_image_request and "formula" not in outputs:
-        outputs.append("formula")
-
-    if visual_action and explicit_graph_intent and not explicit_image_request and "graph" not in outputs:
-        outputs.append("graph")
-
-    # A generic visual verb defaults to a structured diagram, not raster image
-    # generation. Raster generation requires an explicit image/photo request or
-    # clear artwork/photorealism intent; that intent remains compatible with the
-    # explicit-image branch below.
-    artistic_intent = bool(re.search(
-        r"(?:photorealistic|photo[- ]realistic|oil painting|watercolor|watercolour|"
-        r"digital painting|concept art|anime style|comic style|poster|album cover|"
-        r"фотореалист\w*|акварел\w*|маслян\w*\s+живопис\w*|"
-        r"цифров\w*\s+живопис\w*|концепт[- ]арт|стил\w*\s+аниме|"
-        r"комиксн\w*\s+стил\w*|постер|обложк\w*|селфи|аватар\w*|лиц\w*|"
-        r"ui\s+mockup|app\s+mockup|interface\s+design|user interface|screen design|smartphone mockup|"
-        r"макет\w*\s+(?:интерфейс\w*|телефон\w*)|интерфейс\w*\s+приложен\w*|дизайн\w*\s+телефон\w*|"
-        r"\b(?:cat|kitten|dog|puppy|person|portrait|landscape|sunset|forest|city|spacecraft|car|bird|flower|animal|building|house|planet|selfie|avatar|face|smartphone)\b|"
-        r"кот\w*|собак\w*|портрет\w*|пейзаж\w*|закат\w*|лес\w*|город\w*|"
-        r"космическ\w*\s+корабл\w*|автомобил\w*|машин\w*|птиц\w*|цвет\w*|"
-        r"персонаж\w*|животн\w*|здани\w*|дом\w*|планет\w*)",
-        low, re.I,
-    ))
     if (
         visual_action
         and not explicit_diagram_intent
         and not explicit_graph_intent
         and "image" not in outputs
         and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
+        and not _is_ui_instruction_request(low)
+        and not structured_visual_explanation
+        and _has_drawable_subject(low)
     ):
-        outputs.append("image" if artistic_intent else "diagram")
+        outputs.append("image")
     if explicit_image_request:
-        outputs = [kind for kind in outputs if kind not in {"diagram", "graph", "formula", "table"}]
+        outputs = [kind for kind in outputs if kind != "diagram"]
         if "image" not in outputs:
             outputs.append("image")
+
+    # A request for pictures/illustrations of experiments asks for a separate,
+    # explanatory schematic. It must not be swallowed by the final portrait/image.
+    experiment_visuals = bool(re.search(
+        r"(?:(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*)"
+        r".{0,48}(?:опыт\w*|эксперимент\w*|experiment\w*)|"
+        r"(?:опыт\w*|эксперимент\w*|experiment\w*).{0,48}"
+        r"(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*))",
+        low, re.IGNORECASE,
+    ))
+    if experiment_visuals and "diagram" not in outputs:
+        outputs.append("diagram")
+
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
     if mathematical_function and bool(re.search(
@@ -679,6 +1298,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     )) and "formula" not in outputs and "graph" not in outputs:
         outputs.append("formula")
 
+    if _is_image_discussion_without_new_visual_action(low):
+        outputs = [kind for kind in outputs if kind != "image"]
     if "text" not in outputs:
         outputs.insert(0, "text")
     return list(dict.fromkeys(outputs))
@@ -720,6 +1341,24 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         r"распределен\w*|дол\w*\s+категори\w*)",
         low,
     ))
+    spatial_scene_action = bool(re.search(
+        r"(?:\b(?:show|draw|build|create|visuali[sz]e|render|display)\b|покаж\w*|нарис\w*|постро\w*|созда\w*|визуализир\w*|отобраз\w*)",
+        low,
+    ))
+    spatial_scene_body = bool(re.search(
+        r"(?:юпитер\w*|сатурн\w*|земл\w*|марс\w*|планет\w*|спутник\w*|лу[нн]\w*|комет\w*|астероид\w*|звезд\w*|\bjupiter\b|\bsaturn\b|\bearth\b|\bmars\b|\bplanet\w*\b|\bsatellite\w*\b|\bmoon\b|\bcomet\w*\b|\basteroid\w*\b)",
+        low,
+    ))
+    spatial_scene_dynamics = bool(re.search(
+        r"(?:гравитац\w*|тяготен\w*|орбит\w*|траектор\w*|вращен\w*|приближа\w*|удаля\w*|лет\w*|движен\w*|пол[яе]\s+сил|\bgravity\b|\borbit\w*|\btrajectory\w*|\bmoving\b|\bapproach\w*|\bmotion\b|\bfield lines\b|за\s+сколько\s+времени)",
+        low,
+    ))
+    spatial_primitive_request = spatial_scene_action and bool(re.search(
+        r"(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|\bsphere\w*\b|\bcube\w*\b|\bcone\w*\b|\bcylinder\w*\b|\btorus\b|\bplane\b|\bmesh\b)",
+        low,
+    ))
+    inferred_spatial_scene = (spatial_scene_action and spatial_scene_body and spatial_scene_dynamics) or spatial_primitive_request
+
     structured_3d_signal = bool(re.search(
         r"(?:\bxyz\b|координат\w*\s*(?:x\s*[,; ]+\s*y\s*[,; ]+\s*z|x\s*y\s*z)|"
         r"\bz\s*=\s*f\s*\(\s*x\s*[,;]\s*y\s*\)|"
@@ -730,8 +1369,8 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         low,
     ))
 
-    if explicit_3d:
-        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bpyramid\w*\b|\bcone\w*\b|\bcylinder\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|шар\w*|куб\w*|пирамид\w*|конус\w*|цилиндр\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект)", low):
+    if explicit_3d or inferred_spatial_scene:
+        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|сателлит\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|сатурн\w*|земл\w*|марс\w*|комет\w*|гравитац\w*|орбит\w*|траектор\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект|\bjupiter\b|\bsatellite\w*\b|\bcomet\w*\b|\bgravity\b|\borbit\w*|\btrajectory\w*\b)", low):
             representation = "scene3d"
         elif re.search(r"(?:\bscatter\b|\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)", low):
             representation = "scatter3d"
@@ -741,14 +1380,14 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
             representation = "surface3d"
         fallback = "bar" if explicit_bar or categorical_comparison else "line"
         return {
-            "mode": "explicit_3d",
+            "mode": "explicit_3d" if explicit_3d else "inferred_spatial_scene",
             "preferred_representation": representation,
             "fallback_representation": fallback,
             "allowed_2d_representations": ["line", "bar"],
-            "allow_3d_for_explicit_request": True,
+            "allow_3d_for_explicit_request": bool(explicit_3d),
             "allow_3d_when_structured_data_exists": True,
             "require_real_third_dimension": True,
-            "decision_reason": "explicit_3d_request",
+            "decision_reason": "explicit_3d_request" if explicit_3d else "spatial_physics_scene_request",
         }
 
     if structured_3d_signal:
@@ -842,8 +1481,8 @@ def _detect_task(
 ) -> str:
     low = _text(text).lower()
     if wants_image:
-        # The requested image supplements a compound answer; it must not replace
-        # an explanation, code sample, table or diagram with an image-only response.
+        # Image output is additive in a compound request. Do not let one photo
+        # request replace a biography/explanation/table/diagram with an image-only task.
         asks_for_explanation = bool(re.search(
             r"(?:расскаж\w*|объясн\w*|напиш\w*|опиш\w*|привед\w*|перечисл\w*|сравн\w*|разбер\w*|проанализир\w*|"
             r"\btell\b|\bexplain\b|\bwrite\b|\bdescribe\b|\blist\b|\bcompare\b|\banaly[sz]e\b)",
@@ -948,7 +1587,7 @@ def _is_attachment_tutorial_request(text: Any) -> bool:
 _SITE_NAVIGATION_REQUEST_RE = re.compile(
     r"(?:\bгде\b.{0,90}\b(?:вход|кнопк|ссылк|раздел|страниц|находится|расположен|открыть|посмотреть|найти|зайти)\b|"
     r"\bкуда\b.{0,45}\b(?:зайти|нажать|перейти|открыть)\b|"
-    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть)\b|"
+    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть|добавить|прикрепить|загрузить|выбрать)\b|"
     r"покажи.{0,55}(?:куда|путь|интерфейс|меню|на\s+картинк|на\s+изображен|по\s+шагам)|"
     r"проведи.{0,55}(?:интерфейс|сайт|раздел)|"
     r"(?:where\s+(?:is|can\s+i|do\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|show\s+me\s+where)"
@@ -958,7 +1597,7 @@ _SITE_NAVIGATION_REQUEST_RE = re.compile(
 _SITE_NAVIGATION_TARGET_RE = re.compile(
     r"(?:сообществ|community|истори\w*\s+диалог|saved\s+dialogues?|history|"
     r"кабинет|профил|настройк|settings|account|help\s+center|справк|support|поддержк|"
-    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service|"
+    r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service|чат|пространств|"
     r"отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*|feedback|report\s+(?:button|response|answer)|thank(?:s|ing)?\s+button)",
     re.IGNORECASE,
 )
@@ -992,7 +1631,7 @@ def _semantic_normalize(text: Any) -> tuple[str, list[str]]:
 
 _SEMANTIC_ROOTS = {
     "dialogue_action": ("говор", "обсужд", "разговар", "разговор", "обща", "общен", "перепис", "упомин", "затраг", "диалог", "реч", "dialogue", "conversation", "discuss", "talk", "talked", "talking", "chat", "communicat", "speech"),
-    "recall_action": ("напом", "вспом", "припомн", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
+    "recall_action": ("напом", "вспом", "припомн", "помни", "восстанов", "remember", "recall", "remind", "summariz", "перескаж", "перечисл"),
     "decision_action": ("решил", "решен", "вывод", "итог", "договор", "результат", "concluded", "decided", "decision", "outcome"),
     "plan_action": ("план", "заплан", "собира", "намер", "предусмотр", "planned", "plan", "schedule"),
     "continuation_action": ("продолж", "продовж", "вернись", "повер", "возвращ", "останов", "resume", "continue", "continu", "sigamos", "volvamos", "fortsetz", "weiter", "poursuiv", "repren", "riprend", "kontynu", "wroc", "wróc", "voltem", "doorgaan", "verder", "herneem", "return to"),
@@ -1004,7 +1643,7 @@ _SEMANTIC_ROOTS = {
 
 _SEMANTIC_FUZZY_FORMS = {
     "dialogue_action": ("говорили", "говорил", "обсуждали", "обсудили", "разговаривали", "общались", "переписывались", "общение", "разговор", "discussed", "discussion", "talked", "talking", "conversation", "communicate"),
-    "recall_action": ("напомни", "напомнить", "вспомни", "вспомнить", "припомни", "восстанови", "summarize", "remember", "recall"),
+    "recall_action": ("напомни", "напомнить", "вспомни", "вспомнить", "припомни", "помнишь", "помниш", "помнить", "вспоминаешь", "восстанови", "summarize", "remember", "recall"),
     "decision_action": ("решили", "решились", "выводы", "итоги", "договорились", "результаты", "decided", "concluded"),
     "plan_action": ("планировали", "запланировали", "собирались", "намеревались", "planned", "schedule"),
     "past_reference": ("предыдущий", "предыдущем", "прошлый", "прошлом", "раньше", "yesterday", "previous", "earlier"),
@@ -1052,6 +1691,15 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "решил", "решила", "решили", "научно", "пошагово", "решать",
     "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
+    # Request-management verbs are not topic entities. Excluding their common
+    # inflections prevents short clauses like “можешь перенести эти данные?”
+    # from becoming a fake topic named “можес/перенес”.
+    "давай", "можешь", "можес", "может", "могу", "можно", "можете", "сможешь",
+    "работать", "работаем", "работай", "перенеси", "перенести", "перенос",
+    "окей", "okay", "пожалуйста", "please", "хочу", "хочешь", "нужно", "надо",
+    "вчера", "сегодня", "позавчера", "утром", "вечером", "ночью", "днем", "днём",
+    "час", "часа", "часов", "минут", "неделю", "недели", "месяце", "годе",
+    "последних", "последние", "раньше", "недавно", "сегодняшний", "октября", "января",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте",
     "сделай", "сделать", "сделайте", "создай", "создать", "исправь", "исправить",
@@ -1070,6 +1718,8 @@ _CONTEXT_SIGNATURE_GENERIC = {
     "fix", "correct", "data", "value", "values", "chart", "graph", "table",
     "formula", "price", "cost", "growth", "fall", "day", "days", "week", "weeks",
     "month", "months", "year", "years", "uah", "uah.", "usd", "dollar", "dollars",
+    # Short English feedback/questions are discourse markers, not topic names.
+    "what", "mean", "hate", "nice", "good", "okay", "thanks", "thank", "agree",
 }
 _CONTEXT_SIGNATURE_REFERENCES = {
     "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
@@ -1092,9 +1742,23 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "работ", "перенес", "перенос", "можеш", "может", "могу", "давай",
+    "хотел", "хочет", "хочеш", "сможет", "сможеш", "попрос", "пожалуй",
+    "вчера", "сегодня", "позавчера", "утром", "вечером", "ночью", "недавно", "последн",
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
     "доказал", "обосновал", "считал", "называл", "формул", "график", "таблиц",
     "диаграмм", "уравнен", "данн", "значен",
+    # Short interpersonal reactions must not be misread as named topic entities.
+    "спасибо", "спасиб", "благодар", "классн", "крут", "отлич", "прекрас", "здоров",
+    "молодц", "понят", "непон", "понял", "поняла", "соглас", "правил", "верн", "точн",
+    "именно", "ладн", "опять", "ужас", "нрав", "бесит", "раздраж", "разочар",
+    "передел", "перепиш", "исправ", "улучш", "поправ", "отнюд", "ошиб", "мимо",
+    "получ", "виду", "смысл", "лучше",
+    # English conversational reactions are not external topic entities.
+    "thank", "thanks", "appreci", "great", "brilliant", "nice", "perfect",
+    "wonderful", "excellent", "awesome", "good", "wrong", "misunderstood",
+    "understand", "disagree", "agree", "hate", "frustrat", "annoy", "irritat",
+    "revise", "rewrite", "improve", "redo", "fix", "correct", "mean", "what",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -1142,6 +1806,13 @@ def _context_signature(text: Any) -> dict[str, Any]:
             continue
         if len(token) < 4:
             continue
+        # Normalize common inflected/topic-level variants before short stemming.
+        token = {
+            "стихи": "стих", "стиха": "стих", "стихом": "стих", "стихе": "стих",
+            "стихотворение": "стих", "стихотворения": "стих", "стихотворению": "стих",
+            "стихотворением": "стих", "стихотворении": "стих", "стихотворений": "стих",
+            "поэтический": "поэзия", "поэтическая": "поэзия", "поэтическое": "поэзия",
+        }.get(token, token)
         # A small morphological stem keeps inflected Russian nouns aligned.
         subjects.add(token[:5] if len(token) >= 5 else token)
     reference_hits = token_set & _CONTEXT_SIGNATURE_REFERENCES
@@ -1168,6 +1839,67 @@ def _context_signature(text: Any) -> dict[str, Any]:
     }
 
 
+def _has_explicit_topic_switch(text: str) -> bool:
+    """Recognize explicit user-directed branch changes without relying on topic nouns alone."""
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    explicit_switch = re.search(
+        r"(?:^|[.!?;:\n]\s*)(?:новая\s+тема|другая\s+тема|другой\s+вопрос|"
+        r"перейд[её]м\s+к(?:\s+новой\s+теме)?|"
+        r"давай(?:те)?\s+(?:сменим|сменить)\s+тему|"
+        r"switch\s+to\s+(?:a\s+)?new\s+topic|new\s+topic|"
+        r"let['’]?s\s+change\s+the\s+topic)(?:\b|\s*[:—-])",
+        low,
+        flags=re.IGNORECASE,
+    )
+    if explicit_switch:
+        return True
+    # “Теперь про X” is a branch change when X is explicitly named. Do not
+    # interpret an ordinary continuation preface (“а теперь объясни это”) as one.
+    return bool(re.search(
+        r"(?:^|[.!?;:]\s*)теперь\s+(?:о|про|об|обо)\s+"
+        r"(?!него\b|неё\b|нее\b|ней\b|ним\b|нем\b|нём\b|них\b|"
+        r"мне\b|нас\b|это\b|этого\b|этой\b|этот\b|этом\b|эту\b|эти\b|"
+        r"him\b|her\b|them\b|it\b|this\b|that\b|those\b|these\b)[а-яa-z0-9]",
+        low,
+        flags=re.IGNORECASE,
+    ))
+
+
+
+def _looks_like_explicit_topic_closure(text: str) -> bool:
+    """Classify a clear topic closure in the interpretation layer.
+
+    Search/state code consumes this semantic feature instead of making its own
+    keyword-based routing decision. A concrete fresh task in the same utterance
+    remains actionable and is not treated as a closure-only message.
+    """
+    value = _text(text).lower().replace("ё", "е")
+    if not value:
+        return False
+    closure = bool(re.search(
+        r"(?:"
+        r"\b(?:эта\s+)?тема\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+        r"\b(?:эту\s+|данную\s+)?тему\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+        r"\b(?:всё|все)\s*,?\s*(?:эту\s+)?тему\s+(?:закрыли|закрываем|завершили|закончим)\b|"
+        r"\b(?:на\s+этом\s+)?(?:всё|все)\s*[.!…]*$|"
+        r"\b(?:давай(?:те)?\s+)?(?:на\s+этом\s+)?(?:остановимся|закончим|прекратим)\b|"
+        r"\b(?:больше\s+не\s+)?(?:будем\s+)?(?:продолжать|развивать)\s+(?:эту\s+)?тему\b|"
+        r"\btopic\s+is\s+closed\b|\b(?:let'?s\s+)?stop\s+here\b|\bend\s+this\s+topic\b"
+        r")",
+        value, re.IGNORECASE,
+    ))
+    if not closure:
+        return False
+    fresh_action = bool(re.search(
+        r"\b(?:построй\w*|созда\w*|сделай\w*|нарис\w*|исправ\w*|проверь\w*|"
+        r"просмотр\w*|изучи\w*|проанализируй|напиши\w*|разработ\w*|найди\w*|"
+        r"build\w*|create\w*|draw\w*|fix\w*|review\w*|analy[sz]e\w*|write\w*)\b",
+        value, re.IGNORECASE,
+    ))
+    return not fresh_action
+
 def _has_explicit_topic_introduction(text: str) -> bool:
     """Return true when a request explicitly introduces a subject instead of only referring back.
 
@@ -1176,6 +1908,8 @@ def _has_explicit_topic_introduction(text: str) -> bool:
     Pure anaphoric phrases such as “tell me about him/that” remain continuations.
     """
     low = _text(text).lower().replace("ё", "е")
+    if _has_explicit_topic_switch(low):
+        return True
     pattern = re.compile(
         r"\b(?:рас{1,2}каж\w*|рас{1,2}каз\w*|рассказать|напиши(?:те)?|написать|опиши(?:те)?|описать|"
         r"объясни(?:те)?|объяснить|изложи(?:те)?|представь(?:те)?|дай|покажи(?:те)?|"
@@ -1216,26 +1950,6 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-
-    # A message can name its subject and still be an explicit return to an older
-    # branch. Keep such a request whole: splitting "continue the math overview,
-    # where did we stop, and expand it" into separate clauses can discard the
-    # named topic before memory retrieval reaches the Provider.
-    explicit_prior_topic_pointer = bool(re.search(
-        r"\b(?:на\s+ч[её]м\s+мы\s+остановил\w*|где\s+мы\s+остановил\w*|"
-        r"к\s+чему\s+мы\s+пришл\w*|как\s+мы\s+обсуждал\w*|"
-        r"что\s+мы\s+обсуждал\w*|как\s+раньше\s+обсуждал\w*|"
-        r"вернись\s+к\s+(?:предыдущ\w*|прежн\w*|обсужд\w*)|"
-        r"как\s+(?:ты\s+)?хотел\w*,?\s+чтобы\s+мы\s+продолжил\w*)\b",
-        low,
-    ))
-    explicit_resume_action = bool(re.search(
-        r"\b(?:продолж\w*|развей\w*|разверни\w*|возобнови\w*|вернись\s+к)\b",
-        low,
-    ))
-    if explicit_prior_topic_pointer and explicit_resume_action:
-        return True
-
     patterns = (
         r"\bкак\s+(?:ты|вы)\s+(?:решил\w*|посчитал\w*|вычислил\w*|рассчитал\w*|"
         r"получил\w*|вывел\w*|доказал\w*|обосновал\w*)\b",
@@ -1267,6 +1981,49 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     return bool(qualifier_only and len(tokens) <= 5)
 
 
+def _looks_like_selection_followup(text: str) -> bool:
+    """Flag selection language for State Manager validation against the latest answer.
+
+    This is a candidate signal, not proof of continuation. State Manager must match
+    it against the latest same-dialog answer/options before selecting that branch.
+    """
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low or _has_explicit_topic_switch(low):
+        return False
+    return bool(re.search(
+        r"\b(?:выбери(?:те)?|выбирай(?:те)?|подбери(?:те)?|"
+        r"остановись\s+на|бери|возьми|pick|choose|select|go\s+with)\b",
+        low, flags=re.IGNORECASE,
+    ))
+
+
+def _looks_like_next_step_followup(text: str) -> bool:
+    """Recognise compact next-step questions as dialogue follow-ups, not new subjects.
+
+    This is intentionally limited to short, subjectless wording. A self-contained
+    question that names a separate subject still follows the regular NEW path.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not low or len(tokens) > 9:
+        return False
+    pattern = (
+        r"(?:(?:ну|хорошо|ладно|окей|ок|давай|тогда|так)\s+)?"
+        r"(?:(?:а|и)\s+)?"
+        r"(?:"
+        r"следующ\w*\s+шаг"
+        r"|какой\s+(?:будет\s+)?следующ\w*\s+шаг"
+        r"|что\s+(?:нам\s+)?делать\s+дальше"
+        r"|что\s+(?:будет\s+)?дальше"
+        r"|what\s+(?:is\s+)?next(?:\s+step)?"
+        r"|what\s+is\s+the\s+next\s+step"
+        r"|what'?s\s+(?:the\s+)?next\s+step"
+        r"|what\s+comes\s+next"
+        r"|next\s+step"
+        r")"
+    )
+    return bool(re.fullmatch(pattern, low))
+
+
 def _looks_like_context_dependent_question(
     text: str,
     *,
@@ -1286,6 +2043,28 @@ def _looks_like_context_dependent_question(
     if not tokens:
         return False
     token_set = set(tokens)
+    # Requests for a missing deliverable often omit its subject because it is
+    # obvious from the immediately previous answer: “where are the formulas/examples?”,
+    # “and the table?”, “what about the graph?”. Treat the missing subject as a
+    # contextual reference when the phrasing is short and does not introduce a new
+    # topic. The State Manager still has to find a compatible source.
+    output_followup = bool(re.search(
+        r"\b(?:формул\w*|пример\w*|таблиц\w*|график\w*|диаграмм\w*|"
+        r"схем\w*|расчет\w*|расчёт\w*|доказательств\w*|вычислен\w*|"
+        r"картинк\w*|изображен\w*|код\w*|файл\w*|результат\w*|"
+        r"formula\w*|example\w*|table\w*|graph\w*|chart\w*|diagram\w*|"
+        r"calculation\w*|proof\w*|image\w*|code\w*|result\w*)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    contextual_opening = bool(re.match(
+        r"^\s*(?:(?:ну|ладно|хорошо|ок(?:ей)?|тогда|так|а|и|давай)\s+)*"
+        r"(?:где|как|что|какие|какой|какая|почему|зачем|а|и)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    if len(tokens) <= 10 and output_followup and contextual_opening:
+        return True
     anaphoric_terms = {
         "он", "она", "оно", "они", "его", "ее", "ему", "ей", "им", "их",
         "нее", "него", "ней", "ним", "них", "это", "этот", "эта", "эту",
@@ -1293,8 +2072,12 @@ def _looks_like_context_dependent_question(
         "той", "тех", "this", "that", "these", "those", "it", "he", "she",
         "they", "him", "her", "them", "its", "same", "former", "latter",
     }
-    # Bound the signal to ordinary follow-up sized questions; a long request with a
-    # pronoun and a new explicit subject should be resolved by normal decomposition.
+    # Pronouns in a follow-up sized question normally need an antecedent. Do not
+    # veto this relation merely because the sentence also contains a descriptive
+    # noun (for example, “Which law was he the author of?”): that noun may be the
+    # requested property, while the pronoun still refers to the active subject.
+    # State Manager validates the antecedent against the actual latest turn and
+    # checks subject conflicts; this feature alone never chooses a historical row.
     if token_set & anaphoric_terms and len(tokens) <= 18:
         return True
     if len(tokens) <= 5:
@@ -1302,6 +2085,213 @@ def _looks_like_context_dependent_question(
         subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
         return not bool(subjects)
     return False
+
+
+
+def _looks_like_topic_reference_fragment(
+    text: str,
+    *,
+    explicit_topic_introduction: bool = False,
+) -> bool:
+    """Recognise a short topic pointer that should search memory before treating it as new.
+
+    Examples include “про стих”, “я про Premium”, and “я имел в виду тот график”.
+    A concrete instruction such as “расскажи про Эйнштейна” is not a fragment and
+    keeps the normal new-information path. The state manager still decides whether
+    a real matching memory entry exists; this helper only asks it to look.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not low or len(tokens) > 10 or explicit_topic_introduction:
+        return False
+    if re.fullmatch(r"(?:привет|здравствуй\w*|здравствуйте|доброе утро|добрый день|добрый вечер|hello|hi|hey|thanks|thank you)", low):
+        return False
+    if _detect_requested_outputs(text) != ["text"]:
+        return False
+    # Requests with an independent action are tasks, not bare topic pointers.
+    action = re.search(
+        r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
+        r"покажи|построй|создай|сделай|вычисли|сравни|найди|проверь|проанализируй|"
+        r"продолжи|продолжай|продолжим|перечисли|нарисуй|развивай|раскрой|разверни|"
+        r"углуби|расширь|дополни|рассказывай|давай|tell|describe|explain|write|show|build|create|"
+        r"make|calculate|compare|find|check|analyze|continue|develop|expand|elaborate)\b",
+        low,
+    )
+    # A self-correction is a memory pointer even when it names the intended topic.
+    correction_pointer = bool(re.search(
+        r"\b(?:я\s+)?(?:имел|имела|имели)\s+в\s+виду\b|"
+        r"\bя\s+говорю\s+про\b|\bя\s+именно\s+про\b|"
+        r"\bне\s+это\s+имел\w*\s+в\s+виду\b",
+        low,
+    ))
+    if correction_pointer:
+        return True
+    if action:
+        return False
+    pointer = re.match(
+        r"^(?:(?:а|и|ну|так|нет|не)\s+)?(?:(?:я|мы)\s+)?(?:именно\s+)?"
+        r"(?:про|об|обо|насч[её]т|относительно|по\s+поводу|about|regarding)\s+\S+",
+        low,
+    )
+    if pointer:
+        return True
+
+    # A terse noun/name (for example, “Эйнштейна”) can be the user's answer to a
+    # clarification or a pointer back to a previously discussed topic. Search for
+    # an actual matching topic first; if none exists, the State Manager must leave
+    # the request as NEW instead of attaching it to an unrelated hot branch.
+    bare_topic_noise = {
+        "а", "и", "ну", "так", "да", "нет", "ок", "окей", "спасибо", "пожалуйста",
+        "дальше", "далее", "продолжай", "продолжим", "еще", "ещё", "подробнее",
+        "что", "чем", "где", "когда", "почему", "как", "зачем", "кто", "какой", "какая",
+        "тема", "темы", "тему", "вопрос", "вопросы", "расскажи", "объясни", "покажи",
+        "сделай", "создай", "найди", "проверь", "help", "thanks", "please", "continue", "more",
+        "интересно", "интересного", "интереснее", "новое", "новый", "привет", "здравствуйте",
+        "развивай", "раскрой", "разверни", "углуби", "расширь", "дополни", "углубимся",
+        "рассказывай", "говори", "побольше", "more interesting", "hi", "hey", "hello",
+    }
+    artifact_words = bool(re.search(
+        r"\b(?:формул\w*|пример\w*|таблиц\w*|график\w*|диаграмм\w*|"
+        r"formula\w*|example\w*|table\w*|graph\w*|chart\w*)\b", low
+    ))
+    artifact_question = bool(artifact_words and re.match(
+        r"^\s*(?:(?:ну|ладно|хорошо|ок(?:ей)?|тогда|так|а|и|давай)\s+)*"
+        r"(?:где|как|что|какие|какой|какая|почему|зачем|а|и)\b", low
+    ))
+    if len(tokens) <= 4 and not re.search(r"[?!？]", _text(text)) and not action and not artifact_question:
+        signature = _context_signature(text)
+        subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
+        meaningful_tokens = {
+            token for token in tokens
+            if token not in bare_topic_noise
+            and not token.startswith(("интерес", "привет", "здравств", "развивай", "раскрой", "разверни", "углуб", "расшир", "дополни"))
+        }
+        if subjects and meaningful_tokens:
+            return True
+    return False
+
+def _detect_previous_answer_recheck(text: str) -> bool:
+    """Detect a challenge/check of April's earlier response, including long turns.
+
+    This is intentionally narrower than ordinary disagreement detection: it needs
+    a prior-answer/action reference plus a challenge, verification or explanation
+    cue, so a self-contained question on a new subject does not become a repair.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    assistant_action = r"(?:назвал\w*|назвала\w*|назвали|сказал\w*|сказала\w*|сказали|ответил\w*|ответила\w*|ответили|написал\w*|написала\w*|написали|выбрал\w*|выбрала\w*|выбрали|решил\w*|решила\w*|решили|сделал\w*|сделала\w*|сделали|предложил\w*|предложила\w*|выдал\w*|выдала\w*|назван\w*|ответ\w*|написан\w*|chosen|said|answered|wrote|picked|selected|did)"
+    challenge = r"(?:почему|зачем|как\s+так|должн\w*|следовал\w*|надо\s+было|нужно\s+было|вместо|хотя|ошиб\w*|неправил\w*|неверн\w*|проверь\w*|перепроверь\w*|сверь\w*|объясни\w*|поясни\w*|разбер\w*|проверь\s+что|why|how\s+come|should\s+have|instead|although|wrong|mistake|check|verify|explain|review)"
+
+    # Direct second-person reference to something April actually said/did.
+    direct_action = bool(re.search(
+        rf"\b(?:ты|вы|you)\s+(?:же\s+|ведь\s+|вообще\s+)?{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    direct_why = bool(re.search(
+        rf"\b(?:почему|зачем|how\s+come|why)\s+(?:ты|вы|you)\s+.{0,80}{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    assistant_mistake = bool(re.search(
+        r"\b(?:ты|вы|you)\s+(?:ошиб\w*|перепутал\w*|неправил\w*|неверн\w*|got\s+it\s+wrong|made\s+a\s+mistake)\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    verification_target = bool(re.search(
+        rf"\b(?:проверь\w*|перепроверь\w*|сверь\w*|проверь\s+еще\s+раз|check|verify|review)\b.{{0,100}}(?:что\s+)?(?:ты|вы|you)?\s*{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    prior_answer_pointer = bool(re.search(
+        r"(?:предыдущ\w*\s+ответ|прошл\w*\s+ответ|что\s+ты\s+(?:сказал\w*|сказала|написал\w*|написала|назвал\w*|назвала|ответил\w*|ответила)|"
+        r"то,?\s+что\s+ты\s+(?:сказал\w*|сказала|написал\w*|написала|назвал\w*|назвала|ответил\w*|ответила)|"
+        r"previous\s+answer|what\s+you\s+(?:said|wrote|answered|called|named|selected))",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    obligation_contrast = bool(re.search(
+        rf"\b(?:ты|вы|you)\s+(?:должн\w*|следовал\w*|should\s+have)\b.{{0,100}}(?:а\s+ты|но\s+ты|хотя|вместо|but\s+you|instead)\b.{{0,70}}{assistant_action}\b",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    cue = bool(re.search(challenge, low, flags=re.IGNORECASE))
+    # Asking for the value April just named/wrote is recall of the assistant's own
+    # output even without an explicit accusation or correction cue.
+    compact_value_recall = bool(re.search(
+        r"\b(?:какое|какой|какая|какую|что|which|what)\b.{0,70}"
+        r"\b(?:числ\w*|букв\w*|слов\w*|вариант\w*|номер\w*|ответ\w*|number|letter|word|option|answer)\b.{0,55}"
+        r"\b(?:ты|вы|you)\s+(?:назвал\w*|назвала|назвали|сказал\w*|сказала|сказали|"
+        r"написал\w*|написала|написали|ответил\w*|ответила|ответили|выбрал\w*|выбрала|выбрали)\b",
+        low, flags=re.IGNORECASE,
+    ))
+    direct_value_recall = bool(re.search(
+        r"\b(?:что\s+ты\s+(?:назвал\w*|сказал\w*|написал\w*|ответил\w*)|"
+        r"(?:какое|какой|какая|какую)\s+(?:именно\s+)?(?:числ\w*|букв\w*|слов\w*|номер\w*)\s+(?:ты|вы)\b)",
+        low, flags=re.IGNORECASE,
+    ))
+
+    return bool(
+        direct_why
+        or obligation_contrast
+        or assistant_mistake
+        or verification_target
+        or compact_value_recall
+        or direct_value_recall
+        or (prior_answer_pointer and cue)
+        or (direct_action and cue)
+    )
+
+
+def _is_repair_followup_clause(text: str) -> bool:
+    """Recognize a clause that continues a repair already established upstream."""
+    low = _text(text).lower().replace("ё", "е").strip(" \t\r\n,;:.-")
+    if not low:
+        return False
+    if _detect_previous_answer_recheck(low):
+        return True
+
+    # A connective must not turn a fully independent new task into a repair just
+    # because it begins with "то есть" or "объясни". Keep object-bearing commands
+    # only when their object clearly points back to the current exchange.
+    standalone_command = re.match(
+        r"^(?:(?:то\s+есть|ведь|а\s+значит|и\s+значит)\s*[,;:]?\s*)?"
+        r"(?:расскажи\w*|расскажите|опиши\w*|опишите|создай\w*|создайте|"
+        r"напиши\w*|напишите|покажи\w*|покажите|построй\w*|постройте|"
+        r"реши\w*|решите|объясни\w*|объясните|поясни\w*|поясните|разъясни\w*|"
+        r"проверь\w*|перепроверь\w*|сверь\w*|уточни\w*|дай\s+мне|tell\s+me\s+about|"
+        r"explain|clarify|verify|check|describe|create|write|show|solve|что\s+такое|what\s+is)"
+        r"\s+(?:(?:про|о|об|насчет|about|для)\s+)?([\w\u0080-\uffff-]+)",
+        low,
+        flags=re.IGNORECASE,
+    )
+    if standalone_command:
+        pointed_back = bool(re.search(
+            r"(?:\b(?:это|этот|эта|эту|этого|эти|тот|та|ту|предыдущ\w*|прошл\w*|"
+            r"ответ\w*|сказанн\w*|названн\w*|ошиб\w*|правил\w*|услов\w*|"
+            r"игр\w*|ход\w*|букв\w*|город\w*|задач\w*|формул\w*|уравнен\w*|"
+            r"график\w*|таблиц\w*|этот\s+текст|this|that|previous|last|answer|mistake|rule|move|letter|city|task|formula|equation)\b)",
+            low,
+            flags=re.IGNORECASE,
+        ))
+        if not pointed_back:
+            return False
+    if re.match(
+        r"^(?:ведь|то\s+есть|а\s+значит|и\s+значит|но\s+ведь|"
+        r"я\s+(?:что-то\s+)?(?:запутал\w*|не\s+понима\w*|не\s+понял\w*)|"
+        r"объясни\w*|поясни\w*|разъясни\w*|проверь\w*|перепроверь\w*|"
+        r"уточни\w*|разбер\w*|в\s+чем\s+ошиб\w*|в\s+ч[её]м\s+ошиб\w*|"
+        r"почему\s+так|как\s+так|why\s+is\s+that|explain\b|check\b|clarify\b)",
+        low,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    tokens = [t for t in re.findall(r"[\w\u0080-\uffff]+", low) if len(t) > 1]
+    return bool(
+        len(tokens) <= 4
+        and any(token.startswith(("объясни", "объясните", "поясни", "поясните", "разъясни", "проверь", "перепроверь", "уточни", "уточните", "explain", "check", "clarify")) for token in tokens)
+    )
 
 
 def _infer_dialogue_act_profile(
@@ -1312,114 +2302,195 @@ def _infer_dialogue_act_profile(
     answer_followup: bool,
     continuation_action: bool,
     explicit_topic_introduction: bool,
+    topic_reference_fragment: bool = False,
 ) -> dict[str, Any]:
-    """Describe the user's speech act without treating keywords as topic switches.
+    """Classify conversational intent without turning reaction wording into a topic.
 
-    The profile is advisory metadata for active-dialogue retrieval. A short bare
-    agreement/rejection can refer to the immediately preceding turn; a message
-    that introduces its own subject or deliverable must remain a new request.
+    All sentiment/reaction signals are advisory. They only bind to the active
+    exchange when the message does not clearly introduce a self-contained new task.
     """
     low, tokens = _semantic_normalize(text)
     if not tokens:
         return {
             "speech_act": "EMPTY", "communicative_act": "EMPTY",
             "pragmatic_intent": "NONE", "message_function": "EMPTY",
-            "context_dependent_reaction": False,
+            "context_dependent_reaction": False, "topic_reference_fragment": False,
+            "tone": "NEUTRAL", "recommended_response_action": "ANSWER_NORMALLY",
             "pragmatic_features": {},
         }
 
     token_set = set(tokens)
     signature = _context_signature(text)
+    previous_answer_reference = _detect_previous_answer_recheck(text)
+    factual_verification_request = bool(re.search(
+        r"(?:проверь\w*|перепроверь\w*|сверь\w*|check\s+(?:the\s+)?(?:previous\s+)?answer|verify\s+(?:the\s+)?answer|review\s+(?:what\s+you\s+said|the\s+previous\s+answer))",
+        low, flags=re.IGNORECASE,
+    ))
     subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
     output_forms = signature.get("output_forms") if isinstance(signature, dict) else []
-    # The context-signature layer is intentionally permissive. Filter conversational
-    # fillers here so words like "понятно", "ладно" or "объясни" are not mistaken
-    # for a newly introduced topic.
     non_topical_roots = (
-        "понят", "спаси", "хорош", "ладн", "молод", "отлич", "соглас",
-        "правиль", "точн", "верн", "ага", "угу", "да", "нет", "неа",
-        "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
-        "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела",
-        "виду", "друго", "смысл", "так", "это",
+        "понят", "спаси", "благодар", "хорош", "ладн", "молод", "отлич", "здоров",
+        "прекрас", "классн", "крут", "соглас", "правиль", "точн", "верн", "ага", "угу",
+        "да", "нет", "неа", "отнюд", "подро", "подроб", "поясн", "объясн", "уточн", "разъясн",
+        "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела", "имели", "виду",
+        "друго", "смысл", "так", "это", "получ", "непон", "понял", "поняла", "нрав",
+        "ужас", "бесит", "раздраж", "разочар", "передел", "перепиш", "исправ", "улучш",
+        "поправ", "ошиб", "мимо", "передум", "неверн", "неправил", "именн", "прави",
+        "согла", "опять", "лучше",
     )
     meaningful_subjects = [
         _text(term) for term in (subjects or [])
         if _text(term) and not any(_text(term).startswith(root) for root in non_topical_roots)
     ]
-    has_independent_payload = bool(meaningful_subjects or output_forms or signature.get("numeric_anchors"))
-    short = len(tokens) <= 7
+    numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
+    has_independent_payload = bool(meaningful_subjects or output_forms or numeric_anchors)
+    short = len(tokens) <= 9
+    has_deictic_reference = bool(token_set & {
+        "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та", "ту",
+        "того", "он", "она", "оно", "они", "его", "ее", "её", "ей", "ему", "им", "их",
+        "него", "нее", "неё", "ней", "ним", "нем", "нём", "них",
+        "it", "this", "that", "he", "she", "they", "him", "her", "them",
+    })
 
     agreement_terms = {
-        "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно",
-        "именно", "правильно", "согласен", "согласна", "согласны", "конечно",
-        "yes", "yeah", "yep", "ok", "okay", "right", "exactly", "correct", "agreed",
+        "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно", "именно",
+        "правильно", "согласен", "согласна", "согласны", "конечно", "yes", "yeah", "yep",
+        "ok", "okay", "right", "exactly", "correct", "agreed",
     }
     rejection_terms = {
         "нет", "неа", "неверно", "неправильно", "ошибка", "мимо", "отнюдь",
         "no", "nope", "wrong", "incorrect",
     }
+    gratitude_terms = (
+        "спасибо", "спасибки", "благодарю", "благодарен", "благодарна", "очень признателен",
+        "ценю это", "thanks", "thank you", "many thanks", "appreciate it",
+    )
+    positive_terms = (
+        "классно", "круто", "отлично", "здорово", "прекрасно", "замечательно", "молодец",
+        "хорошо получилось", "вот это хорошо", "супер", "great", "brilliant", "well done",
+        "looks good", "nice work", "perfect",
+    )
+    dissatisfaction_terms = (
+        "не нравится", "не устраивает", "не то", "не так", "неправильно", "мимо", "ужасно",
+        "раздражает", "бесит", "не то что я просил", "не то что я просила",
+        "ты не поняла", "ты не понял", "вы не поняли", "опять не понял", "опять не поняла",
+        "не понимаешь меня", "ты меня не понимаешь", "не то имел в виду", "не то имела в виду",
+        "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
+        "я просил", "я просила", "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "not what i asked", "you misunderstood", "you did not understand", "you mixed it up", "you got it mixed up", "i don't understand", "i do not understand",
+        "you don't understand me", "you do not understand me", "i hate this", "i hate it", "this is annoying",
+        "i'm frustrated", "im frustrated", "doesn't work", "does not work",
+    )
+    revision_terms = (
+        "переделай", "переделать", "перепиши", "переписать", "исправь", "поправь", "улучши",
+        "сделай иначе", "попробуй иначе", "по другому", "по-другому", "заново", "с нуля",
+        "можно лучше", "можно было лучше", "а можно лучше", "давай лучше", "надо лучше",
+        "redo", "revise", "rewrite", "fix that", "make it better", "could be better", "try again", "do it differently",
+    )
     correction_terms = (
-        "не так", "не то", "не это", "не совсем", "я имел в виду", "я имела в виду",
-        "я про другое", "не об этом", "не об этом речь", "поправка", "уточню",
+        "не так", "не то", "не это", "не совсем", "я имел в виду", "я имел ввиду",
+        "я имела в виду", "я имела ввиду", "я про другое", "не об этом", "не об этом речь",
+        "поправка", "уточню", "я не про", "я не об", "не про это спрашивал",
+        "не про это спрашивала", "я не это спрашивал", "я не это спрашивала",
         "not that", "not what i meant", "i meant", "that's not right",
+        "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
+        "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "я просил выдать", "я просила выдать", "я просил дать", "я просила дать",
+        "you mixed it up", "you got it mixed up", "you were supposed to",
     )
     clarification_terms = (
         "поясни", "поясните", "уточни", "уточните", "разъясни", "разъясните",
-        "что ты имеешь в виду", "что вы имеете в виду", "в каком смысле",
-        "подробнее", "расшифруй", "clarify", "what do you mean", "elaborate",
+        "что ты имеешь в виду", "что вы имеете в виду", "в каком смысле", "подробнее",
+        "расшифруй", "clarify", "what do you mean", "elaborate",
     )
     explanation_terms = (
-        "объясни", "объясните", "докажи", "докажите", "обоснуй", "обоснуйте",
-        "почему", "как это работает", "как это получается", "explain", "prove",
-        "why does", "why is", "how does",
+        "объясни", "объясните", "докажи", "докажите", "обоснуй", "обоснуйте", "почему",
+        "как это работает", "как это получается", "explain", "prove", "why does", "why is", "how does",
     )
+    has_phrase = lambda phrases: any(phrase in low for phrase in phrases)
+    gratitude = short and has_phrase(gratitude_terms)
+    positive_evaluation = short and has_phrase(positive_terms)
+    dissatisfaction = has_phrase(dissatisfaction_terms)
+    revision_request = has_phrase(revision_terms) and short
     waiting_acknowledgement = bool(re.fullmatch(
-        r"\s*(?:ну\s*)?(?:жду|ожидаю|жду\s+ответа|жду\s+результат\w*|ну\s+и\s+что|долго\??|ну\??|и\??|wait(?:ing)?|i\s*wait|still\s+waiting|waiting\s+for\s+(?:it|the\s+result|the\s+image))\s*[.!?…]*\s*",
-        low, re.IGNORECASE,
+        r"\s*(?:ну\s*)?(?:жду|ожидаю|жду\s+ответа|жду\s+результат\w*|долго|ну\s+и\s+что|wait(?:ing)?|i\s*wait|still\s+waiting|waiting\s+for\s+(?:it|the\s+result|the\s+image))\s*[.!?…]*\s*",
+        low, flags=re.IGNORECASE,
     ))
     acknowledgement = short and (waiting_acknowledgement or any(
-        token in agreement_terms or any(token.startswith(root) for root in ("соглас", "правиль", "точн"))
-        for token in tokens
+        token in agreement_terms or token.startswith(("соглас", "правиль", "точн")) for token in tokens
     )) and not any(token in rejection_terms or token in {"не", "никак", "ни"} for token in tokens)
     negation = short and (
         any(token in rejection_terms for token in tokens)
         or ("не" in token_set and bool(token_set & {"так", "то", "это", "совсем", "согласен", "согласна", "верно", "правильно"}))
-        or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это)\b", low))
+        or bool(re.search(r"\b(?:не\s+соглас\w*|не\s+так|не\s+то|не\s+это|я\s+не\s+это|i\s+(?:do\s+not|don\s+t)\s+agree|not\s+really|no\s+way)\b", low))
     )
-    correction = any(term in low for term in correction_terms) or (
+    correction = previous_answer_reference or has_phrase(correction_terms) or dissatisfaction or (
         negation and bool(token_set & {"это", "то", "так", "другое", "имел", "имела", "виду"})
     )
-    clarification = any(term in low for term in clarification_terms)
-    explanation_request = any(term in low for term in explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
-    has_deictic_reference = bool(token_set & {
-        "это", "этот", "эта", "эту", "этого", "этой", "этом", "эти", "тот", "та",
-        "ту", "того", "той", "он", "она", "оно", "они", "его", "ее", "ей", "ему",
-        "им", "их", "it", "this", "that", "he", "she", "they", "him", "her", "them",
-    })
-    own_topic_or_output = explicit_topic_introduction or has_independent_payload
-    context_dependent_reaction = bool(
-        not own_topic_or_output
-        and not explicit_topic_introduction
+    explicit_previous_answer_correction = bool(re.search(
+        r"\b(?:ты\s+(?:все|всё)\s+напутал\w*|ты\s+перепутал\w*|"
+        r"я\s+(?:же\s+)?просил\w*|ты\s+(?:должен\s+был|должна\s+была)|"
+        r"не\s+то,?\s+что\s+я\s+просил\w*|you\s+(?:mixed\s+it\s+up|got\s+it\s+mixed\s+up)|"
+        r"you\s+were\s+supposed\s+to)\b",
+        low, flags=re.IGNORECASE,
+    ))
+    selection_followup_candidate = _looks_like_selection_followup(text)
+    clarification = has_phrase(clarification_terms)
+    explanation_request = has_phrase(explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
+    own_topic_or_output = explicit_topic_introduction or (has_independent_payload and not topic_reference_fragment)
+    correction_of_active = bool(
+        not explicit_topic_introduction
+        and not _has_explicit_topic_switch(text)
         and (
-            (acknowledgement and len(tokens) <= 4)
+            previous_answer_reference
+            or explicit_previous_answer_correction
+            or (
+                short and (correction or dissatisfaction or revision_request)
+                and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
+                    r"\b(?:я\s+имел\w*\s+в\s*(?:виду|ввиду)|я\s+имела\w*\s+в\s*(?:виду|ввиду)|я\s+не\s+про\b|не\s+про\s+.+\s+спрашивал\w*|не\s+про\s+.+\s+спрашивала\w*|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
+                    low,
+                )))
+            )
+        )
+    )
+    context_dependent_reaction = bool(
+        not explicit_topic_introduction
+        and (
+            (acknowledgement and len(tokens) <= 5 and not has_independent_payload)
             or waiting_acknowledgement
-            or negation
-            or correction
-            or ((clarification or explanation_request) and short and not context_dependent_question)
+            or (gratitude and not has_independent_payload)
+            or (positive_evaluation and not has_independent_payload)
+            or correction_of_active
+            or previous_answer_reference
+            or (negation and (not has_independent_payload or has_deictic_reference))
+            or ((clarification or explanation_request) and short and not has_independent_payload)
+            # Short anaphoric fragments such as “теперь о нём подробнее” point
+            # back to the current exchange even without a question mark or a fixed
+            # continuation verb. A named independent subject still bypasses this.
+            or (has_deictic_reference and short and not has_independent_payload)
+            or topic_reference_fragment
         )
     )
 
-    if correction:
-        speech_act = "CORRECTION"
+    if correction_of_active or correction:
+        speech_act = "CORRECTION_OR_REVISION"
+    elif dissatisfaction:
+        speech_act = "FRUSTRATION_OR_DISSATISFACTION"
+    elif revision_request:
+        speech_act = "REVISION_REQUEST"
     elif negation:
         speech_act = "NEGATION_OR_DISAGREEMENT"
+    elif gratitude:
+        speech_act = "GRATITUDE_OR_APPRECIATION"
+    elif positive_evaluation:
+        speech_act = "POSITIVE_EVALUATION"
     elif acknowledgement:
         speech_act = "AGREEMENT_OR_ACKNOWLEDGEMENT"
     elif clarification:
         speech_act = "CLARIFICATION_REQUEST"
     elif explanation_request or answer_followup:
         speech_act = "EXPLANATION_REQUEST"
-    elif context_dependent_question or has_deictic_reference:
+    elif context_dependent_question or has_deictic_reference or topic_reference_fragment:
         speech_act = "REFERENTIAL_CONTINUATION"
     elif continuation_action:
         speech_act = "CONTINUATION_REQUEST"
@@ -1428,20 +2499,38 @@ def _infer_dialogue_act_profile(
     else:
         speech_act = "STATEMENT_OR_REQUEST"
 
-    if context_dependent_reaction or context_dependent_question or answer_followup:
-        communicative_act = "CONTINUATION"
-    elif acknowledgement:
-        communicative_act = "ACKNOWLEDGEMENT"
-    elif negation or correction:
-        communicative_act = "RESPONSE_OR_CORRECTION"
+    if correction_of_active or revision_request:
+        communicative_act = "REVISE_PREVIOUS_RESPONSE"
+        recommended_response_action = (
+            "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED"
+            if previous_answer_reference or factual_verification_request
+            else "REPAIR_OR_IMPROVE_PREVIOUS_RESPONSE"
+        )
+        tone = "DISSATISFIED" if dissatisfaction or negation else "CORRECTIVE"
+    elif gratitude:
+        communicative_act = "APPRECIATION_AND_CONTINUE"
+        recommended_response_action = "ACKNOWLEDGE_BRIEFLY_AND_CONTINUE_NATURALLY"
+        tone = "GRATEFUL"
+    elif positive_evaluation or acknowledgement:
+        communicative_act = "ACKNOWLEDGEMENT_OR_POSITIVE_FEEDBACK"
+        recommended_response_action = "ACKNOWLEDGE_BRIEFLY_AND_CONTINUE_NATURALLY"
+        tone = "POSITIVE"
+    elif negation or dissatisfaction:
+        communicative_act = "RESPOND_TO_DISAGREEMENT"
+        recommended_response_action = "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED"
+        tone = "DISSATISFIED"
     elif clarification:
         communicative_act = "CLARIFICATION"
-    elif explanation_request:
-        communicative_act = "EXPLANATION"
-    elif continuation_action:
-        communicative_act = "CONTINUATION"
+        recommended_response_action = "CLARIFY_THE_PREVIOUS_POINT"
+        tone = "CURIOUS_OR_UNCERTAIN"
+    elif context_dependent_question or answer_followup or topic_reference_fragment:
+        communicative_act = "CONTINUE_ACTIVE_DIALOGUE"
+        recommended_response_action = "ANSWER_FROM_THE_RELEVANT_DIALOGUE_CONTEXT"
+        tone = "NEUTRAL"
     else:
         communicative_act = "NEW_OR_STANDALONE"
+        recommended_response_action = "ANSWER_NORMALLY"
+        tone = "NEUTRAL"
 
     return {
         "speech_act": speech_act,
@@ -1449,19 +2538,40 @@ def _infer_dialogue_act_profile(
         "pragmatic_intent": speech_act.lower(),
         "message_function": communicative_act.lower(),
         "context_dependent_reaction": context_dependent_reaction,
+        "waiting_acknowledgement": bool(waiting_acknowledgement),
+        "topic_reference_fragment": bool(topic_reference_fragment),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+        "factual_verification_request": bool(factual_verification_request),
+        "tone": tone,
+        "recommended_response_action": (
+            "ACKNOWLEDGE_COMPLETED_RESULT_WITHOUT_REPEATING"
+            if acknowledgement and len(tokens) <= 2 and not has_independent_payload
+            else recommended_response_action
+        ),
         "pragmatic_features": {
             "acknowledgement_or_agreement": bool(acknowledgement),
             "waiting_acknowledgement": bool(waiting_acknowledgement),
+            "bare_acknowledgement": bool(acknowledgement and len(tokens) <= 2 and not has_independent_payload),
             "negation_or_disagreement": bool(negation),
             "correction": bool(correction),
+            "gratitude": bool(gratitude),
+            "positive_evaluation": bool(positive_evaluation),
+            "frustration_or_dissatisfaction": bool(dissatisfaction),
+            "revision_request": bool(revision_request),
             "clarification_request": bool(clarification),
             "explanation_request": bool(explanation_request),
             "continuation_request": bool(continuation_action),
             "deictic_reference": bool(has_deictic_reference),
+            "topic_reference_fragment": bool(topic_reference_fragment),
             "has_independent_payload": bool(has_independent_payload),
+            "previous_answer_reference": bool(previous_answer_reference),
+            "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+            "selection_followup_candidate": bool(selection_followup_candidate),
+            "explicit_previous_answer_correction": bool(explicit_previous_answer_correction),
+            "factual_verification_request": bool(factual_verification_request),
         },
     }
-
 
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
@@ -1479,7 +2589,21 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
             "time_scope": "UNSPECIFIED", "topic_reference": "UNSPECIFIED",
             "requires_memory": False, "history_request": False, "search_scope": "CURRENT_DIALOGUE",
+            "time_window": extract_temporal_window(""),
+            "requested_topic_count": 10, "minimum_topic_count": 5,
             "intent_score": 0, "features": {}, "reason": "empty_request",
+        "routing_policy": {
+            "version": "hot_branch_then_semantic_history_v1",
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
+            "active_branch_must_match_semantically": True,
+            "history_fallback_on_active_branch_miss": True,
+            "history_scope": "ALL_AUTHENTICATED_DIALOGUE_WITHIN_RETENTION",
+            "new_topic_only_after_history_miss": True,
+            "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
+            "named_subject_conflict": "SEARCH_ALL_MATCHING_HISTORY",
+            "history_miss": "NEW_TOPIC",
+            "cross_topic_injection": "DISALLOW",
+        },
         }
 
     dialogue_action = _semantic_group_hit(tokens, "dialogue_action")
@@ -1499,12 +2623,79 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "vamos continuar", "continuemos", "voltemos", "continue a partir daqui",
         "ga door", "laten we doorgaan", "verdergaan", "gaan we verder",
     ))
+    # Premium users often continue by asking for development rather than saying
+    # “continue”. Treat these as discourse moves unless the utterance explicitly
+    # introduces a different subject. This is an interpretation feature, not a
+    # required user trigger or a route-level command.
+    implicit_development_request = bool(re.search(
+        r"\b(?:дальше|далее)\b|"
+        r"\b(?:развивай|раскрой|разверни|углуби|расширь|дополни|углубимся)\b.{0,48}"
+        r"\b(?:тему|мысль|идею|обсуждение|это|эту|дальше|подробн\w*)\b|"
+        r"\b(?:еще|ещё)\s+(?:интересн\w*|подробн\w*|пример\w*|факт\w*|детал\w*|информац\w*|что-то|что-нибудь)\b|"
+        r"\b(?:что\s+еще|что\s+ещё|давай\s+(?:дальше|подробнее|глубже)|"
+        r"рассказывай\s+дальше|говори\s+дальше|побольше|more\s+interesting|tell\s+me\s+more|"
+        r"go\s+deeper|elaborate\s+further|expand\s+on\s+that)\b|"
+        r"^\s*(?:а\s+)?(?:еще|ещё|дальше|далее)\s*[.!?]*\s*$",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    continuation_action = bool(continuation_action or implicit_development_request)
+    explicit_topic_switch = _has_explicit_topic_switch(source)
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
+    explicit_topic_closure = _looks_like_explicit_topic_closure(source)
     answer_followup = _looks_like_previous_answer_followup(source)
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
     recent_reference = _semantic_group_hit(tokens, "recent_reference")
+    # Explicit dates, ranges and rolling durations are parsed once into a UTC
+    # interval. The state manager intersects that interval with Premium's retained
+    # 24-hour window; a time phrase is metadata, not a standalone history trigger.
+    time_window = extract_temporal_window(source)
+    has_explicit_time_window = bool(time_window.get("has_constraint"))
+    minimum_topic_count, requested_topic_count = extract_topic_count_bounds(source, default=10)
+    history_reference_words = bool(re.search(
+        r"\b(?:тем\w*|топик\w*|диалог\w*|разговор\w*|перепис\w*|говорил\w*|"
+        r"обсужд\w*|истори\w*|запрос\w*|topics?|conversations?|chats?|discussion\w*|history)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_topic_inventory = bool(re.search(
+        r"(?:последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*|"
+        r"тем\w*.{0,28}(?:из\s+истори\w*|мы\s+обсужда\w*|мы\s+говорил\w*)|"
+        r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|найт\w*|найд\w*|ищ\w*|search|find|locate|list|show|summariz\w*).{0,36}"
+        r"(?:тем\w*|topics?|history|conversations?))",
+        low, re.IGNORECASE,
+    ))
+    # Identify an unnamed time-scoped overview separately from a lookup for a
+    # particular subject. Strip discourse/time words first, so "physics ... 2h ago"
+    # remains targeted while "what did we discuss 2h ago" becomes an inventory.
+    subject_probe = low
+    subject_probe = re.sub(
+        r"\b(?:\d{1,3}\s*(?:секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\s+назад|"
+        r"(?:хоть\s+|около\s+|примерно\s+|в\s+районе\s+)?час(?:а)?\s+назад|пол\s*часа\s+назад|"
+        r"за\s+последн\w*\s+\d+\s*(?:час\w*|минут\w*|дн\w*)|"
+        r"последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*)\b",
+        " ", subject_probe, flags=re.IGNORECASE,
+    )
+    generic_history_words = {
+        "о", "об", "чем", "чём", "что", "мы", "наш", "наши", "нас", "нам", "говорили", "говорил",
+        "обсуждали", "обсуждали", "разговаривали", "помнишь", "помниш", "помним", "помни", "вспомни",
+        "напомни", "напомнить", "последние", "последних", "тема", "темы", "тему", "тем", "тематик",
+        "история", "истории", "историю", "истории", "диалог", "диалога", "диалоге", "разговор", "разговора",
+        "час", "часа", "часов", "минут", "минуты", "минуту", "дней", "дня", "день", "назад", "хоть",
+        "примерно", "около", "последний", "последнюю", "последнего", "сейчас", "сегодня", "вчера",
+        "утра", "утром", "ранку", "вечера", "вечером", "вечора", "дня", "днем", "днём", "ночью", "ночі",
+        "найти", "найди", "ищи", "можешь", "пожалуйста", "темы", "диалоги", "разговоры",
+        "последн", "только", "покажи", "показать", "выведи", "перечисли", "напомни", "дай", "мне",
+        "the", "what", "were", "we", "did", "do", "our", "about", "talking", "talked", "discuss", "discussed",
+        "conversation", "conversations", "history", "topic", "topics", "list", "show", "me", "last", "hour", "hours", "ago",
+    }
+    subject_tokens = [token for token in re.findall(r"[\w\u0080-\uffff]+", subject_probe.lower())
+                      if len(token) > 2 and token not in generic_history_words and not token.isdigit()]
+    time_scoped_overview = bool(
+        has_explicit_time_window and history_reference_words and not subject_tokens
+    )
+    history_inventory_request = bool(explicit_topic_inventory or time_scoped_overview)
 
     self_reference = bool(token_set & {"мы", "нас", "нам", "наш", "наша", "наши", "наше", "we", "our", "us"}) or any(
         token.startswith(("наш", "наша", "наши")) for token in tokens
@@ -1513,45 +2704,46 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     self_reference = self_reference or ("тобой" in token_set and "с" in token_set)
     self_reference = self_reference or bool(token_set & {"будем", "будете", "планируем", "собираемся", "we'll", "lets"})
     interrogative = bool(token_set & {"что", "чем", "чего", "какие", "какая", "какой", "кто", "где", "когда", "почему", "как", "зачем", "which", "what", "who", "where", "when", "why", "how"}) or "?" in source or "？" in source
-    imperative_recall = bool(token_set & {
-        "напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди",
-        "вернись", "покажи", "покажите", "скажи", "скажите", "назови", "назовите",
-        "выведи", "дай", "дайте", "remind", "recall", "remember", "summarize", "list",
-    })
+    imperative_recall = bool(token_set & {"напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди", "вернись", "покажи", "remind", "recall", "remember", "summarize"})
     temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
     temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
-    explicit_time_reference = bool(re.search(
-        r"\b(?:(?:\d+|один|одна|одно|одну|два|две|пару|три|четыре|пять|полчаса|полторы?)\s*(?:-|–|—|до)?\s*)?(?:минут\w*|мин\b|час\w*|ч\b|дн\w*|сутк\w*|полчаса)\s*(?:назад|тому назад)\b|\b(?:в|около|примерно в)\s*\d{1,2}[:.]\d{2}\b",
-        low,
+    # A question about how to apply/improve the current dialogue mechanism is not
+    # automatically a request to search old history. Earlier, self_reference alone
+    # ("we/our") plus a dialogue/decision word was enough to set HISTORY_LOOKUP;
+    # this routed operational follow-ups to the history-topic fallback when Provider
+    # returned no answer. Require an actual recollection signal for these two paths.
+    explicit_discussion_recall = bool(re.search(
+        r"(?:\b(?:что|о\s+чем|про\s+что|какие\s+темы|какой\s+вопрос|какие\s+вопросы)\b"
+        r".{0,65}\b(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b|"
+        r"\b(?:что\s+было|о\s+чем\s+мы\s+говорили|what\s+did\s+we\s+discuss|"
+        r"what\s+have\s+we\s+discussed|what\s+were\s+we\s+discussing|"
+        r"what\s+did\s+we\s+talk\s+about|what\s+were\s+we\s+talking|"
+        r"what\s+happened\s+in\s+our\s+conversation)\b)",
+        low, re.IGNORECASE,
     ))
-    explicit_last_topic_reference = any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS if "последн" in marker or "последнее время" in marker or "за последнее время" in marker)
-    # A natural Russian question often omits its grammatical subject:
-    # "Какие темы и обсуждали?" still asks to retrieve previous dialogue.
-    asks_about_discussed_topics = bool(
-        dialogue_action and interrogative and re.search(r"\bтем\w*\b", low)
-    )
-    # List requests have a different shape from "remind me": for example,
-    # "в истории 16 диалогов скажи последние 5" or "покажи первые диалоги".
-    # Require a history object plus ordinal/count language and a listing cue.
-    history_listing_request = bool(
-        re.search(r"\b(?:диалог\w*|разговор\w*|переписк\w*|сообщен\w*|истори\w*|тем\w*)\b", low)
-        and re.search(
-            r"\b(?:последн\w*|перв\w*|стар\w*|ранн\w*|давн\w*|\d+|один|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\b",
-            low,
-        )
-        and bool(token_set & {
-            "покажи", "покажите", "скажи", "скажите", "назови", "назовите", "дай",
-            "дайте", "выведи", "перечисли", "перечислите", "найди", "найдите",
-            "истории", "диалогов", "диалоги", "темы", "сообщений", "что", "какие", "какой", "сколько",
-        })
-    )
-    explicit_discussion_question = (dialogue_action and interrogative and (
-        self_reference or temporal_past or recall_action or explicit_time_reference or any(term in low for term in (
-            "о чем", "про что", "что обсуждали", "что было в диалоге", "что было в разговоре",
+    explicit_prior_decision_recall = bool(re.search(
+        r"\b(?:что|какое|какие|к\s+чему)\b.{0,55}\b"
+        r"(?:решил\w*|договорил\w*|выбрал\w*|принял\w*|постановил\w*|согласовал\w*|пришл\w*)\b|"
+        r"\b(?:предыдущ\w*|прошл\w*|раньше|ранее|до\s+этого|в\s+прошлый\s+раз)\b.{0,45}\b"
+        r"(?:решени\w*|вывод\w*|выбор\w*|договоренност\w*|договорённост\w*)\b|"
+        r"\b(?:what|which)\b.{0,65}\b(?:did\s+we\s+(?:decid\w*|agree\w*|choos\w*|select\w*|conclud\w*|settle\w*|make)|"
+        r"have\s+we\s+(?:decid\w*|agree\w*|chosen|selected|conclud\w*)|"
+        r"we\s+(?:decid\w*|agree\w*|chose|selected|conclud\w*))\b|"
+        r"\b(?:previous|prior|earlier|last)\s+(?:decision|conclusion|choice)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_dialogue_recall = bool(
+        explicit_discussion_recall
+        or (self_reference and (temporal_past or recall_action))
+        or any(term in low for term in (
+            "что обсуждали", "что было в диалоге", "что было в разговоре",
             "what did we discuss", "what were we talking", "what happened in our conversation",
         ))
-    )) or asks_about_discussed_topics or history_listing_request or (explicit_time_reference and (interrogative or dialogue_action or self_reference)) or explicit_last_topic_reference
-    decision_recall = decision_action and (interrogative or recall_action) and (self_reference or temporal_past or dialogue_action or past_reference)
+    )
+    explicit_discussion_question = dialogue_action and interrogative and explicit_dialogue_recall
+    decision_recall = (decision_action or explicit_prior_decision_recall) and (interrogative or recall_action or explicit_prior_decision_recall) and (
+        recall_action or temporal_past or explicit_prior_decision_recall
+    )
     plan_past_form = any(token.startswith(root) for token in tokens for root in ("заплан", "планировали", "планировал", "собирались", "собирался", "намеревались"))
     plan_recall = plan_action and (interrogative or recall_action or imperative_recall) and (
         recall_action or past_reference or plan_past_form or (self_reference and not temporal_future)
@@ -1567,14 +2759,27 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or decision_recall
         or plan_recall
         or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
+        # Inventory requests are history retrieval even when they omit “remember”,
+        # “we discussed”, or another fixed recall marker: e.g. “list topics from
+        # 14:00 to 16:00” or “show 5–10 conversations from the last 4 hours”.
+        or history_inventory_request
     ) and not future_topic_question
-    # Explicit recall phrases in all supported languages override missing grammar cues.
+    # Exact recall phrases activate history search even when grammar differs by language.
     if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
         history_recall = True
 
-    context_dependent_question = _looks_like_context_dependent_question(
-        source, interrogative=interrogative,
-        explicit_topic_introduction=explicit_topic_introduction,
+    context_dependent_question = (
+        _looks_like_context_dependent_question(
+            source, interrogative=interrogative,
+            explicit_topic_introduction=explicit_topic_introduction,
+        )
+        or (
+            _looks_like_next_step_followup(source)
+            and not explicit_topic_introduction
+        )
+    )
+    topic_reference_fragment = _looks_like_topic_reference_fragment(
+        source, explicit_topic_introduction=explicit_topic_introduction,
     )
     dialogue_act_profile = _infer_dialogue_act_profile(
         source,
@@ -1583,10 +2788,48 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         answer_followup=answer_followup,
         continuation_action=continuation_action,
         explicit_topic_introduction=explicit_topic_introduction,
+        topic_reference_fragment=topic_reference_fragment,
     )
     context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction"))
+    active_branch_repair = bool(dialogue_act_profile.get("active_branch_repair"))
+    previous_answer_reference = bool(dialogue_act_profile.get("previous_answer_reference"))
+    factual_verification_request = bool(dialogue_act_profile.get("factual_verification_request"))
 
-    if history_recall:
+    else_deictic_reference_terms = {
+        "это", "этого", "этой", "этом", "эти", "этих", "этими", "этим",
+        "тот", "та", "ту", "те", "тех", "такие", "таких", "такими",
+        "там", "прежнему", "прежней", "ранее", "предыдущий",
+    }
+    first_deictic_index = next((index for index, token in enumerate(tokens) if token in else_deictic_reference_terms), -1)
+    deictic_prefix_has_subject = False
+    if first_deictic_index > 0:
+        deictic_prefix_signature = _context_signature(" ".join(tokens[:first_deictic_index]))
+        deictic_prefix_has_subject = bool(
+            deictic_prefix_signature.get("subject_terms")
+            if isinstance(deictic_prefix_signature, dict) else False
+        )
+    short_deictic_followup = bool(
+        len(tokens) <= 12
+        and first_deictic_index >= 0
+        and not deictic_prefix_has_subject
+        and not temporal_future
+    )
+
+    if explicit_topic_switch and not history_recall:
+        # Explicitly changing branch overrides reaction/anaphora cues in the same
+        # wording. The state manager may still retrieve evidence, but must not keep
+        # the current hot branch active merely because an earlier answer is named.
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "UNSPECIFIED"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "explicit_topic_switch"
+    elif history_recall and (not active_branch_repair or history_reference_words or history_inventory_request or has_explicit_time_window or today_reference or recent_reference):
         requires_memory = True
         history_request = True
         search_scope = "ALL_DIALOGUE_HISTORY"
@@ -1601,11 +2844,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             direction = "SEARCH_PRIOR_PLANS"
             topic_reference = "PRIOR_PLAN"
             reason = "plan_terms_with_prior_or_future_context"
-        elif any(term in low for term in ("кратко", "содержание", "перечисли", "какие темы", "список тем", "summarize", "list topics")):
+        elif history_inventory_request or any(term in low for term in ("кратко", "содержание", "перечисли", "какие темы", "список тем", "summarize", "list topics")):
             primary_intent = "HISTORY_SUMMARY"
             direction = "SEARCH_AND_SUMMARIZE_HISTORY"
             topic_reference = "DIALOGUE_HISTORY"
-            reason = "summary_or_topic_list_requested"
+            reason = "time_bounded_topic_inventory" if history_inventory_request else "summary_or_topic_list_requested"
         elif any(term in low for term in ("конкрет", "фрагмент", "найди", "где мы", "какое сообщение", "find the part", "specific message")):
             primary_intent = "HISTORY_SEARCH"
             direction = "SEARCH_DIALOGUE_HISTORY"
@@ -1617,20 +2860,27 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             topic_reference = "TODAY_DIALOGUE" if today_reference else ("PREVIOUS_DIALOGUE" if past_reference or recent_reference else "DIALOGUE_HISTORY")
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
-        time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
-    elif context_dependent_reaction:
-        # Bare agreement/disagreement belongs to the active turn unless it
-        # introduces an independent subject or concrete deliverable.
+        time_scope = (
+            "EXPLICIT_TIME_WINDOW" if has_explicit_time_window else
+            ("TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY"))))
+        )
+    elif context_dependent_reaction or topic_reference_fragment:
+        # Reactions and terse topic pointers request a memory-assisted interpretation.
+        # The state manager must still verify a real match; this is not a forced relation.
         primary_intent = "TOPIC_CONTINUATION"
-        direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
-        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "TOPIC_FRAGMENT" if topic_reference_fragment else "PREVIOUS_OR_ACTIVE_TOPIC"
         time_scope = "ACTIVE_DIALOGUE"
         requires_memory = True
         history_request = False
         search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
-        intent_score = 3
+        intent_score = 4 if topic_reference_fragment else 3
         relation_hint = "CONTINUE"
-        reason = "context_dependent_agreement_or_rejection"
+        reason = (
+            "short_topic_pointer_requires_history_match" if topic_reference_fragment
+            else "active_branch_previous_answer_recheck" if active_branch_repair
+            else "context_dependent_reaction_to_previous_response"
+        )
     elif context_dependent_question:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -1653,7 +2903,12 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 3 + int(interrogative)
         relation_hint = "CONTINUE"
         reason = "previous_answer_explanation_followup"
-    elif (continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future)) and not explicit_topic_introduction:
+    elif (continuation_action or short_deictic_followup) and not explicit_topic_introduction:
+        # Deictic words inside a long, self-contained request can refer to material
+        # introduced in the same utterance (“...девочка с косичками. А там, как оно
+        # на самом деле...”); they are not sufficient evidence of a prior-turn
+        # reference. Short anaphoric replies remain continuations, and explicit
+        # continuation actions are still handled at any length.
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
         topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
@@ -1664,7 +2919,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 2 + int(self_reference) + int(continuation_action)
         relation_hint = "CONTINUE"
         reason = "continuation_or_anaphoric_reference"
-    elif temporal_future and (plan_action or dialogue_action or bool(token_set & {"что", "как", "лучше", "нужно", "надо", "будем", "сделать", "план", "should", "tomorrow"})):
+    elif temporal_future and not explicit_topic_introduction and (plan_action or dialogue_action or bool(token_set & {"что", "как", "лучше", "нужно", "надо", "будем", "сделать", "план", "should", "tomorrow"})):
         future_dialogue_topic = bool(dialogue_action and self_reference)
         primary_intent = "FUTURE_TOPIC_PLANNING" if future_dialogue_topic else "FUTURE_PLANNING"
         direction = "RETRIEVE_OR_PLAN_FUTURE_TOPICS" if future_dialogue_topic else "PLAN_OR_ANSWER_FUTURE_QUESTION"
@@ -1690,6 +2945,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "NEW"
         reason = "explicit_topic_introduction_overrides_continuation" if explicit_topic_introduction and (continuation_action or any(token in token_set for token in {"дальше", "прежнему", "прежней", "resume", "continue"})) else "no_prior_dialogue_intent_detected"
 
+    # Structured-artifact edits need persisted data even when the lexical classifier
+    # would otherwise call the sentence self-contained NEW information. Override only
+    # explicit edits/extensions or demonstrative references; a fresh "build a graph"
+    # request remains NEW and does not pull unrelated history.
+    saved_artifact_followup_kind = _explicit_saved_artifact_followup_kind(source)
+    if saved_artifact_followup_kind and not explicit_topic_introduction and not explicit_topic_switch and not history_request:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "TOPIC_FRAGMENT"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = max(int(intent_score or 0), 3)
+        relation_hint = "CONTINUE"
+        reason = f"explicit_saved_{saved_artifact_followup_kind}_artifact_followup"
+
     # UI navigation can mention “история диалога”, but it is not a request to retrieve prior conversation content.
     site_navigation_request = _is_site_navigation_request(source) or _is_feedback_control_help_request(source)
     if site_navigation_request:
@@ -1704,6 +2976,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "NEW"
         reason = "site_navigation_request_overrides_history_keyword"
 
+    # Dialogue-based conceptual portrait is both a NEW visual deliverable and a
+    # HISTORY-backed task. Do not confuse generic "на фото" phrasing with an
+    # instruction to edit a missing uploaded source image. The image is based on
+    # recent, authenticated dialogue evidence; it is not a claim about appearance.
+    dialogue_profile_request = _is_dialogue_based_self_portrait_request(source)
+    if dialogue_profile_request and not site_navigation_request:
+        primary_intent = "HISTORY_RECALL"
+        direction = "SEARCH_DIALOGUE_HISTORY_FOR_VISUAL_CONTEXT"
+        topic_reference = "DIALOGUE_HISTORY"
+        time_scope = "RECENT_WINDOW"
+        requires_memory = True
+        history_request = True
+        search_scope = "ALL_DIALOGUE_HISTORY"
+        intent_score = max(int(intent_score or 0), 6)
+        relation_hint = "HISTORY_LOOKUP_WITH_NEW_VISUAL_OUTPUT"
+        reason = "dialogue_based_self_portrait_requires_recent_history_context"
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -1711,10 +3000,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "recall_action": bool(recall_action),
         "decision_action": bool(decision_action),
         "plan_action": bool(plan_action),
-        "continuation_action": bool(continuation_action),
+        "continuation_action": bool(continuation_action or saved_artifact_followup_kind),
         "answer_followup": bool(answer_followup),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction),
+        "topic_reference_fragment": bool(topic_reference_fragment or saved_artifact_followup_kind),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(active_branch_repair),
+        "selection_followup_candidate": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("selection_followup_candidate")),
+        "explicit_previous_answer_correction": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("explicit_previous_answer_correction")),
+        "factual_verification_request": bool(factual_verification_request),
+        "explicit_topic_switch": bool(explicit_topic_switch),
         "self_reference": bool(self_reference),
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
@@ -1722,38 +3018,67 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
+        "dialogue_profile_request": bool(dialogue_profile_request),
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
     retrieval_profile = {
-        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if requires_memory and not explicit_topic_introduction and intent_upper in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} else "NEW_TOPIC"),
+        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if requires_memory and not explicit_topic_switch and intent_upper in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} else "NEW_TOPIC"),
         "primary_intent": intent_upper or "NEW_INFORMATION",
         "direction": _text(direction),
         "topic_reference": _text(topic_reference),
-        "prefer_active_branch": bool(requires_memory and not history_request and not explicit_topic_introduction),
+        "prefer_active_branch": bool(requires_memory and not history_request and not explicit_topic_switch),
         "prefer_named_history": bool(history_request or topic_reference in {"TOPIC_FRAGMENT", "PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER"}),
-        "previous_answer_reference": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("previous_answer_reference") or answer_followup),
-        "active_branch_repair": bool((dialogue_act_profile.get("pragmatic_features") or {}).get("active_branch_repair")),
+        "previous_answer_reference": bool(previous_answer_reference or answer_followup),
+        "active_branch_repair": bool(active_branch_repair),
         "avoid_cross_topic_injection": True,
-        "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if requires_memory and not explicit_topic_introduction else "answer_new_request"),
+        "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if requires_memory and not explicit_topic_switch else "answer_new_request"),
     }
     return {
         "schema": "april_request_semantics_v1",
-        "method": "rules_fuzzy_lexical_v1",
         "primary_intent": primary_intent,
         "direction": direction,
         "time_scope": time_scope,
+        "time_window": time_window,
+        "has_explicit_time_window": has_explicit_time_window,
+        "requested_topic_count": requested_topic_count,
+        "minimum_topic_count": minimum_topic_count,
+        "history_inventory_request": history_inventory_request,
         "topic_reference": topic_reference,
         "requires_memory": bool(requires_memory),
         "history_request": bool(history_request),
+        "dialogue_profile_request": bool(dialogue_profile_request),
         "search_scope": search_scope,
         "relation_hint": relation_hint,
         "intent_score": int(intent_score),
         "speech_act": dialogue_act_profile.get("speech_act"),
         "communicative_act": dialogue_act_profile.get("communicative_act"),
+        "previous_answer_reference": bool(previous_answer_reference),
+        "active_branch_repair": bool(active_branch_repair),
+        "factual_verification_request": bool(factual_verification_request),
+        "explicit_topic_switch": bool(explicit_topic_switch),
+        "explicit_topic_introduction": bool(explicit_topic_introduction),
+        "explicit_topic_closure": bool(explicit_topic_closure),
+        "saved_artifact_followup_kind": saved_artifact_followup_kind,
+        # Shared routing contract: active dialogue first, semantically matched
+        # retained history only on conflict, and a clean new topic on a history miss.
+        "routing_policy": {
+            "version": "hot_branch_then_semantic_history_v1",
+            "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
+            "active_branch_must_match_semantically": True,
+            "history_fallback_on_active_branch_miss": True,
+            "history_scope": "ALL_AUTHENTICATED_DIALOGUE_WITHIN_RETENTION",
+            "new_topic_only_after_history_miss": True,
+            "ambiguous_turn": "LATEST_SAME_DIALOG_TURN",
+            "named_subject_conflict": "SEARCH_ALL_MATCHING_HISTORY",
+            "history_miss": "NEW_TOPIC",
+            "cross_topic_injection": "DISALLOW",
+        },
         "pragmatic_intent": dialogue_act_profile.get("pragmatic_intent"),
         "message_function": dialogue_act_profile.get("message_function"),
         "pragmatic_features": dialogue_act_profile.get("pragmatic_features", {}),
+        "tone": dialogue_act_profile.get("tone", "NEUTRAL"),
+        "recommended_response_action": dialogue_act_profile.get("recommended_response_action", "ANSWER_NORMALLY"),
         "features": features,
         "reason": reason,
         "context_signature": context_signature,
@@ -1774,23 +3099,14 @@ def _is_history_request(text: str) -> bool:
 
 
 def _history_count(text: str) -> int:
-    low = _text(text).lower().replace("ё", "е")
-    # Only count a requested result list, not numbers belonging to an age/time
-    # phrase ("два часа назад") or an inventory statement ("в истории 16 диалогов").
-    number_pattern = r"(10|[1-5])"
-    unit_pattern = r"(?:диалог\w*|разговор\w*|сообщен\w*|тем\w*|пункт\w*|раздел\w*)"
-    match = re.search(rf"\bпоследн\w*\s+(?:из\s+)?{number_pattern}\b", low)
-    if not match:
-        match = re.search(rf"\b{number_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low)
-    if match:
-        return max(1, min(5, int(match.group(1))))
-    for word, count in _HISTORY_COUNTS.items():
-        word_pattern = re.escape(word)
-        if re.search(rf"\bпоследн\w*\s+(?:из\s+)?{word_pattern}\b", low) or re.search(
-            rf"\b{word_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low
-        ):
-            return max(1, min(5, count))
-    return 5
+    """Return the upper bound for list requests such as “от 5 до 10 тем”."""
+    _, maximum = extract_topic_count_bounds(text, default=10)
+    return max(1, min(10, int(maximum or 10)))
+
+
+def _history_count_minimum(text: str) -> int:
+    minimum, _ = extract_topic_count_bounds(text, default=10)
+    return max(1, min(10, int(minimum or 5)))
 
 
 def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1805,18 +3121,25 @@ def _select_history_topics(memory: dict[str, Any]) -> list[dict[str, Any]]:
 def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     relation = _text(memory.get("relation")).upper()
     history_request = bool(memory.get("history_request"))
+    contextual_history_match = bool(memory.get("contextual_history_match"))
     pairs = memory.get("selected_pairs")
-    # HISTORY_RECALL intentionally remains relation=NEW, but its selected evidence
-    # must still reach the Provider. Relation controls topic continuation, not whether
-    # authenticated history evidence may be attached to the current request.
-    if (relation != "CONTINUE" and not history_request) or not isinstance(pairs, list):
+    # HISTORY_RECALL and named-topic semantic matches can both remain relation=NEW.
+    # Relation controls active-topic state, not whether grounded user history can be
+    # attached to answer this request.
+    if (relation != "CONTINUE" and not history_request and not contextual_history_match) or not isinstance(pairs, list):
         return []
-    if history_request:
-        limit = 5
-    elif _text(memory.get("history_selection_method")) == "named_topic_section_vector":
-        limit = max(2, min(3, int(memory.get("continuation_context_limit") or 3)))
-    else:
-        limit = 2
+    source_retrieval = memory.get("source_retrieval") if isinstance(memory.get("source_retrieval"), dict) else {}
+    retrieval_method = _text(source_retrieval.get("method")).lower()
+    retrieval_strategy = _text(source_retrieval.get("strategy")).upper()
+    branch_context_ready = bool(
+        retrieval_method.endswith("_branch_context")
+        or retrieval_method in {"same_dialog_topic_branch_context", "semantic_history_topic_branch_context"}
+        or retrieval_strategy in {"ACTIVE_BRANCH_SOURCE", "HOT_WORK_BRANCH_SOURCE", "NAMED_HISTORY_SOURCE_WITH_NEW_OPERATION"}
+    )
+    # Branch retrieval provides several compact, semantically related source turns
+    # (including the originating request and structured-data turns). The provider's
+    # Premium token guard remains the final budget authority.
+    limit = 6 if (history_request or contextual_history_match or branch_context_ready) else 2
     return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
 
 
@@ -1919,11 +3242,12 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
     ui_instruction_detector = globals().get("_is_ui_instruction_request")
     ui_help = _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
     composite_detector = globals().get("_detect_image_compositing_request")
-    image_edit = _detect_image_modification(request) or (
+    unambiguous_new_image = _should_generate_instead_of_requesting_missing_source(request)
+    image_edit = (not unambiguous_new_image) and (_detect_image_modification(request) or (
         callable(composite_detector) and bool(composite_detector(request))
         and bool(re.search(r"(?:на\s+(?:это\s+|эту\s+|этой\s+|мою\s+)?фот\w*|фото\s+с\s+монет\w*|присланн\w*\s+фото)", low, re.I))
-    )
-    image_generation = _detect_image_generation_request(request)
+    ))
+    image_generation = _detect_image_generation_request(request) or unambiguous_new_image
     history_detector = globals().get("_is_history_request")
     history_action_phrase = bool(re.search(
         r"(?:во\s+сколько\s+(?:времени\s+)?мы\s+(?:говорил\w*|обсуждал\w*|разговаривал\w*)|"
@@ -2013,11 +3337,60 @@ def _split_request_sequence(text: str) -> list[str]:
         return []
     if _is_feedback_control_help_request(source):
         return [source]
-    # Keep several route questions together as one navigation workflow. A separate
-    # explicit artifact/calculation action is still split by the normal task path.
+    # Keep multiple related route questions together so the UI room can produce
+    # one coherent navigation map. Split only when the same message clearly asks
+    # for a separate non-UI deliverable such as code, a graph, or a calculation.
     if _is_site_navigation_request(source) and not _has_explicit_independent_non_ui_action(source):
         return [source]
+    if _is_ui_instruction_request(source) and not _has_explicit_independent_task_boundaries(source):
+        return [source]
     if _looks_like_previous_answer_followup(source):
+        return [source]
+
+    # A repair that explains the previous visual-operation mistake is one request,
+    # even if its punctuation resembles several independent commands. Splitting it
+    # caused multiple history searches and let a middle fragment replace the goal.
+    low_repair_source = source.lower().replace("ё", "е")
+    repair_rejects_edit = bool(re.search(
+        r"(?:я\s+(?:же\s+)?не\s+просил\w*.{0,100}(?:измен\w*|редактир\w*|обрабатыва\w*)|"
+        r"не\s+(?:надо|нужно)\s+(?:измен\w*|редактир\w*)|"
+        r"я\s+(?:же\s+)?просил\w*.{0,100}(?:созда\w*|нарис\w*|сгенерир\w*)|исправься|i\s+did\s+not\s+ask\s+you\s+to\s+edit)",
+        low_repair_source, re.IGNORECASE | re.DOTALL,
+    ))
+    repair_has_visual_output = bool(
+        set(_detect_requested_outputs(source)) & {"image", "diagram", "graph", "table", "file"}
+    )
+    if repair_rejects_edit and repair_has_visual_output and len(source.split()) <= 100:
+        return [source]
+
+    # A correction/continuation that names the prior task must remain one semantic
+    # unit. Splitting "I already asked you to draw X. Continue" detached the subject
+    # from its continuation verb and arbitration then selected only the trailing
+    # "continue" step, with no usable render instructions.
+    low_source = source.lower().replace("ё", "е")
+    # Imperative splitting used to detach "Я попросил тебя" from the requested
+    # artifact, leaving the actual visual subject as a second artificial task.
+    # Preserve the complete user-authored clause whenever that opening explains
+    # a single visual-creation request. Multi-deliverable bundles are handled above.
+    first_person_visual_repair = bool(
+        re.search(r"^\s*(?:я\s+(?:же\s+)?(?:просил|просила|попросил|попросила)|i\s+asked\s+you)\b", low_source)
+        and set(_detect_requested_outputs(source)) & {"image", "diagram", "graph", "table", "file"}
+        and re.search(r"(?:созда\w*|нарис\w*|сгенерир\w*|постро\w*|create|draw|generate|build)\w*", low_source)
+    )
+    if first_person_visual_repair and len(source.split()) <= 100:
+        return [source]
+    visual_or_artifact_task = bool(set(_detect_requested_outputs(source)) & {
+        "image", "diagram", "graph", "table", "formula", "code", "file", "link"
+    })
+    prior_task_repair = bool(re.search(
+        r"\b(?:я\s+же\s+)?(?:просил|просила|попросил|попросила|говорил|говорила)\b",
+        low_source,
+    ))
+    continuation_suffix = bool(re.search(
+        r"(?:^|[.!?。]\s*)\b(?:продолжи(?:те)?|продолжай(?:те)?|продолжим|дальше|далее|resume|continue|go\s+on)\s*[.!?…]*\s*$",
+        low_source, re.IGNORECASE,
+    ))
+    if visual_or_artifact_task and continuation_suffix and (prior_task_repair or len(source.split()) <= 35):
         return [source]
 
     # A detailed 3D-scene prompt is one artifact task with many constraints, not
@@ -2045,6 +3418,20 @@ def _split_request_sequence(text: str) -> list[str]:
     if starts_visual_build and "graph" in parent_outputs and only_graph_artifact_outputs and (has_3d_scene_language or has_visual_artifact_noun) and not re.search(r"[?？]\s+\S", source):
         return [source]
 
+    # A recognized multi-render presentation (for example formulas + biography +
+    # experiment illustrations + sources + a final portrait) is one user task.
+    # Keep its coordinated clauses together so dependent phrases are not sent to
+    # State Manager as fake standalone questions. All other requests retain the
+    # established conjunction-based question splitting.
+    presentation_bundle = len(build_presentation_sequence(source)) >= 2
+    if presentation_bundle:
+        # A multi-render request is one coherent task with a separate ordered
+        # presentation plan. Splitting its imperatives into memory-search clauses
+        # detaches short connectors and pronouns from the named subject, and can
+        # trigger repeated searches against unrelated old branches.
+        # Keep the user's wording intact; presentation_sequence controls render order.
+        return [source]
+
     lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
     for line in lines:
@@ -2060,9 +3447,14 @@ def _split_request_sequence(text: str) -> list[str]:
         # Question marks are strong boundaries. Also split sentence periods only
         # when the next sentence visibly starts another task/question, avoiding
         # ordinary explanatory sentences and most abbreviation false positives.
+        conjunction_boundary = "" if presentation_bundle else (
+            r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)"
+        )
         boundary_pattern = re.compile(
+            # In a multi-render presentation, clauses like "ссылки на ресурсы с
+            # описанием, куда они ведут и что объясняют" remain in one request.
             r"(?<=[?？])\s+|(?<=[.!])\s+(?=" + _TASK_OR_QUESTION_START + r")"
-            r"|\s+(?:и|а также|а|and|also)\s+(?=" + question_lead + r"\b)",
+            + conjunction_boundary,
             flags=re.IGNORECASE,
         )
         questions = [piece.strip() for piece in boundary_pattern.split(line) if piece.strip()]
@@ -2076,6 +3468,27 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    # Modal openers (“Можешь…”, “Можно…”, ASR typo “Можес…”, “Could you…”) are
+    # the beginning of the following task, not independent tasks. Merge them before
+    # semantic search so one user sentence performs one memory lookup rather than
+    # burning time on an empty-prefix search.
+    if len(cleaned) > 1 and re.fullmatch(
+        r"(?:можешь|можете|можес|может|можно|сможешь|сможете|пожалуйста|давай|давайте|окей|okay|"
+        r"could\s+you|can\s+you|please)[,.!?…\s]*",
+        cleaned[0], flags=re.IGNORECASE,
+    ):
+        cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
+    # The task splitter can isolate a discourse opener from a continuation verb:
+    # “Ну так продолжи” -> “Ну так” + “продолжи”. This is one active-branch
+    # instruction, not two searches. Merge only a short filler with an explicit
+    # continuation clause; independently named tasks still stay separate.
+    if len(cleaned) > 1 and re.fullmatch(
+        r"(?:ну\s+так|ну|так|хорошо|ладно|ок(?:ей)?|да|отлично|спасибо|great|good|okay|ok|yes)[,.!?…\s]*",
+        cleaned[0], flags=re.IGNORECASE,
+    ):
+        # These are discourse openers, not executable requests. Always bind one to
+        # the following substantive clause, including a brand-new visual task.
+        cleaned = [f"{cleaned[0].strip(' ,.!?…')} {cleaned[1]}".strip()] + cleaned[2:]
     if (len(cleaned) > 1 and _is_short_continuation_preface(cleaned[0])
             and _has_explicit_topic_introduction(cleaned[1])):
         # “Good, continue further” is a transition, not a retrieval task, when the
@@ -2086,6 +3499,75 @@ def _split_request_sequence(text: str) -> list[str]:
         # bound per-turn memory searches and prevent unbounded preprocessing time.
         cleaned = cleaned[:23] + ["; ".join(cleaned[23:])]
     return cleaned or [source]
+
+
+def build_presentation_sequence(text: str) -> list[dict[str, Any]]:
+    """Create an ordered deliverable manifest for a single multi-part Premium answer.
+
+    This is a presentation plan, not a set of independent dialogue-memory searches.
+    It preserves requested sections/renderers and moves an explicitly requested
+    final portrait/image to the final slot.
+    """
+    source = _text(text)
+    low = source.lower().replace("ё", "е")
+    if not source:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    detectors = [
+        ("formulas", r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*)", ["text", "formula"]),
+        ("biography", r"(?:истори\w*\s+(?:его\s+|ее\s+|её\s+)?жизн\w*|биограф\w*|history\s+of\s+(?:his|her|their)\s+life|biography)", ["text"]),
+        ("tables", r"(?:таблиц\w*|табличн\w*|\btable\w*|screenshot\w*)", ["text", "table"]),
+        ("experiments", r"(?:опыт\w*|эксперимент\w*|experiment\w*)", ["text", "diagram"]),
+        ("discoveries", r"(?:открыти\w*|discover\w*)", ["text", "diagram"]),
+        ("resources", r"(?:ссылк\w*|ресурс\w*|источник\w*|website\w*|resource\w*|source\w*|\burls?\b|\blinks?\b)", ["text", "link"]),
+    ]
+    for section, pattern, output_types in detectors:
+        match = re.search(pattern, low, re.IGNORECASE)
+        if match:
+            candidates.append({
+                "section": section,
+                "title": {
+                    "formulas": "Формулы и пояснения",
+                    "biography": "История жизни",
+                    "tables": "Таблицы и данные",
+                    "experiments": "Иллюстрации опытов",
+                    "discoveries": "Открытия и их значение",
+                    "resources": "Ресурсы и ссылки",
+                }[section],
+                "source_position": match.start(),
+                "output_types": output_types,
+                "final_output": False,
+            })
+
+    final_portrait = bool(re.search(
+        r"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
+        r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
+        r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
+        low, re.IGNORECASE,
+    ))
+    if final_portrait:
+        candidates.append({
+            "section": "final_portrait",
+            "title": "Итоговый портрет",
+            "source_position": len(source) + 1,
+            "output_types": ["image"],
+            "final_output": True,
+        })
+
+    candidates.sort(key=lambda item: (bool(item.get("final_output")), int(item.get("source_position") or 0)))
+    if len(candidates) <= 1:
+        return []
+    sequence = []
+    for index, item in enumerate(candidates, start=1):
+        sequence.append({
+            "step_index": index,
+            "section": item["section"],
+            "title": item["title"],
+            "output_types": list(item["output_types"]),
+            "final_output": bool(item["final_output"]),
+        })
+    return sequence
 
 
 def build_question_sequence(
@@ -2101,27 +3583,255 @@ def build_question_sequence(
     """
     sequence: list[dict[str, Any]] = []
     parent = dict(parent_interpretation or interpret_request_semantics(text))
+    parent_pragmatic = parent.get("pragmatic_features") if isinstance(parent.get("pragmatic_features"), dict) else {}
+    parent_explicit_topic_switch = bool(parent.get("explicit_topic_switch") or _has_explicit_topic_switch(text))
+    parent_repair = bool(
+        not parent_explicit_topic_switch
+        and (parent.get("active_branch_repair") or parent_pragmatic.get("active_branch_repair"))
+    )
+    parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
+    if _is_dialogue_based_self_portrait_request(text):
+        # Analysis subject and image output are one semantic task. Splitting after
+        # "based on our dialogue" or before "draw an image" discards the evidence
+        # basis and causes the model to ask for a source photo unnecessarily.
+        return [{
+            "step_index": 1,
+            "request": _text(text),
+            "output_types": ["text", "image"],
+            "answer_in_order": True,
+            "semantic_intent": "HISTORY_RECALL",
+            "search_direction": "SEARCH_DIALOGUE_HISTORY_FOR_VISUAL_CONTEXT",
+            "time_scope": "RECENT_WINDOW",
+            "topic_reference": "DIALOGUE_HISTORY",
+            "requires_memory": True,
+            "history_request": True,
+            "dialogue_profile_request": True,
+            "semantic_reason": "dialogue_profile_and_image_must_remain_one_task",
+            "features": {"dialogue_profile_request": True},
+            "action_contract": {
+                "action": "CREATE_DIALOGUE_GROUNDED_CONCEPTUAL_PORTRAIT",
+                "input_source": "authenticated_recent_dialogue_history",
+                "output_types": ["text", "image"],
+                "must_not": ["не запрашивать отсутствующее исходное фото", "не выдумывать реальную внешность", "не выдавать выводы о настроении за диагноз"],
+                "success": ["кратко описать подтверждённые повторяющиеся темы и стиль общения", "создать концептуальное изображение по ним", "согласовать текст и факт готовности изображения"],
+            },
+        }]
     pieces = _split_request_sequence(text)
-    parent_introduces_subject = _has_explicit_topic_introduction(text)
+    parent_signature = parent.get("context_signature") if isinstance(parent.get("context_signature"), dict) else _context_signature(text)
+    parent_participants = parent_signature.get("participant_references") if isinstance(parent_signature.get("participant_references"), dict) else {}
+    parent_is_self_contained_new = bool(
+        parent.get("primary_intent") == "NEW_INFORMATION"
+        and not parent.get("requires_memory")
+        and not parent.get("history_request")
+        and not parent.get("explicit_topic_switch")
+        and not parent_signature.get("reference_terms")
+        and not parent_participants.get("interlocutor_reference")
+        and not parent_participants.get("shared_reference")
+    )
+    first_piece_signature = _context_signature(pieces[0]) if pieces else {}
+    first_piece_intent = interpret_request_semantics(pieces[0]) if pieces else {}
+    first_piece_participants = first_piece_signature.get("participant_references") if isinstance(first_piece_signature.get("participant_references"), dict) else {}
+    first_piece_is_turn_root = bool(
+        pieces
+        and first_piece_intent.get("primary_intent") == "NEW_INFORMATION"
+        and not first_piece_intent.get("requires_memory")
+        and not first_piece_intent.get("history_request")
+        and not first_piece_intent.get("explicit_topic_switch")
+        and first_piece_signature.get("has_explicit_subject")
+        and not first_piece_signature.get("reference_terms")
+        and not first_piece_participants.get("interlocutor_reference")
+        and not first_piece_participants.get("shared_reference")
+    )
+    # A compound turn can be labeled as continuation because a later clause uses
+    # a pronoun ("draw a project ... and explain how to assemble it"). Resolve the
+    # first substantive clause independently; if it is a self-contained subject,
+    # dependent clauses inherit that root only after its normal memory search runs.
+    parent_introduces_subject = bool(
+        _has_explicit_topic_introduction(text)
+        or (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
+        or first_piece_is_turn_root
+    )
     subject_intro_seen = False
     for index, item in enumerate(pieces, start=1):
         item_introduces_subject = _has_explicit_topic_introduction(item)
+        item_low = item.lower().replace("ё", "е")
         item_has_anaphor = bool(re.search(
-            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their)\b",
-            item.lower().replace("ё", "е"), flags=re.IGNORECASE,
+            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their|"
+            r"какой|какая|какое|какие|который|которая|которое|которые|which|what)\b",
+            item_low, flags=re.IGNORECASE,
         ))
+        # Evaluation/choice clauses can refer to alternatives from the preceding
+        # clause without a pronoun: "... и объясни, какое лучше выбрать".
+        evaluative_dependency = bool(re.search(
+            r"\b(?:какой|какая|какое|какие|который|которая|которое|которые|which|what)\b"
+            r".{0,48}\b(?:лучше|выбрать|выбирай|выбери|подходит|подойдет|подойдёт|"
+            r"предпочесть|оценить|сравнить|стоит\s+взять|should\s+i\s+choose|choose|pick)\b",
+            item_low, flags=re.IGNORECASE | re.DOTALL,
+        ))
+        # Generic alternative/display clauses have an implicit object supplied by
+        # the preceding request: "show both versions", "покажи оба варианта".
+        # Treat them as dependent only when a prior clause has introduced the
+        # turn's subject; they must not independently start a new topic.
+        alternative_dependency = bool(re.search(
+            r"\b(?:оба|обе|обоих|все|эти|такие|both|all)\s+(?:вариант\w*|способ\w*|пример\w*|пункт\w*|решени\w*|верси\w*|option\w*|version\w*|approach\w*|way\w*)\b"
+            r"|\b(?:покажи|покажите|нарисуй|сделай|объясни|сравни|show|draw|make|explain|compare)\b.{0,28}\b(?:оба|обе|все|both|all)\b",
+            item_low, flags=re.IGNORECASE | re.DOTALL,
+        ))
+        item_has_anaphor = item_has_anaphor or evaluative_dependency or alternative_dependency
+        preceding_clause = " ".join(pieces[:index - 1])
+        preceding_signature = _context_signature(preceding_clause) if preceding_clause else {}
+        preceding_has_subject = bool(
+            subject_intro_seen
+            or _has_explicit_topic_introduction(preceding_clause)
+            or (parent_is_self_contained_new and preceding_signature.get("has_explicit_subject"))
+        )
         inherits_current_request_subject = bool(
-            parent_introduces_subject
-            and index > 1
+            index > 1
+            and parent_introduces_subject
             and item_has_anaphor
             and not item_introduces_subject
-            and (subject_intro_seen or _has_explicit_topic_introduction(" ".join(pieces[:index - 1])))
+            and preceding_has_subject
         )
+        # The first clause owns the subject for this turn even when its task verb is
+        # uncommon. Executor uses this metadata for a safe NEW-topic fast path.
+        if index == 1 and (
+            (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
+            or first_piece_is_turn_root
+        ):
+            item_introduces_subject = True
         # Per-question output signals must use the same semantic enhancement as
         # the turn-level contract. Without this, INTERPRETATION could request a
         # diagram while REQUEST_SEQUENCE still tells Provider to return text only.
         outputs = _enhance_requested_outputs(item, _detect_requested_outputs(item))
+        # When a single turn is split into clauses, an ellipsis such as "his photo
+        # and the table is ugly—make it prettier" can leave the visual noun in one
+        # child and the operation in the next. Bind the turn-level renderer intent to
+        # the child that actually names that visual object; do not attach it to a
+        # generic style-only child such as "make it prettier".
+        item_low = item.lower().replace("ё", "е")
+        output_object_patterns = {
+            "image": r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bphoto\w*|\bimage\w*|\bpicture\w*)",
+            "table": r"(?:таблиц\w*|\btable\b)",
+            "graph": r"(?:график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b)",
+            "diagram": r"(?:схем\w*|чертеж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b)",
+            "formula": r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b|\blatex\b)",
+            "code": r"(?:код\w*|скрипт\w*|\bcode\b|\bscript\b)",
+            "link": r"(?:ссылк\w*|\blink\b|\burl\b)",
+            "file": r"(?:файл\w*|документ\w*|\bfile\b|\bdocument\b)",
+        }
+        for parent_output in parent_outputs:
+            pattern = output_object_patterns.get(parent_output)
+            if pattern and parent_output not in outputs and re.search(pattern, item_low, flags=re.IGNORECASE):
+                outputs.append(parent_output)
+        if "text" not in outputs:
+            outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
+        if parent_explicit_topic_switch:
+            item_semantics["explicit_topic_switch"] = True
+            item_semantics["active_branch_repair"] = False
+            item_semantics.setdefault("features", {})["active_branch_repair"] = False
+            item_semantics["features"]["explicit_topic_switch"] = True
+            item_semantics.setdefault("pragmatic_features", {})["active_branch_repair"] = False
+        parent_subject_terms = set(parent_signature.get("subject_terms") or [])
+        child_subject_terms = set((item_semantics.get("context_signature") or {}).get("subject_terms") or [])
+        shared_repair_subject_terms = parent_subject_terms.intersection(child_subject_terms)
+        # Multi-clause corrections often repeat the concrete subject in the final
+        # clause (“you mixed it up; give me the warm grain name”). Link that clause
+        # back to the correction's active branch, but only when it has the same
+        # subject and does not explicitly introduce/switch to another topic.
+        same_repair_subject = bool(
+            len(shared_repair_subject_terms) >= 2
+            or (
+                shared_repair_subject_terms
+                and min(len(parent_subject_terms), len(child_subject_terms)) <= 2
+            )
+        )
+        repair_linked_clause = bool(
+            parent_repair
+            and not _has_explicit_topic_introduction(item)
+            and not _has_explicit_topic_switch(item)
+            and (
+                _detect_previous_answer_recheck(item)
+                or _is_repair_followup_clause(item)
+                or same_repair_subject
+            )
+        )
+        if repair_linked_clause:
+            child_pragmatic = item_semantics.get("pragmatic_features") if isinstance(item_semantics.get("pragmatic_features"), dict) else {}
+            child_features = item_semantics.get("features") if isinstance(item_semantics.get("features"), dict) else {}
+            item_semantics.update({
+                "primary_intent": "TOPIC_CONTINUATION",
+                "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+                "topic_reference": "PREVIOUS_ASSISTANT_ANSWER",
+                "time_scope": "ACTIVE_DIALOGUE",
+                "requires_memory": True,
+                "history_request": False,
+                "search_scope": "TOPIC_OR_ACTIVE_CONTEXT",
+                "relation_hint": "CONTINUE",
+                "reason": "repair_clause_inherits_active_branch",
+                "speech_act": item_semantics.get("speech_act") or "CORRECTION_OR_REVISION",
+                "communicative_act": "REVISE_PREVIOUS_RESPONSE",
+                "pragmatic_intent": "correction_or_revision",
+                "message_function": "revise_previous_response",
+                "tone": "CORRECTIVE",
+                "recommended_response_action": "RECHECK_PREVIOUS_RESPONSE_AND_CORRECT_IF_NEEDED",
+                "previous_answer_reference": True,
+                "active_branch_repair": True,
+                "factual_verification_request": bool(
+                    item_semantics.get("factual_verification_request")
+                    or parent.get("factual_verification_request")
+                    or parent_pragmatic.get("factual_verification_request")
+                ),
+                "pragmatic_features": {
+                    **child_pragmatic,
+                    "previous_answer_reference": True,
+                    "active_branch_repair": True,
+                    "factual_verification_request": bool(
+                        child_pragmatic.get("factual_verification_request")
+                        or parent.get("factual_verification_request")
+                        or parent_pragmatic.get("factual_verification_request")
+                    ),
+                },
+                "features": {
+                    **child_features,
+                    "context_dependent_reaction": True,
+                    "previous_answer_reference": True,
+                    "active_branch_repair": True,
+                    "factual_verification_request": bool(
+                        child_features.get("factual_verification_request")
+                        or parent.get("factual_verification_request")
+                        or parent_pragmatic.get("factual_verification_request")
+                    ),
+                },
+                "parent_context_dependency": True,
+                "parent_intent": parent.get("primary_intent", "TOPIC_CONTINUATION"),
+            })
+        parent_window = parent.get("time_window") if isinstance(parent.get("time_window"), dict) else {}
+        if parent_window.get("has_constraint") and not (item_semantics.get("time_window") or {}).get("has_constraint"):
+            item_semantics["time_window"] = parent_window
+            item_semantics["has_explicit_time_window"] = True
+            item_semantics["time_scope"] = parent.get("time_scope", "EXPLICIT_TIME_WINDOW")
+        if parent.get("history_request") and not item_introduces_subject:
+            # A decomposed clause can omit the temporal/history words that made the
+            # whole request unambiguous. Preserve that parent context for dependent
+            # follow-ups without forcing it onto a separately introduced new subject.
+            _, inherited_tokens = _semantic_normalize(item)
+            inherited_set = set(inherited_tokens)
+            context_words = {
+                "это", "этого", "этой", "этом", "них", "ним", "нему", "истории",
+                "темы", "диалоги", "обсуждение", "список", "сводка", "выводы", "итоги",
+                "topics", "history", "conversations", "summary", "them", "those", "these",
+            }
+            if item_semantics.get("history_request") or item_semantics.get("requires_memory") or inherited_set.intersection(context_words) or len(inherited_set) <= 5:
+                item_semantics["history_request"] = True
+                item_semantics["requires_memory"] = True
+                item_semantics["search_scope"] = "ALL_DIALOGUE_HISTORY"
+                item_semantics["relation_hint"] = "HISTORY_LOOKUP"
+                item_semantics["primary_intent"] = "HISTORY_SUMMARY" if parent.get("primary_intent") == "HISTORY_SUMMARY" else item_semantics.get("primary_intent", "HISTORY_RECALL")
+                item_semantics["direction"] = "SEARCH_AND_SUMMARIZE_HISTORY" if item_semantics["primary_intent"] == "HISTORY_SUMMARY" else "SEARCH_DIALOGUE_HISTORY"
+                item_semantics["reason"] = "parent_history_context_inherited"
+                item_semantics["requested_topic_count"] = parent.get("requested_topic_count", _history_count(text))
+                item_semantics["minimum_topic_count"] = parent.get("minimum_topic_count", _history_count_minimum(text))
         if (
             parent.get("requires_memory")
             and parent.get("topic_reference") == "PREVIOUS_ASSISTANT_ANSWER"
@@ -2202,10 +3912,30 @@ def build_question_sequence(
             "semantic_intent": item_semantics.get("primary_intent", "NEW_INFORMATION"),
             "search_direction": item_semantics.get("direction", "ANSWER_NEW_REQUEST"),
             "time_scope": item_semantics.get("time_scope", "UNSPECIFIED"),
+            "time_window": item_semantics.get("time_window") if isinstance(item_semantics.get("time_window"), dict) else {},
+            "has_explicit_time_window": bool(item_semantics.get("has_explicit_time_window")),
+            "requested_topic_count": max(1, min(10, int(item_semantics.get("requested_topic_count") or _history_count(item)))) if item_semantics.get("history_request") else 0,
+            "minimum_topic_count": max(1, min(10, int(item_semantics.get("minimum_topic_count") or _history_count_minimum(item)))) if item_semantics.get("history_request") else 0,
             "topic_reference": item_semantics.get("topic_reference", "UNSPECIFIED"),
             "requires_memory": bool(item_semantics.get("requires_memory")),
             "history_request": bool(item_semantics.get("history_request")),
             "semantic_reason": item_semantics.get("reason", ""),
+            "speech_act": item_semantics.get("speech_act", "STATEMENT_OR_REQUEST"),
+            "communicative_act": item_semantics.get("communicative_act", "NEW_OR_STANDALONE"),
+            "pragmatic_intent": item_semantics.get("pragmatic_intent", ""),
+            "message_function": item_semantics.get("message_function", ""),
+            "tone": item_semantics.get("tone", "NEUTRAL"),
+            "recommended_response_action": item_semantics.get("recommended_response_action", "ANSWER_NORMALLY"),
+            "pragmatic_features": item_semantics.get("pragmatic_features", {}),
+            "features": item_semantics.get("features", {}),
+            "previous_answer_reference": bool(item_semantics.get("previous_answer_reference")),
+            "active_branch_repair": bool(item_semantics.get("active_branch_repair") or repair_linked_clause),
+            "factual_verification_request": bool(item_semantics.get("factual_verification_request")),
+            "explicit_topic_switch": bool(parent_explicit_topic_switch or item_semantics.get("explicit_topic_switch")),
+            "explicit_topic_introduction": bool(item_semantics.get("explicit_topic_introduction")),
+            "explicit_topic_closure": bool(item_semantics.get("explicit_topic_closure")),
+            "saved_artifact_followup_kind": item_semantics.get("saved_artifact_followup_kind", ""),
+            "routing_policy": item_semantics.get("routing_policy", {}),
             "context_signature": item_semantics.get("context_signature") or _context_signature(item),
             "parent_context_dependency": bool(item_semantics.get("parent_context_dependency")),
             "parent_intent": item_semantics.get("parent_intent", ""),
@@ -2235,66 +3965,82 @@ def _is_code_modification_request(text: str) -> bool:
     return any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS)
 
 
-def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
-    """Count prior replies that actually refused an image edit in Free.
+def _build_dialogue_based_portrait_profile(
+    request_text: str,
+    selected_pairs: list[dict[str, Any]],
+    history_topics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a compact, evidence-bound visual brief from retrieved dialogue.
 
-    A note that merely says generated images are new and source photos remain
-    unchanged is not a refusal, and must not make the next edit attempt sound
-    like a repeated warning.
+    This is a non-clinical observation of conversational patterns, not a diagnosis
+    and not evidence of the user's physical appearance. Only repeatedly supported
+    themes are promoted to the image brief; single incidental topics stay secondary.
     """
-    if not isinstance(memory, dict):
-        return 0
-    pairs: list[Any] = []
-    seen_pairs: set[str] = set()
-    # Check candidates too: a follow-up insistence may be classified as NEW,
-    # leaving the last assistant refusal outside selected_pairs.
-    for source_name in ("selected_pairs", "candidates"):
-        source = memory.get(source_name)
-        if not isinstance(source, list):
+    pairs = [item for item in selected_pairs if isinstance(item, dict)]
+    user_turns = [
+        _text(item.get("source_user_text") or item.get("user") or item.get("user_text") or item.get("user_text_en"))
+        for item in pairs
+    ]
+    user_turns = [turn for turn in user_turns if turn]
+    topic_labels = []
+    for item in pairs:
+        label = _text(item.get("topic") or item.get("topic_summary"))
+        if label and label not in topic_labels:
+            topic_labels.append(label[:120])
+    for item in history_topics or []:
+        if not isinstance(item, dict):
             continue
-        for pair in source[:12]:
-            try:
-                fingerprint = json.dumps(pair, ensure_ascii=False, sort_keys=True, default=str)
-            except Exception:
-                fingerprint = str(pair)
-            if fingerprint in seen_pairs:
-                continue
-            seen_pairs.add(fingerprint)
-            pairs.append(pair)
-    notice_markers = (
-        "редактирование изображений доступно только в premium",
-        "редактирование и улучшение изображений доступно только в premium",
-        "изменение изображений доступно только в premium",
-        "image editing is available only in premium",
-        "editing and enhancing images is available only in premium",
-        "редагування зображень доступне тільки в premium",
-        "редагування зображень доступне лише в premium",
-        "la retouche d’image est disponible uniquement avec premium",
-        "la modification des images est disponible uniquement avec premium",
-    )
-    refusal_markers = (
-        "не могу изменить", "не могу изменять", "не могу изменять уже создан",
-        "не могу редактировать", "не могу изменить уже создан",
-        "не могу отредактировать", "не могу изменить фото", "не могу изменить диаграм",
-        "cannot edit", "can't edit", "cannot modify", "can't modify", "unable to edit",
-        "не можу змінити", "не можу змінювати", "не можу редагувати",
-        "impossible de modifier", "je ne peux pas modifier", "mais pas modifier",
-    )
-    count = 0
-    for pair in pairs:
-        try:
-            rendered = json.dumps(pair, ensure_ascii=False, default=str).lower().replace("ё", "е")
-        except Exception:
-            rendered = str(pair).lower().replace("ё", "е")
-        has_premium_notice = (
-            any(marker.replace("ё", "е") in rendered for marker in notice_markers)
-            or bool(re.search(r"редактир\w*.{0,80}доступн\w*.{0,30}premium", rendered))
-            or bool(re.search(r"(?:editing|edit|modification).{0,80}available.{0,30}premium", rendered))
-            or bool(re.search(r"premium.{0,30}(?:editing|edit|modification)", rendered))
-        )
-        if has_premium_notice and any(marker.replace("ё", "е") in rendered for marker in refusal_markers):
-            count += 1
-    return min(count, 5)
+        label = _text(item.get("topic") or item.get("title") or item.get("label") or item.get("summary"))
+        if label and label not in topic_labels:
+            topic_labels.append(label[:120])
+        if len(topic_labels) >= 8:
+            break
+
+    joined = " ".join(user_turns).lower().replace("ё", "е")
+    theme_rules = [
+        ("создание и развитие April/AI-инструментов", r"(?:април|april|бот\w*|бота|ai[- ]?ассист|llm|openai|модель\w*)"),
+        ("архитектура, интерпретация намерений и память диалога", r"(?:интерпретац\w*|пониман\w* запрос|памят\w*|диалог\w*|истори\w*|ветк\w*|контекст\w*|semantic|memory)"),
+        ("программирование, отладка и проверка логов", r"(?:код\w*|python|пайтон|tsx|typescript|файл\w*|логи|ошибк\w*|тест\w*|отлад\w*|исправ\w*)"),
+        ("визуализация и согласованная мультимедийная подача", r"(?:картинк\w*|изображен\w*|генерац\w*|рендер\w*|диаграмм\w*|схем\w*|галере\w*|визуал\w*)"),
+        ("практическое улучшение интерфейса и продукта", r"(?:интерфейс\w*|пользовател\w*|кнопк\w*|страниц\w*|ui\b|ux\b|google play|публикац\w*)"),
+    ]
+    # Call a theme recurring only when it occurs in two separate retrieved user turns.
+    recurring_themes = [
+        label for label, pattern in theme_rules
+        if sum(1 for turn in user_turns if re.search(pattern, turn, re.I)) >= 2
+    ]
+    iterative_pattern = r"(?:исправ\w*|улучш\w*|проверь|провер\w*|передел\w*|почему|ошибк\w*|не\s+работ\w*)"
+    analytical_pattern = r"(?:проанализ\w*|структур\w*|по\s+цепочк\w*|причин\w*|лог\w*|доказ\w*|провер\w*)"
+    iterative_turns = sum(1 for turn in user_turns if re.search(iterative_pattern, turn, re.I))
+    analytical_turns = sum(1 for turn in user_turns if re.search(analytical_pattern, turn, re.I))
+    if iterative_turns >= 2:
+        communication_style = "повторяющийся запрос на итеративное улучшение, проверку причин и доведение результата до рабочего состояния"
+    elif analytical_turns >= 2:
+        communication_style = "повторяющийся интерес к структурному анализу, причинным связям и проверке фактов"
+    else:
+        communication_style = "недостаточно повторяющихся сигналов для уверенного описания устойчивого стиля общения"
+    current_low = _text(request_text).lower().replace("ё", "е")
+    frustration_pattern = r"(?:не\s+понима\w*|до\s+сих\s+пор|плохо\s+работ\w*|пута\w*|от\s+фонаря|раздраж\w*|не\s+то|снова\s+ошиб\w*)"
+    current_frustration = bool(re.search(frustration_pattern, current_low))
+    recent_frustration_turns = sum(1 for turn in user_turns[:5] if re.search(frustration_pattern, turn, re.I))
+    if current_frustration:
+        tone_note = "в текущем сообщении заметно недовольство повторяющимися сбоями и ожидание более точного результата; это ситуативная реакция на проблему, не характеристика личности"
+    elif recent_frustration_turns >= 2:
+        tone_note = "в нескольких недавних сообщениях повторялось недовольство точностью ответов или исправлением ошибок; это может описывать напряжение вокруг текущей задачи, но не состояние человека в целом"
+    else:
+        tone_note = "по текущему сообщению и выбранным недавним репликам недостаточно оснований уверенно описывать эмоциональное состояние; не изображать настроение как факт"
+    return {
+        "schema": "april_dialogue_portrait_profile_v1",
+        "evidence_turn_count": len(user_turns),
+        "recurring_themes": recurring_themes[:5],
+        "recent_topic_labels": topic_labels[:8],
+        "observed_communication_style": communication_style,
+        "situational_tone_observation": tone_note,
+        "evidence_policy": "Only themes supported by repeated retrieved dialogue turns are described as recurring. Distinguish observations from inference.",
+        "visual_direction": "A thoughtful, non-photorealistic conceptual portrait. Use only motifs supported by repeated dialogue evidence. When recurring themes are too weak to support a concrete scene, use a neutral, abstract adult silhouette with subtle dialogue-node motifs rather than inventing a profession, physical appearance, or biography.",
+        "do_not_infer": ["exact face or physical likeness", "age beyond adult styling", "ethnicity", "medical or psychiatric diagnosis", "private traits not stated in dialogue", "one-off incidental topic as the person's defining identity"],
+        "do_not_substitute": ["unrelated weapon or object", "random stock portrait", "source-photo request when no source photo was requested", "text-only substitute for requested image"],
+    }
 
 
 def build_interpretation(
@@ -2314,6 +4060,11 @@ def build_interpretation(
     original = _text(original_request or current_request)
     memory = dict(memory or {})
     request_semantics = dict(semantic_interpretation or interpret_request_semantics(original or text))
+    dialogue_profile_request = bool(request_semantics.get("dialogue_profile_request") or _is_dialogue_based_self_portrait_request(original or text))
+    if dialogue_profile_request:
+        request_semantics["dialogue_profile_request"] = True
+        request_semantics["history_request"] = True
+        request_semantics["requires_memory"] = True
     attachments = [dict(x) for x in (attachments or []) if isinstance(x, dict)]
     visual_context = [dict(x) for x in (visual_context or []) if isinstance(x, dict)]
 
@@ -2324,28 +4075,6 @@ def build_interpretation(
     ]
     restored_kinds = {str(item.get("kind") or "").lower() for item in restored_assets}
     has_image = "image" in kinds or "image" in restored_kinds or bool(visual_context)
-    output_asset_roles = {"april_output", "assistant_output", "generated", "generated_image", "april_generated"}
-
-    def _is_user_source_image(item: dict[str, Any]) -> bool:
-        kind = _text(item.get("kind") or item.get("mime_type") or item.get("content_type")).lower()
-        item_type = _text(item.get("type")).lower()
-        is_image = (
-            kind == "image"
-            or kind.startswith("image/")
-            or item_type in {"input_image", "image"}
-            or bool(item.get("image_url"))
-        )
-        if not is_image:
-            return False
-        role = _text(item.get("asset_role") or "user_input").lower()
-        source_type = _text(item.get("source_type") or "").lower()
-        return role not in output_asset_roles and source_type not in output_asset_roles
-
-    has_user_source_image = any(
-        _is_user_source_image(item)
-        for item in [*attachments, *restored_assets, *visual_context]
-        if isinstance(item, dict)
-    )
     has_voice = "voice" in kinds
     has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
     # Distinguish an asset's presence in dialogue memory from actual source bytes
@@ -2361,44 +4090,239 @@ def build_interpretation(
         for item in attachments
     )
 
-    request_text = original or text
-    detected_outputs = _detect_requested_outputs(request_text)
-    requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
-    routing_capabilities = _infer_routing_capabilities(request_text)
-
-    # Keep edit restrictions separate from permitted creation. A new picture
-    # described in the current dialogue remains a normal Free generation; a
-    # request to alter an existing photo/diagram is Premium-only and must not
-    # be rerouted into a replacement generation.
-    image_modification_requested = _detect_image_modification(request_text)
-    compositing_requested = _detect_image_compositing_request(request_text)
-    # A geometry/technical drawing stays a structured diagram even if the
-    # wording says "on the picture" or the dialogue contains an earlier image.
-    # Explicitly changing an existing photo/diagram is still restricted, while
-    # independently creating a new SVG/geometry artifact remains available.
-    structured_diagram_noun = bool(re.search(
-        r"(?:схем\w*|диаграмм\w*|черт[её]ж\w*|геометрическ\w*\s+фигур\w*|"
-        r"треугольн\w*|квадрат\w*|прямоугольн\w*|параллелограмм\w*|ромб\w*|"
-        r"трапец\w*|многоугольн\w*|окружност\w*|график\w*|"
-        r"размер\w*\s+(?:кажд\w*\s+)?сторон\w*|размер\w*|измерен\w*)",
-        request_text.lower().replace("ё", "е"),
-    ))
-    contextual_source_edit = bool(has_user_source_image and _detect_contextual_image_edit(request_text))
-    image_edit_restricted = bool(
-        image_modification_requested
-        or contextual_source_edit
-        or (has_user_source_image and compositing_requested and not structured_diagram_noun)
+    # Derive output requirements both from the complete user turn and from each
+    # explicitly separated sub-request. This prevents an image/table/graph request
+    # from disappearing when the splitter assigns it to a child clause.
+    question_sequence = build_question_sequence(
+        original or text,
+        parent_interpretation=request_semantics,
     )
-    # Kept as an explicit false compatibility field for older prompt and
-    # executor code. Free never converts an edit request into a new image.
-    free_image_recreation = False
-    image_edit_prior_attempts = _prior_free_image_edit_notice_count(memory) if image_edit_restricted else 0
+    presentation_sequence = build_presentation_sequence(original or text)
+    if dialogue_profile_request:
+        presentation_sequence = [{
+            "step_index": 1,
+            "section": "dialogue_based_portrait",
+            "title": "Концептуальный портрет по истории диалогов",
+            "output_types": ["text", "image"],
+            "answer_in_order": True,
+            "final_output": False,
+        }]
+    detected_outputs = _detect_requested_outputs(original or text)
+    requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
+    for sequence_item in question_sequence:
+        if not isinstance(sequence_item, dict):
+            continue
+        for output_type in sequence_item.get("output_types") or []:
+            normalized_output = _text(output_type).lower()
+            if normalized_output and normalized_output not in requested_outputs:
+                requested_outputs.append(normalized_output)
+    if "text" not in requested_outputs:
+        requested_outputs.insert(0, "text")
+    if dialogue_profile_request:
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
+    routing_capabilities = _infer_routing_capabilities(original or text)
+    relation = _text(memory.get("relation") or "NEW").upper()
+    normalized_visual_request = _text(original or text).lower().replace("ё", "е")
+    ui_instruction_request = _is_ui_instruction_request(normalized_visual_request)
+    if ui_instruction_request:
+        requested_outputs = [item for item in requested_outputs if item != "image"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = [
+                    name for name in (sequence_item.get("output_types") or []) if _text(name).lower() != "image"
+                ] or ["text"]
+        presentation_sequence = [
+            item for item in presentation_sequence
+            if isinstance(item, dict) and any(_text(name).lower() != "image" for name in (item.get("output_types") or []))
+        ]
+        for sequence_item in presentation_sequence:
+            sequence_item["output_types"] = [
+                name for name in (sequence_item.get("output_types") or []) if _text(name).lower() != "image"
+            ]
+    if dialogue_profile_request:
+        ui_instruction_request = False
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
+
+    has_saved_output_image = any(
+        _text(item.get("kind")).lower() == "image"
+        and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+        for item in restored_assets
+    )
+    # A short follow-up such as "А фото его" means: restore the image promised
+    # in the active visual task, not inspect the previous generated image as an
+    # input and not silently suppress the image renderer because no verb appears.
+    explicit_new_image = bool(re.search(
+        r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|сделай\s+(?:нов\w*|друг\w*)|нов\w*\s+(?:фото|картинк\w*|изображени\w*)|друг\w*\s+(?:фото|картинк\w*|изображени\w*)|generate|create|draw|make\s+(?:a\s+)?new|another\s+(?:image|photo|picture))\b",
+        normalized_visual_request,
+    ))
+    source_image_available = bool(
+        has_original_image
+        and any(
+            isinstance(item.get("image_url") or item.get("data_uri") or item.get("src") or item.get("image_data_uri") or item.get("_content_data_uri"), str)
+            and str(item.get("image_url") or item.get("data_uri") or item.get("src") or item.get("image_data_uri") or item.get("_content_data_uri")).startswith("data:image/")
+            for item in visual_context if isinstance(item, dict)
+        )
+    )
+    image_discussion_only = _is_image_discussion_without_new_visual_action(normalized_visual_request)
+    explicit_image_edit = False if (ui_instruction_request or dialogue_profile_request or image_discussion_only) else _detect_image_modification(normalized_visual_request)
+    if (
+        explicit_image_edit
+        and not has_original_image
+        and _should_generate_instead_of_requesting_missing_source(normalized_visual_request)
+    ):
+        # No real source image is attached and the wording requests drawing, not
+        # changing a named/attached photo. Keep the image output and let the
+        # registered generator create a new picture instead of asking for upload.
+        explicit_image_edit = False
+    contextual_image_edit = bool(not ui_instruction_request and not image_discussion_only and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
+    image_edit_requested = bool((explicit_image_edit or contextual_image_edit) and not dialogue_profile_request)
+    # A contextual command such as "Добавь зелёную галочку" becomes an image
+    # edit only when a source image is actually available. An explicit edit request
+    # without source bytes must ask for the photo and must never run generation.
+    if image_edit_requested and source_image_available and "image" not in requested_outputs:
+        requested_outputs.append("image")
+        if question_sequence:
+            sequence_item = question_sequence[-1]
+            if isinstance(sequence_item, dict):
+                item_outputs = list(sequence_item.get("output_types") or [])
+                if "image" not in item_outputs:
+                    item_outputs.append("image")
+                sequence_item["output_types"] = item_outputs
+        if presentation_sequence:
+            sequence_item = presentation_sequence[-1]
+            if isinstance(sequence_item, dict):
+                item_outputs = list(sequence_item.get("output_types") or [])
+                if "image" not in item_outputs:
+                    item_outputs.append("image")
+                sequence_item["output_types"] = item_outputs
+    if image_edit_requested and not source_image_available:
+        requested_outputs = [name for name in requested_outputs if name != "image"]
+        # Do not leave a phantom image deliverable in the child request sequence;
+        # it could otherwise encourage the model to claim an image was generated.
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                item_outputs = [
+                    _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                    if _text(name).lower() != "image"
+                ]
+                sequence_item["output_types"] = item_outputs or ["text"]
+        cleaned_presentation = []
+        for sequence_item in presentation_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            item_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            if not item_outputs:
+                continue
+            sequence_item["output_types"] = item_outputs
+            cleaned_presentation.append(sequence_item)
+        presentation_sequence = cleaned_presentation
+    if dialogue_profile_request:
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = list(dict.fromkeys(["text", "image", *(sequence_item.get("output_types") or [])]))
+        for sequence_item in presentation_sequence:
+            if isinstance(sequence_item, dict) and not any(name in (sequence_item.get("output_types") or []) for name in ("text", "image")):
+                sequence_item["output_types"] = ["text", "image"]
+
     wants_image = "image" in requested_outputs
-    if image_edit_restricted:
-        wants_image = False
-        requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
-        if "text" not in requested_outputs:
-            requested_outputs.insert(0, "text")
+    image_noun_present = bool(re.search(
+        r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        normalized_visual_request,
+    ))
+    # A status complaint asks what happened to an earlier image; it is not a
+    # request to create a substitute illustration. Keep it text-only so a failed
+    # edit can never turn "Так где фотка?" into an unrelated new image.
+    image_status_request = bool(re.search(
+        r"(?:\b(?:так\s+)?где\b.{0,55}?(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|image|photo|picture)"
+        r"|\bкуда\s+(?:дел\w*|пропал\w*|исчез\w*).{0,45}?(?:фото|картинк\w*|изображени\w*)"
+        r"|\b(?:фото|фотк\w*|картинк\w*|изображени\w*).{0,35}?(?:пропал\w*|исчез\w*|не\s+(?:появил\w*|загрузил\w*|показал\w*|видно))"
+        r"|\b(?:не\s+вижу|не\s+появил\w*|не\s+загрузил\w*|не\s+показал\w*).{0,45}?(?:фото|картинк\w*|изображени\w*|image|photo|picture)\b"
+        r"|\bwhere\s+(?:is|did|has)\b.{0,45}?(?:photo|picture|image)\b)",
+        normalized_visual_request, re.IGNORECASE | re.DOTALL,
+    )) and not explicit_new_image and not explicit_image_edit
+    if image_status_request:
+        requested_outputs = [item for item in requested_outputs if _text(item).lower() != "image"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = [
+                    _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                    if _text(name).lower() != "image"
+                ] or ["text"]
+        presentation_sequence = [
+            item for item in presentation_sequence
+            if isinstance(item, dict) and any(_text(name).lower() != "image" for name in (item.get("output_types") or []))
+        ]
+        for sequence_item in presentation_sequence:
+            sequence_item["output_types"] = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ] or ["text"]
+
+    retrieval_language = bool(re.search(
+        r"\b(?:покаж\w*|верни|восстанов\w*|подним\w*|открой|выведи|отобраз\w*|обещал|долж\н\w*|не\s+увидел|не\s+показал|не\s+загрузил\w*|пропал\w*|где\s+(?:мое|моя|моё|его|ее|её|фото|картинк\w*)|show|restore|recover|bring\s+back|didn.?t\s+see|not\s+shown|missing)\b",
+        normalized_visual_request,
+    ))
+    short_image_reference = (
+        len(normalized_visual_request.split()) <= (16 if retrieval_language else 9)
+        and image_noun_present
+        and not explicit_new_image
+        and not explicit_image_edit
+        and not re.search(r"\b(?:что\s+(?:на|изображено|видно)|опиши|анализиру\w*|прочитай|распознай|написано|what\s+(?:is|does)|describe|analy[sz]e|read\s+the)\b", normalized_visual_request)
+        and (retrieval_language or bool(re.search(r"\b(?:его|ее|её|их|эт\w*|тот|ту|this|that|his|her|their|it|а|и|еще|ещё|also|же)\b", normalized_visual_request)))
+    )
+    # A short "where is his photo?" follow-up is an image deliverable even when
+    # no prior output asset was saved. Reuse the saved asset when available;
+    # otherwise let the image-generation path create the missing portrait.
+    image_followup = (
+        relation == "CONTINUE"
+        and short_image_reference
+        and not ui_instruction_request
+        and not image_status_request
+    )
+    reuse_saved_image = image_followup and has_saved_output_image
+    if image_followup and "image" not in requested_outputs:
+        requested_outputs.append("image")
+
+    # Active visual history is context, not permission to render again. A turn that
+    # discusses, praises, questions, or rejects a previous image stays text-only
+    # unless the current wording contains an affirmative visual operation.
+    image_generation_blocked = bool(image_discussion_only)
+    if image_generation_blocked:
+        requested_outputs = [name for name in requested_outputs if _text(name).lower() != "image"] or ["text"]
+        for sequence_item in question_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            step_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            sequence_item["output_types"] = step_outputs or ["text"]
+            action_contract = sequence_item.get("action_contract")
+            if isinstance(action_contract, dict):
+                action_contract["output_types"] = list(sequence_item["output_types"])
+                if _text(action_contract.get("action")).upper() == "GENERATE_NEW_IMAGE":
+                    action_contract["action"] = "ANSWER_DIRECTLY"
+                    action_contract["domain"] = "general"
+                    action_contract["target"] = "current_request"
+        cleaned_presentation = []
+        for sequence_item in presentation_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            step_outputs = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() != "image"
+            ]
+            if step_outputs:
+                sequence_item["output_types"] = step_outputs
+                cleaned_presentation.append(sequence_item)
+        presentation_sequence = cleaned_presentation
+        image_edit_requested = False
+        reuse_saved_image = False
+    wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
@@ -2413,15 +4337,16 @@ def build_interpretation(
         allow_data_driven_3d=data_source_attached,
     ) if "graph" in requested_outputs else {}
 
-    relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
     history_request = (
         bool(memory.get("history_request"))
         or bool(request_semantics.get("history_request"))
         or _is_history_request(original or text)
     )
-    history_count = max(1, min(5, int(memory.get("requested_topic_count") or _history_count(original or text) or 5)))
+    history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 10)))
+    history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or min(5, history_count))))
     history_topics = _select_history_topics(memory)[:history_count]
+    dialogue_portrait_profile = _build_dialogue_based_portrait_profile(original or text, selected_pairs, history_topics) if dialogue_profile_request else {}
 
     # Referential questions such as "а про него еще?" are resolved by the
     # State Manager anchor, not by guessing from the current sentence.
@@ -2481,27 +4406,19 @@ def build_interpretation(
         has_file=has_original_file,
         wants_image=wants_image,
     )
+    if image_edit_requested:
+        task = "edit_image" if source_image_available else "request_source_image"
+    elif reuse_saved_image:
+        task = "answer_request"
     # A modification verb requests a code edit; merely asking what a code file
     # does remains analyze_file and never silently becomes code generation.
     if _is_code_modification_request(original or text) and has_file:
         task = "modify_code"
-    if image_edit_restricted:
-        task = "image_edit_restricted"
 
-    # An existing/remembered image must not override an explicit request for a
-    # structured geometry or graph artifact. In particular, do not turn
-    # "draw this parallelogram on the picture" into image analysis or raster
-    # generation simply because image context exists in the conversation.
-    structured_visual_output = bool(
-        structured_diagram_noun
-        and ("diagram" in requested_outputs or "graph" in requested_outputs)
-        and not image_modification_requested
-        and not free_image_recreation
-    )
-    if structured_visual_output:
-        task = "answer_request"
-    elif has_original_image and task == "answer_request":
+    if has_original_image and task == "answer_request" and not image_status_request:
         task = "analyze_image"
+    if dialogue_profile_request:
+        task = "generate_image"
 
     result = {
         "schema": "april_interpretation_v2",
@@ -2531,10 +4448,18 @@ def build_interpretation(
             "task": task,
             "requested_outputs": requested_outputs,
             "wants_image": wants_image,
-            "explicit_generation_request": wants_image,
-            "image_edit_restricted": image_edit_restricted,
-            "free_image_recreation": free_image_recreation,
-            "image_edit_prior_attempts": image_edit_prior_attempts,
+            "image_generation_blocked": bool(image_generation_blocked),
+            "image_operation": "edit" if (image_edit_requested and source_image_available) else ("request_source" if image_edit_requested else ("reuse" if reuse_saved_image else ("generate" if wants_image else "none"))),
+            "image_edit_requested": bool(image_edit_requested),
+            "source_image_available": bool(source_image_available),
+            "source_asset_message_id": next((_text(item.get("asset_message_id")) for item in visual_context if _text(item.get("asset_message_id"))), ""),
+            "source_asset_role": next((_text(item.get("asset_role") or "user_input") for item in visual_context if _text(item.get("image_url") or item.get("data_uri"))), ""),
+            "image_edit_instruction": original or text if image_edit_requested else "",
+            "reuse_saved_image": bool(reuse_saved_image),
+            "image_status_request": bool(image_status_request),
+            "has_saved_output_image": bool(has_saved_output_image),
+            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested and not image_status_request),
+            "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
             "wants_code": "code" in requested_outputs,
@@ -2544,7 +4469,10 @@ def build_interpretation(
             "graph_policy": graph_policy,
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
+            "dialogue_profile_request": bool(dialogue_profile_request),
             "history_count": history_count if history_request else 0,
+            "history_count_minimum": history_count_minimum if history_request else 0,
+            "time_window": request_semantics.get("time_window") if history_request else {},
             "semantic_intent": _text(request_semantics.get("primary_intent") or "NEW_INFORMATION"),
             "search_direction": _text(request_semantics.get("direction") or "ANSWER_NEW_REQUEST"),
             "semantic_reason": _text(request_semantics.get("reason")),
@@ -2552,18 +4480,30 @@ def build_interpretation(
         "dialogue": {
             "relation": relation,
             "is_new_dialogue": relation != "CONTINUE",
+            "recent_limitations": _recent_dialogue_limitations(selected_pairs),
+            "interaction_profile": {
+                "speech_act": _text(request_semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
+                "communicative_act": _text(request_semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+                "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
+                "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+                "context_dependent_reaction": bool(request_semantics.get("features", {}).get("context_dependent_reaction")) if isinstance(request_semantics.get("features"), dict) else False,
+                "active_branch_repair": bool(request_semantics.get("active_branch_repair")),
+                "previous_answer_reference": bool(request_semantics.get("previous_answer_reference")),
+                "factual_verification_request": bool(request_semantics.get("factual_verification_request")),
+                "explicit_topic_switch": bool(request_semantics.get("explicit_topic_switch")),
+            },
             "continuation_context": {
                 "active_topic": _text(memory.get("active_topic")),
                 "reason": _text(memory.get("reason")),
                 "confidence": float(memory.get("relation_confidence") or 0.0),
                 "selected_pairs": selected_pairs,
                 "anchor": continuation_anchor,
+                "active_work_branch": dict(memory.get("active_work_branch") or {}) if isinstance(memory.get("active_work_branch"), dict) else {},
                 "selected_section": dict(memory.get("selected_section") or {}),
                 "clarification_needed": bool(memory.get("clarification_needed")),
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
                 "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
                 "history_topics": history_topics,
-                "history_time_search": dict(memory.get("history_time_search") or {}),
                 "known_topic_count": int(memory.get("known_topic_count") or len(history_topics)),
                 "restored_assets": [
                     {
@@ -2579,18 +4519,24 @@ def build_interpretation(
             # controls topic switching; a CONTINUE request is not reclassified as NEW.
             "new_dialogue": {
                 "request": original or text,
-                "active": relation != "CONTINUE" and not history_request,
-                "needs_independent_resolution": relation != "CONTINUE" and not history_request,
+                "active": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
+                "needs_independent_resolution": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
             },
         },
         "visual": {
             "items": visual_context,
+            "dialogue_profile_request": bool(dialogue_profile_request),
+            "dialogue_based_portrait_profile": dialogue_portrait_profile,
             "analysis_required": has_original_image,
-            "generation_required": wants_image,
+            "generation_required": bool(wants_image and not reuse_saved_image and not image_edit_requested),
+            "edit_required": bool(image_edit_requested and source_image_available),
+            "source_image_required": bool(image_edit_requested),
+            "source_image_available": bool(source_image_available),
+            "reuse_saved_image": bool(reuse_saved_image),
             "input_source": "current_upload" if any(not item.get("recalled_from_memory") for item in visual_context) else ("dialogue_memory" if has_image else "none"),
             "remembered_assets": [item for item in restored_assets if _text(item.get("kind")).lower() == "image"][:4],
-            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image else "",
-            "image_model": "gpt-image-2" if wants_image else "",
+            "generator": "C_APRIL_IMAGES_GENERATOR" if wants_image and not reuse_saved_image else "",
+            "image_model": "gpt-image-2" if wants_image and not reuse_saved_image else "",
         },
         "files": {
             "items": attachments,
@@ -2602,12 +4548,12 @@ def build_interpretation(
             "user_goal": text,
             "memory_context": selected_pairs,
             "history_request": history_request,
+            "dialogue_profile_request": bool(dialogue_profile_request),
             "history_count": history_count if history_request else 0,
             "history_topics": history_topics,
-            "history_time_search": dict(memory.get("history_time_search") or {}),
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
             "new_dialogue_request": original or text,
-            "new_dialogue_active": relation != "CONTINUE" and not history_request,
+            "new_dialogue_active": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
             "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
@@ -2615,8 +4561,19 @@ def build_interpretation(
             "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
             "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
-            "question_sequence": _build_question_sequence(original or text),
+            "question_sequence": question_sequence,
+            "presentation_sequence": presentation_sequence,
             "answer_sequence_in_order": True,
+            "premium_render_budget": {
+                "total_output_tokens": 12000,
+                "render_payload_tokens": 4800,
+                "explanation_and_answer_tokens": 7200,
+                "visual_share_percent": 40,
+                "text_share_percent": 60,
+                "render_budget_included_in_total": True,
+                "renderer_selection": "explicit_request_then_semantic_value",
+                "scene_order": "interleave_explanation_and_visual_by_step_index",
+            },
             "presentation_contract": {
                 "mcdowell_required": True,
                 "katex_required_for_math": True,
@@ -2625,42 +4582,60 @@ def build_interpretation(
                 "renderer_signal_source": "C_ARTIFACT_CONTRACT",
             },
             "rendering_guidance": [
-                "Always preserve a concise explanatory text answer.",
-                "Use a structured table for a clear comparison when the answer has comparable attributes.",
-                "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
-                "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. New images requested from the current dialogue are allowed in Free and must not receive an unsolicited package/plan disclaimer. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
-                "In Free, an explicit request to alter an existing image, photo, diagram, chart, or drawing is Premium-only: return a concise, soft localized limitation, do not ask the user to upload the image again, and do not generate a replacement image or diagram. Never set free_image_recreation to enable a generation for an edit request. Ordinary new image generation and ordinary new diagrams remain enabled.",
+                "Always preserve a complete explanatory text answer and answer every REQUEST_SEQUENCE item in order.",
+                "When PRESENTATION_SEQUENCE exists, use it as the ordered checklist of deliverable sections and renderer types within this single request; it does not trigger separate memory retrievals.",
+                "Interleave each section's text and typed renderer by its step_index. Keep final_output=true sections last, after every earlier section and renderer.",
+                "Premium output ceiling is exactly 12000 tokens per complete answer attempt; target 7200 tokens for explanatory text (60%) and 4800 for concrete visual/render payloads (40%), both inside the same total. Do not fill the cap for its own sake.",
+                "Interleave each request step's explanatory text with its own formula/table/diagram/graph/image render blocks using step_index; do not group all visuals at the end.",
+                "Use a structured table for a clear comparison when the answer has comparable attributes. A table payload must contain real headers/columns and at least one populated row; do not emit empty TableBlock shells or put a whole list of values into one cell when each item can be a row/cell.",
+                "For composite requests, preserve every requested output independently (for example, table AND photograph/image); never treat one renderer as replacing another.",
+                "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, grounded link, or image when it materially improves understanding; never invent data or label a generated illustration as an authentic photograph.",
+                "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
-                "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
+                'For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D. For a requested day/week/month/custom range, preserve every available date/value from CURRENT_REQUEST, CONTINUATION_CONTEXT and PROTECTED_STRUCTURED_DATA, and render one explicit series.points item for every available measurement instead of asking the user to repeat data already stored. For a multi-day time series, fill missing dates between two or more known measurements by interpolation by default so intermediate points appear immediately; label each interpolated point (point-level label such as "interpolated estimate") and the series/graph description and explanatory text as estimates, never as measured/verified observations. Keep all known source points exact, do not interpolate beyond the first/last known values, and do not invent a trend from a single measurement or from no numeric source. Use actual dates if present, weekday labels if supplied, otherwise neutral day indices.',
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
-                "Never invent numeric data, URLs, files, or images just to fill a renderer.",
+                "Never invent observed numeric data, URLs, files, or images just to fill a renderer. A narrowly allowed exception is linear interpolation strictly between at least two existing numeric measurements in a temporal line/area graph when intermediate dates are requested; every derived point must be labeled as an estimate in its point label and graph explanation, and it must never be presented as an observed/verified value. Never extrapolate or derive a trend from one or zero source measurements.",
                 "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
+                "Every non-text renderer must also carry a specific 1–3 sentence explanation in the selected display language: explain the exact formula/variables, link destination and purpose, image subject and relation (or source-supported edits), code file/functions and changes, table comparison, graph axes/data/trend, or diagram components/relationships. The Premium SceneContract places a separate text explanation block directly after the corresponding renderer; do not repeat that explanation elsewhere verbatim.",
             ],
             "improvement_policy": "Improve the requested result while preserving unaffected behavior; do not invent missing source content.",
             "output_plan": requested_outputs,
             "semantic_interpretation": request_semantics,
-            "semantic_interpretation_version": "april_request_semantics_v1",
+            "semantic_interpretation_version": "april_request_semantics_v4_active_branch_repair",
+            "dialogue_communication": {
+                "principle": "Respond to the user's conversational move, not only to the literal words.",
+                "speech_act": _text(request_semantics.get("speech_act") or "STATEMENT_OR_REQUEST"),
+                "communicative_act": _text(request_semantics.get("communicative_act") or "NEW_OR_STANDALONE"),
+                "tone": _text(request_semantics.get("tone") or "NEUTRAL"),
+                "recommended_response_action": _text(request_semantics.get("recommended_response_action") or "ANSWER_NORMALLY"),
+                "active_branch_repair": bool(request_semantics.get("active_branch_repair")),
+                "previous_answer_reference": bool(request_semantics.get("previous_answer_reference")),
+                "factual_verification_request": bool(request_semantics.get("factual_verification_request")),
+                "explicit_topic_switch": bool(request_semantics.get("explicit_topic_switch")),
+                "instructions": [
+                    "When context says CONTINUE and evidence is present, continue the conversation naturally from the relevant prior point; do not restart the subject or recite internal search metadata.",
+                    "Mention past discussion in ordinary conversational language only when it helps answer the user or the user asks what was discussed.",
+                    "Treat gratitude and positive feedback briefly and naturally, then continue only when the user also gave a next step.",
+                    "Treat disagreement, dissatisfaction, or a revision request as feedback on the previous answer when supported by context; re-check the previous answer and correct/improve it instead of defending it blindly.",
+                    "When active_branch_repair or previous_answer_reference is true, compare the current challenge with the selected canonical USER↔APRIL source turns; report what April actually said separately from what should have been said, and do not advance the active task until the correction is addressed.",
+                    "Use only selected dialogue-memory evidence for claims about what was previously said. If the requested time range has no entries, state that honestly and offer nearby retained entries as nearby, not as matches inside the requested range.",
+                    "Before saying a prior value or answer is unavailable, inspect ACTIVE_WORK_BRANCH.last_assistant_answer, recent_steps.april_text, DIALOGUE_ANCHOR, and selected CONTINUATION_CONTEXT pairs. A value omitted from a summary is not missing when the exact assistant turn is present.",
+                    "For an explicit question about what April said, named, wrote, calculated, selected, or answered, verify April's own prior output independently from whether that output was factually correct. Apply the same evidence check to the active exchange and matching past-dialogue records.",
+                    "A topic pointer is a retrieval hint, not proof that a memory exists. If no matching prior record is found, answer as a new request or ask a concise clarification instead of inventing continuity.",
+                ],
+            },
         },
     }
-    if image_edit_restricted:
-        sequence_items = ((result.get("request_structure") or {}).get("question_sequence") or [])
-        for sequence_item in sequence_items:
-            if not isinstance(sequence_item, dict):
-                continue
-            item_outputs = sequence_item.get("output_types")
-            if not isinstance(item_outputs, list):
-                item_outputs = ["text"]
-            item_outputs = [kind for kind in item_outputs if str(kind).lower() not in {"image", "gallery", "generated_image"}]
-            if "text" not in item_outputs:
-                item_outputs.insert(0, "text")
-            sequence_item["output_types"] = item_outputs
-        render_plan = result.get("request_structure", {}).get("output_plan")
-        if isinstance(render_plan, list):
-            result["request_structure"]["output_plan"] = [
-                kind for kind in render_plan if str(kind).lower() not in {"image", "gallery", "generated_image"}
-            ] or ["text"]
-
+    if dialogue_profile_request:
+        _communication = result["request_structure"]["dialogue_communication"]
+        _communication["dialogue_profile_request"] = True
+        # These two instructions lead the compact provider card, whose communication
+        # contract is intentionally limited to five instructions to protect tokens.
+        _communication["instructions"] = [
+            "For dialogue_profile_request, use DIALOGUE_BASED_PORTRAIT_PROFILE and selected CONTINUATION_CONTEXT as evidence: give a natural Russian non-clinical reading of 2–3 recurring communication/project patterns, distinguish observed facts from cautious interpretation, and mention mood only as a situational impression grounded in the current turn.",
+            "The user requested a NEW conceptual image based on dialogue history, not an edit of a source photo. Never ask for an upload; make the image and the brief text complementary. Do not infer real facial appearance, ethnicity, medical or psychiatric diagnosis, or unsupported biography; do not let one-off topics hijack the scene.",
+        ] + list(_communication.get("instructions") or [])
     _apr_timing_log("build_interpretation", interpretation_started,
         relation=relation, task=task, requested_outputs=requested_outputs,
         input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
@@ -2668,6 +4643,7 @@ def build_interpretation(
         semantic_intent=request_semantics.get("primary_intent"),
         search_direction=request_semantics.get("direction"),
         history_request=bool(request_semantics.get("history_request")),
+        dialogue_profile_request=bool(dialogue_profile_request),
         attachment_task_count=len(asset_task_map),
         selected_section=_text((memory.get("selected_section") or {}).get("heading")),
         clarification_needed=bool(memory.get("clarification_needed")),
@@ -2696,6 +4672,604 @@ __all__ = [
     "build_interpretation_identity",
     "build_interpretation",
     "build_question_sequence",
+    "build_presentation_sequence",
     "interpret_request_semantics",
     "assert_same_identity",
 ]
+
+
+# Temporal parsing is embedded here to keep Premium logic inside existing modules.
+from datetime import datetime, time as datetime_time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_DEFAULT_TIMEZONE = "Europe/Kyiv"
+
+_WEEKDAY_NAMES = {
+    "понедельник": 0, "понедельника": 0, "понедельнику": 0, "понедельнике": 0,
+    "понеділок": 0, "понеділка": 0, "понеділку": 0, "monday": 0,
+    "вторник": 1, "вторника": 1, "вторнику": 1, "вівторок": 1, "вівторка": 1, "вівторку": 1, "tuesday": 1,
+    "среда": 2, "среду": 2, "среды": 2, "среде": 2, "середа": 2, "середу": 2, "середи": 2, "середі": 2, "wednesday": 2,
+    "четверг": 3, "четверга": 3, "четвергу": 3, "четверге": 3, "четвер": 3, "четверга": 3, "четвергу": 3, "thursday": 3,
+    "пятница": 4, "пятницу": 4, "пятницы": 4, "пятнице": 4, "п’ятниця": 4, "п’ятницю": 4, "пятниця": 4, "пятницю": 4, "friday": 4,
+    "суббота": 5, "субботу": 5, "субботы": 5, "субботе": 5, "субота": 5, "суботу": 5, "суботи": 5, "saturday": 5,
+    "воскресенье": 6, "воскресенья": 6, "воскресенью": 6, "неділя": 6, "неділю": 6, "неділі": 6, "sunday": 6,
+}
+
+
+def _weekday_reference(low: str) -> tuple[int, re.Match[str]] | None:
+    """Return a weekday only when wording marks it as a temporal reference.
+
+    A bare subject word like “пятницы” in a request to format a calendar is not a
+    time filter. Phrases such as “в пятницу”, “за прошлую среду”, and “last Monday” are.
+    """
+    names = "|".join(sorted((re.escape(name) for name in _WEEKDAY_NAMES), key=len, reverse=True))
+    pattern = re.compile(
+        rf"\b(?:в|во|за|на|по|с|от|from|on|last|this|past|previous|"
+        rf"прошл\w*|предыдущ\w*|последн\w*|эт\w*|минул\w*)"
+        rf"(?:\s+(?:прошл\w*|предыдущ\w*|последн\w*|эт\w*|минул\w*|this|last|previous))?"
+        rf"\s+(?P<weekday>{names})\b"
+    )
+    match = pattern.search(low)
+    if not match:
+        return None
+    return _WEEKDAY_NAMES[match.group("weekday")], match
+
+
+_MONTHS = {
+    "января": 1, "январь": 1, "січня": 1, "січень": 1, "january": 1, "jan": 1,
+    "февраля": 2, "февраль": 2, "лютого": 2, "лютий": 2, "february": 2, "feb": 2,
+    "марта": 3, "март": 3, "березня": 3, "березень": 3, "march": 3, "mar": 3,
+    "апреля": 4, "апрель": 4, "квітня": 4, "квітень": 4, "april": 4, "apr": 4,
+    "мая": 5, "май": 5, "травня": 5, "травень": 5, "may": 5,
+    "июня": 6, "июнь": 6, "червня": 6, "червень": 6, "june": 6, "jun": 6,
+    "июля": 7, "июль": 7, "липня": 7, "липень": 7, "july": 7, "jul": 7,
+    "августа": 8, "август": 8, "серпня": 8, "серпень": 8, "august": 8, "aug": 8,
+    "сентября": 9, "сентябрь": 9, "вересня": 9, "вересень": 9, "september": 9, "sep": 9,
+    "октября": 10, "октябрь": 10, "жовтня": 10, "жовтень": 10, "october": 10, "oct": 10,
+    "ноября": 11, "ноябрь": 11, "листопада": 11, "листопад": 11, "november": 11, "nov": 11,
+    "декабря": 12, "декабрь": 12, "грудня": 12, "грудень": 12, "december": 12, "dec": 12,
+}
+
+
+def _tz(name: str | None = None):
+    try:
+        return ZoneInfo(name or _DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def _reference_local(reference_ts: float | int | None, timezone_name: str | None) -> datetime:
+    zone = _tz(timezone_name)
+    if reference_ts is None:
+        return datetime.now(zone)
+    return datetime.fromtimestamp(float(reference_ts), tz=zone)
+
+
+def _local_epoch(value: datetime) -> float:
+    return value.astimezone(timezone.utc).timestamp()
+
+
+def _result(start: datetime, end: datetime, *, source: str, timezone_name: str | None,
+            reference: datetime) -> dict[str, Any]:
+    zone = _tz(timezone_name)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=zone)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=zone)
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
+    if end_utc < start_utc:
+        return _empty(timezone_name, reference)
+    return {
+        "has_constraint": True,
+        "start_at": start_utc.timestamp(),
+        "end_at": end_utc.timestamp(),
+        "start_utc": start_utc.isoformat(),
+        "end_utc": end_utc.isoformat(),
+        "start_local": start.astimezone(zone).isoformat(),
+        "end_local": end.astimezone(zone).isoformat(),
+        "timezone": getattr(zone, "key", "UTC"),
+        "source": source,
+        "label": f"{start.astimezone(zone).strftime('%Y-%m-%d %H:%M')} — {end.astimezone(zone).strftime('%Y-%m-%d %H:%M')}",
+        "reference_at": _local_epoch(reference),
+    }
+
+
+def _empty(timezone_name: str | None, reference: datetime) -> dict[str, Any]:
+    zone = _tz(timezone_name)
+    return {
+        "has_constraint": False,
+        "start_at": None,
+        "end_at": None,
+        "start_utc": "",
+        "end_utc": "",
+        "start_local": "",
+        "end_local": "",
+        "timezone": getattr(zone, "key", "UTC"),
+        "source": "none",
+        "label": "",
+        "reference_at": _local_epoch(reference),
+    }
+
+
+def _parse_date(value: str, reference: datetime) -> datetime | None:
+    raw = value.strip().lower().replace("ё", "е")
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%y", "%d/%m/%y"):
+        try:
+            d = datetime.strptime(raw, fmt).date()
+            return datetime.combine(d, datetime_time.min, tzinfo=reference.tzinfo)
+        except ValueError:
+            continue
+    # Day/month without a year uses the reference year; a year boundary is fixed
+    # by the range parser if the resulting end precedes the start.
+    for fmt in ("%d.%m", "%d/%m", "%d-%m"):
+        try:
+            d = datetime.strptime(raw, fmt).date().replace(year=reference.year)
+            return datetime.combine(d, datetime_time.min, tzinfo=reference.tzinfo)
+        except ValueError:
+            continue
+    return None
+
+
+def _relative_clock_date(low: str, reference: datetime, zone: Any) -> datetime.date:
+    """Resolve a date modifier used alongside a clock range or a single clock."""
+    if re.search(r"\b(?:позавчера|the day before yesterday)\b", low):
+        return (reference - timedelta(days=2)).date()
+    if re.search(r"\b(?:вчера|yesterday)\b", low):
+        return (reference - timedelta(days=1)).date()
+    if re.search(r"\b(?:сегодня|today)\b", low):
+        return reference.date()
+    weekday = _weekday_reference(low)
+    if weekday is not None:
+        named_weekday, _ = weekday
+        days_back = (reference.weekday() - named_weekday) % 7
+        if days_back == 0 and re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", low):
+            days_back = 7
+        return (reference - timedelta(days=days_back)).date()
+    return reference.date()
+
+
+def extract_temporal_window(
+    text: Any,
+    *,
+    reference_ts: float | int | None = None,
+    timezone_name: str | None = None,
+) -> dict[str, Any]:
+    """Parse explicit time/date bounds from a user request.
+
+    Supported examples include “за последние 3 часа”, “с 14:00 до 16:30”,
+    “между 9 и 11 часами”, “вчера утром”, “с 14.10.2026 по 15.10.2026”,
+    “с 14 по 15 октября”, “сегодня”, and weekday references. Unspecified time means
+    no temporal filter; callers must not interpret that as an empty interval.
+    """
+    source_text = str(text or "").strip()
+    low = re.sub(r"\s+", " ", source_text.lower().replace("ё", "е").replace("’", "'").replace("ʼ", "'")).strip()
+    reference = _reference_local(reference_ts, timezone_name)
+    zone = _tz(timezone_name)
+    if not low:
+        return _empty(timezone_name, reference)
+
+    ago = re.search(
+        r"\b(\d{1,3})\s*(секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\s+назад\b",
+        low,
+    )
+    if ago:
+        amount, unit = max(1, int(ago.group(1))), ago.group(2)
+        delta = timedelta(seconds=amount) if unit.startswith(("сек", "second", "sec")) else timedelta(minutes=amount) if unit.startswith(("мин", "minute", "min")) else timedelta(hours=amount) if unit.startswith(("час", "годин", "hour", "hr")) else timedelta(days=amount)
+        # "N hours ago" names a point in time, not the full interval from then
+        # until now. Search a small neighborhood around that point. Rolling
+        # phrases such as "last N hours" are handled by the separate duration rule.
+        center = reference - delta
+        radius = timedelta(minutes=10) if unit.startswith(("сек", "second", "sec", "мин", "minute", "min")) else timedelta(minutes=30) if unit.startswith(("час", "годин", "hour", "hr")) else timedelta(minutes=90)
+        return _result(center - radius, center + radius, source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+
+    # Common conversational equivalents: "an hour ago", "two hours ago",
+    # including filler words and spelled-out Russian numerals.
+    if re.search(r"\bпол\s*часа\s+назад\b", low):
+        center = reference - timedelta(minutes=30)
+        return _result(center - timedelta(minutes=15), center + timedelta(minutes=15), source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+    word_ago = re.search(
+        r"\b(один|одна|одно|одну|два|две|двух|три|тр[её]х|четыре|четыр[её]х|"
+        r"пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти)\s+"
+        r"(час\w*|годин\w*|hour\w*|hr\w*|минут\w*|minute\w*|min\w*|день|дня|дней|дн\w*)\s+назад\b",
+        low,
+    )
+    if word_ago:
+        number_words = {
+            "один": 1, "одна": 1, "одно": 1, "одну": 1, "два": 2, "две": 2, "двух": 2,
+            "три": 3, "трех": 3, "трёх": 3, "четыре": 4, "четырех": 4, "четырёх": 4,
+            "пять": 5, "пяти": 5, "шесть": 6, "шести": 6, "семь": 7, "семи": 7,
+            "восемь": 8, "восьми": 8, "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+        }
+        amount = number_words.get(word_ago.group(1), 1)
+        unit = word_ago.group(2)
+        delta = timedelta(minutes=amount) if unit.startswith(("минут", "minute", "min")) else timedelta(days=amount) if unit.startswith(("день", "дня", "дней", "дн")) else timedelta(hours=amount)
+        center = reference - delta
+        radius = timedelta(minutes=10) if unit.startswith(("минут", "minute", "min")) else timedelta(minutes=90) if unit.startswith(("день", "дня", "дней", "дн")) else timedelta(minutes=30)
+        return _result(center - radius, center + radius, source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:около\s+|примерно\s+|хоть\s+|в\s+районе\s+)?час(?:а)?\s+назад\b", low):
+        center = reference - timedelta(hours=1)
+        return _result(center - timedelta(minutes=30), center + timedelta(minutes=30), source="relative_ago_point", timezone_name=timezone_name, reference=reference)
+
+    # Spoken-number rolling durations: “за последние пять часов”, “за три дня”.
+    # Keep this separate from “пять часов назад”, which is a point-in-time query.
+    word_duration = re.search(
+        r"\b(?:за\s+|в\s+течение\s+(?:последн\w*\s+)?|последн\w*\s+|past\s+|last\s+)"
+        r"(один|одна|одно|одну|два|две|двух|три|трех|трёх|четыре|четырех|четырёх|"
+        r"пять|пяти|шесть|шести|семь|семи|восемь|восьми|девять|девяти|десять|десяти)\s+"
+        r"(секунд\w*|минут\w*|час\w*|годин\w*|дн\w*|день|дня|дней|доба\w*|days?|hours?|minutes?)\b",
+        low,
+    )
+    if word_duration:
+        number_words = {
+            "один": 1, "одна": 1, "одно": 1, "одну": 1,
+            "два": 2, "две": 2, "двух": 2, "три": 3, "трех": 3, "трёх": 3,
+            "четыре": 4, "четырех": 4, "четырёх": 4, "пять": 5, "пяти": 5,
+            "шесть": 6, "шести": 6, "семь": 7, "семи": 7, "восемь": 8,
+            "восьми": 8, "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+        }
+        amount = number_words[word_duration.group(1)]
+        unit = word_duration.group(2)
+        if unit.startswith(("секунд",)):
+            delta = timedelta(seconds=amount)
+        elif unit.startswith("минут") or unit.startswith("minute"):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith(("час", "годин", "hour")):
+            delta = timedelta(hours=amount)
+        else:
+            delta = timedelta(days=amount)
+        return _result(reference - delta, reference, source="relative_duration_spoken_number", timezone_name=timezone_name, reference=reference)
+
+    # Relative rolling durations, including intervals longer than the 24-hour
+    # product retention window (the state manager intersects both windows).
+    rel = re.search(
+        r"\b(?:за\s+|в\s+течение\s+(?:последн\w*\s+)?|последн\w*\s+|past\s+|last\s+)"
+        r"(\d{1,3})\s*(секунд\w*|сек\.?|минут\w*|мин\.?|час\w*|годин\w*|дн\w*|доба\w*|день|дня|дней|days?|hours?|hrs?|minutes?|mins?|seconds?)\b",
+        low,
+    )
+    if rel:
+        amount = max(1, int(rel.group(1)))
+        unit = rel.group(2)
+        if unit.startswith(("сек", "second", "sec")):
+            delta = timedelta(seconds=amount)
+        elif unit.startswith(("мин", "minute", "min")):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith(("час", "годин", "hour", "hr")):
+            delta = timedelta(hours=amount)
+        else:
+            delta = timedelta(days=amount)
+        return _result(reference - delta, reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:последний час|за час|за последний час|последний 1 час|last hour|past hour)\b", low):
+        return _result(reference - timedelta(hours=1), reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:полчаса|пол\s+часа|half an hour|last 30 minutes)\b", low):
+        return _result(reference - timedelta(minutes=30), reference, source="relative_duration", timezone_name=timezone_name, reference=reference)
+
+    # Natural durations without a number, and “N units ago” wording.
+    named_duration = re.search(
+        r"\b(?:за\s+|в\s+течение\s+|последн\w*\s+|past\s+|last\s+)?"
+        r"(сутки|суток|день|дня|неделю|недели|месяц|месяца|год|года|day|week|month|year)\b",
+        low,
+    )
+    if named_duration and re.search(r"\b(?:за|последн\w*|прошл\w*|past|last|в\s+течение)\b", low):
+        unit = named_duration.group(1)
+        days = 1 if unit in {"сутки", "суток", "день", "дня", "day"} else 7 if unit in {"неделю", "недели", "week"} else 30 if unit in {"месяц", "месяца", "month"} else 365
+        return _result(reference - timedelta(days=days), reference, source="named_duration", timezone_name=timezone_name, reference=reference)
+    if re.search(r"\b(?:с\s+начала\s+дня|с\s+начала\s+сегодня|since\s+start\s+of\s+day)\b", low):
+        start = datetime.combine(reference.date(), datetime_time.min, tzinfo=zone)
+        return _result(start, reference, source="day_start", timezone_name=timezone_name, reference=reference)
+
+    # Explicit date-time bounds preserve the clock supplied on each endpoint,
+    # e.g. “с 14.10.2026 15:00 до 15.10.2026 18:30”.
+    date_pat = r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)"
+    datetime_range = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*({date_pat})\s+(?:в\s*)?(\d{{1,2}}):(\d{{2}})\s*"
+        rf"(?:по|до|[-–—]|to|through)\s*({date_pat})\s+(?:в\s*)?(\d{{1,2}}):(\d{{2}})\b",
+        low,
+    )
+    if datetime_range:
+        start_date = _parse_date(datetime_range.group(1), reference)
+        end_date = _parse_date(datetime_range.group(4), reference)
+        sh, sm, eh, em = (int(datetime_range.group(i)) for i in (2, 3, 5, 6))
+        if start_date and end_date and all((h <= 23 and m <= 59) for h, m in ((sh, sm), (eh, em))):
+            start = datetime.combine(start_date.date(), datetime_time(sh, sm), tzinfo=zone)
+            end = datetime.combine(end_date.date(), datetime_time(eh, em), tzinfo=zone)
+            return _result(start, end, source="explicit_datetime_range", timezone_name=timezone_name, reference=reference)
+
+    # Explicit ISO / numeric date ranges. End dates are inclusive; make the
+    # interval's end exclusive by advancing to midnight after the final day.
+    date_range = re.search(rf"\b(?:с|з|із|від|от|from)\s*({date_pat})\s*(?:по|до|[-–—]|to|through)\s*({date_pat})\b", low)
+    if date_range:
+        start = _parse_date(date_range.group(1), reference)
+        end = _parse_date(date_range.group(2), reference)
+        if start and end:
+            if end < start and not re.search(r"\d{4}", date_range.group(2)):
+                end = end.replace(year=end.year + 1)
+            end += timedelta(days=1)
+            return _result(start, end, source="explicit_date_range", timezone_name=timezone_name, reference=reference)
+
+    # Month-name ranges allow the month to be stated on each endpoint, including
+    # cross-month bounds such as “с 28 сентября по 3 октября 2026”.
+    month_pattern = "|".join(sorted((re.escape(m) for m in _MONTHS), key=len, reverse=True))
+    month_first_range = re.search(
+        rf"\b(?:from|between)\s+({month_pattern})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\s+"
+        rf"(?:to|through|[-–—])\s+({month_pattern})\s+(\d{{1,2}})(?:,?\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_first_range:
+        month1, day1 = _MONTHS[month_first_range.group(1)], int(month_first_range.group(2))
+        month2, day2 = _MONTHS[month_first_range.group(4)], int(month_first_range.group(5))
+        inferred_year = int(month_first_range.group(6) or reference.year)
+        year1 = int(month_first_range.group(3) or inferred_year)
+        year2 = int(month_first_range.group(6) or year1)
+        try:
+            start = datetime(year1, month1, day1, tzinfo=zone)
+            end_start = datetime(year2, month2, day2, tzinfo=zone)
+            if end_start < start and not month_first_range.group(6):
+                end_start = end_start.replace(year=end_start.year + 1)
+            return _result(start, end_start + timedelta(days=1), source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    month_to_month = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\s*"
+        rf"(?:по|до|[-–—]|to|through)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_to_month:
+        day1, month1 = int(month_to_month.group(1)), _MONTHS[month_to_month.group(2)]
+        inferred_year = int(month_to_month.group(6) or reference.year)
+        year1 = int(month_to_month.group(3) or inferred_year)
+        day2, month2 = int(month_to_month.group(4)), _MONTHS[month_to_month.group(5)]
+        year2 = int(month_to_month.group(6) or year1)
+        try:
+            start = datetime(year1, month1, day1, tzinfo=zone)
+            end_start = datetime(year2, month2, day2, tzinfo=zone)
+            if end_start < start and not month_to_month.group(6):
+                end_start = end_start.replace(year=end_start.year + 1)
+            return _result(start, end_start + timedelta(days=1), source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    # Compact Russian/English ranges: “с 14 по 15 октября [2026]”.
+    month_range = re.search(
+        rf"\b(?:с|з|із|від|от|from)\s*(\d{{1,2}})\s*(?:по|до|[-–—]|to|through)\s*(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b",
+        low,
+    )
+    if month_range:
+        first_day, last_day = int(month_range.group(1)), int(month_range.group(2))
+        month = _MONTHS[month_range.group(3)]
+        year = int(month_range.group(4) or reference.year)
+        try:
+            start = datetime(year, month, first_day, tzinfo=zone)
+            end = datetime(year, month, last_day, tzinfo=zone) + timedelta(days=1)
+            if end < start and not month_range.group(4):
+                start = start.replace(year=year - 1)
+                end = end.replace(year=year - 1)
+            return _result(start, end, source="month_name_range", timezone_name=timezone_name, reference=reference)
+        except ValueError:
+            pass
+
+    # If a specific date accompanies a clock range, use that date instead of
+    # silently interpreting the clock range as today.
+    clock_date = _relative_clock_date(low, reference, zone)
+    explicit_iso_for_clock = re.search(r"(?<!\d)(\d{4}-\d{1,2}-\d{1,2})(?!\d)", low)
+    explicit_num_for_clock = re.search(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?!\d)", low)
+    if explicit_num_for_clock and re.fullmatch(r"\d{1,2}-\d{1,2}", explicit_num_for_clock.group(1)):
+        short_pair = explicit_num_for_clock.group(0)
+        pair_end = explicit_num_for_clock.end()
+        following = low[pair_end:pair_end + 20]
+        if re.match(r"\s*(?:утра|ранку|вечера|вечора|дня|днем|ночью|ночі|час\w*|годин\w*)\b", following):
+            explicit_num_for_clock = None
+    explicit_month_for_clock = re.search(rf"\b(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b", low)
+    clock_date_start = _parse_date(explicit_iso_for_clock.group(1), reference) if explicit_iso_for_clock else (
+        _parse_date(explicit_num_for_clock.group(1), reference) if explicit_num_for_clock else None
+    )
+    if clock_date_start is None and explicit_month_for_clock:
+        try:
+            clock_date_start = datetime(
+                int(explicit_month_for_clock.group(3) or reference.year),
+                _MONTHS[explicit_month_for_clock.group(2)], int(explicit_month_for_clock.group(1)),
+                tzinfo=zone,
+            )
+        except ValueError:
+            clock_date_start = None
+    if clock_date_start is not None:
+        clock_date = clock_date_start.date()
+
+    # Clock range. Bare numeric ranges such as “от 5 до 10 тем” are not times;
+    # require HH:MM, a time-of-day marker, or an hour-unit word.
+    clock_range = re.search(
+        r"\b(?:с|от|между|from|between)\s*(\d{1,2})(?::(\d{2}))?\s*"
+        r"(?:до|по|и|[-–—]|to|and)\s*(\d{1,2})(?::(\d{2}))?",
+        low,
+    )
+    if clock_range:
+        matched = clock_range.group(0)
+        after = low[clock_range.end():clock_range.end() + 30]
+        before = low[max(0, clock_range.start() - 20):clock_range.start()]
+        has_clock_colon = ":" in matched
+        has_time_word = bool(re.search(r"\b(?:час\w*|годин\w*|утра|ранку|дня|вечера|вечор\w*|ночью|ночі|am|pm|o'clock|hours?)\b", before + " " + after))
+        # A nearby word such as “темы” must not cancel a clear clock marker;
+        # bare numeric ranges like “от 5 до 10 тем” still have no time word.
+        if has_clock_colon or has_time_word:
+            h1, m1 = int(clock_range.group(1)), int(clock_range.group(2) or 0)
+            h2, m2 = int(clock_range.group(3)), int(clock_range.group(4) or 0)
+            daypart_text = f"{before} {after}"
+            is_pm = bool(re.search(r"\b(?:вечера|вечером|вечора|вечор\w*|дня|днем|днём|пополудни|afternoon|evening|pm)\b", daypart_text))
+            is_morning = bool(re.search(r"\b(?:утра|утром|ранку|morning|am)\b", daypart_text))
+            is_night = bool(re.search(r"\b(?:ночью|ночі|night)\b", daypart_text))
+            if is_pm:
+                h1 = h1 + 12 if 1 <= h1 <= 11 else h1
+                h2 = h2 + 12 if 1 <= h2 <= 11 else h2
+            elif is_morning and not is_night:
+                h1 = 0 if h1 == 12 else h1
+                h2 = 0 if h2 == 12 else h2
+            if h1 <= 23 and h2 <= 23 and m1 <= 59 and m2 <= 59:
+                start = datetime.combine(clock_date, datetime_time(h1, m1), tzinfo=zone)
+                end = datetime.combine(clock_date, datetime_time(h2, m2), tzinfo=zone)
+                if end <= start:
+                    end += timedelta(days=1)
+                return _result(start, end, source="clock_range", timezone_name=timezone_name, reference=reference)
+
+    # A single date; date ranges were handled above so this cannot swallow one end.
+    iso_date = re.search(r"(?<!\d)(\d{4}-\d{1,2}-\d{1,2})(?!\d)", low)
+    numeric_date = re.search(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?!\d)", low)
+    month_date = re.search(rf"\b(\d{{1,2}})\s+({month_pattern})(?:\s+(\d{{4}}))?\b", low)
+    date_start = _parse_date(iso_date.group(1), reference) if iso_date else (_parse_date(numeric_date.group(1), reference) if numeric_date else None)
+    if month_date:
+        try:
+            date_start = datetime(
+                int(month_date.group(3) or reference.year), _MONTHS[month_date.group(2)],
+                int(month_date.group(1)), tzinfo=zone,
+            )
+        except ValueError:
+            pass
+    if date_start:
+        return _result(date_start, date_start + timedelta(days=1), source="explicit_date", timezone_name=timezone_name, reference=reference)
+
+    # Weekday ranges such as “с понедельника по пятницу”. A bare weekday noun
+    # elsewhere in the user request is not treated as a temporal filter.
+    weekday_names = "|".join(sorted((re.escape(name) for name in _WEEKDAY_NAMES), key=len, reverse=True))
+    weekday_range = re.search(
+        rf"\b(?:с|от|from)\s+(?:(?:прошл\w*|предыдущ\w*|эт\w*|last|previous|this)\s+)?"
+        rf"(?P<start>{weekday_names})\s+(?:по|до|[-–—]|to|through)\s+"
+        rf"(?:(?:прошл\w*|предыдущ\w*|эт\w*|last|previous|this)\s+)?"
+        rf"(?P<end>{weekday_names})\b",
+        low,
+    )
+    if weekday_range:
+        start_day = _WEEKDAY_NAMES[weekday_range.group("start")]
+        end_day = _WEEKDAY_NAMES[weekday_range.group("end")]
+        week_start = reference.date() - timedelta(days=reference.weekday())
+        if re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", weekday_range.group(0)):
+            week_start -= timedelta(days=7)
+        start_date = week_start + timedelta(days=start_day)
+        end_date = week_start + timedelta(days=end_day)
+        if end_date < start_date:
+            end_date += timedelta(days=7)
+        start = datetime.combine(start_date, datetime_time.min, tzinfo=zone)
+        end = datetime.combine(end_date + timedelta(days=1), datetime_time.min, tzinfo=zone)
+        return _result(start, end, source="weekday_range", timezone_name=timezone_name, reference=reference)
+
+    # Day-relative expressions, with optional part-of-day restrictions.
+    day_offset = 0
+    if re.search(r"\b(?:позавчера|the day before yesterday)\b", low):
+        day_offset = -2
+    elif re.search(r"\b(?:вчера|yesterday)\b", low):
+        day_offset = -1
+    elif re.search(r"\b(?:сегодня|сегодняшн\w*|today)\b", low):
+        day_offset = 0
+    else:
+        # Weekday names mean the most recent matching local day (today if named
+        # weekday equals today), which is useful for “what did we discuss Monday?”.
+        weekday_match = _weekday_reference(low)
+        if weekday_match is not None:
+            weekday, _ = weekday_match
+            days_back = (reference.weekday() - weekday) % 7
+            if days_back == 0 and re.search(r"\b(?:прошл\w*|предыдущ\w*|last|previous)\b", low):
+                days_back = 7
+            day_offset = -days_back
+        else:
+            day_offset = None
+
+    if day_offset is not None:
+        day = (reference + timedelta(days=day_offset)).date()
+        start = datetime.combine(day, datetime_time.min, tzinfo=zone)
+        end = start + timedelta(days=1)
+        part = None
+        if re.search(r"\b(?:утром|утра|ранку|morning|morning time)\b", low):
+            part = (5, 12)
+        elif re.search(r"\b(?:днем|днём|дня|пополудни|afternoon|noon)\b", low):
+            part = (12, 17)
+        elif re.search(r"\b(?:вечером|вечера|вечор\w*|evening)\b", low):
+            part = (17, 22)
+        elif re.search(r"\b(?:ночью|ночі|ночью|night|overnight)\b", low):
+            start = datetime.combine(day, datetime_time(22, 0), tzinfo=zone)
+            end = start + timedelta(hours=7)
+            return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
+        if part:
+            start = datetime.combine(day, datetime_time(part[0], 0), tzinfo=zone)
+            end = datetime.combine(day, datetime_time(part[1], 0), tzinfo=zone)
+            return _result(start, end, source="day_part", timezone_name=timezone_name, reference=reference)
+        # Bare yesterday/today/weekday bounds are whole local days.
+        if day_offset != 0 or re.search(r"\b(?:сегодня|today)\b", low):
+            return _result(start, end, source="relative_day", timezone_name=timezone_name, reference=reference)
+
+    # Explicit clock plus approximate language, without a range.
+    single_clock = re.search(r"\b(?:в|около|around|at)\s*(\d{1,2}):(\d{2})\b", low)
+    if single_clock:
+        h, m = int(single_clock.group(1)), int(single_clock.group(2))
+        if h <= 23 and m <= 59:
+            centre = datetime.combine(clock_date, datetime_time(h, m), tzinfo=zone)
+            return _result(centre - timedelta(minutes=30), centre + timedelta(minutes=30), source="approximate_clock", timezone_name=timezone_name, reference=reference)
+
+    return _empty(timezone_name, reference)
+
+
+def intersect_retention_window(window: dict[str, Any], *, now_ts: float, retention_seconds: int) -> dict[str, Any]:
+    """Intersect a parsed range with the product's retained-memory interval."""
+    if not isinstance(window, dict) or not window.get("has_constraint"):
+        return {"applied": False, "empty": False, "start_at": None, "end_at": None, "source": "none"}
+    try:
+        start = float(window["start_at"])
+        end = float(window["end_at"])
+    except (KeyError, TypeError, ValueError):
+        return {"applied": False, "empty": False, "start_at": None, "end_at": None, "source": "invalid"}
+    clipped_start = max(start, float(now_ts) - max(1, int(retention_seconds)))
+    clipped_end = min(end, float(now_ts))
+    return {
+        "applied": True,
+        "empty": clipped_end <= clipped_start,
+        "start_at": clipped_start,
+        "end_at": clipped_end,
+        "source": str(window.get("source") or "explicit"),
+        "label": str(window.get("label") or ""),
+        "timezone": str(window.get("timezone") or _DEFAULT_TIMEZONE),
+        "requested_start_at": start,
+        "requested_end_at": end,
+    }
+
+_TOPIC_NUMBER_WORDS = {
+    "один": 1, "одну": 1, "одна": 1, "одного": 1,
+    "два": 2, "две": 2, "двух": 2,
+    "три": 3, "трех": 3, "трёх": 3,
+    "четыре": 4, "четырех": 4, "четырёх": 4,
+    "пять": 5, "пяти": 5, "шесть": 6, "шести": 6,
+    "семь": 7, "семи": 7, "восемь": 8, "восьми": 8,
+    "девять": 9, "девяти": 9, "десять": 10, "десяти": 10,
+}
+
+
+def extract_topic_count_bounds(text: Any, default: int = 10) -> tuple[int, int]:
+    """Return (minimum, maximum) requested history topic count, clamped to 1–10."""
+    low = re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
+    topic_word = r"(?:тем\w*|топик\w*|диалог\w*|разговор\w*|topic\w*|conversation\w*)"
+    # A numeric range is accepted only when it clearly modifies a topic/record count,
+    # so date ranges and time ranges cannot be mistaken for “5–10 topics”.
+    numeric_range = re.search(
+        rf"\b(?:(?:от|from)\s*)?(\d{{1,2}})\s*(?:до|to|[-–—]|и|and)\s*(\d{{1,2}})\s*{topic_word}\b", low
+    )
+    if numeric_range:
+        first, second = int(numeric_range.group(1)), int(numeric_range.group(2))
+        if 1 <= first <= 10 and 1 <= second <= 10:
+            return min(first, second), max(first, second)
+    words = "|".join(sorted((re.escape(word) for word in _TOPIC_NUMBER_WORDS), key=len, reverse=True))
+    word_range = re.search(
+        rf"\b(?:от\s*)?({words})\s+(?:до|и)\s+({words})\s+{topic_word}\b", low
+    )
+    if word_range:
+        first, second = _TOPIC_NUMBER_WORDS[word_range.group(1)], _TOPIC_NUMBER_WORDS[word_range.group(2)]
+        return min(first, second), max(first, second)
+
+    single = re.search(rf"\b(10|[1-9])\s*{topic_word}\b", low)
+    if single:
+        value = int(single.group(1))
+        return value, value
+    for word, value in _TOPIC_NUMBER_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\s+{topic_word}\b", low):
+            return value, value
+    bounded = max(1, min(10, int(default or 10)))
+    # General history overview: list at least five only when five distinct topics
+    # exist, and never ask the model to fabricate entries when fewer are available.
+    return min(5, bounded), bounded
+
