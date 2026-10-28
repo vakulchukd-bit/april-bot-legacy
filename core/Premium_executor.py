@@ -1893,11 +1893,13 @@ async def _edit_image_artifact(
         return None
     source_bytes, source_mime, source_item = selected
     edit_prompt_parts = [
-        "Edit the supplied source image according to this exact user instruction: " + request_text + ".",
-        "Preserve the source image and every unaffected detail, including composition, background, perspective, lighting, and existing text.",
-        "Apply only the requested change to the existing image. Do not replace the source with a new scene, redraw unrelated UI, add people/decorations, or invent controls.",
-        "When the instruction specifies a colour, match that colour exactly. A requested red arrow must be clearly red (#FF3030), not green, teal, or another accent colour.",
-        "Point the arrow at the specific control named by the user; keep it visibly separate from button text and do not obscure the label.",
+        "Edit the supplied source image according to this exact current user instruction: " + request_text + ".",
+        "STRICT EDIT SCOPE: make only the changes explicitly requested in this current instruction. Preserve every unaffected pixel and detail, including composition, background, perspective, lighting, layout, existing text, and controls.",
+        "Do not add any unrequested element: no arrows, pointers, red markers, labels, circles, highlights, callouts, captions, icons, decorative accents, explanatory annotations, or extra UI. Do not add a marker merely to indicate which text or number was changed.",
+        "Treat constraints such as 'without the red arrow', 'remove the pointer', 'do not add a marker', and equivalent wording as strict prohibitions. If a prohibited element is already present in the supplied source, remove only that element and preserve the requested edits.",
+        "Only if the current user instruction expressly asks to indicate, point to, highlight, circle, or show where to press may you add the minimum necessary visual marker. Follow the user's stated marker type, colour, and target; do not infer this permission from an unrelated edit.",
+        "When a colour is explicitly requested for an allowed change, match that colour accurately. Otherwise do not introduce a new colour accent or annotation.",
+        "Do not replace the source with a new scene, redraw unrelated UI, add people/decorations, change unrelated numbers, or invent controls. The current user's instruction is authoritative; prior turns may identify the source image but do not authorize extra modifications.",
     ]
     visual_context_data = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
     ui_brief = visual_context_data.get("site_navigation_visual_brief") if isinstance(visual_context_data.get("site_navigation_visual_brief"), dict) else {}
@@ -1905,7 +1907,7 @@ async def _edit_image_artifact(
         try:
             import json as _json
             compact_ui_brief = _json.dumps(ui_brief, ensure_ascii=False, separators=(",", ":"))[:2600]
-            edit_prompt_parts.append("Verified April interface context (use only to identify the requested control, not to replace the source screenshot): " + compact_ui_brief)
+            edit_prompt_parts.append("Verified April interface context (use only to identify a control explicitly named by the user; it does not authorize adding arrows, labels, or other overlays): " + compact_ui_brief)
         except Exception:
             pass
     edit_prompt = " ".join(edit_prompt_parts)
@@ -2106,7 +2108,11 @@ def _image_source_subject_terms(value: Any) -> list[str]:
         "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
         "которое", "ты", "мне", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
         "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
-        "замени", "удали", "убери", "переделай", "исправь", "сохрани", "какую",
+        "замени", "удали", "убери", "переделай", "переделать", "перерисуй", "исправь", "исправить",
+        "сохрани", "какую", "цифрами", "цифры", "цифру", "цифр", "числа", "число", "показание",
+        "показания", "дисплей", "дисплея", "дисплее", "стрелка", "стрелки", "стрелку", "стрелкой",
+        "указатель", "указателя", "указателем", "маркер", "маркера", "красный", "красная", "красной",
+        "красную", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только", "выдай", "пришли",
     }
     words = [word for word in raw_words if word not in skip and len(word) >= 3]
     if not words:
@@ -2249,6 +2255,21 @@ def _select_image_edit_source(
         and _text(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
         for item in decoded_candidates
     )
+    # When the user asks to revise the previous result without a new upload—most
+    # importantly, to remove an unrequested arrow/marker—edit the generated result
+    # so already-corrected content is preserved. A freshly attached user image
+    # always keeps priority, even if the request also mentions removing a marker.
+    overlay_removal_revision = bool(re.search(
+        r"(?:\bбез\s+(?:(?:красн\w*|черн\w*|син\w*|зелен\w*)\s+)?"
+        r"(?:стрелк\w*|указател\w*|марк\w*|подсветк\w*|обводк\w*|надпис\w*|"
+        r"кружк\w*|аннотац\w*|arrow\w*|pointer\w*|marker\w*|highlight\w*|"
+        r"callout\w*|annotation\w*)\b|"
+        r"\b(?:убери(?:те)?|удали(?:те)?|сотри(?:те)?|remove|delete|erase)\b.{0,60}"
+        r"(?:стрелк\w*|указател\w*|марк\w*|arrow\w*|pointer\w*|marker\w*))",
+        low_request, re.IGNORECASE | re.DOTALL,
+    ))
+    if overlay_removal_revision and not has_current_user_upload:
+        prefers_generated = True
     if request_subjects and not prefers_generated and not has_current_user_upload and decoded_candidates:
         # If the user explicitly names a source subject (e.g. "the photo with coins")
         # and none of the recalled image sidecars match it, don't modify an unrelated
