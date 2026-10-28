@@ -21,6 +21,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -740,10 +741,27 @@ def _apply_presentation_sequence(
     blocks = [dict(block) for block in (render_blocks or []) if isinstance(block, dict)] if isinstance(render_blocks, list) else []
     sequence = [dict(item) for item in (presentation_sequence or []) if isinstance(item, dict)] if isinstance(presentation_sequence, list) else []
     if not sequence:
-        for index, block in enumerate(blocks):
-            block.setdefault("step_index", 1)
-            block["sequence_index"] = index
-        return blocks
+        has_inline_anchors = any(
+            str(block.get("type") or block.get("artifact_type") or "").strip().lower()
+            not in {"text", "message", "answer", "markdown", "message_text"}
+            and _text(block.get("anchor_text") or block.get("insert_after_text"))
+            and block.get("final_output") is not True
+            for block in blocks
+        )
+        if not has_inline_anchors:
+            for index, block in enumerate(blocks):
+                block.setdefault("step_index", 1)
+                block["sequence_index"] = index
+            return blocks
+        # A one-step fallback lets precise anchors work for otherwise simple
+        # responses without changing the legacy no-sequence path above.
+        observed_types = []
+        for block in blocks:
+            kind = str(block.get("type") or block.get("artifact_type") or "text").strip().lower()
+            kind = "image" if kind in {"gallery", "generated_image", "screenshot"} else kind
+            if kind not in observed_types:
+                observed_types.append(kind)
+        sequence = [{"step_index": 1, "section": "answer", "title": "Answer", "output_types": observed_types}]
 
     by_section = {str(item.get("section") or ""): item for item in sequence}
     by_step = {int(item.get("step_index") or index + 1): item for index, item in enumerate(sequence)}
@@ -753,16 +771,65 @@ def _apply_presentation_sequence(
         present_keys = [key for key in text_keys if isinstance(block.get(key), str)]
         for key in (present_keys or ["content"]):
             block[key] = value
-        payload = block.get("payload")
-        if isinstance(payload, dict):
-            payload_keys = [key for key in text_keys if isinstance(payload.get(key), str)]
-            for key in (payload_keys or ["content"]):
-                # Text-block payloads mirror the visible text; never leave the
-                # original full answer inside every heading-derived clone.
-                payload[key] = value
+
+        # Keep every known text-bearing envelope in sync. A shallow heading/anchor
+        # clone must never expose the source's full answer through a nested signal
+        # after the visible `content` has been split into scene fragments.
+        def update_text_fields(container: dict[str, Any], *, create_content: bool = False) -> dict[str, Any]:
+            copied = dict(container)
+            present = [key for key in text_keys if isinstance(copied.get(key), str)]
+            for key in (present or (["content"] if create_content else [])):
+                copied[key] = value
+            return copied
+
+        if isinstance(block.get("payload"), dict):
+            block["payload"] = update_text_fields(block["payload"], create_content=True)
+
+        for wrapper_key in ("data", "artifact", "signal", "render_signal", "presentation_signal", "room_signal", "presentation"):
+            wrapper = block.get(wrapper_key)
+            if not isinstance(wrapper, dict):
+                continue
+            wrapper_copy = dict(wrapper)
+            for payload_key in ("payload", "data"):
+                nested = wrapper_copy.get(payload_key)
+                if isinstance(nested, dict):
+                    wrapper_copy[payload_key] = update_text_fields(nested)
+            if isinstance(wrapper_copy.get("payload_contract"), dict):
+                payload_contract = dict(wrapper_copy["payload_contract"])
+                nested_payload = payload_contract.get("payload")
+                if isinstance(nested_payload, dict):
+                    payload_contract["payload"] = update_text_fields(nested_payload)
+                wrapper_copy["payload_contract"] = payload_contract
+            for text_key in text_keys:
+                if isinstance(wrapper_copy.get(text_key), str):
+                    wrapper_copy[text_key] = value
+            block[wrapper_key] = wrapper_copy
 
     def section_for_text(value: str, fallback_step: int = 1) -> dict[str, Any]:
         low = _text(value).lower().replace("ё", "е")
+        # Prefer an exact/strong match to the planned section title before using
+        # legacy keyword rules. This lets Premium align arbitrary topics, not only
+        # the historical formulas/biography/experiments/resources section names.
+        heading_line = next((line.strip(" #\t") for line in _text(value).splitlines() if line.strip()), "")
+        normalized_heading = re.sub(r"[^\w\s]", " ", heading_line.lower().replace("ё", "е"), flags=re.UNICODE)
+        heading_tokens = {token for token in normalized_heading.split() if len(token) >= 4}
+        title_candidates: list[tuple[int, dict[str, Any]]] = []
+        for item in sequence:
+            title = _text(item.get("title") or item.get("section") or item.get("goal"))
+            if not title:
+                continue
+            normalized_title = re.sub(r"[^\w\s]", " ", title.lower().replace("ё", "е"), flags=re.UNICODE)
+            title_tokens = {token for token in normalized_title.split() if len(token) >= 4}
+            if not title_tokens:
+                continue
+            overlap = len(heading_tokens & title_tokens)
+            if normalized_title.strip() in low or (heading_line and normalized_heading.strip() in normalized_title):
+                title_candidates.append((100 + overlap, item))
+            elif overlap >= 2 and overlap / max(1, len(title_tokens)) >= 0.5:
+                title_candidates.append((overlap, item))
+        if title_candidates:
+            return max(title_candidates, key=lambda pair: pair[0])[1]
+
         patterns = {
             "formulas": r"(?:формул\w*|уравнен\w*|formula\w*|equation\w*|математическ\w+ запись)",
             "biography": r"(?:биограф\w*|истори\w* жизни|ранн\w+ годы|жизн\w* и работ\w*|life story|biography|early life)",
@@ -773,6 +840,130 @@ def _apply_presentation_sequence(
             if re.search(pattern, low, re.IGNORECASE) and section in by_section:
                 return by_section[section]
         return by_step.get(max(1, fallback_step), sequence[0])
+
+    # The provider may attach an exact anchor to a renderer. Honor it by splitting
+    # the corresponding text block and inserting the renderer immediately after
+    # that sentence/paragraph. This is the key path for scenes placed in the middle
+    # of a longer answer instead of collecting all visuals at the end.
+    anchored_visuals: list[tuple[int, dict[str, Any], str]] = []
+    for block_index, candidate in enumerate(blocks):
+        candidate_type = str(candidate.get("type") or candidate.get("artifact_type") or "").strip().lower()
+        if candidate_type in {"text", "message", "answer", "markdown", "message_text"}:
+            continue
+        if candidate.get("final_output") is True:
+            continue
+        anchor = _text(candidate.get("anchor_text") or candidate.get("insert_after_text"))
+        if anchor and len(anchor) <= 260:
+            anchored_visuals.append((block_index, candidate, anchor))
+    anchor_visual_indexes = {item[0] for item in anchored_visuals}
+
+    placed_anchor_indexes: set[int] = set()
+    blocks_for_expansion: list[dict[str, Any]] = []
+    anchor_placements_applied = False
+    for source_index, source_block in enumerate(blocks):
+        source_type = str(source_block.get("type") or source_block.get("artifact_type") or "text").strip().lower()
+        is_source_text = source_type in {"text", "message", "answer", "markdown", "message_text"}
+        source_content = str(source_block.get("content") or source_block.get("text") or source_block.get("markdown") or source_block.get("display_text") or "")
+        if not is_source_text or not source_content.strip():
+            if source_index not in placed_anchor_indexes and source_index not in anchor_visual_indexes:
+                blocks_for_expansion.append(source_block)
+            continue
+
+        matches: list[tuple[int, int, int, dict[str, Any], str]] = []
+        for visual_index, visual_block, anchor_text in anchored_visuals:
+            if visual_index in placed_anchor_indexes:
+                continue
+            try:
+                found = re.search(re.escape(anchor_text), source_content, re.IGNORECASE)
+            except re.error:
+                found = None
+            if found:
+                matches.append((found.start(), found.end(), visual_index, visual_block, anchor_text))
+        matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        non_overlapping: list[tuple[int, int, int, dict[str, Any], str]] = []
+        last_end = -1
+        for match in matches:
+            if match[0] < last_end:
+                continue
+            non_overlapping.append(match)
+            last_end = match[1]
+        if not non_overlapping:
+            blocks_for_expansion.append(source_block)
+            continue
+
+        anchor_placements_applied = True
+        cursor = 0
+        source_step = source_block.get("step_index") or 1
+        source_title = _text(source_block.get("step_title") or "")
+        source_id = source_index
+
+        def append_anchor_text_fragment(fragment: str, step: Any, title: str) -> None:
+            fragment = fragment.strip()
+            if not fragment:
+                return
+            clone = dict(source_block)
+            for nested_key in ("payload", "data", "signal", "render_signal", "presentation_signal", "room_signal", "presentation"):
+                nested_value = source_block.get(nested_key)
+                if isinstance(nested_value, dict):
+                    clone[nested_key] = dict(nested_value)
+            if isinstance(source_block.get("payload"), dict):
+                clone["payload"] = dict(source_block["payload"])
+            clone["_april_text_source_index"] = source_id
+            clone["_april_anchor_fragment"] = True
+            clone["step_index"] = max(1, int(step or 1))
+            if title:
+                clone["step_title"] = title[:100]
+            set_text_content(clone, fragment)
+            blocks_for_expansion.append(clone)
+
+        for start, end, visual_index, visual_block, _anchor_text in non_overlapping:
+            # Infer the section from the nearest Markdown heading before this
+            # anchor when the provider did not explicitly assign a step. This
+            # keeps an inline graph/image grouped with the explanation it follows.
+            previous_headings = list(re.finditer(r"(?m)^#{1,4}\s+([^\n]+)\s*$", source_content[:start]))
+            anchor_heading = previous_headings[-1].group(1).strip() if previous_headings else ""
+            anchor_context = (anchor_heading + "\n" if anchor_heading else "") + source_content[start:end]
+            try:
+                inferred_anchor_step = section_for_text(anchor_context, int(source_step or 1))
+            except (TypeError, ValueError, OverflowError):
+                inferred_anchor_step = sequence[0]
+            step_value = visual_block.get("step_index") or (inferred_anchor_step.get("step_index") if isinstance(inferred_anchor_step, dict) else None) or source_step
+            try:
+                anchor_step = max(1, int(step_value))
+            except (TypeError, ValueError, OverflowError):
+                anchor_step = 1
+            anchor_title = _text(
+                visual_block.get("step_title")
+                or (inferred_anchor_step.get("title") or inferred_anchor_step.get("section") if isinstance(inferred_anchor_step, dict) else "")
+                or source_title
+            )
+            append_anchor_text_fragment(source_content[cursor:end], anchor_step, anchor_title)
+
+            placed_visual = dict(visual_block)
+            placed_visual["_april_anchor_placed"] = True
+            placed_visual["step_index"] = anchor_step
+            if anchor_title:
+                placed_visual["step_title"] = anchor_title[:100]
+            blocks_for_expansion.append(placed_visual)
+            placed_anchor_indexes.add(visual_index)
+            cursor = end
+
+        append_anchor_text_fragment(source_content[cursor:], blocks_for_expansion[-1].get("step_index", source_step), source_title)
+
+    # If an anchor did not match the canonical prose, retain its visual block as a
+    # fallback instead of dropping it. Its missing/stale anchor will not be treated
+    # as a placement signal on the next pass.
+    for visual_index, visual_block, _anchor_text in anchored_visuals:
+        if visual_index not in placed_anchor_indexes:
+            fallback = dict(visual_block)
+            fallback.pop("anchor_text", None)
+            fallback.pop("insert_after_text", None)
+            blocks_for_expansion.append(fallback)
+
+    # Keep all ordinary renderers in their provider order; anchored renderers have
+    # already been woven into the prose and must not be sorted back out of place.
+    if anchored_visuals:
+        blocks = blocks_for_expansion
 
     expanded: list[dict[str, Any]] = []
     used_renderer_steps: dict[str, set[int]] = {}
@@ -819,11 +1010,31 @@ def _apply_presentation_sequence(
             current_step = max(1, int(block.get("step_index") or 1))
         except (TypeError, ValueError, OverflowError):
             current_step = 1
-        if kind in {"image", "gallery"}:
-            match = next((item for item in sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
-            if match is None:
-                image_items = [item for item in sequence if "image" in (item.get("output_types") or [])]
-                match = image_items[-1] if image_items else None
+        if block.get("_april_anchor_placed") or block.get("_april_anchor_fragment"):
+            # Anchored prose and its renderer form one inline scene. Do not remap
+            # the renderer to the first/last matching type step; doing so would
+            # split the visual away from the explanation it is attached to.
+            match = by_step.get(current_step, sequence[0])
+        elif kind in {"image", "gallery"}:
+            image_items = [item for item in sequence if "image" in (item.get("output_types") or [])]
+            explicit_step = block.get("step_index")
+            try:
+                explicit_step_number = max(1, int(explicit_step)) if explicit_step is not None else None
+            except (TypeError, ValueError, OverflowError):
+                explicit_step_number = None
+            if block.get("final_output") is True:
+                match = next((item for item in sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
+                if match is None:
+                    match = image_items[-1] if image_items else None
+            else:
+                match = next((item for item in image_items if explicit_step_number is not None and int(item.get("step_index") or 1) == explicit_step_number), None)
+                if match is None:
+                    used = used_renderer_steps.setdefault(kind, set())
+                    match = next((item for item in image_items if int(item.get("step_index") or 1) not in used), None)
+                if match is None and image_items:
+                    match = image_items[0]
+            if isinstance(match, dict):
+                used_renderer_steps.setdefault(kind, set()).add(int(match.get("step_index") or 1))
         elif kind in {"formula", "diagram", "graph", "table", "link", "code", "file"}:
             renderer_steps = [item for item in sequence if kind in (item.get("output_types") or [])]
             explicit_step = block.get("step_index")
@@ -867,7 +1078,8 @@ def _apply_presentation_sequence(
         except (TypeError, ValueError, OverflowError):
             return 1
 
-    expanded.sort(key=lambda block: (safe_step_index(block), int(block.get("_april_original_order") or 0)))
+    if not anchor_placements_applied:
+        expanded.sort(key=lambda block: (safe_step_index(block), int(block.get("_april_original_order") or 0)))
 
     # Merge heading chunks back into one text block per step. Visual blocks retain
     # their own renderers and sit between the appropriate narrative steps.
@@ -897,6 +1109,8 @@ def _apply_presentation_sequence(
     for index, block in enumerate(compact):
         block.pop("_april_text_source_index", None)
         block.pop("_april_original_order", None)
+        block.pop("_april_anchor_placed", None)
+        block.pop("_april_anchor_fragment", None)
         block["sequence_index"] = index
     return compact
 
@@ -4487,15 +4701,52 @@ async def execute(
                             break
                     _apr_timing_log("image_text_contract_reconciled", None, mode="preserve_profile_analysis_and_append_image_status")
                 first_artifact = image_results[0].get("artifact") if isinstance(image_results[0].get("artifact"), dict) else image_results[0]
-                image_step_index = 1
-                image_step_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
+                default_image_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
                 image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
-                image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
-                if image_sequence_item is None and image_sequence_items:
-                    image_sequence_item = image_sequence_items[-1]
-                if isinstance(image_sequence_item, dict):
-                    image_step_index = max(1, int(image_sequence_item.get("step_index") or 1))
-                    image_step_title = _text(image_sequence_item.get("title") or image_step_title)[:100]
+
+                def planned_image_step(item: dict[str, Any]) -> int:
+                    try:
+                        return max(1, int(item.get("step_index") or 1))
+                    except (TypeError, ValueError, OverflowError):
+                        return 1
+
+                image_placement_spec = _build_image_spec(raw, interpretation, identity) or {}
+                image_anchor = _text(image_placement_spec.get("anchor_text") or image_placement_spec.get("insert_after_text"))
+                explicit_image_step = image_placement_spec.get("step_index")
+                try:
+                    explicit_image_step = max(1, int(explicit_image_step)) if explicit_image_step is not None else None
+                except (TypeError, ValueError, OverflowError):
+                    explicit_image_step = None
+                image_is_explicit_final = image_placement_spec.get("final_output") is True
+                image_sequence_item = None
+                if explicit_image_step is not None:
+                    image_sequence_item = next((
+                        item for item in image_sequence_items
+                        if planned_image_step(item) == explicit_image_step
+                    ), None)
+                if image_sequence_item is None and image_is_explicit_final:
+                    image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
+                if image_sequence_item is None and not image_anchor:
+                    # A generic generated image follows the first planned image
+                    # scene unless the contract explicitly calls it the final
+                    # output. Never force every image to the last scene.
+                    image_sequence_item = next((item for item in image_sequence_items if item.get("final_output")), None)
+                    if image_sequence_item is None and image_sequence_items:
+                        image_sequence_item = image_sequence_items[0]
+
+                # For an anchor without an explicit step, let the presentation
+                # adapter infer the section from the sentence/heading. Assigning
+                # the first image step here would override that more precise hint.
+                image_step_index = explicit_image_step
+                image_step_title = _text(image_placement_spec.get("step_title") or "")[:100]
+                if image_sequence_item is not None:
+                    planned_step = planned_image_step(image_sequence_item)
+                    if image_step_index is None and (not image_anchor or image_is_explicit_final):
+                        image_step_index = planned_step
+                    if not image_step_title and (not image_anchor or image_is_explicit_final or explicit_image_step is not None):
+                        image_step_title = _text(image_sequence_item.get("title") or default_image_title)[:100]
+                if not image_step_title and not image_anchor:
+                    image_step_title = default_image_title
                 visible_image_payload = {
                     "kind": "generated_image_gallery" if len(visible_images) > 1 else "generated_image",
                     "artifact_type": "image",
@@ -4507,13 +4758,22 @@ async def execute(
                 }
                 image_block = {
                     "type": "image",
-                    "step_index": image_step_index,
-                    "step_title": image_step_title,
                     "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
                     "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
                     "content": "",
                     "payload": visible_image_payload,
                 }
+                if image_step_index is not None:
+                    image_block["step_index"] = image_step_index
+                if image_step_title:
+                    image_block["step_title"] = image_step_title
+                if image_anchor and not image_is_explicit_final:
+                    image_block["anchor_text"] = image_anchor
+                explicit_insert_after = _text(image_placement_spec.get("insert_after_text"))
+                if explicit_insert_after and not image_is_explicit_final:
+                    image_block["insert_after_text"] = explicit_insert_after
+                if image_is_explicit_final or (image_sequence_item is not None and image_sequence_item.get("final_output") and not image_anchor):
+                    image_block["final_output"] = True
                 packaged["render_blocks"].append(image_block)
 
     if _text(image_intent.get("task")) == "edit_image":
@@ -4639,7 +4899,26 @@ async def execute(
             return 1
 
     indexed_blocks = list(enumerate(normalized_blocks))
-    indexed_blocks.sort(key=lambda pair: (_safe_block_step_index(pair[1]), pair[0]))
+    # _apply_presentation_sequence already emits the canonical inline order and
+    # stamps sequence_index after weaving anchored renderers into prose. Sorting
+    # those blocks by step here would undo that weave (for example text → graph →
+    # continuation text). Retain the canonical sequence whenever it is complete;
+    # keep the legacy step-based fallback only for older/unindexed blocks.
+    def _has_finite_sequence_index(block: Any) -> bool:
+        if not isinstance(block, dict) or block.get("sequence_index") is None:
+            return False
+        try:
+            return math.isfinite(float(block.get("sequence_index")))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    has_final_sequence = bool(indexed_blocks) and all(
+        _has_finite_sequence_index(block) for _, block in indexed_blocks
+    )
+    if has_final_sequence:
+        indexed_blocks.sort(key=lambda pair: (float(pair[1].get("sequence_index")), pair[0]))
+    else:
+        indexed_blocks.sort(key=lambda pair: (_safe_block_step_index(pair[1]), pair[0]))
     normalized_blocks = [block for _, block in indexed_blocks]
     for scene_index, block in enumerate(normalized_blocks):
         if isinstance(block, dict):
