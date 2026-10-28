@@ -1813,7 +1813,7 @@ def _looks_like_referential_image_edit(value: Any) -> bool:
     if not _looks_like_image_edit_request(low):
         return False
     return bool(re.search(
-        r"(?:\b(?:на|в|по|с)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\b|фотограф\w*|картинк\w*|"
+        r"(?:\b(?:на|в|по|с|к)\s+(?:этом|этой|этих|этот|эта|эти)\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|"
         r"изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*)|"
         r"\bк\s+(?:этой|той|такой)\s+иллюстрац\w*|"
         r"\b(?:ту|эту|предыдущую|прошлую)\s+(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|иллюстрац\w*|картинк\w*|изображени\w*)\b|"
@@ -1835,69 +1835,135 @@ def _decode_image_source_item(item: dict[str, Any]) -> tuple[bytes, str] | None:
     return None
 
 
-def _merge_restored_edit_image_sources(
-    visual_context: list[dict[str, Any]] | None,
-    restored_assets: list[dict[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], int]:
-    """Recover image bytes from durable dialogue assets when metadata-only context was passed.
+def _image_source_subject_terms(value: Any) -> list[str]:
+    """Return a cautious hint for the source scene, excluding requested additions.
 
-    The State Manager can restore an image as an asset summary while the visual-context
-    item itself contains only a cache reference. Editing needs the concrete source bytes,
-    so add a decoded data URI from the matching durable asset without replacing a current
-    user upload or modifying the persisted asset record.
+    In "добавь к этой фотке пустыни караван с верблюдами", the source hint is
+    "пустыни"; later nouns describe what should be added. When the phrase only says
+    "добавь к этой фотке караван", it returns no hint and the active-dialog latest
+    image is preferred over unrelated historical artifacts.
     """
-    merged = [dict(item) for item in (visual_context or []) if isinstance(item, dict)]
-    known_ids = {
-        _text(item.get("asset_message_id"))
-        for item in merged
-        if _text(item.get("asset_message_id"))
+    low = _text(value).lower().replace("ё", "е")
+    image_match = re.search(
+        r"(?:фотограф\w*|фотк\w*|фото\b|картинк\w*|изображен\w*|снимк\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)", low, re.I,
+    )
+    if not image_match:
+        return []
+    tail = low[image_match.end():image_match.end() + 120]
+    tail = re.split(r"[.!?;\n]", tail, maxsplit=1)[0]
+    raw_words = re.findall(r"[a-zа-яёіїєґ][a-zа-яёіїєґ-]{1,}", tail, re.I)
+    skip = {
+        "с", "со", "из", "изо", "на", "в", "во", "про", "об", "обо", "о", "от", "для",
+        "with", "of", "from", "about", "in", "on", "the", "a", "an", "this", "that",
+        "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
+        "которое", "ты", "мне", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
+        "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
+        "замени", "удали", "убери", "переделай", "исправь", "сохрани", "какую",
     }
-    known_sources = {
-        _text(item.get(key))
-        for item in merged
-        for key in ("image_url", "data_uri", "src", "image_data_uri")
-        if _text(item.get(key)).startswith("data:image/")
-    }
-    added = 0
-    for saved in (restored_assets or []):
-        if not isinstance(saved, dict) or _text(saved.get("kind")).lower() != "image":
+    words = [word for word in raw_words if word not in skip and len(word) >= 3]
+    if not words:
+        return []
+    explicit_link = bool(re.match(r"\s*(?:с\b|со\b|из\b|про\b|of\b|with\b|from\b|about\b)", tail, re.I))
+    edit_after_source = bool(re.search(
+        r"\b(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|"
+        r"переделай|исправь|add\w*|edit\w*|change\w*|modify\w*)\b", tail, re.I,
+    ))
+    if not (explicit_link or len(words) >= 2 or edit_after_source):
+        return []
+    # Keep just the first source-scene token; never score all later add-on nouns.
+    return [words[0][:5]]
+
+
+def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Combine ranked rows with the selected compact pairs without crossing dialogue scope."""
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    sources = list(dialogue_context.get("candidates") or [])
+    sources.extend(dialogue_context.get("selected_pairs") or [])
+    anchor = dialogue_context.get("anchor")
+    if isinstance(anchor, dict):
+        sources.append(anchor)
+
+    def contains_image_artifact(value: Any, depth: int = 0) -> bool:
+        if depth > 5:
+            return False
+        if isinstance(value, dict):
+            kind = _text(value.get("kind") or value.get("artifact_type") or value.get("type")).lower()
+            renderer = _text(value.get("renderer") or value.get("viewer")).lower()
+            if kind in {"image", "image_edit", "gallery", "photo", "picture"} or "galleryblock" in renderer:
+                return True
+            return any(contains_image_artifact(child, depth + 1) for child in value.values())
+        if isinstance(value, list):
+            return any(contains_image_artifact(child, depth + 1) for child in value[:80])
+        return False
+
+    for source in sources:
+        if not isinstance(source, dict) or not bool(source.get("same_dialog")):
             continue
-        role = _text(saved.get("asset_role") or "april_output").lower()
-        if role not in {"april_output", "assistant_output", "generated", "user_input", "attachment"}:
+        message_id = _text(source.get("message_id") or source.get("source_message_id"))
+        if not message_id or message_id in seen:
             continue
-        uri = next((
-            _text(saved.get(key))
-            for key in ("_content_data_uri", "image_data_uri", "data_uri", "image_url", "src")
-            if _text(saved.get(key)).startswith("data:image/")
-        ), "")
-        if not uri or uri in known_sources:
+        modalities = set(source.get("row_modalities") or [])
+        evidence = _text(source.get("attachment_evidence"))
+        structured = source.get("protected_structured_data")
+        has_image = "image" in modalities or bool(re.search(
+            r"(?i)(?:image[/_-](?:png|jpe?g|webp)|\.(?:png|jpe?g|webp)\b|\b(?:image|photo|picture|фото|фотограф|изображени|картинк)\b)",
+            evidence,
+        )) or contains_image_artifact(structured)
+        if not has_image:
             continue
-        asset_id = _text(saved.get("asset_message_id"))
-        if asset_id and asset_id in known_ids and any(
-            _decode_image_source_item(item) and _text(item.get("asset_message_id")) == asset_id
-            for item in merged
-        ):
+        item = dict(source)
+        item["message_id"] = message_id
+        item["row_modalities"] = sorted(modalities | {"image"})
+        if item.get("created_at") is None:
+            item["created_at"] = item.get("topic_last_at") or item.get("topic_origin_at") or 0
+        if item.get("turn_index") is None:
+            item["turn_index"] = item.get("turn") or 0
+        if not item.get("user"):
+            item["user"] = item.get("user_text") or ""
+        if not item.get("april"):
+            item["april"] = item.get("summary") or item.get("april_text") or ""
+        candidates.append(item)
+        seen.add(message_id)
+    return candidates
+
+
+def _select_active_image_candidate(
+    candidates: list[dict[str, Any]],
+    source_terms: list[str],
+    *,
+    now_ts: float | None = None,
+) -> str:
+    """Choose one image from the authenticated active dialogue, not an old branch."""
+    now = float(now_ts if now_ts is not None else time.time())
+    ranked: list[tuple[int, float, int, str]] = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict) or not bool(candidate.get("same_dialog")):
             continue
-        decoded = _decode_asset_data_uri(uri)
-        if not decoded or not decoded[0]:
+        if "image" not in set(candidate.get("row_modalities") or []):
             continue
-        item = dict(saved)
-        item.update({
-            "kind": "image",
-            "asset_role": role,
-            "image_url": uri,
-            "data_uri": uri,
-            "image_data_uri": uri,
-            "src": uri,
-            "mime_type": _text(saved.get("mime_type") or decoded[1] or "image/png"),
-            "recalled_from_memory": True,
-        })
-        merged.append(item)
-        if asset_id:
-            known_ids.add(asset_id)
-        known_sources.add(uri)
-        added += 1
-    return merged, added
+        candidate_id = _text(candidate.get("message_id"))
+        if not candidate_id:
+            continue
+        try:
+            created_at = float(candidate.get("created_at") or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            created_at = 0.0
+        if created_at and (now - created_at > 24 * 60 * 60 or created_at > now + 60):
+            continue
+        evidence = " ".join(
+            _text(candidate.get(key))
+            for key in ("topic", "user", "april", "attachment_evidence", "memory_summary")
+        ).lower().replace("ё", "е")
+        hits = sum(1 for term in (source_terms or []) if term and term in evidence)
+        if source_terms and hits <= 0:
+            continue
+        ranked.append((hits, created_at, int(candidate.get("turn_index") or 0), candidate_id))
+    if not ranked:
+        return ""
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return ranked[0][3]
 
 
 def _select_image_edit_source(
@@ -1914,42 +1980,16 @@ def _select_image_edit_source(
     candidates = [item for item in (visual_context or []) if isinstance(item, dict)]
     low_request = _text(request_text).lower().replace("ё", "е")
     prefers_generated = bool(re.search(
-        r"(?:ты\s+(?:создал\w*|сгенерир\w*|нарис\w*|сделал\w*)|"
-        r"(?:сгенерированн\w*|созданн\w*)\s+тобой|твой\s+(?:рисунок|результат|рендер)|"
+        r"(?:ты\s+(?:создал\w*|сгенерир\w*|нарис\w*|сделал\w*|выдал\w*)|"
+        r"(?:сгенерированн\w*|созданн\w*)\s+тобой|твой\s+(?:рисунок|результат|рендер|фото|фотк\w*|картинк\w*)|"
+        r"(?:твою|твою\s+же|твою\s+картинк\w*|твою\s+фотк\w*)|"
+        r"которую\s+ты\s+(?:мне\s+)?(?:нарисовал\w*|создал\w*|выдал\w*|сгенерировал\w*)|"
         r"последн\w*\s+(?:картинк\w*|изображени\w*|иллюстрац\w*)|"
         r"(?:the\s+)?(?:image|picture|photo)\s+(?:you\s+)?(?:made|generated|created)|"
         r"latest\s+(?:generated\s+)?(?:image|picture|photo))",
         low_request, re.IGNORECASE,
     ))
-    subject_hints = (
-        "монет", "банкнот", "купюр", "калькулятор", "телефон", "стол", "деньг",
-        "канистр", "этикетк", "автомобил", "машин", "кот", "собак", "хаски",
-        "кружк", "документ", "паспорт", "чек", "квитанц",
-    )
-    def _subject_hint_is_present(term: str) -> bool:
-        # Match inflected nouns, not arbitrary substrings inside ordinary words.
-        # In particular, the stem "кот" must not match "которая" in a request
-        # like "добавь лодку, которая будет под луной"; that false positive made
-        # the source selector reject the exact generated image being edited.
-        if term == "кот":
-            return bool(re.search(
-                r"(?<![\w\u0080-\uffff])(?:кот(?:а|у|ом|е|ы|ов|ам|ами|ах)?|котик\w*|кот[её]н(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)|котят\w*)(?![\w\u0080-\uffff])",
-                low_request,
-                re.IGNORECASE,
-            ))
-        if term == "стол":
-            return bool(re.search(
-                r"(?<![\w\u0080-\uffff])стол(?:а|у|ом|е|ы|ов|ам|ами|ах)?(?![\w\u0080-\uffff])",
-                low_request,
-                re.IGNORECASE,
-            ))
-        return bool(re.search(
-            rf"(?<![\w\u0080-\uffff]){re.escape(term)}[\w\u0080-\uffff]*",
-            low_request,
-            re.IGNORECASE,
-        ))
-
-    request_subjects = [term for term in subject_hints if _subject_hint_is_present(term)]
+    request_subjects = _image_source_subject_terms(low_request)
     decoded_candidates = [item for item in candidates if _decode_image_source_item(item)]
     relevance_by_id: dict[int, int] = {}
     for item in decoded_candidates:
@@ -1978,10 +2018,12 @@ def _select_image_edit_source(
         ).lower().replace("ё", "е")
         relevance = sum(1 for term in request_subjects if term in summary)
         role_rank = 0 if (is_output if prefers_generated else not is_output) else 1
-        # A current upload always beats a recalled item; then match the indicated
-        # subject and choose the requested source role.
+        # Explicit references to an image made by April outrank a current attachment;
+        # otherwise current uploads remain the default. Source-subject alignment is
+        # evaluated before old active-work recency so an unrelated prior edit cannot win.
         sequence = int(item.get("sequence_index") or 9999)
-        return (0 if is_current else 1, -relevance, role_rank, sequence)
+        current_rank = (0 if is_current else 1) if not prefers_generated else 1
+        return (current_rank, -relevance, role_rank, sequence)
 
     for item in sorted(candidates, key=rank):
         decoded = _decode_image_source_item(item)
@@ -1999,7 +2041,8 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "то фото", "та картинка", "тот файл", "предыдущий файл", "предыдущий код",
         "сравни с", "сравни это", "сравни с предыдущ", "вернись к фото", "вернись к файлу",
         "на той картинке", "на предыдущей картинке", "на старой картинке",
-        "на этой канистре", "на этом фото", "на этой фотографии", "на этой картинке",
+        "на этой канистре", "на этой фотке", "к этой фотке", "к этой фотографии", "к этой фотке", "эту фотку",
+        "на этом фото", "на этой фотографии", "на этой картинке", "к этой картинке",
         "на этом изображении", "к этой иллюстрации", "к этой картинке", "к этому изображению",
         "ту иллюстрацию, которую ты нарисовала", "ту иллюстрацию, которую ты нарисовал",
         "ту картинку, которую ты нарисовала", "ту картинку, которую ты нарисовал",
@@ -2297,51 +2340,31 @@ def _restore_selected_assets(
     message_ids = list(dict.fromkeys(message_ids))[:8]
 
     relation = _text(dialogue_context.get("relation")).upper()
-    # A selected active branch can point at a recent generated image while the
-    # user explicitly describes an earlier photo. Add the same-conversation image
-    # candidates before restoring bytes, ranking by source-subject evidence.
+    # The current hot scene is checked before any broad/history branch. For a
+    # referential image edit, select one same-dialog image candidate by explicit
+    # source-subject evidence; if no source subject is named, prefer the newest
+    # image in this dialogue. Do not restore a stack of unrelated historical images.
     if referential_edit:
-        candidates = [item for item in (dialogue_context.get("candidates") or []) if isinstance(item, dict)]
-        request_low = _text(current_request).lower().replace("ё", "е")
-        subject_terms = [
-            term for term in (
-                "монет", "банкнот", "купюр", "калькулятор", "телефон", "стол", "деньг",
-                "канистр", "этикетк", "автомобил", "машин", "кот", "собак", "хаски",
-                "документ", "паспорт", "чек", "квитанц", "телевизор", "ноутбук",
-            ) if term in request_low
-        ]
-        ranked_candidates: list[tuple[int, float, str]] = []
-        for candidate in candidates:
-            if not bool(candidate.get("same_dialog")):
-                continue
-            modalities = set(candidate.get("row_modalities") or [])
-            if "image" not in modalities:
-                continue
-            candidate_id = _text(candidate.get("message_id"))
-            if not candidate_id:
-                continue
-            try:
-                created_at = float(candidate.get("created_at") or 0)
-            except (TypeError, ValueError, OverflowError):
-                created_at = 0.0
-            if created_at and (time.time() - created_at > 24 * 60 * 60 or created_at > time.time() + 60):
-                continue
-            evidence = " ".join(
-                _text(candidate.get(key)) for key in ("topic", "user", "april", "attachment_evidence", "memory_summary")
-            ).lower().replace("ё", "е")
-            hits = sum(1 for term in subject_terms if term in evidence)
-            ranked_candidates.append((hits, created_at, candidate_id))
-        if ranked_candidates:
-            ranked_candidates.sort(key=lambda part: (part[0], part[1]), reverse=True)
-            has_subject_match = bool(subject_terms and any(item[0] > 0 for item in ranked_candidates))
-            extra_ids = [
-                item[2] for item in ranked_candidates
-                if (item[0] > 0 if has_subject_match else True)
-            ][:6]
-            # Put semantically aligned historical source turns first, then the
-            # active branch. This is still account- and dialog-scoped, and asset
-            # bytes are subsequently fetched only for these selected message IDs.
-            message_ids = list(dict.fromkeys(extra_ids + message_ids))[:8]
+        candidates = _dialogue_image_source_candidates(dialogue_context)
+        source_terms = _image_source_subject_terms(current_request)
+        selected_image_id = _select_active_image_candidate(candidates, source_terms)
+        # Never retain an old anchor when the active-dialog image resolver did not
+        # find a compatible source. If no source hint is present, the resolver uses
+        # recency within this same dialogue; it never searches another dialogue.
+        message_ids = [selected_image_id] if selected_image_id else []
+        selection_method = "source_subject_match" if source_terms and selected_image_id else (
+            "latest_image_in_active_dialogue" if selected_image_id else "no_compatible_image_in_active_dialogue"
+        )
+        print(
+            "[APRIL_ACTIVE_IMAGE_SOURCE_RESOLUTION] " + json.dumps({
+                "method": selection_method,
+                "source_terms": source_terms[:3],
+                "candidate_images": len(candidates),
+                "selected_message_key": selected_image_id[:48] if selected_image_id else "",
+                "same_dialog_only": True,
+            }, ensure_ascii=False),
+            flush=True,
+        )
 
     # Semantic search can label a referential edit as NEW when the user's current
     # sentence names a visible object (e.g. "на этой канистре") but the previous
@@ -2353,33 +2376,13 @@ def _restore_selected_assets(
     fallback_used = False
     if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
         return visual_context, attachments, file_inputs, file_contents, []
-    if not has_current_asset and referential_edit and (relation != "CONTINUE" or not message_ids):
-        candidates = [item for item in (dialogue_context.get("candidates") or []) if isinstance(item, dict)]
+    if not has_current_asset and referential_edit and not message_ids:
+        candidates = _dialogue_image_source_candidates(dialogue_context)
         now_ts = time.time()
-        recent_images = []
-        request_low = _text(current_request).lower().replace("ё", "е")
-        subject_terms = [term for term in ("канистр", "этикетк", "масл", "собак", "хаски", "автомобил", "машин", "кот", "собак") if term in request_low]
-        for candidate in candidates:
-            if not bool(candidate.get("same_dialog")):
-                continue
-            if "image" not in set(candidate.get("row_modalities") or []):
-                continue
-            try:
-                age = now_ts - float(candidate.get("created_at") or 0)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if age < -60 or age > 24 * 60 * 60:
-                continue
-            candidate_id = _text(candidate.get("message_id"))
-            if not candidate_id:
-                continue
-            evidence = " ".join(_text(candidate.get(key)) for key in ("topic", "user", "april", "attachment_evidence")).lower().replace("ё", "е")
-            if subject_terms and not any(term in evidence for term in subject_terms):
-                continue
-            recent_images.append((float(candidate.get("created_at") or 0), candidate_id))
-        if recent_images:
-            recent_images.sort(reverse=True)
-            message_ids = [recent_images[0][1]]
+        subject_terms = _image_source_subject_terms(current_request)
+        selected_image_id = _select_active_image_candidate(candidates, subject_terms, now_ts=now_ts)
+        if selected_image_id:
+            message_ids = [selected_image_id]
             fallback_used = True
         elif relation != "CONTINUE":
             return visual_context, attachments, file_inputs, file_contents, []
@@ -4245,20 +4248,7 @@ async def execute(
                 answer = _explanation
                 break
     if not answer:
-        intent_for_empty_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-        input_for_empty_answer = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
-        language_for_empty_answer = _text(input_for_empty_answer.get("display_language")).lower()
-        if language_for_empty_answer.startswith(("uk", "ua")):
-            answer = "Текстова відповідь від моделі порожня. Перевір результат нижче або повтори запит; вихідні дані не змінено."
-        elif language_for_empty_answer.startswith("en"):
-            answer = "The model returned no text. Check any result below or retry the request; the source data was not changed."
-        else:
-            answer = "Модель вернула пустой текстовый ответ. Проверь результат ниже или повтори запрос; исходные данные не изменены."
-        raw["answer"] = answer
-        raw["content"] = answer
-        raw["summary"] = _text(raw.get("summary")) or answer[:180]
-        if not isinstance(raw.get("render_blocks"), list):
-            raw["render_blocks"] = []
+        raise RuntimeError("CANONICAL_ANSWER_MISSING")
     raw["answer"] = answer
     if not _text(raw.get("content")):
         raw["content"] = answer
@@ -4536,18 +4526,7 @@ async def execute(
         image_started = time.perf_counter()
         if is_image_edit_operation:
             try:
-                edit_visual_context, restored_edit_sources = _merge_restored_edit_image_sources(
-                    visual_context or [], restored_assets if isinstance(restored_assets, list) else []
-                )
-                _apr_timing_log(
-                    "image_edit_source_context_ready", None,
-                    visual_items=len(edit_visual_context),
-                    decoded_sources=sum(1 for item in edit_visual_context if _decode_image_source_item(item)),
-                    restored_sources_added=restored_edit_sources,
-                )
-                image_result = await _edit_image_artifact(interpretation, edit_visual_context)
-                if image_result and not _text(image_intent.get("source_asset_message_id")):
-                    image_intent["source_asset_message_id"] = _text(image_result.get("source_asset_message_id"))
+                image_result = await _edit_image_artifact(interpretation, visual_context or [])
             except Exception as image_edit_error:
                 _apr_timing_log(
                     "image_edit_failed", None,
