@@ -404,6 +404,78 @@ def _is_structured_visual_explanation_request(text: Any) -> bool:
     return visual_explanation and not existing_image and not explicit_new_picture
 
 
+def _is_dialogue_based_self_portrait_request(text: str) -> bool:
+    """Detect an intent to CREATE a conceptual self-portrait from dialogue history.
+
+    The phrase "нарисуй моё изображение на фото" is often a casual way to ask
+    for an image output, not an edit of a photo upload. A source-image operation
+    needs a concrete deictic/source reference ("на этой фотографии", "на моём
+    загруженном фото", "добавь на снимок"). We also require a first-person
+    self-representation cue and an explicit conversation/history basis.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    source_edit = bool(re.search(
+        r"(?:(?:добав\w*|дорис\w*|встав\w*|нанес\w*|измени\w*|отредактир\w*|"
+        r"замени\w*|убери\w*|удали\w*|перекрась\w*|обработ\w*)|"
+        r"(?:на|в)\s+(?:эт\w*|мо\w*\s+загруженн\w*|присланн\w*|прикрепленн\w*|исходн\w*)\s*"
+        r"(?:фото\b|фотограф\w*|картинк\w*|изображени\w*|снимк\w*)|"
+        r"(?:this|uploaded|attached|original)\s+(?:photo|image|picture))",
+        low, re.I | re.S,
+    ))
+    if source_edit:
+        return False
+    self_reference = bool(re.search(
+        r"(?:как\s+ты\s+(?:меня\s+)?(?:себе\s+)?(?:представля\w*|вид\w*|вообража\w*)|"
+        r"как\s+ты\s+меня\s+вид\w*|как\s+я\s+выгляжу\s+в\s+твоем\s+представлени\w*|"
+        r"мо\w*\s+(?:изображени\w*|портрет\w*|аватар\w*)|"
+        r"образ\s+меня|представь\s+меня|изобрази\s+меня|"
+        r"how\s+you\s+(?:imagine|picture|see)\s+me|"
+        r"how\s+do\s+you\s+see\s+me|my\s+(?:portrait|image|avatar)|"
+        r"a\s+portrait\s+of\s+me)", low, re.I | re.S,
+    ))
+    history_basis = bool(re.search(
+        r"(?:из\s+(?:наших|моих)\s+(?:диалог\w*|разговор\w*|переписк\w*)|"
+        r"по\s+(?:истори\w*|содержани\w*)\s+(?:наших\s+)?(?:диалог\w*|разговор\w*|общени\w*)|"
+        r"исходя\s+из\s+(?:истори\w*|нашего\s+общени\w*|наших\s+диалог\w*)|"
+        r"на\s+основе\s+(?:наших\s+)?(?:диалог\w*|разговор\w*|общени\w*|истори\w*)|"
+        r"по\s+нашим\s+разговор\w*|из\s+того,\s+что\s+мы\s+обсуждал\w*|"
+        r"based\s+on\s+(?:our\s+)?(?:conversation|dialogue|chat|discussion|history)|"
+        r"from\s+our\s+(?:conversations|chats|talks))", low, re.I | re.S,
+    ))
+    image_action = bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|покаж\w*|сдела\w*|" 
+        r"draw|create|generate|make|show|render|изображени\w*|портрет\w*|картинк\w*)",
+        low, re.I,
+    ))
+    return bool(self_reference and history_basis and image_action)
+
+
+def _is_self_portrait_generation_request(text: str) -> bool:
+    """Detect new-image self-portrait requests, not edits to a supplied photo."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    if _is_dialogue_based_self_portrait_request(low):
+        return True
+    # General self-avatar/portrait creation. Explicitly named existing source-image
+    # edits are left to _detect_image_modification.
+    source_edit = bool(re.search(
+        r"(?:добав\w*|дорис\w*|встав\w*|нанес\w*|измени\w*|отредактир\w*|" 
+        r"на\s+(?:эт\w*|мо\w*\s+загруженн\w*|прикрепленн\w*|присланн\w*)\s*"
+        r"(?:фото\b|фотограф\w*|изображени\w*|картинк\w*|снимк\w*))", low, re.I | re.S,
+    ))
+    if source_edit:
+        return False
+    return bool(re.search(
+        r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|сдела\w*|покаж\w*|draw|create|generate|make|show)"
+        r".{0,70}?(?:меня|себя|мой\s+портрет|мо\w*\s+(?:изображени\w*|аватар\w*|портрет\w*)|"
+        r"myself|yourself|my\s+(?:portrait|avatar|image)|your\s+(?:portrait|avatar))",
+        low, re.I | re.S,
+    ))
+
+
 def _detect_image_modification(text: str) -> bool:
     """Detect edits to an explicitly identified existing image, not a generic canvas.
 
@@ -415,6 +487,8 @@ def _detect_image_modification(text: str) -> bool:
     """
     low = _text(text).lower().replace("ё", "е")
     if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
+        return False
+    if _is_self_portrait_generation_request(low):
         return False
 
     # Explicit correction language outranks legacy edit markers. Voice transcripts
@@ -496,6 +570,8 @@ def _detect_image_generation_request(text: str) -> bool:
         return False
     if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
         return False
+    if _is_self_portrait_generation_request(low):
+        return True
     if _detect_image_modification(low):
         return True
 
@@ -2662,6 +2738,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         relation_hint = "NEW"
         reason = "site_navigation_request_overrides_history_keyword"
 
+    # Dialogue-based conceptual portrait is both a NEW visual deliverable and a
+    # HISTORY-backed task. Do not confuse generic "на фото" phrasing with an
+    # instruction to edit a missing uploaded source image. The image is based on
+    # recent, authenticated dialogue evidence; it is not a claim about appearance.
+    dialogue_profile_request = _is_dialogue_based_self_portrait_request(source)
+    if dialogue_profile_request and not site_navigation_request:
+        primary_intent = "HISTORY_RECALL"
+        direction = "SEARCH_DIALOGUE_HISTORY_FOR_VISUAL_CONTEXT"
+        topic_reference = "DIALOGUE_HISTORY"
+        time_scope = "RECENT_WINDOW"
+        requires_memory = True
+        history_request = True
+        search_scope = "ALL_DIALOGUE_HISTORY"
+        intent_score = max(int(intent_score or 0), 6)
+        relation_hint = "HISTORY_LOOKUP_WITH_NEW_VISUAL_OUTPUT"
+        reason = "dialogue_based_self_portrait_requires_recent_history_context"
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -2687,6 +2780,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
+        "dialogue_profile_request": bool(dialogue_profile_request),
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
@@ -2715,6 +2809,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "topic_reference": topic_reference,
         "requires_memory": bool(requires_memory),
         "history_request": bool(history_request),
+        "dialogue_profile_request": bool(dialogue_profile_request),
         "search_scope": search_scope,
         "relation_hint": relation_hint,
         "intent_score": int(intent_score),
@@ -3256,6 +3351,32 @@ def build_question_sequence(
         and (parent.get("active_branch_repair") or parent_pragmatic.get("active_branch_repair"))
     )
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
+    if _is_dialogue_based_self_portrait_request(text):
+        # Analysis subject and image output are one semantic task. Splitting after
+        # "based on our dialogue" or before "draw an image" discards the evidence
+        # basis and causes the model to ask for a source photo unnecessarily.
+        return [{
+            "step_index": 1,
+            "request": _text(text),
+            "output_types": ["text", "image"],
+            "answer_in_order": True,
+            "semantic_intent": "HISTORY_RECALL",
+            "search_direction": "SEARCH_DIALOGUE_HISTORY_FOR_VISUAL_CONTEXT",
+            "time_scope": "RECENT_WINDOW",
+            "topic_reference": "DIALOGUE_HISTORY",
+            "requires_memory": True,
+            "history_request": True,
+            "dialogue_profile_request": True,
+            "semantic_reason": "dialogue_profile_and_image_must_remain_one_task",
+            "features": {"dialogue_profile_request": True},
+            "action_contract": {
+                "action": "CREATE_DIALOGUE_GROUNDED_CONCEPTUAL_PORTRAIT",
+                "input_source": "authenticated_recent_dialogue_history",
+                "output_types": ["text", "image"],
+                "must_not": ["не запрашивать отсутствующее исходное фото", "не выдумывать реальную внешность", "не выдавать выводы о настроении за диагноз"],
+                "success": ["кратко описать подтверждённые повторяющиеся темы и стиль общения", "создать концептуальное изображение по ним", "согласовать текст и факт готовности изображения"],
+            },
+        }]
     pieces = _split_request_sequence(text)
     parent_signature = parent.get("context_signature") if isinstance(parent.get("context_signature"), dict) else _context_signature(text)
     parent_participants = parent_signature.get("participant_references") if isinstance(parent_signature.get("participant_references"), dict) else {}
@@ -3605,6 +3726,84 @@ def _is_code_modification_request(text: str) -> bool:
     return any(marker.replace("ё", "е") in low for marker in _CODE_MODIFICATION_MARKERS)
 
 
+def _build_dialogue_based_portrait_profile(
+    request_text: str,
+    selected_pairs: list[dict[str, Any]],
+    history_topics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a compact, evidence-bound visual brief from retrieved dialogue.
+
+    This is a non-clinical observation of conversational patterns, not a diagnosis
+    and not evidence of the user's physical appearance. Only repeatedly supported
+    themes are promoted to the image brief; single incidental topics stay secondary.
+    """
+    pairs = [item for item in selected_pairs if isinstance(item, dict)]
+    user_turns = [
+        _text(item.get("source_user_text") or item.get("user") or item.get("user_text") or item.get("user_text_en"))
+        for item in pairs
+    ]
+    user_turns = [turn for turn in user_turns if turn]
+    topic_labels = []
+    for item in pairs:
+        label = _text(item.get("topic") or item.get("topic_summary"))
+        if label and label not in topic_labels:
+            topic_labels.append(label[:120])
+    for item in history_topics or []:
+        if not isinstance(item, dict):
+            continue
+        label = _text(item.get("topic") or item.get("title") or item.get("label") or item.get("summary"))
+        if label and label not in topic_labels:
+            topic_labels.append(label[:120])
+        if len(topic_labels) >= 8:
+            break
+
+    joined = " ".join(user_turns).lower().replace("ё", "е")
+    theme_rules = [
+        ("создание и развитие April/AI-инструментов", r"(?:април|april|бот\w*|бота|ai[- ]?ассист|llm|openai|модель\w*)"),
+        ("архитектура, интерпретация намерений и память диалога", r"(?:интерпретац\w*|пониман\w* запрос|памят\w*|диалог\w*|истори\w*|ветк\w*|контекст\w*|semantic|memory)"),
+        ("программирование, отладка и проверка логов", r"(?:код\w*|python|пайтон|tsx|typescript|файл\w*|логи|ошибк\w*|тест\w*|отлад\w*|исправ\w*)"),
+        ("визуализация и согласованная мультимедийная подача", r"(?:картинк\w*|изображен\w*|генерац\w*|рендер\w*|диаграмм\w*|схем\w*|галере\w*|визуал\w*)"),
+        ("практическое улучшение интерфейса и продукта", r"(?:интерфейс\w*|пользовател\w*|кнопк\w*|страниц\w*|ui\b|ux\b|google play|публикац\w*)"),
+    ]
+    # Call a theme recurring only when it occurs in two separate retrieved user turns.
+    recurring_themes = [
+        label for label, pattern in theme_rules
+        if sum(1 for turn in user_turns if re.search(pattern, turn, re.I)) >= 2
+    ]
+    iterative_pattern = r"(?:исправ\w*|улучш\w*|проверь|провер\w*|передел\w*|почему|ошибк\w*|не\s+работ\w*)"
+    analytical_pattern = r"(?:проанализ\w*|структур\w*|по\s+цепочк\w*|причин\w*|лог\w*|доказ\w*|провер\w*)"
+    iterative_turns = sum(1 for turn in user_turns if re.search(iterative_pattern, turn, re.I))
+    analytical_turns = sum(1 for turn in user_turns if re.search(analytical_pattern, turn, re.I))
+    if iterative_turns >= 2:
+        communication_style = "повторяющийся запрос на итеративное улучшение, проверку причин и доведение результата до рабочего состояния"
+    elif analytical_turns >= 2:
+        communication_style = "повторяющийся интерес к структурному анализу, причинным связям и проверке фактов"
+    else:
+        communication_style = "недостаточно повторяющихся сигналов для уверенного описания устойчивого стиля общения"
+    current_low = _text(request_text).lower().replace("ё", "е")
+    frustration_pattern = r"(?:не\s+понима\w*|до\s+сих\s+пор|плохо\s+работ\w*|пута\w*|от\s+фонаря|раздраж\w*|не\s+то|снова\s+ошиб\w*)"
+    current_frustration = bool(re.search(frustration_pattern, current_low))
+    recent_frustration_turns = sum(1 for turn in user_turns[:5] if re.search(frustration_pattern, turn, re.I))
+    if current_frustration:
+        tone_note = "в текущем сообщении заметно недовольство повторяющимися сбоями и ожидание более точного результата; это ситуативная реакция на проблему, не характеристика личности"
+    elif recent_frustration_turns >= 2:
+        tone_note = "в нескольких недавних сообщениях повторялось недовольство точностью ответов или исправлением ошибок; это может описывать напряжение вокруг текущей задачи, но не состояние человека в целом"
+    else:
+        tone_note = "по текущему сообщению и выбранным недавним репликам недостаточно оснований уверенно описывать эмоциональное состояние; не изображать настроение как факт"
+    return {
+        "schema": "april_dialogue_portrait_profile_v1",
+        "evidence_turn_count": len(user_turns),
+        "recurring_themes": recurring_themes[:5],
+        "recent_topic_labels": topic_labels[:8],
+        "observed_communication_style": communication_style,
+        "situational_tone_observation": tone_note,
+        "evidence_policy": "Only themes supported by repeated retrieved dialogue turns are described as recurring. Distinguish observations from inference.",
+        "visual_direction": "A thoughtful, non-photorealistic conceptual portrait. Use only motifs supported by repeated dialogue evidence. When recurring themes are too weak to support a concrete scene, use a neutral, abstract adult silhouette with subtle dialogue-node motifs rather than inventing a profession, physical appearance, or biography.",
+        "do_not_infer": ["exact face or physical likeness", "age beyond adult styling", "ethnicity", "medical or psychiatric diagnosis", "private traits not stated in dialogue", "one-off incidental topic as the person's defining identity"],
+        "do_not_substitute": ["unrelated weapon or object", "random stock portrait", "source-photo request when no source photo was requested", "text-only substitute for requested image"],
+    }
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -3622,6 +3821,11 @@ def build_interpretation(
     original = _text(original_request or current_request)
     memory = dict(memory or {})
     request_semantics = dict(semantic_interpretation or interpret_request_semantics(original or text))
+    dialogue_profile_request = bool(request_semantics.get("dialogue_profile_request") or _is_dialogue_based_self_portrait_request(original or text))
+    if dialogue_profile_request:
+        request_semantics["dialogue_profile_request"] = True
+        request_semantics["history_request"] = True
+        request_semantics["requires_memory"] = True
     attachments = [dict(x) for x in (attachments or []) if isinstance(x, dict)]
     visual_context = [dict(x) for x in (visual_context or []) if isinstance(x, dict)]
 
@@ -3655,6 +3859,15 @@ def build_interpretation(
         parent_interpretation=request_semantics,
     )
     presentation_sequence = build_presentation_sequence(original or text)
+    if dialogue_profile_request:
+        presentation_sequence = [{
+            "step_index": 1,
+            "section": "dialogue_based_portrait",
+            "title": "Концептуальный портрет по истории диалогов",
+            "output_types": ["text", "image"],
+            "answer_in_order": True,
+            "final_output": False,
+        }]
     detected_outputs = _detect_requested_outputs(original or text)
     requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
     for sequence_item in question_sequence:
@@ -3666,6 +3879,8 @@ def build_interpretation(
                 requested_outputs.append(normalized_output)
     if "text" not in requested_outputs:
         requested_outputs.insert(0, "text")
+    if dialogue_profile_request:
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
     routing_capabilities = _infer_routing_capabilities(original or text)
     relation = _text(memory.get("relation") or "NEW").upper()
     normalized_visual_request = _text(original or text).lower().replace("ё", "е")
@@ -3685,6 +3900,10 @@ def build_interpretation(
             sequence_item["output_types"] = [
                 name for name in (sequence_item.get("output_types") or []) if _text(name).lower() != "image"
             ]
+    if dialogue_profile_request:
+        ui_instruction_request = False
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
+
     has_saved_output_image = any(
         _text(item.get("kind")).lower() == "image"
         and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
@@ -3705,7 +3924,7 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
-    explicit_image_edit = False if ui_instruction_request else _detect_image_modification(normalized_visual_request)
+    explicit_image_edit = False if (ui_instruction_request or dialogue_profile_request) else _detect_image_modification(normalized_visual_request)
     if (
         explicit_image_edit
         and not has_original_image
@@ -3716,7 +3935,7 @@ def build_interpretation(
         # registered generator create a new picture instead of asking for upload.
         explicit_image_edit = False
     contextual_image_edit = bool(not ui_instruction_request and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
-    image_edit_requested = bool(explicit_image_edit or contextual_image_edit)
+    image_edit_requested = bool((explicit_image_edit or contextual_image_edit) and not dialogue_profile_request)
     # A contextual command such as "Добавь зелёную галочку" becomes an image
     # edit only when a source image is actually available. An explicit edit request
     # without source bytes must ask for the photo and must never run generation.
@@ -3760,6 +3979,15 @@ def build_interpretation(
             sequence_item["output_types"] = item_outputs
             cleaned_presentation.append(sequence_item)
         presentation_sequence = cleaned_presentation
+    if dialogue_profile_request:
+        requested_outputs = list(dict.fromkeys(["text", "image", *requested_outputs]))
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = list(dict.fromkeys(["text", "image", *(sequence_item.get("output_types") or [])]))
+        for sequence_item in presentation_sequence:
+            if isinstance(sequence_item, dict) and not any(name in (sequence_item.get("output_types") or []) for name in ("text", "image")):
+                sequence_item["output_types"] = ["text", "image"]
+
     wants_image = "image" in requested_outputs
     image_noun_present = bool(re.search(
         r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
@@ -3842,6 +4070,7 @@ def build_interpretation(
     history_count = max(1, min(10, int(memory.get("requested_topic_count") or request_semantics.get("requested_topic_count") or _history_count(original or text) or 10)))
     history_count_minimum = max(1, min(history_count, int(memory.get("minimum_topic_count") or request_semantics.get("minimum_topic_count") or _history_count_minimum(original or text) or min(5, history_count))))
     history_topics = _select_history_topics(memory)[:history_count]
+    dialogue_portrait_profile = _build_dialogue_based_portrait_profile(original or text, selected_pairs, history_topics) if dialogue_profile_request else {}
 
     # Referential questions such as "а про него еще?" are resolved by the
     # State Manager anchor, not by guessing from the current sentence.
@@ -3912,6 +4141,8 @@ def build_interpretation(
 
     if has_original_image and task == "answer_request" and not image_status_request:
         task = "analyze_image"
+    if dialogue_profile_request:
+        task = "generate_image"
 
     result = {
         "schema": "april_interpretation_v2",
@@ -3961,6 +4192,7 @@ def build_interpretation(
             "graph_policy": graph_policy,
             "wants_table": "table" in requested_outputs,
             "history_request": history_request,
+            "dialogue_profile_request": bool(dialogue_profile_request),
             "history_count": history_count if history_request else 0,
             "history_count_minimum": history_count_minimum if history_request else 0,
             "time_window": request_semantics.get("time_window") if history_request else {},
@@ -4009,12 +4241,14 @@ def build_interpretation(
             # controls topic switching; a CONTINUE request is not reclassified as NEW.
             "new_dialogue": {
                 "request": original or text,
-                "active": relation != "CONTINUE" and not history_request,
-                "needs_independent_resolution": relation != "CONTINUE" and not history_request,
+                "active": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
+                "needs_independent_resolution": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
             },
         },
         "visual": {
             "items": visual_context,
+            "dialogue_profile_request": bool(dialogue_profile_request),
+            "dialogue_based_portrait_profile": dialogue_portrait_profile,
             "analysis_required": has_original_image,
             "generation_required": bool(wants_image and not reuse_saved_image and not image_edit_requested),
             "edit_required": bool(image_edit_requested and source_image_available),
@@ -4036,11 +4270,12 @@ def build_interpretation(
             "user_goal": text,
             "memory_context": selected_pairs,
             "history_request": history_request,
+            "dialogue_profile_request": bool(dialogue_profile_request),
             "history_count": history_count if history_request else 0,
             "history_topics": history_topics,
             "topic_table_markdown": _text(memory.get("topic_table_markdown")),
             "new_dialogue_request": original or text,
-            "new_dialogue_active": relation != "CONTINUE" and not history_request,
+            "new_dialogue_active": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
             "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
@@ -4114,6 +4349,15 @@ def build_interpretation(
             },
         },
     }
+    if dialogue_profile_request:
+        _communication = result["request_structure"]["dialogue_communication"]
+        _communication["dialogue_profile_request"] = True
+        # These two instructions lead the compact provider card, whose communication
+        # contract is intentionally limited to five instructions to protect tokens.
+        _communication["instructions"] = [
+            "For dialogue_profile_request, use DIALOGUE_BASED_PORTRAIT_PROFILE and selected CONTINUATION_CONTEXT as evidence: give a natural Russian non-clinical reading of 2–3 recurring communication/project patterns, distinguish observed facts from cautious interpretation, and mention mood only as a situational impression grounded in the current turn.",
+            "The user requested a NEW conceptual image based on dialogue history, not an edit of a source photo. Never ask for an upload; make the image and the brief text complementary. Do not infer real facial appearance, ethnicity, medical or psychiatric diagnosis, or unsupported biography; do not let one-off topics hijack the scene.",
+        ] + list(_communication.get("instructions") or [])
     _apr_timing_log("build_interpretation", interpretation_started,
         relation=relation, task=task, requested_outputs=requested_outputs,
         input_chars=len(text), selected_pairs=len(selected_pairs), history_topics=len(history_topics),
@@ -4121,6 +4365,7 @@ def build_interpretation(
         semantic_intent=request_semantics.get("primary_intent"),
         search_direction=request_semantics.get("direction"),
         history_request=bool(request_semantics.get("history_request")),
+        dialogue_profile_request=bool(dialogue_profile_request),
         attachment_task_count=len(asset_task_map),
         selected_section=_text((memory.get("selected_section") or {}).get("heading")),
         clarification_needed=bool(memory.get("clarification_needed")),
