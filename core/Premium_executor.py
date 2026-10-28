@@ -3075,6 +3075,22 @@ async def execute(
         flow_key=_apr_diag_ref(identity.get("flow_id")),
     )
 
+    def _emit_image_workflow_stage(stage: str) -> None:
+        """Publish UI-only progress for Premium image edits; never affects routing."""
+        if not progress_sink:
+            return
+        try:
+            progress_sink({
+                "type": "workflow_stage",
+                "stage": stage,
+                "render_type": "image",
+                "message_id": identity["message_id"],
+                "flow_id": identity["flow_id"],
+            })
+        except Exception:
+            # A disconnected client must not interrupt image editing or persistence.
+            pass
+
     # First infer the overall semantic direction, intent, time scope and memory
     # need; only then split the request into ordered questions. The classifier is
     # local/deterministic and does not add an API call or replace the existing splitter.
@@ -3216,7 +3232,33 @@ async def execute(
                 "revision_request", "factual_verification_request",
             ))
         )
-        explicit_saved_artifact_followup = bool(_explicit_artifact_followup_kind(original or current_text))
+        explicit_saved_artifact_kind = _explicit_artifact_followup_kind(original or current_text)
+        explicit_saved_artifact_followup = bool(explicit_saved_artifact_kind)
+        semantic_time_window = single_semantics.get("time_window")
+        has_explicit_time_window = bool(
+            single_semantics.get("has_explicit_time_window")
+            or (isinstance(semantic_time_window, dict) and semantic_time_window.get("has_constraint"))
+        )
+        image_edit_workflow = bool(
+            (explicit_saved_artifact_kind == "image" or _detect_image_modification(original or current_text))
+            and not single_semantics.get("history_request")
+            and not has_explicit_time_window
+            and not _text(resume_message_id)
+        )
+        # If the user attached the image and explicitly asks to modify it, that
+        # attachment is the exact source of truth. Searching 24 hours of old image
+        # and scene JSON adds no value and was taking ~58 seconds on an 81-row
+        # history. Keep the canonical memory path for all other requests.
+        attached_image_edit_fast_path = bool(
+            visual_context
+            and image_edit_workflow
+            and _detect_image_modification(original or current_text)
+            and not single_semantics.get("previous_answer_reference")
+            and not single_semantics.get("active_branch_repair")
+            and not (single_semantics.get("pragmatic_features") or {}).get("active_branch_repair")
+        )
+        if image_edit_workflow:
+            _emit_image_workflow_stage("analyzing")
         if gratitude_only:
             single_semantics.update({
                 "primary_intent": "TOPIC_CONTINUATION",
@@ -3229,7 +3271,7 @@ async def execute(
         # Do not bypass the canonical State Manager on a subject/topic switch.
         # A switched-to subject may have a real older branch; State Manager checks
         # the latest topic, then matching history, then a clean NEW-topic fallback.
-        skip_memory_search = False
+        skip_memory_search = attached_image_edit_fast_path
         if skip_memory_search:
             dialogue_context = {
                 "window_hours": 24,
@@ -3245,7 +3287,7 @@ async def execute(
                 "previous_answer_reference": False,
                 "factual_verification_request": False,
                 "explicit_topic_switch": False,
-                "reason": "explicit_topic_switch_fast_path",
+                "reason": "attached_image_edit_fast_path",
                 "active_topic": _text(original or current_text)[:140],
                 "selected_pairs": [],
                 "candidates": [],
@@ -3292,7 +3334,7 @@ async def execute(
             candidates=len(dialogue_context.get("candidates") or []),
             selected_pairs=len(dialogue_context.get("selected_pairs") or []),
             topic_index_count=len(dialogue_context.get("topic_index") or []),
-            status="explicit_topic_switch_fast_path" if skip_memory_search else "ok",
+            status="attached_image_edit_fast_path" if skip_memory_search else "ok",
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
@@ -4861,6 +4903,7 @@ async def execute(
     if image_generation_allowed:
         image_started = time.perf_counter()
         if is_image_edit_operation:
+            _emit_image_workflow_stage("generating")
             try:
                 image_result = await _edit_image_artifact(interpretation, visual_context or [])
             except Exception as image_edit_error:
@@ -5035,6 +5078,8 @@ async def execute(
                             variant_index=result_index,
                             error=(type(result_item).__name__ if isinstance(result_item, BaseException) else _text((result_item or {}).get("error"))[:100]),
                         )
+        if image_edit_workflow and isinstance(image_result, dict) and image_result.get("image_bytes"):
+            _emit_image_workflow_stage("saving")
         _apr_timing_log(
             "image_edit" if image_intent.get("image_operation") == "edit" else "image_generation",
             image_started,
