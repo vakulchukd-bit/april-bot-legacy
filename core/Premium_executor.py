@@ -1835,6 +1835,71 @@ def _decode_image_source_item(item: dict[str, Any]) -> tuple[bytes, str] | None:
     return None
 
 
+def _merge_restored_edit_image_sources(
+    visual_context: list[dict[str, Any]] | None,
+    restored_assets: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Recover image bytes from durable dialogue assets when metadata-only context was passed.
+
+    The State Manager can restore an image as an asset summary while the visual-context
+    item itself contains only a cache reference. Editing needs the concrete source bytes,
+    so add a decoded data URI from the matching durable asset without replacing a current
+    user upload or modifying the persisted asset record.
+    """
+    merged = [dict(item) for item in (visual_context or []) if isinstance(item, dict)]
+    known_ids = {
+        _text(item.get("asset_message_id"))
+        for item in merged
+        if _text(item.get("asset_message_id"))
+    }
+    known_sources = {
+        _text(item.get(key))
+        for item in merged
+        for key in ("image_url", "data_uri", "src", "image_data_uri")
+        if _text(item.get(key)).startswith("data:image/")
+    }
+    added = 0
+    for saved in (restored_assets or []):
+        if not isinstance(saved, dict) or _text(saved.get("kind")).lower() != "image":
+            continue
+        role = _text(saved.get("asset_role") or "april_output").lower()
+        if role not in {"april_output", "assistant_output", "generated", "user_input", "attachment"}:
+            continue
+        uri = next((
+            _text(saved.get(key))
+            for key in ("_content_data_uri", "image_data_uri", "data_uri", "image_url", "src")
+            if _text(saved.get(key)).startswith("data:image/")
+        ), "")
+        if not uri or uri in known_sources:
+            continue
+        asset_id = _text(saved.get("asset_message_id"))
+        if asset_id and asset_id in known_ids and any(
+            _decode_image_source_item(item) and _text(item.get("asset_message_id")) == asset_id
+            for item in merged
+        ):
+            continue
+        decoded = _decode_asset_data_uri(uri)
+        if not decoded or not decoded[0]:
+            continue
+        item = dict(saved)
+        item.update({
+            "kind": "image",
+            "asset_role": role,
+            "image_url": uri,
+            "data_uri": uri,
+            "image_data_uri": uri,
+            "src": uri,
+            "mime_type": _text(saved.get("mime_type") or decoded[1] or "image/png"),
+            "recalled_from_memory": True,
+        })
+        merged.append(item)
+        if asset_id:
+            known_ids.add(asset_id)
+        known_sources.add(uri)
+        added += 1
+    return merged, added
+
+
 def _select_image_edit_source(
     visual_context: list[dict[str, Any]],
     *,
@@ -1861,7 +1926,30 @@ def _select_image_edit_source(
         "канистр", "этикетк", "автомобил", "машин", "кот", "собак", "хаски",
         "кружк", "документ", "паспорт", "чек", "квитанц",
     )
-    request_subjects = [term for term in subject_hints if term in low_request]
+    def _subject_hint_is_present(term: str) -> bool:
+        # Match inflected nouns, not arbitrary substrings inside ordinary words.
+        # In particular, the stem "кот" must not match "которая" in a request
+        # like "добавь лодку, которая будет под луной"; that false positive made
+        # the source selector reject the exact generated image being edited.
+        if term == "кот":
+            return bool(re.search(
+                r"(?<![\w\u0080-\uffff])(?:кот(?:а|у|ом|е|ы|ов|ам|ами|ах)?|котик\w*|кот[её]н(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)|котят\w*)(?![\w\u0080-\uffff])",
+                low_request,
+                re.IGNORECASE,
+            ))
+        if term == "стол":
+            return bool(re.search(
+                r"(?<![\w\u0080-\uffff])стол(?:а|у|ом|е|ы|ов|ам|ами|ах)?(?![\w\u0080-\uffff])",
+                low_request,
+                re.IGNORECASE,
+            ))
+        return bool(re.search(
+            rf"(?<![\w\u0080-\uffff]){re.escape(term)}[\w\u0080-\uffff]*",
+            low_request,
+            re.IGNORECASE,
+        ))
+
+    request_subjects = [term for term in subject_hints if _subject_hint_is_present(term)]
     decoded_candidates = [item for item in candidates if _decode_image_source_item(item)]
     relevance_by_id: dict[int, int] = {}
     for item in decoded_candidates:
@@ -4157,7 +4245,20 @@ async def execute(
                 answer = _explanation
                 break
     if not answer:
-        raise RuntimeError("CANONICAL_ANSWER_MISSING")
+        intent_for_empty_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+        input_for_empty_answer = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+        language_for_empty_answer = _text(input_for_empty_answer.get("display_language")).lower()
+        if language_for_empty_answer.startswith(("uk", "ua")):
+            answer = "Текстова відповідь від моделі порожня. Перевір результат нижче або повтори запит; вихідні дані не змінено."
+        elif language_for_empty_answer.startswith("en"):
+            answer = "The model returned no text. Check any result below or retry the request; the source data was not changed."
+        else:
+            answer = "Модель вернула пустой текстовый ответ. Проверь результат ниже или повтори запрос; исходные данные не изменены."
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = _text(raw.get("summary")) or answer[:180]
+        if not isinstance(raw.get("render_blocks"), list):
+            raw["render_blocks"] = []
     raw["answer"] = answer
     if not _text(raw.get("content")):
         raw["content"] = answer
@@ -4435,7 +4536,18 @@ async def execute(
         image_started = time.perf_counter()
         if is_image_edit_operation:
             try:
-                image_result = await _edit_image_artifact(interpretation, visual_context or [])
+                edit_visual_context, restored_edit_sources = _merge_restored_edit_image_sources(
+                    visual_context or [], restored_assets if isinstance(restored_assets, list) else []
+                )
+                _apr_timing_log(
+                    "image_edit_source_context_ready", None,
+                    visual_items=len(edit_visual_context),
+                    decoded_sources=sum(1 for item in edit_visual_context if _decode_image_source_item(item)),
+                    restored_sources_added=restored_edit_sources,
+                )
+                image_result = await _edit_image_artifact(interpretation, edit_visual_context)
+                if image_result and not _text(image_intent.get("source_asset_message_id")):
+                    image_intent["source_asset_message_id"] = _text(image_result.get("source_asset_message_id"))
             except Exception as image_edit_error:
                 _apr_timing_log(
                     "image_edit_failed", None,
