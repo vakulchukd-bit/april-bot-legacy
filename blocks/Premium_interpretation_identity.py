@@ -615,6 +615,29 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     if negated_visual_request:
         return True
 
+    # A user may recount the original visual instruction while praising the
+    # result: "я попросил тебя изменить фото ... и ты справилась". The edit
+    # verbs in that recap are infinitives, not a new command. Keep this narrow:
+    # the guard above already lets a genuine affirmative visual instruction win.
+    retrospective_request_recap = bool(
+        re.search(
+            r"\bя\s+(?:(?:же|только)\s+)?(?:тебя\s+)?"
+            r"(?:попросил\w*|просил\w*|просила|попросила)\b"
+            r".{0,180}?\b(?:измен\w*|редактир\w*|добав\w*|встав\w*|"
+            r"дорис\w*|замен\w*|убер\w*|исправ\w*)\b",
+            low, re.IGNORECASE | re.DOTALL,
+        )
+        and re.search(
+            r"\b(?:ты\s+)?(?:справил\w*|молодец|отлично|замечательно|"
+            r"прекрасно|получилось|получил\w*|сработал\w*|лайк|"
+            r"ставлю\s+тебе\s+лайк|спасибо|благодар\w*|well\s+done|"
+            r"great\s+job|nice\s+work|thanks)\b",
+            low, re.IGNORECASE,
+        )
+    )
+    if retrospective_request_recap:
+        return True
+
     # Past-result narration, appreciation, capability discussion, and questions
     # about how/why an earlier picture was made are dialogue, not fresh work.
     retrospective_image_talk = bool(re.search(
