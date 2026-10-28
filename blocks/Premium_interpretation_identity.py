@@ -494,6 +494,52 @@ def _is_self_portrait_generation_request(text: str) -> bool:
     ))
 
 
+def _is_explicit_visual_revision_request(text: str) -> bool:
+    """Detect a current instruction to revise a previously shown image.
+
+    This is narrower than image discussion: it requires a current request/imperative
+    and a concrete image reference. A retrospective sentence such as "I asked you to
+    change the photo" is not enough on its own. Negative constraints like "give me
+    the photo without the red arrow" are edit scope, not a reason to suppress editing.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"
+    if not re.search(image_noun, low, re.IGNORECASE):
+        return False
+    direct_edit = bool(re.search(
+        r"\b(?:переделай(?:те)?|перерисуй(?:те)?|исправь(?:те)?|поправь(?:те)?|"
+        r"измени(?:те)?|замени(?:те)?|убери(?:те)?|удали(?:те)?|отредактируй(?:те)?|"
+        r"redo|revise|remove|replace|edit\s+again)\b",
+        low, re.IGNORECASE,
+    ))
+    polite_revision = bool(re.search(
+        r"\b(?:я\s+)?(?:прошу|пожалуйста|нужно|надо|хочу|please|could\s+you)\b"
+        r".{0,120}\b(?:переделать|перерисовать|исправить|поправить|изменить|заменить|"
+        r"убрать|удалить|отредактировать|redo|revise|remove|replace|edit)\b",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    deliver_without_overlay = bool(
+        re.search(r"\b(?:выдай|выдайте|пришли|пришлите|верни|верните|покажи|покажите|"
+                  r"дай|дайте|send|return|give|show)\b", low, re.IGNORECASE)
+        and re.search(r"\bбез\s+(?:(?:красн\w*|черн\w*|син\w*|зелен\w*)\s+)?"
+                      r"(?:стрелк\w*|указател\w*|марк\w*|подсветк\w*|обводк\w*|надпис\w*|"
+                      r"кружк\w*|аннотац\w*|arrow\w*|pointer\w*|marker\w*|highlight\w*|"
+                      r"callout\w*|annotation\w*)\b", low, re.IGNORECASE)
+    )
+    revision_cue = bool(re.search(
+        r"(?:\b(?:еще\s+раз|ещё\s+раз|повторно|снова|передел\w*|перерис\w*|"
+        r"исправ\w*|поправ\w*|замен\w*|убер\w*|удал\w*|again|redo|revise)\b|"
+        r"\bбез\s+.{0,30}(?:стрелк\w*|указател\w*|марк\w*|arrow|pointer)\b|"
+        r"\bwithout\s+(?:the\s+)?(?:arrow|pointer|marker)\b)",
+        low, re.IGNORECASE,
+    ))
+    if deliver_without_overlay and revision_cue:
+        return True
+    return bool((direct_edit or polite_revision) and revision_cue)
+
+
 def _has_affirmative_visual_instruction(text: str) -> bool:
     """Return True only when the current turn contains an affirmative visual action.
 
@@ -504,6 +550,8 @@ def _has_affirmative_visual_instruction(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    if _is_explicit_visual_revision_request(low):
+        return True
 
     image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     negated_prefix = re.compile(
@@ -600,7 +648,14 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     if not low:
         return False
     image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
-    if not re.search(image_noun, low, re.IGNORECASE):
+    visual_overlay_noun = bool(re.search(r"(?:стрелк\w*|указател\w*|маркер\w*|подсветк\w*|обводк\w*|callout\w*|pointer|arrow|marker|highlight)", low, re.IGNORECASE))
+    visual_feedback_marker = bool(re.search(
+        r"(?:лишн\w*|не\s+надо\s+было|не\s+должн\w*\s+был\w*|"
+        r"не\s+(?:просил\w*|просила|просить)|не\s+добавля\w*|не\s+заказывал\w*|"
+        r"unnecessary|unrequested|should(?:n't|\s+not)\s+have|not\s+asked\s+for)",
+        low, re.IGNORECASE,
+    ))
+    if not re.search(image_noun, low, re.IGNORECASE) and not (visual_overlay_noun and visual_feedback_marker):
         return False
     # A voice recap can contain the same edit verbs as a live command:
     # "I asked you to change the photo from 8800 to 8803, and you did it".
@@ -630,6 +685,12 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
 
     if _has_affirmative_visual_instruction(low):
         return False
+
+    # A complaint about an unrequested visual overlay is a response to the previous
+    # render, even when the user no longer repeats the word "photo". It is not a
+    # new edit until a current imperative/request is present.
+    if visual_overlay_noun and visual_feedback_marker:
+        return True
 
     # Explicit refusal/correction: "я не просил, чтобы ты создавала картинку",
     # "не создавай изображение, просто объясни". Keep this broader than one exact
@@ -3057,6 +3118,51 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         previous_answer_reference = bool(repair_feedback)
         saved_artifact_followup_kind = ""
 
+    # An explicit request to redo/repair a previously shown photo is one edit task
+    # anchored to the active dialogue's image branch. Do not classify it as a new
+    # standalone topic just because the instruction has several sentences or a
+    # negative constraint such as "without the red arrow".
+    explicit_visual_revision = _is_explicit_visual_revision_request(source)
+    if (
+        explicit_visual_revision
+        and not history_request
+        and not site_navigation_request
+        and not dialogue_profile_request
+        and not explicit_topic_switch
+    ):
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = max(int(intent_score or 0), 4)
+        relation_hint = "CONTINUE"
+        reason = "explicit_visual_revision_of_active_artifact"
+        saved_artifact_followup_kind = "image"
+        active_branch_repair = True
+        previous_answer_reference = True
+        dialogue_act_profile = dict(dialogue_act_profile)
+        pragmatic = dict(dialogue_act_profile.get("pragmatic_features") or {})
+        pragmatic.update({
+            "correction": True,
+            "active_branch_repair": True,
+            "previous_answer_reference": True,
+            "has_independent_payload": False,
+        })
+        dialogue_act_profile.update({
+            "speech_act": "CORRECTION_OR_REVISION",
+            "communicative_act": "CONTINUE_ACTIVE_DIALOGUE",
+            "pragmatic_intent": "apply_explicit_visual_revision",
+            "message_function": "revise_active_visual_artifact",
+            "active_branch_repair": True,
+            "previous_answer_reference": True,
+            "tone": "DIRECT",
+            "recommended_response_action": "APPLY_EXPLICIT_VISUAL_REVISION",
+            "pragmatic_features": pragmatic,
+        })
+
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
     features = {
@@ -3083,6 +3189,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
         "dialogue_profile_request": bool(dialogue_profile_request),
+        "explicit_visual_revision": bool(explicit_visual_revision),
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
@@ -3654,6 +3761,37 @@ def build_question_sequence(
         and (parent.get("active_branch_repair") or parent_pragmatic.get("active_branch_repair"))
     )
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
+    if (
+        _is_explicit_visual_revision_request(text)
+        and not _has_independent_nonvisual_artifact_request(text)
+        and not _is_site_navigation_request(text)
+    ):
+        return [{
+            "step_index": 1,
+            "request": _text(text),
+            "output_types": ["text", "image"],
+            "answer_in_order": True,
+            "semantic_intent": "TOPIC_CONTINUATION",
+            "search_direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+            "time_scope": "ACTIVE_DIALOGUE",
+            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+            "requires_memory": True,
+            "history_request": False,
+            "semantic_reason": "explicit_visual_revision_kept_as_single_task",
+            "features": {"explicit_visual_revision": True, "active_branch_repair": True},
+            "action_contract": {
+                "action": "REVISE_ACTIVE_IMAGE_ARTIFACT",
+                "input_source": "current_upload_or_latest_compatible_same_dialogue_image",
+                "output_types": ["text", "image"],
+                "must_not": [
+                    "не добавлять элементы, которых нет в текущей просьбе",
+                    "сохранить все не затронутые детали изображения",
+                    "обязательно учесть запреты и отрицательные ограничения пользователя",
+                    "не разбивать уточнение изображения на отдельные независимые запросы",
+                ],
+                "success": ["вернуть изменённое изображение", "кратко описать только запрошенные изменения"],
+            },
+        }]
     if _is_dialogue_based_self_portrait_request(text):
         # Analysis subject and image output are one semantic task. Splitting after
         # "based on our dialogue" or before "draw an image" discards the evidence
