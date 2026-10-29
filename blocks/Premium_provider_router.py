@@ -30,7 +30,7 @@ PREMIUM_OUTPUT_TOKEN_LIMIT = 12000
 PREMIUM_RENDER_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
 PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
 PREMIUM_RECOVERY_RETRIES = 1
-PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX = 3600
+PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX = PREMIUM_OUTPUT_TOKEN_LIMIT
 INPUT_TOKEN_TARGET = 3600
 MAX_PROMPT_TOKENS = min(3600, max(256, int(os.getenv("APRIL_PREMIUM_OPENAI_PROMPT_TOKEN_BUDGET", "3600") or 3600)))
 MAX_TOPIC_PROMPT_TOKENS = max(1, int(MAX_PROMPT_TOKENS * 0.30))
@@ -209,7 +209,7 @@ For each newly supplied image/screenshot, inspect the actual pixels and record a
 For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
 Treat the user's CURRENT_REQUEST as the task for all attachments in that message. When a message contains both an image and a file, analyze each source distinctly and explain how they relate only when the contents support that link; don't answer each attachment as an unrelated task. For mixed batches, sort assets by ATTACHMENT_INDEX sequence_index ascending and analyze each numbered item in that order; don't silently omit an item because another attachment is longer. Keep ATTACHMENT_INDEX, attachment role (USER_INPUT vs APRIL_OUTPUT), source message ID, and CURRENT_REQUEST distinct. Prefer cached sidecars for routine continuation; avoid repeating previously supplied descriptions. A concise per-asset sidecar must preserve enough concrete facts for later follow-up, and must be labelled by the exact filename, kind, sequence_index, and source message ID from ATTACHMENT_INDEX.
 Generation/editing is permission-based. Explicit image intent sets INTERPRETATION.wants_image=true. For a substantial answer (roughly 2000+ tokens), include an image specification only when an illustration materially improves understanding; the processor may authorize it after checking answer size and task type. An input image/attachment is never, by itself, a request to generate another image.
-When INTERPRETATION.wants_diagram=true and wants_image=false, fulfill the requested visual subject as a structured diagram through the existing SceneContract route. Return a concrete payload the Web can draw (SVG, geometric primitives/elements, or meaningful nodes and edges). The diagram must depict the requested thing: a wiring diagram shows components, terminals and actual conductor paths; a geometric drawing shows the requested figure/coordinates; a mathematical diagram shows the relevant mathematical relation. Keep labels concise and visual, preserve supplied values, and mark illustrative assumptions rather than inventing measurements. Do not convert prose headings or numbered answer steps into a diagram unless the user specifically requested an answer outline or process flow. An empty diagram shell is a missing visual deliverable, not a valid substitute. Generic verbs such as "draw", "нарисуй", "show" or "покажи" do not authorize raster generation by themselves. Explicit picture/image/illustration/photo intent uses C_APRIL_IMAGES_GENERATOR when wants_image=true; an adaptive image candidate for a substantial answer may be used only after the processor validates and enables it.
+Interpretation defines explicit user output requirements and sets adaptive_visual_policy. When INTERPRETATION.wants_diagram=true and wants_image=false, a concrete SceneContract diagram is required. In addition, use semantic judgment over the complete answer: when the answer explains a concrete spatial, relational, mathematical, scientific, process, or technical structure and a light object-based visual would materially improve understanding, add a typed SceneContract render block even if the user did not name the renderer. This is a meaning-based decision over the explained objects, relationships, data and constraints, never a match against domain words, noun lists, request phrases, or keyword co-occurrence. Do not add a visual merely because a topic belongs to a scientific domain; require a concrete structure or relationship in the answer. If no concrete drawable information exists, keep the answer textual rather than inventing a subject. Use the same unified SceneContract route for both required and adaptive visuals. Return concrete drawable data the Web can render: SVG, visual primitives/elements, coordinates, dimensions, annotations, meaningful nodes and edges, or structured geometry. The scene must depict the actual objects and relationships explained in the answer, across any discipline. Preserve supplied objects, counts, values, signs, units, coordinate systems, dimensions, labels, and constraints exactly. For scientific or technical visuals, represent only the relationships and quantities actually established by the request/answer; mark illustrative assumptions clearly and never invent measurements or physical components. Keep concise labels and a short explanation inside the visual where useful, plus a separate explanatory text block before/after the visual. Do not convert prose headings or numbered answer steps into an outline unless the user specifically requests an outline or process flow. An empty diagram shell is a missing visual deliverable, not a valid substitute. Generic verbs such as "draw", "нарисуй", "show" or "покажи" do not authorize raster generation by themselves. Explicit picture/image/illustration/photo intent uses C_APRIL_IMAGES_GENERATOR when wants_image=true; an adaptive image candidate for a substantial answer may be used only after the processor validates and enables it.
 For analyze_image, analyze_file, or analyze_input tasks, answer in explanatory text and retain enough specific facts to support follow-up questions. Avoid generic one-sentence summaries when the user asks what an image/file contains.
 For a code modification request, return an explanatory text block followed by a separate render block with type="code", language, filename, and the complete corrected code. Preserve unaffected behavior; never replace required source lines with ellipses/placeholders. Do not claim a file was saved unless an actual file artifact is present. If a file artifact is explicitly requested, include its real content, but keep narrative/summary fields concise and do not repeat source code in any other prose field. For a request to explain code only, do not rewrite it unasked.
 Use render blocks that match each request-sequence step: type="code" for code, type="table" for tables, type="diagram" for diagrams, type="formula" for formulas, type="image" for generated images, and type="text" for explanations. When a diagram is requested, it must contain drawable data (SVG/elements or at least two nodes plus an edge), not only a line of text. Do not turn the answer's existing headings or paragraphs into an outline diagram unless the user explicitly asks for an answer/topic map; a process diagram should show concise action labels or real relationships, while the prose carries the explanations. Set step_index and step_title on blocks when several steps exist, and preserve step order. KaTeX-compatible LaTeX is mandatory for mathematical expressions; McDowell presentation metadata is mandatory for every scene. Always return a complete SceneContract-compatible structured answer.
@@ -1259,7 +1259,7 @@ def _compress_3d_scene_specification(value: Any, max_tokens: int) -> str:
         return "; ".join(clauses)
 
     priority_pattern = re.compile(
-        r"\d|[=^*/]|\b(?:z\s*=|x|y|surface_function|z_function|objects_3d|sphere|spheres|cube|triangle|funnel|wave|mesh|formula|function|domain|range|resolution|grid|axis|axes|colour|color|perspective|rotate|zoom|interactive|масса|сфер\w*|куб\w*|треугольн\w*|воронк\w*|волн\w*|сетк\w*|формул\w*|поверхност\w*|диапазон\w*|ось|оси|цвет\w*|перспектив\w*|вращ\w*|приближа\w*|интерактив\w*|координат\w*|не\s+добавляй|не\s+заменяй)\b",
+        r"\d|[=^*/]|\b(?:z\s*=|x|y|surface_function|z_function|objects_3d|shape|geometry|dimensions|coordinates|primitive|formula|function|domain|range|resolution|grid|axis|axes|colour|color|perspective|rotate|zoom|interactive|масса|формул\w*|поверхност\w*|диапазон\w*|ось|оси|цвет\w*|перспектив\w*|вращ\w*|приближа\w*|интерактив\w*|координат\w*|размер\w*|угол\w*|вектор\w*|структур\w*|не\s+добавляй|не\s+заменяй)\b",
         re.I,
     )
     chosen: set[int] = {0, len(clauses) - 1} if clauses else set()
@@ -4816,18 +4816,38 @@ def _premium_diagram_has_concrete_payload(block: dict[str, Any]) -> bool:
                 parsed_mermaid = _mermaid_payload(source_text)
                 if isinstance(parsed_mermaid, dict) and isinstance(parsed_mermaid.get("nodes"), list) and len(parsed_mermaid["nodes"]) >= 2:
                     return True
-            nodes = source.get("nodes") or source.get("components") or source.get("vertices")
-            edges = source.get("edges") or source.get("connections") or source.get("relations")
-            explicit_edge_list = any(key in source and isinstance(source.get(key), list) for key in ("edges", "connections", "relations"))
-            if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and (bool(edges) or explicit_edge_list):
+            molecule = source.get("molecule") if isinstance(source.get("molecule"), dict) else {}
+            molecular_structure = source.get("molecular_structure") if isinstance(source.get("molecular_structure"), dict) else {}
+            nodes = (
+                source.get("nodes") or source.get("components") or source.get("vertices")
+                or source.get("atoms") or molecule.get("atoms") or molecular_structure.get("atoms")
+            )
+            edges = (
+                source.get("edges") or source.get("connections") or source.get("relations")
+                or source.get("bonds") or molecule.get("bonds") or molecular_structure.get("bonds")
+            )
+            if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and bool(edges):
                 return True
-            if any(isinstance(source.get(key), list) and len(source[key]) >= 2 for key in ("elements", "drawing_elements", "drawingElements", "primitives")):
+            if any(
+                isinstance(source.get(key), list) and len(source[key]) >= 1
+                for key in ("elements", "drawing_elements", "drawingElements", "visual_elements", "visualElements", "primitives", "shapes", "objects", "objects_3d", "objects3d")
+            ):
                 return True
             geometry = source.get("geometry")
-            if isinstance(geometry, dict) and any(isinstance(geometry.get(key), list) and len(geometry[key]) >= 2 for key in ("vertices", "elements", "primitives")):
+            if isinstance(geometry, dict) and any(
+                isinstance(geometry.get(key), list) and len(geometry[key]) >= 1
+                for key in ("vertices", "elements", "visual_elements", "drawing_elements", "primitives", "shapes", "objects", "objects_3d")
+            ):
                 return True
-            shape = _text(source.get("shape") or source.get("kind") or source.get("diagram_type")).lower().replace("-", "_").replace(" ", "_")
-            if shape in {"triangle", "equilateral_triangle", "square", "rectangle", "parallelogram", "circle", "sphere", "cube"}:
+            # A shape label by itself is only a name, not drawable geometry.
+            # Accept a parametric shape only when the model supplies measurements,
+            # coordinates, vertices, or an explicit geometry object.
+            shape = _text(source.get("shape") or source.get("kind") or source.get("diagram_type")).strip()
+            has_shape_data = any(
+                source.get(key) not in (None, "", [], {})
+                for key in ("dimensions", "parameters", "coordinates", "vertices", "geometry")
+            )
+            if shape and has_shape_data:
                 return True
         queue = next_queue
     return False
@@ -5322,53 +5342,33 @@ async def _repair_requested_diagram(
     search dialogue, or add a renderer based on keyword matches.
     """
     language = _text(display_language or "ru")
-    context = _selected_diagram_context(request)
+    intent_data = request.intent if isinstance(request.intent, dict) else {}
+    request_structure = intent_data.get("request_structure") if isinstance(intent_data.get("request_structure"), dict) else {}
+    semantic_intent = (
+        request_structure.get("semantic_interpretation")
+        if isinstance(request_structure.get("semantic_interpretation"), dict)
+        else intent_data.get("semantic_interpretation")
+        if isinstance(intent_data.get("semantic_interpretation"), dict)
+        else {}
+    )
+    relation = _text((request.memory or {}).get("relation") if isinstance(request.memory, dict) else "").upper()
+    memory_authorized = bool(
+        semantic_intent.get("requires_memory")
+        or semantic_intent.get("history_request")
+        or semantic_intent.get("previous_answer_reference")
+        or semantic_intent.get("active_branch_repair")
+        or semantic_intent.get("dialogue_profile_request")
+        or _text(semantic_intent.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "HISTORY_RECALL"}
+    )
+    context = _selected_diagram_context(request) if memory_authorized and relation == "CONTINUE" else []
     answer_context = str(answer or "")
 
-    # Recover well-specified electrical/geometry visuals locally before paying for
-    # another model call. This code is reached only after Interpretation selected
-    # the diagram renderer; it does not classify intent or change room routing.
-    try:
-        from blocks.Premium_C_ARTIFACT_CONTRACT import _geometry_diagram_payload_from_request
-        from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
-        # Deterministic geometry recovery may inspect only the current user request.
-        # Do not merge historical dialogue or the model's prose into an inferred
-        # physical-system diagram: that caused topic bleed (e.g. old lamp examples).
-        deterministic_payload = _geometry_diagram_payload_from_request(str(current_request or ""), "")
-        if isinstance(deterministic_payload, dict) and deterministic_payload:
-            deterministic_payload = ensure_readable_diagram_payload(
-                deterministic_payload, title=_text(deterministic_payload.get("title"))
-            ) or deterministic_payload
-            anchor = _diagram_anchor_sentence(answer_context)
-            block = {
-                "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
-                "viewer": "DiagramRenderer", "title": _text(deterministic_payload.get("title") or "Схема"),
-                "payload": deterministic_payload,
-                "explanation": _text(deterministic_payload.get("description")),
-                "source": "deterministic_interpretation_requested_diagram", "integrity_repaired": True,
-            }
-            if anchor:
-                block["anchor_text"] = anchor
-            normalized = normalize_render_blocks([block], answer_context)
-            repaired = next((item for item in normalized if isinstance(item, dict)
-                             and _text(item.get("type") or item.get("artifact_type")).lower() == "diagram"
-                             and _premium_diagram_has_concrete_payload(item)), None)
-            if repaired:
-                _payload = repaired.get("payload") if isinstance(repaired.get("payload"), dict) else deterministic_payload
-                return repaired, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                                  "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, {
-                    "status": "deterministic_payload_repaired", "output_chars": 0, "model": "local_diagram_adapter",
-                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                              "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
-                    "renderer": _text(repaired.get("renderer")), "node_count": len(_payload.get("nodes") or []),
-                    "edge_count": len(_payload.get("edges") or []),
-                    "svg_present": bool(_payload.get("svg") or _payload.get("svg_payload")),
-                    "anchor_found": bool(anchor), "recovery": "no_additional_provider_call",
-                }
-    except Exception as exc:
-        _apr_timing_log("deterministic_diagram_recovery_skipped", None, error=type(exc).__name__)
-    # The optional model repair shares the same 12k Premium output ceiling as
-    # the primary response. A deterministic local repair above costs no tokens.
+    # Never synthesize an artifact by recognizing words in the request.
+    # If the primary model answer lacks concrete scene data, the same semantic
+    # provider receives the current request, the user-facing answer, and only
+    # dialogue evidence authorized by Interpretation.
+    # The optional model repair uses only the remainder of the shared 12k
+    # Premium output ceiling. No local request-word fallback is applied.
     remaining_output_budget = max(0, min(
         PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
         int(max_output_tokens or 0),
@@ -5385,14 +5385,13 @@ async def _repair_requested_diagram(
     if _estimate_tokens(answer_context) > 900:
         answer_context = _semantic_compress(answer_context, 900)
     repair_system = (
-        "You are April's semantic diagram renderer. You are not writing a second answer. "
-        "Return one JSON object only, in this schema: {\\\"diagram\\\": {\\\"title\\\": string, \\\"description\\\": string, \\\"representation\\\": string, \\\"diagram_type\\\": string, \\\"nodes\\\": [], \\\"edges\\\": [], \\\"elements\\\": [], \\\"svg\\\": string, \\\"anchor_text\\\": string}}. "
-        "Omit unused optional fields. Create the visual subject requested by CURRENT_REQUEST, resolved with SELECTED_DIALOGUE_CONTEXT only when the current message refers back to it. "
-        "Do not redraw the answer outline, headings, paragraphs, or numbered instructions. A diagram is not a paraphrase: draw the subject itself and the meaningful relationships. "
-        "For a connection/wiring drawing, model the actual components and terminals as nodes and the actual wires as edges; use diagram_type='electrical_schematic' and grounded component symbols/kinds only when supported by the current request and selected context. "
-        "For geometry, output the requested shapes/coordinates; for math, the relevant mathematical structure; for a real process-flow request, concise actions and transitions. "
-        "Use supplied numeric values exactly. Do not invent measurements, ratings, components, or causal links. If dimensions are unspecified, mark the drawing as schematic/illustrative. "
-        "Prefer nodes+edges with explicit positions and terminal/edge labels, or a complete useful SVG with multiple drawable elements. A text-only title/description is invalid. "
+        "You are April's semantic scene-completion renderer. You are not writing a second answer and you do not decide whether a visual was requested; Interpretation has already made that decision. "
+        "Return one JSON object only, using this envelope: {\\\"diagram\\\": {\\\"title\\\": string, \\\"description\\\": string, \\\"representation\\\": string, \\\"diagram_type\\\": string, \\\"nodes\\\": [], \\\"edges\\\": [], \\\"components\\\": [], \\\"connections\\\": [], \\\"elements\\\": [], \\\"visual_elements\\\": [], \\\"primitives\\\": [], \\\"geometry\\\": {}, \\\"objects_3d\\\": [], \\\"dimensions\\\": {}, \\\"annotations\\\": [], \\\"atoms\\\": [], \\\"bonds\\\": [], \\\"molecule\\\": {}, \\\"molecular_structure\\\": {}, \\\"reaction\\\": {}, \\\"axes\\\": {}, \\\"equations\\\": [], \\\"svg\\\": string, \\\"anchor_text\\\": string}}. Omit unused optional fields. "
+        "Build the scene from the meaning of CURRENT_REQUEST together with EXISTING_ANSWER. Use SELECTED_DIALOGUE_CONTEXT only when the semantic interpretation explicitly says this turn refers to prior dialogue; never treat a pronoun whose object is named earlier in the same request as a reference to old history. "
+        "The scene must depict the actual subject and relationships explained in the answer, not a generic sample, answer outline, decorative summary, or keyword-triggered template. "
+        "Choose the representation that faithfully fits the subject: nodes and labelled edges for relationships/processes; geometric primitives and coordinates for spatial objects; axes, curves, plotted points and equations for mathematics; vectors, forces, fields and units for physics; atoms, bonds and molecular geometry for chemistry; components, terminals and connections for technical schematics; dimension lines, units, views and annotations for engineering drawings. These are general representation capabilities, not word triggers. "
+        "Preserve every supplied object, count, numeric value, sign, unit, relationship, dimension and constraint that contributes to the explanation. Keep dimensions and labels attached to the correct objects. Do not invent measurements, ratings, components, formulas, atoms, causal links or missing input values. When data are insufficient for a precise drawing, label the visual as conceptual/schematic and show only what is established. "
+        "Prefer complete drawable scene data: nodes+edges with explicit IDs and positions, primitive elements with coordinates and labels, a structured geometry object, or a complete SVG with a viewBox and multiple meaningful drawing elements. A text-only title/description is invalid. "
         "Labels and description must be in RETURN_LANGUAGE: " + language + ". The description must contribute one short detail not already repeated from the prose. "
         "anchor_text, when provided, must be copied verbatim from EXISTING_ANSWER and be a unique sentence after which this visual belongs. Do not include new prose answer or extra artifacts."
     )
@@ -5440,7 +5439,13 @@ async def _repair_requested_diagram(
         raw_blocks = decoded.get("render_blocks")
         if isinstance(raw_blocks, list):
             candidate = next((item for item in raw_blocks if isinstance(item, dict) and _text(item.get("type") or item.get("artifact_type")).lower() == "diagram"), None)
-    if not isinstance(candidate, dict) and isinstance(decoded, dict) and any(key in decoded for key in ("svg", "svg_payload", "nodes", "edges", "elements", "geometry")):
+    if not isinstance(candidate, dict) and isinstance(decoded, dict) and any(
+        key in decoded for key in (
+            "svg", "svg_payload", "nodes", "edges", "components", "connections", "elements",
+            "visual_elements", "visualElements", "primitives", "drawing_elements", "drawingElements",
+            "geometry", "objects_3d", "objects3d", "atoms", "bonds", "molecule", "molecular_structure",
+        )
+    ):
         candidate = decoded
     if not isinstance(candidate, dict):
         meta["failure"] = "diagram_payload_missing"
@@ -5451,7 +5456,15 @@ async def _repair_requested_diagram(
         candidate_block["anchor_text"] = decoded.get("anchor_text")
     nested_payload = candidate_block.get("payload")
     diagram_payload = dict(nested_payload) if isinstance(nested_payload, dict) else dict(candidate_block)
-    for field_name in ("title", "description", "representation", "diagram_type", "format", "layout", "direction", "nodes", "components", "edges", "connections", "relations", "elements", "shapes", "points", "vertices", "geometry", "svg", "svg_payload", "drawing", "notes", "linked_formula"):
+    for field_name in (
+        "title", "description", "representation", "diagram_type", "format", "layout", "direction",
+        "nodes", "components", "edges", "connections", "relations", "elements", "visual_elements",
+        "visualElements", "primitives", "drawing_elements", "drawingElements", "shapes", "points",
+        "vertices", "geometry", "objects", "objects_3d", "objects3d", "dimensions", "measurements",
+        "annotations", "labels", "legend", "caption", "notes", "atoms", "bonds", "molecule",
+        "molecular_structure", "reaction", "reactants", "products", "axes", "x_axis", "y_axis",
+        "z_axis", "coordinate_system", "units", "equations", "linked_formula", "svg", "svg_payload", "drawing",
+    ):
         if field_name in candidate_block and field_name not in diagram_payload:
             diagram_payload[field_name] = candidate_block[field_name]
     if not diagram_payload.get("title"):
@@ -5555,6 +5568,7 @@ async def generate_text(
                 client.responses.create,
                 model=MODEL,
                 input=base_input,
+                max_output_tokens=PREMIUM_OUTPUT_TOKEN_LIMIT,
             )
             provider_retries = 0
             prior_usage_data: dict[str, int] = {}
