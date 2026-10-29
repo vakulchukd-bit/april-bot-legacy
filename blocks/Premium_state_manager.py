@@ -111,10 +111,10 @@ def load_dialogue_pairs(
             owner_ids = _dialogue_owner_ids_cursor(cur, uid)
             if not owner_ids:
                 return []
-            # Read-time retention is enforced by created_at + 24 hours below.
-            # Legacy retention fields are backfilled by storage's canonical cleanup
-            # on writes; history retrieval itself must remain read-only and must not
-            # contend on UPDATE locks while the user is waiting for an answer.
+            # A read must never run a broad retention UPDATE: it can wait on row locks
+            # and previously added tens of seconds to every full-history request. The
+            # canonical storage cleanup/save path persists Premium's 24-hour retention;
+            # this reader applies the active entitlement without mutating the table.
             dialog_filters: list[str] = []
             dialog_params: list[Any] = []
             if limit and str(dialog_id or '').strip():
@@ -128,6 +128,8 @@ def load_dialogue_pairs(
             limit_clause = " LIMIT %s" if limit else ""
             # A bounded Premium read mirrors the existing migration's 24-hour
             # entitlement without running a broad UPDATE over the whole table.
+            # This function only returns an active Premium user's history, so the
+            # effective retention is 24 hours even if a legacy row still contains 12.
             retention_clause = "created_at + INTERVAL '24 hours' > %s"
             params: list[Any] = [owner_ids, current, current]
             params.extend(dialog_params)
@@ -149,11 +151,11 @@ def load_dialogue_pairs(
                 tuple(params),
             )
             rows = [dict(row) for row in cur.fetchall()]
-            # The Premium read view is always 24 hours even if an older row still
-            # carries retention_hours=12 in storage. The canonical storage cleanup
-            # upgrades persistent retention metadata on the write path.
+            # Reflect the active Premium entitlement in-memory for every read. Without
+            # this, _row_is_live() would drop valid 12–24h legacy rows after the SQL
+            # query already included them. Persistence remains the storage cleanup's job.
             for row in rows:
-                row["retention_hours"] = PREMIUM_MEMORY_WINDOW_HOURS
+                row["retention_hours"] = 24
             if limit:
                 rows.reverse()  # expose the same chronological order as full-history reads
             for row in rows:
@@ -3264,37 +3266,33 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _query_needs_structured_evidence(query: str, query_modalities: set[str] | None = None) -> bool:
-    """Decide whether prior structured artifacts are relevant evidence for this query.
+    """Only inspect large saved renderer/attachment payloads when the request needs them.
 
-    Asking for a *new* image/table/code block is an output requirement, not proof that
-    the user refers to an old saved artifact. The full dialogue search still runs;
-    only large historical renderer payloads are inspected deeply when the request
-    actually refers to or modifies an existing artifact/section.
+    A plain factual continuation ("tell me more about Newton") should be ranked from
+    dialogue text and topic identity, not by recursively decoding every old graph,
+    image and code block in the user's entire history. Asset edits, renderer requests,
+    and explicit references to saved files still use the lossless structured path.
     """
-    low = _text(query).lower().replace("ё", "е")
-    if _explicit_artifact_followup_kind(query):
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
         return True
-
-    renderer_or_asset = bool(re.search(
+    low = _text(query).lower().replace("ё", "е")
+    renderer_or_asset = re.search(
         r"(?:\bфото\b|\bфотограф\w*|\bфотк\w*|картинк\w*|изображен\w*|снимк\w*|скриншот\w*|вложен\w*|"
         r"документ\w*|файл\w*|график\w*|диаграмм\w*|таблиц\w*|формул\w*|"
         r"уравнен\w*|схем\w*|чертеж\w*|код\w*|скрипт\w*|"
         r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bfile\b|\bdocument\b|"
         r"\bgraph\b|\bchart\b|\btable\b|\bformula\b|\bdiagram\b|\bcode\b)",
         low, re.IGNORECASE,
-    ))
-    operation = bool(re.search(
-        r"(?:измен\w*|редакт\w*|передел\w*|улучш\w*|замен\w*|добав\w*|убер\w*|удал\w*|"
+    )
+    operation = re.search(
+        r"(?:измен\w*|редакт\w*|передел\w*|улучш\w*|замен\w*|добав\w*|убер\w*|"
         r"исправ\w*|перестро\w*|восстанов\w*|верни\w*|покажи\s+(?:снова|его|ее|её|это)|"
         r"\bedit\w*|\bchange\w*|\bmodify\w*|\brevise\w*|\brestore\w*|\bremove\w*|\badd\b)",
         low, re.IGNORECASE,
-    ))
-    deictic = bool(re.search(
-        r"\b(?:это|этот|эта|эту|его|ее|её|них|нему|него|тот|та|предыдущ\w*|последн\w*|"
-        r"из\s+истори\w*|it|this|that|its|them|previous|earlier|again)\b",
-        low, re.IGNORECASE,
-    ))
-    return bool((renderer_or_asset and operation and deictic) or _is_section_request(low))
+    )
+    deictic = re.search(r"\b(?:это|этот|эта|эту|его|ее|её|них|нему|него|тот|та|it|this|that|its|them)\b", low)
+    return bool(renderer_or_asset or (operation and deictic) or _is_section_request(low))
 
 
 def _is_structured_work_branch(branch: dict[str, Any] | None) -> bool:
@@ -3313,20 +3311,28 @@ def _structured_work_requested(
     interpretation: dict[str, Any] | None = None,
     query_modalities: set[str] | None = None,
 ) -> bool:
-    """Whether this turn needs previous structured artifacts as search evidence.
-
-    Requested output types remain in the interpretation/provider contract. They do
-    not by themselves make every prior image, graph, table or code payload relevant.
-    """
+    """Decide artifact/task relevance using the entire user turn and its interpreted outputs."""
     data = interpretation if isinstance(interpretation, dict) else {}
-    full_turn = _text(data.get("parent_request_text") or query)
-    if any(bool(data.get(flag)) for flag in (
-        "previous_answer_reference", "active_branch_repair", "factual_verification_request",
-    )):
-        return _query_needs_structured_evidence(full_turn, query_modalities)
-    if _text(data.get("saved_artifact_followup_kind")):
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
         return True
-    return _query_needs_structured_evidence(full_turn, query_modalities)
+    outputs = data.get("parent_requested_outputs") or data.get("requested_outputs") or data.get("output_types") or []
+    if not isinstance(outputs, (list, tuple, set)):
+        outputs = [outputs]
+    output_names = {_text(item).lower() for item in outputs if _text(item)}
+    structured_outputs = {
+        "image", "gallery", "graph", "diagram", "chart", "formula", "table",
+        "code", "source_code", "file", "document", "3d", "3d_graph",
+    }
+    if output_names.intersection(structured_outputs):
+        return True
+    if any(bool(data.get(flag)) for flag in (
+        "wants_image", "wants_graph", "wants_code", "wants_file",
+        "wants_links", "wants_formula", "wants_table", "wants_diagram", "wants_chart",
+    )):
+        return True
+    full_turn = _text(data.get("parent_request_text") or query)
+    return _query_needs_structured_evidence(full_turn, modalities)
 
 
 def _candidate_score(
@@ -3354,18 +3360,14 @@ def _candidate_score(
     )
     # Keep the normal text-search path bounded. Exact renderer payloads and full
     # attachments are restored from the selected source rows later, after ranking.
-    # Ranking uses bounded text plus a compact structured-evidence summary. The
-    # full artifact is retained in the source row and restored only after selection.
-    answer_for_search = april[:6000]
-    answer_en_for_search = april_en[:3000]
+    answer_for_search = april if needs_structured_evidence else april[:6000]
+    answer_en_for_search = april_en if needs_structured_evidence else april_en[:3000]
     query_tokens = _semantic_tokens(q)
     user_tokens = _semantic_tokens(user)
     answer_tokens = _semantic_tokens(answer_for_search)
-    attachment_evidence = (
-        _row_attachment_evidence(row)[:12000] if needs_structured_evidence else ""
-    )
+    attachment_evidence = _row_attachment_evidence(row) if needs_structured_evidence else ""
     memory_summary = (
-        _compact_memory_summary(row)[:6000] if needs_structured_evidence
+        _compact_memory_summary(row) if needs_structured_evidence
         else _compact_memory_summary_lightweight(row)
     )
     candidate_text = " ".join(x for x in (user, user_en, answer_for_search, answer_en_for_search, memory_summary, attachment_evidence) if x)
@@ -4420,14 +4422,11 @@ def _explicit_artifact_followup_kind(query: str) -> str:
     )
     # Possessives describe the entity; they are not proof that the user wants an
     # old artifact. “Show a picture of him / his discoveries” is a new deliverable.
-    artifact_pattern = next((pattern for name, pattern in artifact_patterns if name == kind), r"(?!)")
-    # A topic demonstrative such as "этот фестиваль" is not a saved-artifact
-    # reference. Bind deictic language to the actual artifact noun.
     explicit_saved_reference = bool(re.search(
-        rf"(?:\b(?:этот|эта|эту|этой|эти|this|that|same|previous|earlier)\s+(?:[\w-]+\s+){{0,2}}{artifact_pattern}|"
-        rf"(?:^|\b)(?:снова|ещё?\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*)\b.{{0,45}}{artifact_pattern}|"
-        rf"{artifact_pattern}.{{0,45}}\b(?:снова|ещё?\s+раз|again|once\s+more)\b)",
-        low, re.IGNORECASE | re.DOTALL,
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
+        low, re.IGNORECASE,
     ))
     return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference else ""
 
@@ -4460,9 +4459,9 @@ def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
 def _is_visual_misroute_correction(query: Any) -> bool:
     """True only for an explicit correction of the immediately preceding visual topic.
 
-    This is not a generic image-edit detector. A present-tense edit command remains
-    an edit request; this recognizer covers retrospective correction statements such
-    as "Какие зайчики? Я тебе про цифры, ты путаешь".
+    This is not a generic image-edit detector. A present-tense edit command must keep
+    the ordinary image workflow; this fast path is for statements such as
+    "Какие зайчики? Я тебе про цифры, ты путаешь".
     """
     low = _text(query).lower().replace("ё", "е")
     if not low or _detect_image_modification(low) or _has_independent_nonvisual_artifact_request(low):
@@ -4537,15 +4536,24 @@ def search_dialogue_context(
     retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_visual_revision = _is_explicit_visual_revision_request(query)
     visual_misroute_correction = _is_visual_misroute_correction(query)
+    query_features_for_repair = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    query_pragmatic_for_repair = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    explicit_active_restatement = bool(
+        not query_interpretation.get("history_request")
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            query_interpretation.get("active_branch_repair")
+            or query_features_for_repair.get("explicit_previous_answer_correction")
+            or query_pragmatic_for_repair.get("explicit_previous_answer_correction")
+        )
+    )
     targeted_active_repair = bool(
         retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
+        or explicit_active_restatement
     )
-    # Every request hydrates the complete authenticated Premium retention window.
-    # Active visual references may nominate a likely source row, but must not truncate
-    # history or replace the semantic search set: other relevant context can coexist.
     state = hydrate(
         uid,
-        limit=0,
+        limit=16 if targeted_active_repair else 0,
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
     )
@@ -4554,20 +4562,34 @@ def search_dialogue_context(
     # dictionaries directly could let concurrent turns overwrite one another's context.
     # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
     all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
-    visual_anchor = _select_recent_visual_task_anchor(all_rows, query) if targeted_active_repair else None
-    if visual_anchor is not None:
-        # Keep the likely active image task available for detailed semantic scoring,
-        # without suppressing other history candidates or forcing the anchor to win.
-        _apr_timing_log(
-            "active_visual_branch_candidate", None,
-            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
-            source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
-            retained_rows=len(all_rows), reason=(
-                "retrospective_image_feedback" if retrospective_image_discussion else (
-                "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
+    if targeted_active_repair:
+        same_dialog_rows = [row for row in all_rows if (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )]
+        if same_dialog_rows:
+            all_rows = sorted(same_dialog_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        else:
+            all_rows = sorted(all_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        visual_anchor = _select_recent_visual_task_anchor(all_rows, query)
+        if visual_anchor is not None:
+            # Re-anchor to the original user task so its asset IDs and typed render
+            # data are restored instead of injecting an older, text-similar branch.
+            all_rows = [visual_anchor]
+            _apr_timing_log(
+                "active_visual_branch_reanchored", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
+                recent_rows=len(same_dialog_rows), reason=(
+                    "retrospective_image_feedback" if retrospective_image_discussion else (
+                    "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
+                )
+                ),
             )
-            ),
-        )
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
     # lookup if an explicitly requested time interval contains no saved dialogue pairs.
     retained_rows = list(all_rows)
@@ -4642,18 +4664,16 @@ def search_dialogue_context(
         set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
     )
     if targeted_active_repair and all_rows:
-        # Prefer the most relevant prior visual task as the repair reference, while
-        # keeping the user's current meaning and the rest of the 24-hour history in
-        # the candidate set. The anchor is evidence, not a forced replacement topic.
-        anchor_row = visual_anchor
-        if isinstance(anchor_row, dict):
-            anchor_text = " ".join((
-                _text(anchor_row.get("user_text") or anchor_row.get("user")),
-                _text(anchor_row.get("user_text_en")),
-            ))
-            anchor_subjects = _subject_tokens(anchor_text)
-            if anchor_subjects and not query_subjects:
-                query_subjects = set(anchor_subjects)
+        # The authenticated source task is the semantic anchor; do not let reaction
+        # wording introduce unrelated entities into the branch selection.
+        anchor_row = all_rows[-1]
+        anchor_text = " ".join((
+            _text(anchor_row.get("user_text") or anchor_row.get("user")),
+            _text(anchor_row.get("user_text_en")),
+        ))
+        anchor_subjects = _subject_tokens(anchor_text)
+        if anchor_subjects:
+            query_subjects = set(anchor_subjects)
     # Referential questions about an object's origin are continuations, not a new
     # "internet/source" topic. The grammar/predicate terms are excluded above; this
     # fallback prevents morphology/typos from creating a false subject conflict.
@@ -4761,10 +4781,11 @@ def search_dialogue_context(
     query_modalities = {modality for modality, enabled in (
         ("image", bool(has_image or image_edit_reference)), ("file", bool(has_file)), ("voice", bool(has_voice)),
     ) if enabled}
-    # A historical-image edit needs exact source retrieval. The targeted source
-    # scan considers image-bearing rows in the same dialogue, while the shared
-    # semantic ranking and active-work arbitration still run for the whole request.
-    image_edit_history_source_scan = bool(
+    # A historical-image edit needs exact source retrieval, but it should not
+    # trigger expensive full-JSON scoring for every retained message. The targeted
+    # fast path below includes all image-bearing rows in this same dialogue and
+    # ranks a smaller semantic set for the active-work branch.
+    image_edit_history_fast_path = bool(
         image_edit_reference
         and not has_image
         and not has_file
@@ -4816,9 +4837,8 @@ def search_dialogue_context(
     else:
         scoped_rows = list(all_rows)
 
-    # Search the whole user's 24-hour window for a distinctly named old topic.
-    # Generic words such as "применение" are filtered by semantic token relevance,
-    # not by disabling the active-branch/history search.
+    # Search the whole user's 24-hour window for a distinctly named old topic,
+    # but do not let generic words such as "применение" switch the active topic.
     topic_bearing = _semantic_tokens(subject_query if is_correction and subject_query != query else query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
     # A pure correction such as "I wasn't asking about Mendeleev" rejects that
     # entity; searching the archive for the rejected name would repeat the mistake.
@@ -4840,14 +4860,11 @@ def search_dialogue_context(
             mid = _text(row.get("message_id"))
             if mid and mid in scoped_ids:
                 continue
-            # This pass decides candidate relevance only. Renderer JSON is opened
-            # later for the selected candidates, never while scanning every row.
-            lightweight_subject = _row_subject_text_lightweight(row)
-            row_subjects = _subject_tokens(lightweight_subject)
+            row_subjects = _subject_tokens(search_subject_text(row))
             subject_overlap = _subject_overlap(query_subjects, row_subjects)
             if _subject_conflicts(query_subjects, row_subjects):
                 continue
-            searchable_topic = " ".join((_topic_label_lightweight(row), lightweight_subject))
+            searchable_topic = " ".join((search_topic_label(row), search_subject_text(row)))
             overlap = _topic_query_overlap(query, searchable_topic)
             if overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60):
                 # Subject alignment is useful only when there is also meaningful
@@ -4937,9 +4954,9 @@ def search_dialogue_context(
     scoring_rows = rows
     light_prefilter_used = False
     # A general inventory request (“what did we discuss today/yesterday?”) is
-    # Broad history-inventory requests are represented by the complete topic index;
-    # named-topic requests additionally use the detailed relevance ranking below.
-    history_inventory_topic_index_mode = bool(
+    # served from the chronological topic index and needs no O(history) fuzzy
+    # scoring of every row. Named-topic history searches still get full ranking.
+    history_inventory_fast_path = bool(
         history_request and (
             bool(query_interpretation.get("history_inventory_request"))
             or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
@@ -4947,10 +4964,22 @@ def search_dialogue_context(
             or not _history_query_topic_tokens(query)
         )
     )
-    # Use the same two-stage relevance pipeline for every request. All retained
-    # rows are evaluated by the lightweight semantic prefilter; detailed/fuzzy
-    # scoring (which may inspect structured payloads) is limited to its best matches.
-    if len(rows) > 18:
+    needs_full_candidate_rank = bool(
+        not image_edit_history_fast_path
+        and (
+            (history_request and not history_inventory_fast_path)
+            or needs_structured_search or _is_section_request(query)
+            or query_modalities or is_correction or is_short_acknowledgement
+            or reference_followup or explicit_artifact_followup or resume_key
+            or continuation_intent or pending_clarification
+        )
+    )
+    if history_inventory_fast_path and not image_edit_history_fast_path:
+        # A broad inventory query is answered from the chronological topic index.
+        # Scoring every large structured row here defeats the fast path and was taking
+        # ~43 seconds for 69 rows in the supplied production log.
+        scoring_rows = []
+    elif len(rows) > 18 and not needs_full_candidate_rank:
         # First pass considers every scoped row cheaply; the expensive scoring pass
         # (partial-string ratios, answer/entity scoring and payload inspection) runs
         # only on the strongest semantic candidates. The separate history fallback
@@ -4985,19 +5014,10 @@ def search_dialogue_context(
                 scoring_rows.append(latest_same_dialog_row)
         light_prefilter_used = True
 
-    # A semantically identified active visual task is an additional candidate for
-    # the same detailed scoring stage. It never short-circuits the memory search and
-    # can still be rejected by normal relevance/route arbitration.
-    if visual_anchor is not None:
-        anchor_message_id = _text(visual_anchor.get("message_id"))
-        seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows if isinstance(row, dict)}
-        if anchor_message_id and anchor_message_id not in seen_scoring_ids:
-            scoring_rows = list(scoring_rows) + [visual_anchor]
-
     # Preserve source recall while avoiding a full deep-score pass over every
     # dialogue row. Keep all image-bearing rows from the authenticated active
     # dialogue/conversation, even if they fall outside the lightweight top 18.
-    if image_edit_history_source_scan:
+    if image_edit_history_fast_path:
         source_image_terms = _image_source_subject_tokens(query)
         image_source_rows: list[dict[str, Any]] = []
         for row in rows:
@@ -5103,7 +5123,7 @@ def search_dialogue_context(
             if added_rows:
                 scoring_rows = list(scoring_rows) + added_rows
             _apr_timing_log(
-                "image_edit_history_source_scan",
+                "image_edit_history_fast_path",
                 None,
                 source_terms=sorted(source_image_terms)[:4],
                 image_rows_found=len(image_source_rows),
@@ -5113,7 +5133,7 @@ def search_dialogue_context(
             )
         else:
             _apr_timing_log(
-                "image_edit_history_source_scan",
+                "image_edit_history_fast_path",
                 None,
                 source_terms=sorted(source_image_terms)[:4],
                 image_rows_found=0,
@@ -5139,7 +5159,7 @@ def search_dialogue_context(
         "candidate_score_rank", candidate_started,
         total_scoped_rows=len(rows), candidates_scored=len(scoring_rows), matches=len(matches),
         lightweight_prefilter=light_prefilter_used,
-        history_inventory_topic_index_mode=history_inventory_topic_index_mode,
+        history_inventory_fast_path=history_inventory_fast_path,
     )
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
@@ -5238,10 +5258,10 @@ def search_dialogue_context(
     active_work_row_index = -1
     active_work_has_marker = False
     scoped_work_rows: list[dict[str, Any]] = []
-    # Check the active work branch for every ordinary user turn. The subsequent
-    # semantic arbitration must prove compatibility before it can reuse that branch;
-    # a named new subject is evidence for rejection, not a reason to skip the check.
-    should_scan_active_work = True
+    # Artifact branch inference parses structured_response payloads. For a normal
+    # text request with an explicit subject, it cannot improve the answer and may
+    # accidentally resurrect an old image/code task from another topic.
+    should_scan_active_work = bool(needs_structured_search or not query_subjects)
     if should_scan_active_work and not history_request and not time_filter.get("applied") and not resume_key:
         scoped_work_rows = [
             row for row in all_rows
@@ -5278,7 +5298,7 @@ def search_dialogue_context(
             "active_work_branch_scan",
             user_key=_apr_diag_ref(uid),
             scanned=bool(should_scan_active_work),
-            reason="semantic_active_branch_check",
+            reason=("structured_or_elliptical_request" if should_scan_active_work else "named_text_request_skips_artifact_branch"),
             scoped_rows=len(scoped_work_rows),
             matched=bool(active_work_pair),
         )
