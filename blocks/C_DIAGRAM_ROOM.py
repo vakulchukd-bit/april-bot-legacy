@@ -853,8 +853,8 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
     if not isinstance(payload, dict):
         return ""
     nodes_raw = payload.get("nodes") or payload.get("components") or payload.get("vertices")
-    edges_raw = payload.get("edges") or payload.get("connections") or payload.get("relations")
-    if not isinstance(nodes_raw, list) or len(nodes_raw) < 2 or not isinstance(edges_raw, list) or not edges_raw:
+    edges_raw = next((payload.get(key) for key in ("edges", "connections", "relations") if isinstance(payload.get(key), list)), None)
+    if not isinstance(nodes_raw, list) or len(nodes_raw) < 2 or not isinstance(edges_raw, list):
         return ""
 
     nodes: list[dict[str, Any]] = []
@@ -892,8 +892,9 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
             continue
         seen_edges.add(key)
         edges.append({"from": source, "to": target, "label": label})
-    if not edges:
-        return ""
+    # A node collection is a valid visual composition even without relations
+    # (for example, several laboratory vessels and labeled samples). In that case
+    # render each supplied element as its own card; do not fabricate arrows.
 
     # The viewBox is deliberately phone-width. With a 760px viewBox, a 360px
     # mobile viewport would halve every label, reproducing the tiny-corner graph.
@@ -1396,8 +1397,8 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
             has_existing_drawing = True
             break
     nodes_for_rebuild = result.get("nodes") or result.get("components") or result.get("vertices")
-    edges_for_rebuild = result.get("edges") or result.get("connections") or result.get("relations")
-    has_rebuildable_graph = isinstance(nodes_for_rebuild, list) and len(nodes_for_rebuild) >= 2 and isinstance(edges_for_rebuild, list) and bool(edges_for_rebuild)
+    edges_for_rebuild = next((result.get(key) for key in ("edges", "connections", "relations") if isinstance(result.get(key), list)), None)
+    has_rebuildable_graph = isinstance(nodes_for_rebuild, list) and len(nodes_for_rebuild) >= 2 and isinstance(edges_for_rebuild, list)
     if has_existing_drawing:
         current_svg = next((_text(result.get(key)) for key in svg_fields if _text(result.get(key))), "")
         viewbox_match = re.search(r"viewBox\s*=\s*['\"]\s*[-+0-9.]+[ ,]+[-+0-9.]+[ ,]+([-+0-9.]+)[ ,]+([-+0-9.]+)", current_svg, re.IGNORECASE)
@@ -1411,8 +1412,9 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
         broken_intrinsic_width = bool(re.search(r"""\bwidth\s*=\s*['"]100%['"]""", current_svg, re.IGNORECASE))
         if not (has_rebuildable_graph and (existing_viewbox_width > 520 or broken_intrinsic_width)):
             return result
-    # A nonempty <svg></svg> shell, a label-only SVG, or an over-wide node graph
-    # is not enough. Rebuild only from concrete same-turn nodes and edges.
+    # A nonempty <svg></svg> shell or a label-only SVG is not enough. Rebuild
+    # from concrete same-turn nodes and any supplied relations; a node-only
+    # composition is still drawable, but no relationship arrows are inferred.
     for svg_field in svg_fields:
         if isinstance(result.get(svg_field), str):
             result.pop(svg_field, None)
