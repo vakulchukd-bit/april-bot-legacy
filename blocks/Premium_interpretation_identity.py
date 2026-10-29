@@ -1065,16 +1065,6 @@ def _detect_image_generation_request(text: str) -> bool:
     if elliptical_delivery:
         return True
 
-    # "Draw a tractor/model/person" is an image request even when the user does
-    # not say "draw a picture". Keep diagrams, tables and charts on their own
-    # renderer path; no lexical hard-coding of any particular subject is used.
-    structured_target = bool(re.search(
-        r"(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*|\bflowchart\b|\bdiagram\b|\bgraph\b|\bchart\b|\btable\b)",
-        low, re.IGNORECASE,
-    ))
-    visual_action = bool(re.search(r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|draw|create|generate|illustrat\w*)", low, re.I))
-    if visual_action and not structured_target and _has_drawable_subject(low):
-        return True
     return False
 
 
@@ -1090,39 +1080,6 @@ def _detect_link_request(text: str) -> bool:
     noun_request = re.search(rf"{link_noun}.{{0,36}}{resource_noun}|{resource_noun}.{{0,36}}{link_noun}", low, re.IGNORECASE)
     resource_explanation = re.search(rf"{resource_noun}.{{0,44}}(?:с\s+описани\w*|что\s+объясня\w*|куда\s+вед\w*|explain\w*|describe\w*)", low, re.IGNORECASE)
     return bool(action_request or noun_request or resource_explanation)
-
-
-def _has_drawable_subject(text: str) -> bool:
-    """True when a visual verb has a concrete drawable object, not just style words."""
-    low = _text(text).lower().replace("ё", "е")
-    if not low or _is_ui_instruction_request(low):
-        return False
-    drawable_objects = (
-        r"(?:\bcat\b|\bdog\b|\bperson\b|\bportrait\b|\blandscape\b|\bhouse\b|"
-        r"\btree\b|\bflower\b|\bcar\b|\bship\b|\bplanet\b|\bdinosaur\w*\b|"
-        r"\bduck\b|\bmap\b|\bavatar\b|\bcharacter\b|\bobject\b|\bmodel\b|"
-        r"кот\w*|собак\w*|человек\w*|портрет\w*|пейзаж\w*|дом\w*|дерев\w*|цвет\w*|"
-        r"машин\w*|корабл\w*|планет\w*|динозавр\w*|утк\w*|карт\w*|аватар\w*|"
-        r"персонаж\w*|объект\w*|макет\w*|модель\w*|предмет\w*|иллюстрац\w*)"
-    )
-    if re.search(drawable_objects, low, flags=re.IGNORECASE):
-        return True
-    # Generic drawable noun phrase fallback. Do not require a hard-coded entity
-    # list (tractor, bicycle, robot, building, etc.); the action plus a concrete
-    # object phrase is enough unless the request explicitly names another renderer.
-    visual_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|illustrat\w*|draw|create|generate)"
-    abstract_targets = r"(?:ответ\w*|вывод\w*|анализ\w*|объяснен\w*|инструкц\w*|план\w*|отчет\w*|отч[её]т\w*|документ\w*|формул\w*|таблиц\w*|схем\w*|диаграмм\w*|график\w*|код\w*|скрипт\w*|текст\w*|перевод\w*|список|summary|answer|analysis|instructions|plan|report|document|formula|table|diagram|chart|graph|code|script|text|translation|list)"
-    generic_subject = re.search(
-        rf"(?<![\w\u0080-\uffff]){visual_action}\b\s+(?:мне\s+|нам\s+|a\s+|an\s+|the\s+)?(?P<object>[\w-]+(?:\s+[\w-]+){{0,4}})",
-        low, re.IGNORECASE,
-    )
-    if generic_subject:
-        words = re.findall(r"[\w-]+", generic_subject.group("object"), re.UNICODE)
-        head = words[-1] if words else ""
-        if head and not re.fullmatch(abstract_targets, head, flags=re.IGNORECASE):
-            return True
-    return False
-
 
 
 def _detect_portrait_request(text: str) -> bool:
@@ -1238,57 +1195,6 @@ def _is_feedback_control_help_request(text: Any) -> bool:
     return feedback_target and interaction_question and not explicit_artifact_creation
 
 
-def _is_object_level_diagram_request(text: Any) -> bool:
-    """Recognize object/connection drawings even when the user omits the noun 'diagram'.
-
-    This is deliberately narrow: it requires a drawing/show action plus a concrete
-    technical or scientific subject. It must not turn arbitrary explanatory prose
-    into a diagram or an Images Generator request.
-    """
-    low = _text(text).lower().replace("ё", "е")
-    visual_action = bool(re.search(
-        r"(?:\b(?:draw|show|display|create|build|render|visuali[sz]e)\b|"
-        r"нарис\w*|покаж\w*|показ\w*|изобраз\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|визуализир\w*)",
-        low, re.IGNORECASE,
-    ))
-    # Only explicit picture/photo language reserves Images Generator. Its broad
-    # drawable-subject heuristic also matches nouns such as "triangle"; those
-    # shapes belong in the structured diagram renderer instead.
-    explicit_image = bool(re.search(
-        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
-        low, re.IGNORECASE,
-    )) or _detect_portrait_request(low)
-    if not visual_action or explicit_image:
-        return False
-
-    # Wiring is a diagram-level task by itself when the request names connected
-    # electrical objects. Two distinct object classes are required to avoid false
-    # positives on ordinary questions about a battery, lamp, or switch.
-    electrical_part = r"(?:батар\w*|аккумулятор\w*|лампоч\w*|ламп\w*|выключател\w*|переключател\w*|провод\w*|предохранител\w*|резистор\w*|battery|accumulator|bulb|lamp|switch|wire|fuse|resistor)"
-    electrical_objects = re.findall(electrical_part, low, flags=re.IGNORECASE)
-    electrical_action = bool(re.search(
-        r"(?:подключ\w*|соедин\w*|провод\w*|замкнут\w*\s+цеп\w*|электрическ\w*\s+цеп\w*|"
-        r"connect\w*|wire\w*|circuit|schematic)", low, re.IGNORECASE,
-    ))
-    if len(electrical_objects) >= 2 and electrical_action:
-        return True
-
-    # Scientific drawing cues: actual shapes, molecular/atomic structures, vectors,
-    # rays, waves, and mechanical objects. A subject noun alone is not enough.
-    drawable_subject = bool(re.search(
-        r"(?:треугольник\w*|квадрат\w*|прямоугольник\w*|окружност\w*|круг\w*|угол\w*|"
-        r"геометрическ\w*\s+фигур\w*|координатн\w*\s+ос\w*|парабол\w*|график\w*\s+функц\w*|"
-        r"молекул\w*|атом\w*|химическ\w*\s+связ\w*|электронн\w*\s+оболоч\w*|"
-        r"вектор\w*|сил\w*\s+тяготен\w*|луч\w*\s+свет\w*|оптическ\w*\s+схем\w*|"
-        r"маятник\w*|волнов\w*\s+процесс\w*|магнитн\w*\s+пол\w*|линз\w*|пружин\w*|"
-        r"triangle\w*|square\w*|rectangle\w*|circle\w*|angle\w*|geometric\s+shape|coordinate\s+axes|"
-        r"parabola\w*|molecule\w*|atom\w*|chemical\s+bond|electron\s+shell|vector\w*|force\s+diagram|"
-        r"light\s+ray|optical\s+diagram|pendulum\w*|wave\s+diagram|magnetic\s+field|lens\w*|spring\w*)",
-        low, re.IGNORECASE,
-    ))
-    return drawable_subject
-
-
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -1371,22 +1277,6 @@ def _detect_requested_outputs(text: str) -> list[str]:
     ))
     if explicit_diagram_target and diagram_visual_action and not explicit_image_request and "diagram" not in result:
         result.append("diagram")
-    # A technical drawing can be implicit in a request such as "show me how to
-    # connect the battery, switch and lamp". Do not require the user to know the
-    # renderer's vocabulary, and do not route this to image generation.
-    object_level_diagram = _is_object_level_diagram_request(low)
-    explicit_picture_noun = bool(re.search(
-        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
-        low, re.IGNORECASE,
-    ))
-    if object_level_diagram and not explicit_picture_noun:
-        # Prefer vector/object rendering over inferred image generation for shapes,
-        # molecules, and connection schematics. An explicit request for a picture
-        # still wins and never receives an extra diagram.
-        result = [kind for kind in result if kind != "image"]
-        if "diagram" not in result:
-            result.append("diagram")
-
     # Catch compound/hyphenated programming requests such as "Python-код" even when
     # the exact phrase is absent from the phrase table. A code noun alone is not enough.
     has_code_noun = bool(re.search(
@@ -1495,13 +1385,8 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not _has_affirmative_visual_instruction(low)
         and not _is_self_portrait_generation_request(low)
     )
-    object_level_diagram = _is_object_level_diagram_request(low)
-    explicit_picture_noun = bool(re.search(
-        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
-        low, re.IGNORECASE,
-    ))
-    explicit_image_request = False if (incidental_nonvisual_followup or (object_level_diagram and not explicit_picture_noun)) else _detect_image_generation_request(low)
-    portrait_request = False if (incidental_nonvisual_followup or (object_level_diagram and not explicit_picture_noun)) else _detect_portrait_request(low)
+    explicit_image_request = False if incidental_nonvisual_followup else _detect_image_generation_request(low)
+    portrait_request = False if incidental_nonvisual_followup else _detect_portrait_request(low)
     structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
@@ -1580,10 +1465,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     if (table_request or table_grid_request) and "table" not in outputs:
         outputs.append("table")
 
-    # Semantic drawing policy: ordinary requests to draw/create/show a picture
-    # go to Images Generator. Diagram is reserved for explicit schematic,
-    # blueprint, technical drawing, or measured-drawing intent. Graphs remain
-    # a separate mathematical/data visualization route.
+    # Explicit renderer requests remain hard requirements. When no renderer is
+    # named, the provider may add a SceneContract visual through semantic
+    # interpretation of its answer; request noun lists do not choose the subject.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
         r"нарис\w*|покаж\w*|показ\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
@@ -1594,48 +1478,12 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
         low,
     ))
-    explicit_graph_intent = bool(re.search(
-        r"(?:\b(?:graph|chart|plot|3d graph)\b|график\w*|график\s+функци\w*|"
-        r"постро\w*\s+(?:график|поверхност))",
-        low,
-    ))
     if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
-    if _is_object_level_diagram_request(low) and "diagram" not in outputs:
-        explicit_picture_noun = bool(re.search(
-            r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
-            low, re.IGNORECASE,
-        ))
-        if not explicit_picture_noun:
-            outputs = [kind for kind in outputs if kind != "image"]
-            outputs.append("diagram")
-    if (
-        visual_action
-        and not explicit_diagram_intent
-        and not explicit_graph_intent
-        and "image" not in outputs
-        and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
-        and not _is_ui_instruction_request(low)
-        and not structured_visual_explanation
-        and _has_drawable_subject(low)
-    ):
-        outputs.append("image")
     if explicit_image_request:
         outputs = [kind for kind in outputs if kind != "diagram"]
         if "image" not in outputs:
             outputs.append("image")
-
-    # A request for pictures/illustrations of experiments asks for a separate,
-    # explanatory schematic. It must not be swallowed by the final portrait/image.
-    experiment_visuals = bool(re.search(
-        r"(?:(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*)"
-        r".{0,48}(?:опыт\w*|эксперимент\w*|experiment\w*)|"
-        r"(?:опыт\w*|эксперимент\w*|experiment\w*).{0,48}"
-        r"(?:картинк\w*|изображени\w*|иллюстраци\w*|picture\w*|image\w*|illustration\w*))",
-        low, re.IGNORECASE,
-    ))
-    if experiment_visuals and "diagram" not in outputs:
-        outputs.append("diagram")
 
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
@@ -1688,24 +1536,6 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         r"распределен\w*|дол\w*\s+категори\w*)",
         low,
     ))
-    spatial_scene_action = bool(re.search(
-        r"(?:\b(?:show|draw|build|create|visuali[sz]e|render|display)\b|покаж\w*|нарис\w*|постро\w*|созда\w*|визуализир\w*|отобраз\w*)",
-        low,
-    ))
-    spatial_scene_body = bool(re.search(
-        r"(?:юпитер\w*|сатурн\w*|земл\w*|марс\w*|планет\w*|спутник\w*|лу[нн]\w*|комет\w*|астероид\w*|звезд\w*|\bjupiter\b|\bsaturn\b|\bearth\b|\bmars\b|\bplanet\w*\b|\bsatellite\w*\b|\bmoon\b|\bcomet\w*\b|\basteroid\w*\b)",
-        low,
-    ))
-    spatial_scene_dynamics = bool(re.search(
-        r"(?:гравитац\w*|тяготен\w*|орбит\w*|траектор\w*|вращен\w*|приближа\w*|удаля\w*|лет\w*|движен\w*|пол[яе]\s+сил|\bgravity\b|\borbit\w*|\btrajectory\w*|\bmoving\b|\bapproach\w*|\bmotion\b|\bfield lines\b|за\s+сколько\s+времени)",
-        low,
-    ))
-    spatial_primitive_request = spatial_scene_action and bool(re.search(
-        r"(?:сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|треугольн\w*|пирамид\w*|плоскост\w*|\bsphere\w*\b|\bcube\w*\b|\bcone\w*\b|\bcylinder\w*\b|\btorus\b|\bplane\b|\bmesh\b)",
-        low,
-    ))
-    inferred_spatial_scene = (spatial_scene_action and spatial_scene_body and spatial_scene_dynamics) or spatial_primitive_request
-
     structured_3d_signal = bool(re.search(
         r"(?:\bxyz\b|координат\w*\s*(?:x\s*[,; ]+\s*y\s*[,; ]+\s*z|x\s*y\s*z)|"
         r"\bz\s*=\s*f\s*\(\s*x\s*[,;]\s*y\s*\)|"
@@ -1716,25 +1546,28 @@ def _graph_representation_policy(text: str, *, allow_data_driven_3d: bool = Fals
         low,
     ))
 
-    if explicit_3d or inferred_spatial_scene:
-        if re.search(r"(?:\bsphere\w*\b|\bcube\w*\b|\bobject\s+scene\b|\b3d\s+scene\b|сфер\w*|куб\w*|конус\w*|цилиндр\w*|тор\w*|сателлит\w*|спутник\w*|лу[нн]\w*|планет\w*|юпитер\w*|сатурн\w*|земл\w*|марс\w*|комет\w*|гравитац\w*|орбит\w*|траектор\w*|объект\w*\s+сцен\w*|пространствен\w*\s+объект|\bjupiter\b|\bsatellite\w*\b|\bcomet\w*\b|\bgravity\b|\borbit\w*|\btrajectory\w*\b)", low):
-            representation = "scene3d"
-        elif re.search(r"(?:\bscatter\b|\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)", low):
+    if explicit_3d:
+        if structured_3d_signal and re.search(
+            r"(?:\bxyz\b|\bcoordinates\b|\bpoint\s+cloud\b|координат\w*|облак\w*\s+точек|пространствен\w*\s+точк)",
+            low,
+        ):
             representation = "scatter3d"
-        else:
-            # A 3D function/surface is the natural choice for explicit requests
-            # such as an exponential function in 3D; the provider must supply z=f(x,y).
+        elif structured_3d_signal:
             representation = "surface3d"
+        else:
+            # With only an explicit 3D request, Interpretation delegates the
+            # scene's concrete representation to the model-produced SceneContract.
+            representation = "scene3d"
         fallback = "bar" if explicit_bar or categorical_comparison else "line"
         return {
-            "mode": "explicit_3d" if explicit_3d else "inferred_spatial_scene",
+            "mode": "explicit_3d",
             "preferred_representation": representation,
             "fallback_representation": fallback,
             "allowed_2d_representations": ["line", "bar"],
             "allow_3d_for_explicit_request": bool(explicit_3d),
             "allow_3d_when_structured_data_exists": True,
             "require_real_third_dimension": True,
-            "decision_reason": "explicit_3d_request" if explicit_3d else "spatial_physics_scene_request",
+            "decision_reason": "explicit_3d_request",
         }
 
     if structured_3d_signal:
@@ -2702,9 +2535,19 @@ def _infer_dialogue_act_profile(
     # an empty subject signature when the user explicitly says "в нём всё нравится",
     # "у неё ...", "особенно ... в фильме" etc. The State Manager must validate the
     # antecedent against the active branch; this flag only asks it to retain context.
+    # A demonstrative inside a self-contained request may refer to an object
+    # introduced earlier in the SAME user message. It must not be mistaken for a
+    # reference to an older dialogue branch. Keep long anaphoric follow-ups only
+    # when the current message lacks its own task subject or explicitly rechecks a
+    # prior answer.
     strong_anaphoric_reference = bool(
         not explicit_topic_introduction
         and not _has_explicit_topic_switch(text)
+        and (
+            not has_independent_payload
+            or previous_answer_reference
+            or _looks_like_previous_answer_followup(text)
+        )
         and (
             (
                 re.search(
@@ -4082,7 +3925,27 @@ def _split_request_sequence(text: str) -> list[str]:
         # executor still assembles them into the same response/scene contract.
         return inline_numbered_items
 
-    lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
+    # A single grammatical utterance is one user goal, even when it contains
+    # coordinated operations ("explain how to do X and show it as a diagram").
+    # Do not split it into memory-search fragments just because it contains
+    # several imperative/question verbs. Separate only explicit lists, multiple
+    # question sentences, or semicolon-delimited tasks.
+    nonempty_source_lines = [line.strip() for line in source.splitlines() if line.strip()]
+    question_mark_count = len(re.findall(r"[?？]", source))
+    has_semicolon_boundary = bool(re.search(r";|；", source))
+    is_explicit_multiline_list = (
+        len(nonempty_source_lines) > 1
+        and all(re.match(r"^(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s+", line) for line in nonempty_source_lines)
+    )
+    if (
+        question_mark_count <= 1
+        and not has_semicolon_boundary
+        and (len(nonempty_source_lines) <= 1 or is_explicit_multiline_list)
+        and not is_explicit_multiline_list
+    ):
+        return [source]
+
+    lines = nonempty_source_lines or [source]
     parts: list[str] = []
     for line in lines:
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)]|[a-zA-Z][.)])\s*", "", line).strip()
@@ -4453,7 +4316,7 @@ def build_question_sequence(
             "image": r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bphoto\w*|\bimage\w*|\bpicture\w*)",
             "table": r"(?:таблиц\w*|\btable\b)",
             "graph": r"(?:график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b)",
-            "diagram": r"(?:схем\w*|черт[её]ж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b|(?:подключ\w*|соедин\w*|connect\w*|wire\w*).{0,70}(?:батар\w*|аккумулятор\w*|ламп\w*|лампочк\w*|выключател\w*|battery|lamp|bulb|switch)|(?:батар\w*|аккумулятор\w*|ламп\w*|лампочк\w*|выключател\w*|battery|lamp|bulb|switch).{0,70}(?:подключ\w*|соедин\w*|connect\w*|wire\w*))",
+            "diagram": r"(?:схем\w*|черт[её]ж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b)",
             "formula": r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b|\blatex\b)",
             "code": r"(?:код\w*|скрипт\w*|\bcode\b|\bscript\b)",
             "link": r"(?:ссылк\w*|\blink\b|\burl\b)",
