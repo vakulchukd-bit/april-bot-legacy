@@ -18,6 +18,7 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
     MachineResponse,
     WEB_RENDERER_REGISTRY,
     get_web_renderer_registration,
+    _mermaid_payload,
 )
 
 
@@ -4563,11 +4564,16 @@ def _premium_diagram_has_concrete_payload(block: dict[str, Any]) -> bool:
                 if svg.lower().startswith("<svg") and len(svg) >= 180 and len(drawable_tag.findall(svg)) >= 2:
                     return True
             source_text = " ".join(_text(source.get(key)) for key in ("diagram", "mermaid", "flowchart", "source", "code", "content", "text"))
-            if source_text and re.search(r"(?:-->|---|flowchart\s+(?:LR|RL|TB|TD|BT)|graph\s+(?:LR|RL|TB|TD|BT))", source_text, re.I):
-                return True
+            if source_text:
+                # Require parseable visual structure (at least two declared nodes),
+                # not merely the word `flowchart` or a direction marker.
+                parsed_mermaid = _mermaid_payload(source_text)
+                if isinstance(parsed_mermaid, dict) and isinstance(parsed_mermaid.get("nodes"), list) and len(parsed_mermaid["nodes"]) >= 2:
+                    return True
             nodes = source.get("nodes") or source.get("components") or source.get("vertices")
             edges = source.get("edges") or source.get("connections") or source.get("relations")
-            if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and edges:
+            explicit_edge_list = any(key in source and isinstance(source.get(key), list) for key in ("edges", "connections", "relations"))
+            if isinstance(nodes, list) and len(nodes) >= 2 and isinstance(edges, list) and (bool(edges) or explicit_edge_list):
                 return True
             if any(isinstance(source.get(key), list) and len(source[key]) >= 2 for key in ("elements", "drawing_elements", "drawingElements", "primitives")):
                 return True
