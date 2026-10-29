@@ -557,6 +557,7 @@ def _build_dialogue_thread_context(
     branch = context.get("active_branch") if isinstance(context.get("active_branch"), dict) else {}
     anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
     selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
+    topic_context = context.get("topic_context") if isinstance(context.get("topic_context"), dict) else {}
     relation = _text(context.get("relation") or "NEW").upper()
     continuing = relation == "CONTINUE" and bool(anchor or selected)
     uid = _text(user_id)
@@ -569,6 +570,11 @@ def _build_dialogue_thread_context(
         branch.get("topic_origin_message_id") or anchor.get("topic_origin_message_id")
         or anchor.get("origin_message_id") or branch.get("origin_message_id")
     ) if continuing else message_id
+    # When State Manager matched the hot branch, its expanded manifest supplies the
+    # durable topic root. Reuse it instead of deriving a fresh topic from this turn.
+    manifest_root = _text(topic_context.get("root_message_id"))
+    if continuing and manifest_root:
+        root_message_id = manifest_root
     if continuing and not root_message_id:
         root_message_id = parent_message_id or message_id
 
@@ -581,6 +587,14 @@ def _build_dialogue_thread_context(
         branch.get("selected_topic_id") or anchor.get("topic_id")
         or anchor.get("selected_topic_id") or branch.get("topic_id")
     )
+    manifest_topic_id = _text(topic_context.get("topic_id"))
+    if continuing and manifest_topic_id:
+        # The manifest was built from the exact matched anchor's canonical topic;
+        # it wins over a missing/derived ID but never over an explicit topic boundary.
+        persisted_topic_id = manifest_topic_id
+    manifest_topic = _text(topic_context.get("topic"))
+    if continuing and manifest_topic:
+        topic = manifest_topic[:240]
     topic_seed = "|".join((uid, dialog_id, root_message_id or message_id, topic.casefold()))
     topic_id = persisted_topic_id or (
         "topic-" + hashlib.sha256(topic_seed.encode("utf-8")).hexdigest()[:20]
@@ -712,6 +726,31 @@ def _build_dialogue_thread_context(
         "recent_steps": steps[-5:],
         "question_sequence": question_steps,
         "artifact_index": deduped_artifacts[-12:],
+        "topic_context_manifest": ({
+            "schema": _text(topic_context.get("schema") or "april_active_topic_context_v1")[:60],
+            "topic_id": _text(topic_context.get("topic_id") or topic_id)[:120],
+            "topic": _text(topic_context.get("topic") or topic)[:180],
+            "root_message_id": _text(topic_context.get("root_message_id") or root_message_id)[:120],
+            "pair_count": max(0, int(topic_context.get("pair_count") or len(selected))),
+            "branch_count": max(0, int(topic_context.get("branch_count") or 0)),
+            "summary": _text(topic_context.get("summary"))[:1800],
+            # Keep each known branch identity and its latest compact description, not
+            # the branch's binary assets or the full duplicate transcript.
+            "branches": [
+                {
+                    "branch_id": _text(item.get("branch_id"))[:120],
+                    "topic": _text(item.get("topic"))[:120],
+                    "root_message_id": _text(item.get("root_message_id"))[:120],
+                    "summary": _text(item.get("summary"))[:260],
+                    "pair_count": max(0, int(item.get("pair_count") or 0)),
+                    "last_message_id": _text(item.get("last_message_id"))[:120],
+                }
+                for item in (topic_context.get("branches") or [])[:80]
+                if isinstance(item, dict)
+            ],
+            "artifact_count": max(0, int(topic_context.get("artifact_count") or 0)),
+            "source_message_ids": [_text(value)[:120] for value in (topic_context.get("source_message_ids") or [])[:160] if _text(value)],
+        } if continuing and topic_context else {}),
     }
 
 
@@ -3905,6 +3944,8 @@ async def execute(
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
             "dialogue_thread_context": dict(dialogue_thread_context),
+            "topic_context": dict(dialogue_context.get("topic_context") or {}),
+            "topic_context_expansion": dict(dialogue_context.get("topic_context_expansion") or {}),
             "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
             "active_branch": dict(dialogue_context.get("active_branch") or {}),
             "active_work_branch": (
@@ -5957,6 +5998,7 @@ async def execute(
         "recent_steps": recent_steps[-6:],
         "question_sequence": list(dialogue_thread.get("question_sequence") or [])[:8],
         "artifact_index": unique_artifacts[-12:],
+        "topic_context_manifest": dict(dialogue_thread.get("topic_context_manifest") or {}),
     })
     # The response record is copied before enrichment so the provider's raw
     # response metadata object is not mutated in-place.
@@ -5973,6 +6015,7 @@ async def execute(
         "last_action": last_action,
         "recent_steps": recent_steps[-6:],
         "artifact_index": unique_artifacts[-12:],
+        "topic_context_manifest": dict(dialogue_thread.get("topic_context_manifest") or {}),
         "dialogue_thread": dialogue_thread,
     })
     structured_request = _strip_inline_binary({
