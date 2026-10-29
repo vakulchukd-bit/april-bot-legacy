@@ -258,8 +258,13 @@ def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Canonicalize supplied structure and make concrete diagrams readable on mobile."""
     payload = dict(payload or {})
-    nodes = payload.get("nodes") or payload.get("components") or payload.get("vertices") or []
-    edges = payload.get("edges") or []
+    molecule = payload.get("molecule") if isinstance(payload.get("molecule"), dict) else {}
+    molecular_structure = payload.get("molecular_structure") if isinstance(payload.get("molecular_structure"), dict) else {}
+    nodes = (
+        payload.get("nodes") or payload.get("components") or payload.get("vertices")
+        or payload.get("atoms") or molecule.get("atoms") or molecular_structure.get("atoms") or []
+    )
+    edges = payload.get("edges") or payload.get("bonds") or molecule.get("bonds") or molecular_structure.get("bonds") or []
     connections = payload.get("connections") or []
     relations = payload.get("relations") or []
 
@@ -276,8 +281,11 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     for i, node in enumerate(nodes):
         if isinstance(node, dict):
             item = dict(node)
-            item.setdefault("id", str(item.get("name") or item.get("label") or f"node_{i + 1}"))
-            item.setdefault("label", str(item.get("name") or item.get("id") or ""))
+            item.setdefault("id", str(item.get("atom_id") or item.get("key") or item.get("name") or item.get("label") or f"node_{i + 1}"))
+            item.setdefault("label", str(
+                item.get("name") or item.get("label") or item.get("symbol")
+                or item.get("element") or item.get("atom_type") or item.get("id") or ""
+            ))
             canonical_nodes.append(item)
         else:
             label = str(node).strip()
@@ -288,8 +296,8 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     for edge in edges + connections + relations:
         if not isinstance(edge, dict):
             continue
-        source = edge.get("from") or edge.get("source") or edge.get("start")
-        target = edge.get("to") or edge.get("target") or edge.get("end")
+        source = edge.get("from") or edge.get("source") or edge.get("start") or edge.get("atom1") or edge.get("a")
+        target = edge.get("to") or edge.get("target") or edge.get("end") or edge.get("atom2") or edge.get("b")
         if source and target:
             # Preserve renderer-specific relation metadata (electrical terminals,
             # directions, ports, styles and annotations) while canonicalizing endpoints.
@@ -298,6 +306,8 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             canonical_edge["to"] = str(target)
             if canonical_edge.get("label") is not None:
                 canonical_edge["label"] = str(canonical_edge["label"])
+            elif canonical_edge.get("bond_order") is not None or canonical_edge.get("order") is not None:
+                canonical_edge["label"] = str(canonical_edge.get("bond_order") or canonical_edge.get("order"))
             canonical_edges.append(canonical_edge)
 
     payload["nodes"] = canonical_nodes
@@ -572,7 +582,7 @@ WEB_RENDERER_REGISTRY = {
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
-    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "components", "vertices", "connections", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
+    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "drawing_elements", "drawingElements", "visual_elements", "visualElements", "primitives", "nodes", "edges", "components", "vertices", "connections", "relations", "segments", "elements", "shapes", "points", "coordinates", "geometry", "parameters", "dimensions", "annotations", "labels", "legend", "objects", "objects_3d", "objects3d", "atoms", "bonds", "molecule", "molecular_structure", "reaction", "reactants", "products", "axes", "equations", "formulas", "vectors", "forces", "measurements", "constraints", "coordinate_system", "camera", "viewport", "style", "title", "description", "caption", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
     "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
     "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects", "nodes", "edges", "title", "description"]},
@@ -1947,6 +1957,17 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
         "table_data": "table", "generated_image": "image", "image_artifact": "image",
         "image_data": "image", "figure": "image", "math": "formula", "latex": "formula",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
+        "technical_drawing": "diagram", "blueprint": "diagram", "engineering_drawing": "diagram",
+        "mechanical_drawing": "diagram", "circuit_diagram": "diagram", "electrical_schematic": "diagram",
+        "electrical_circuit": "diagram", "circuit": "diagram", "flowchart": "diagram", "flow_chart": "diagram",
+        "process_diagram": "diagram", "network_diagram": "diagram", "mind_map": "diagram", "uml": "diagram",
+        "geometry": "diagram", "geometry_diagram": "diagram", "geometry_scene": "diagram",
+        "math_diagram": "diagram", "mathematical_diagram": "diagram", "mathematics_diagram": "diagram",
+        "physics_diagram": "diagram", "physics_scheme": "diagram", "scientific_diagram": "diagram",
+        "trigonometry_diagram": "diagram", "chemistry": "diagram", "chemistry_diagram": "diagram",
+        "molecule": "diagram", "molecular_graph": "diagram", "molecular_structure": "diagram",
+        "chemical_structure": "diagram", "reaction": "diagram", "reaction_network": "diagram",
+        "reaction_scheme": "diagram", "process": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
         "message": "text", "message_text": "text", "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
@@ -2232,6 +2253,18 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
+        "technical_drawing": "diagram", "blueprint": "diagram", "circuit_diagram": "diagram",
+        "electrical_schematic": "diagram", "flowchart": "diagram", "flow_chart": "diagram",
+        "process_diagram": "diagram", "network_diagram": "diagram", "mind_map": "diagram",
+        "geometry_diagram": "diagram", "math_diagram": "diagram", "physics_diagram": "diagram",
+        "chemistry_diagram": "diagram", "molecular_structure": "diagram", "reaction_scheme": "diagram",
+        "trigonometry_diagram": "diagram", "uml": "diagram",
+        "geometry": "diagram", "geometry_scene": "diagram", "mathematical_diagram": "diagram",
+        "mathematics_diagram": "diagram", "physics_scheme": "diagram", "scientific_diagram": "diagram",
+        "molecule": "diagram", "molecular_graph": "diagram", "chemical_structure": "diagram",
+        "chemistry": "diagram", "reaction": "diagram", "reaction_network": "diagram",
+        "reaction_scheme": "diagram", "engineering_drawing": "diagram", "mechanical_drawing": "diagram",
+        "electrical_circuit": "diagram", "circuit": "diagram", "process": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
         "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "message": "text", "message_text": "text",
@@ -2407,6 +2440,18 @@ def _render_requested_outputs(values: Any) -> set[str]:
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
+        "technical_drawing": "diagram", "blueprint": "diagram", "circuit_diagram": "diagram",
+        "electrical_schematic": "diagram", "flowchart": "diagram", "flow_chart": "diagram",
+        "process_diagram": "diagram", "network_diagram": "diagram", "mind_map": "diagram",
+        "geometry_diagram": "diagram", "math_diagram": "diagram", "physics_diagram": "diagram",
+        "chemistry_diagram": "diagram", "molecular_structure": "diagram", "reaction_scheme": "diagram",
+        "trigonometry_diagram": "diagram", "uml": "diagram",
+        "geometry": "diagram", "geometry_scene": "diagram", "mathematical_diagram": "diagram",
+        "mathematics_diagram": "diagram", "physics_scheme": "diagram", "scientific_diagram": "diagram",
+        "molecule": "diagram", "molecular_graph": "diagram", "chemical_structure": "diagram",
+        "chemistry": "diagram", "reaction": "diagram", "reaction_network": "diagram",
+        "reaction_scheme": "diagram", "engineering_drawing": "diagram", "mechanical_drawing": "diagram",
+        "electrical_circuit": "diagram", "circuit": "diagram", "process": "diagram",
         "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link",
     }
@@ -2488,21 +2533,6 @@ def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
     return answer
-
-
-def _electrical_diagram_payload_from_request(request_text: str, answer: str = "") -> Dict[str, Any]:
-    """Deprecated compatibility shim.
-
-    Never infer a specific circuit from keyword co-occurrence. The diagram room
-    must use the interpreted request and model-produced concrete payload; this
-    adapter intentionally returns no payload to prevent historical-topic bleed.
-    """
-    return {}
-
-
-def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
-    """Do not convert generic prose/ASCII sketches into a guessed circuit."""
-    return {}
 
 
 def _is_ascii_line_chart_fence(text: str) -> bool:
@@ -2614,18 +2644,6 @@ def _graph_payload_from_answer(answer: str, graph_policy: Dict[str, Any] | None 
         }
     return {}
 
-
-def _is_redundant_schematic_paragraph(paragraph: str) -> bool:
-    text = str(paragraph or "").strip().lower()
-    if not text or not re.search(r"схем|подключени|wiring|schematic", text):
-        return False
-    terms = [
-        r"аккумулятор|батаре", r"предохранител|fuse", r"выключател|switch",
-        r"двигател|мотор|лампоч|ламп[аыуе]|светодиод|motor|lamp|bulb",
-    ]
-    if sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in terms) < 3:
-        return False
-    return bool(re.search(r"(?:→|➜|->|-->|\bзатем\b|\bпосле\s+него\b|\bчерез\b)", text, re.IGNORECASE))
 
 def _rendered_link_urls(render_blocks: Any) -> set[str]:
     """Return URLs which are definitely represented by a visible link renderer."""
@@ -2764,20 +2782,6 @@ def _strip_rendered_segments(
                 for block in render_blocks
             ):
                 cleaned = cleaned.replace(match.group(0), "", 1)
-        else:
-            schematic_payload = _electrical_schematic_payload(cleaned)
-            if schematic_payload and (not isinstance(render_blocks, list) or any(
-                isinstance(block, dict) and _scene_block_type(block) == "diagram"
-                and _has_render_payload("diagram", _payload_for_render_block(block, "diagram"), block)
-                for block in render_blocks
-            )):
-                sketch = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", cleaned, re.IGNORECASE)
-                if sketch:
-                    cleaned = cleaned.replace(sketch.group(0), "", 1)
-                paragraphs = re.split(r"\n\s*\n", cleaned)
-                paragraphs = [paragraph for paragraph in paragraphs if not _is_redundant_schematic_paragraph(paragraph)]
-                cleaned = "\n\n".join(paragraphs)
-
     if "graph" in rendered_types:
         # Only remove an ASCII chart when the graph renderer was built from this
         # exact chart source; otherwise keep the source text rather than risk loss.
@@ -3124,384 +3128,6 @@ def _interpolate_weekly_graph_payload(
     payload["interpolation_method"] = "linear"
     payload["estimated_points"] = [2, 3, 4, 5, 6]
     return payload
-
-
-def _graph_payload_from_request(
-    current_request: str,
-    answer: str = "",
-    graph_policy: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    """Build only a graph that is grounded in the current request/answer.
-
-    Explicit equations are kept verbatim. For a weekly line chart with two known
-    endpoints, missing daily points are calculated by linear interpolation and
-    marked as estimates, never as observed measurements. Common 3D surfaces are
-    allowed as labelled illustrative defaults when the user names the surface but
-    supplies no equation.
-    """
-    request_text = str(current_request or "").strip()
-    answer_text = str(answer or "").strip()
-    text = "\n".join(part for part in (request_text, answer_text) if part)
-    if not text:
-        return {}
-
-    policy = graph_policy if isinstance(graph_policy, dict) else {}
-    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
-    is_3d = preferred in {
-        "scene3d", "scene_3d", "surface3d", "surface_3d",
-        "scatter3d", "scatter_3d", "mesh3d", "mesh_3d", "3d",
-    } or bool(re.search(r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*|3-мерн\w*)", text, re.IGNORECASE))
-
-    if is_3d:
-        # A named 3D primitive is already sufficient geometry for GraphBlock.
-        # Previously this branch only reconstructed equations/surfaces or spheres;
-        # a request for a cube therefore returned {} when the Provider emitted an
-        # empty GraphBlock shell. SceneContract then correctly rejected that shell,
-        # leaving the user with prose but no visible graph. Build a labelled unit
-        # cube as an explicit illustrative default only when the current request
-        # names a cube and supplies no dimensions of its own.
-        cube_requested = bool(re.search(
-            r"(?:куб\w*|\bcube\w*\b|\bhexahedron\w*\b)",
-            request_text,
-            re.IGNORECASE,
-        ))
-        if cube_requested:
-            vertex_specs = [
-                ("A", -1.0, -1.0, -1.0),
-                ("B",  1.0, -1.0, -1.0),
-                ("C",  1.0,  1.0, -1.0),
-                ("D", -1.0,  1.0, -1.0),
-                ("E", -1.0, -1.0,  1.0),
-                ("F",  1.0, -1.0,  1.0),
-                ("G",  1.0,  1.0,  1.0),
-                ("H", -1.0,  1.0,  1.0),
-            ]
-            vertices = [
-                {"id": name, "label": name, "x": x, "y": y, "z": z}
-                for name, x, y, z in vertex_specs
-            ]
-            edge_indices = (
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7),
-            )
-            paths = [
-                {
-                    "id": f"cube-edge-{index + 1:02d}",
-                    "kind": "wireframe",
-                    "label": f"{vertices[left]['label']}–{vertices[right]['label']}",
-                    "points": [
-                        {key: vertices[left][key] for key in ("x", "y", "z", "label")},
-                        {key: vertices[right][key] for key in ("x", "y", "z", "label")},
-                    ],
-                }
-                for index, (left, right) in enumerate(edge_indices)
-            ]
-            cube_object = {
-                "id": "cube-1",
-                "shape": "cube",
-                "object_type": "cube",
-                "label": "Куб",
-                "x": 0.0,
-                "y": 0.0,
-                "z": 0.0,
-                "center": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "size": 2.0,
-                "width": 2.0,
-                "height": 2.0,
-                "depth": 2.0,
-                "vertices": vertices,
-                "edges": [
-                    {"from": vertices[left]["label"], "to": vertices[right]["label"]}
-                    for left, right in edge_indices
-                ],
-            }
-            return {
-                "representation": "scene3d",
-                "graph_type": "scene3d",
-                "chart_type": "scene3d",
-                "dimensions": 3,
-                "three_d": True,
-                "title": "Куб в трёхмерном пространстве",
-                "description": (
-                    "Схематический единичный куб с центром в начале координат. "
-                    "Длина ребра условно равна 2 единицам, поскольку размер не задан в запросе."
-                ),
-                "objects_3d": [cube_object],
-                "points": vertices,
-                "paths": paths,
-                "x_domain": [-1.5, 1.5],
-                "y_domain": [-1.5, 1.5],
-                "z_domain": [-1.5, 1.5],
-                "x_axis": {"title": "X"},
-                "y_axis": {"title": "Y"},
-                "z_axis": {"title": "Z"},
-                "source": "current_request_explicit_3d_cube",
-            }
-
-        equation_match = re.search(
-            r"(?im)(?:^|[\s;])(?:z|f\s*\(\s*x\s*,\s*y\s*\))\s*=\s*([^\n;]+)",
-            text,
-        )
-        expression = ""
-        illustrative = False
-        if equation_match:
-            expression = equation_match.group(1).strip().strip("`$ ")
-            expression = re.sub(r"\s+(?:в|in)\s*(?:3\s*[- ]?d|3д|3d)\b.*$", "", expression, flags=re.IGNORECASE).strip()
-            expression = re.sub(r"[.!?]+$", "", expression).strip()
-        elif re.search(r"парабол|paraboloid|parabola", text, re.IGNORECASE):
-            expression = "x^2 + y^2"
-            illustrative = True
-        elif re.search(r"седлов|saddle", text, re.IGNORECASE):
-            expression = "x^2 - y^2"
-            illustrative = True
-        elif re.search(r"волнообраз|волнов|wave surface|waveform surface", text, re.IGNORECASE):
-            expression = "sin(sqrt(x^2 + y^2))"
-            illustrative = True
-        if expression:
-            return {
-                "representation": "surface3d",
-                "graph_type": "surface3d",
-                "chart_type": "surface3d",
-                "dimensions": 3,
-                "three_d": True,
-                "title": "Иллюстративная 3D-поверхность" if illustrative else "3D-график функции",
-                "description": (
-                    "Показана стандартная иллюстративная поверхность; уравнение не задавалось явно."
-                    if illustrative else "Поверхность построена по уравнению из текущего запроса."
-                ),
-                "equation": f"z = {expression}",
-                "expression": expression,
-                "surface_function": expression,
-                "z_function": expression,
-                "x_domain": [-5, 5],
-                "y_domain": [-5, 5],
-                "source": "current_request_equation" if not illustrative else "labelled_illustrative_shape_default",
-            }
-        return {}
-
-    # Require a semantically explicit endpoint relation; arbitrary numbers in
-    # prose are not enough to be treated as chart data.
-    range_pattern = re.compile(
-        r"(?i)(?:\b(?:с|от|from)\s*)"
-        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|uah|usd|eur|€|\$)?\s*"
-        r"(?:до|to|по|through)\s*"
-        r"(-?\d+(?:[.,]\d+)?)\s*(грн\.?|uah|usd|eur|€|\$)?"
-    )
-    range_match = range_pattern.search(text)
-    if not range_match:
-        # Equation-only 2D function: preserve the user/model's actual expression.
-        equation_match = re.search(
-            r"(?im)(?:^|[\s;])(?:y|f\s*\(\s*x\s*\))\s*=\s*([^\n;]+)",
-            text,
-        )
-        if equation_match and re.search(r"\bx\b", equation_match.group(1), re.IGNORECASE):
-            expression = equation_match.group(1).strip().strip("`$ ")
-            expression = re.sub(r"[.!?]+$", "", expression).strip()
-            if expression:
-                return {
-                    "representation": "function2d",
-                    "graph_type": "function",
-                    "chart_type": "line",
-                    "dimensions": 2,
-                    "title": "График функции",
-                    "equation": f"y = {expression}",
-                    "expression": expression,
-                    "series": [{
-                        "label": f"y = {expression}",
-                        "type": "function",
-                        "fn": expression,
-                        "equation": f"y = {expression}",
-                        "expression": expression,
-                    }],
-                    "x_axis": {"title": "x"},
-                    "y_axis": {"title": "y"},
-                    "source": "current_request_equation",
-                }
-        return {}
-
-    start_value = _number_for_render(range_match.group(1))
-    end_value = _number_for_render(range_match.group(2))
-    if start_value is None or end_value is None:
-        return {}
-
-    combined_low = text.lower()
-    if re.search(r"недел|week", combined_low):
-        x_labels = ["Начало недели", "Конец недели"]
-        x_title = "Период недели"
-    elif re.search(r"месяц|month", combined_low):
-        x_labels = ["Начало месяца", "Конец месяца"]
-        x_title = "Период месяца"
-    elif re.search(r"год|year", combined_low):
-        x_labels = ["Начало года", "Конец года"]
-        x_title = "Период года"
-    elif re.search(r"день|дня|дней|day|daily", combined_low):
-        x_labels = ["Начало периода", "Конец периода"]
-        x_title = "Период"
-    else:
-        x_labels = ["Начальное значение", "Конечное значение"]
-        x_title = "Период"
-
-    currency = range_match.group(3) or ""
-    if not currency:
-        currency_match = re.search(r"(?i)(грн\.?|uah|usd|eur|€|\$)", text)
-        currency = currency_match.group(1) if currency_match else ""
-    y_title = f"Значение, {currency}" if currency else "Значение"
-    title_match = re.search(
-        r"(?i)(?:построй|построить|покажи|нарисуй|построить)\s+(?:мне\s+)?(?:график|диаграмму)\s+(.{3,150})",
-        request_text,
-    )
-    title = title_match.group(1).strip() if title_match else "Изменение значения за период"
-    title = re.sub(r"\s*(?:с|от)\s*-?\d+(?:[.,]\d+)?[\w\s.,]*$", "", title, flags=re.IGNORECASE).strip(" .,:;-") or "Изменение значения за период"
-    points = [
-        {"x": x_labels[0], "y": start_value, "label": "Исходное значение", "estimated": False},
-        {"x": x_labels[1], "y": end_value, "label": "Исходное значение", "estimated": False},
-    ]
-    payload = {
-        "representation": "line",
-        "chart_type": "line",
-        "graph_type": "line",
-        "dimensions": 2,
-        "title": title[:140],
-        "description": "Начальное и конечное значения заданы явно.",
-        "series": [{
-            "label": y_title,
-            "type": "line",
-            "points": points,
-            "x": x_labels,
-            "y": [start_value, end_value],
-            "values": [start_value, end_value],
-        }],
-        "points": points,
-        "x_values": x_labels,
-        "y_values": [start_value, end_value],
-        "x_axis": {"title": x_title, "values": x_labels},
-        "y_axis": {"title": y_title},
-        "source": "explicit_current_request_range",
-        "data_semantics": {"kind": "endpoint_range", "interpolation": "not_applied"},
-    }
-    return _interpolate_weekly_graph_payload(payload, request_text, answer_text)
-
-
-def _geometry_diagram_payload_from_request(
-    current_request: str,
-    answer: str = "",
-) -> Dict[str, Any]:
-    """Create small SVG drawings for explicitly named elementary geometry.
-
-    Shape identity comes from the current request. Dimension labels are shown
-    only when the user supplies them; no unspecified side lengths are invented.
-    """
-    request_text = str(current_request or "").strip()
-    text = "\n".join(part for part in (request_text, str(answer or "").strip()) if part)
-    if not text:
-        return {}
-    low = text.lower()
-
-    if re.search(r"треугол|triangle", low):
-        shape = "triangle"
-    elif re.search(r"квадрат|square", low):
-        shape = "square"
-    elif re.search(r"прямоугольник|прямоугольн|rectangle", low):
-        shape = "rectangle"
-    elif re.search(r"окружност|круг|circle", low):
-        shape = "circle"
-    else:
-        return {}
-
-    measures = re.findall(
-        r"(?<![\w])(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|meter|meters|m)\b",
-        request_text,
-        re.IGNORECASE,
-    )
-    def label_measure(item: tuple[str, str]) -> str:
-        value = item[0].replace(",", ".")
-        unit = item[1].lower()
-        unit_map = {"cm": "см", "mm": "мм", "m": "м", "meter": "м", "meters": "м"}
-        return f"{value} {unit_map.get(unit, unit)}"
-
-    side_labels: list[str] = []
-    per_each_match = re.search(
-        r"(?i)(?:по|each|every side(?: is)?)\s*(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|m)\b",
-        request_text,
-    )
-    if per_each_match and shape in {"triangle", "square"}:
-        side_labels = [label_measure((per_each_match.group(1), per_each_match.group(2)))] * (3 if shape == "triangle" else 4)
-    elif measures:
-        side_labels = [label_measure(item) for item in measures[:4]]
-
-    if shape == "triangle":
-        polygon = '<polygon points="260,48 78,318 442,318" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3" stroke-linejoin="round"/>'
-        labels = ""
-        if side_labels:
-            labels_data = [
-                (160, 172, side_labels[0]),
-                (360, 172, side_labels[min(1, len(side_labels)-1)]),
-                (260, 342, side_labels[min(2, len(side_labels)-1)]),
-            ]
-            labels = "".join(
-                f'<text x="{x}" y="{y}" text-anchor="middle" fill="#e5e7eb" font-size="18" font-family="Arial,sans-serif">{value}</text>'
-                for x, y, value in labels_data
-            )
-        svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="370" viewBox="0 0 520 370">'
-            '<title>Чертёж треугольника</title>'
-            '<line x1="260" y1="48" x2="78" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            '<line x1="260" y1="48" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            '<line x1="78" y1="318" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
-            f'{labels}'
-            '<text x="260" y="25" text-anchor="middle" fill="#e5e7eb" font-size="16" font-family="Arial,sans-serif">Треугольник</text>'
-            '</svg>'
-        )
-        equilateral = len(side_labels) >= 3 and len(set(side_labels[:3])) == 1
-        return {
-            "representation": "diagram",
-            "shape": "equilateral_triangle" if equilateral else "triangle",
-            "diagram_type": "geometry",
-            "title": "Чертёж равностороннего треугольника" if equilateral else "Чертёж треугольника",
-            "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематический треугольник; размеры сторон не задавались.",
-            "svg": svg,
-            "source": "current_request_geometry_fallback",
-        }
-
-    if shape == "square":
-        side = side_labels[0] if side_labels else ""
-        svg_shape = (
-            '<rect x="135" y="65" width="250" height="250" rx="1" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
-        )
-        labels = f'<text x="260" y="52" text-anchor="middle" fill="#e5e7eb" font-size="18">{side}</text>' if side else ""
-        title = "Чертёж квадрата"
-        shape_name = "square"
-    elif shape == "rectangle":
-        left = side_labels[0] if side_labels else ""
-        right = side_labels[1] if len(side_labels) > 1 else ""
-        svg_shape = '<rect x="90" y="95" width="340" height="190" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
-        labels = (
-            (f'<text x="260" y="82" text-anchor="middle" fill="#e5e7eb" font-size="18">{left}</text>' if left else "")
-            + (f'<text x="448" y="196" text-anchor="middle" fill="#e5e7eb" font-size="18">{right}</text>' if right else "")
-        )
-        title = "Чертёж прямоугольника"
-        shape_name = "rectangle"
-    else:
-        radius = side_labels[0] if side_labels else ""
-        svg_shape = '<circle cx="260" cy="190" r="120" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
-        labels = f'<text x="260" y="190" text-anchor="middle" fill="#e5e7eb" font-size="18">{radius}</text>' if radius else ""
-        title = "Чертёж окружности"
-        shape_name = "circle"
-
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">'
-        f'<title>{title}</title>{svg_shape}{labels}</svg>'
-    )
-    return {
-        "representation": "diagram",
-        "shape": shape_name,
-        "diagram_type": "geometry",
-        "title": title,
-        "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематическая геометрическая фигура; размеры не задавались.",
-        "svg": svg,
-        "source": "current_request_geometry_fallback",
-    }
 
 
 def _graph_payload_from_table_3d(
@@ -3971,6 +3597,17 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
+    if block_type == "diagram":
+        # Responses may wrap their concrete drawing inside `diagram`, `scene`,
+        # `graph`, or a nested `payload`. Unwrap those envelopes while retaining
+        # non-empty block-level metadata and explicit top-level fields.
+        for wrapper_key in ("diagram", "scene", "graph", "visual"):
+            nested = merged.get(wrapper_key)
+            if not isinstance(nested, dict):
+                continue
+            nested_payload = nested.get("payload") if isinstance(nested.get("payload"), dict) else nested
+            outer = {key: value for key, value in merged.items() if key != wrapper_key}
+            merged = {**nested_payload, **outer}
     # Normalize common provider aliases before validation. The Web renderers
     # consume typed canonical keys, so payload data must not be rejected just
     # because a provider called it `source`, `mermaid`, or Markdown links.
@@ -4097,20 +3734,32 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
         )
     if block_type == "diagram":
-        diagram_nodes = p.get("nodes") or p.get("components") or p.get("vertices")
-        # Treat an explicit edge list (including an empty one) as structural
-        # evidence that the producer supplied a diagram rather than an empty shell.
-        has_explicit_edges = any(key in p and isinstance(p.get(key), list) for key in ("edges", "connections", "relations"))
+        molecule = p.get("molecule") if isinstance(p.get("molecule"), dict) else {}
+        molecular_structure = p.get("molecular_structure") if isinstance(p.get("molecular_structure"), dict) else {}
+        diagram_nodes = (
+            p.get("nodes") or p.get("components") or p.get("vertices")
+            or p.get("atoms") or molecule.get("atoms") or molecular_structure.get("atoms")
+        )
+        geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
+        geometry_has_drawables = any(
+            isinstance(geometry.get(key), list) and bool(geometry.get(key))
+            for key in ("elements", "visual_elements", "drawing_elements", "shapes", "primitives", "vertices", "points", "objects", "objects_3d")
+        ) or bool(geometry.get("shape") or geometry.get("figure_type") or geometry.get("geometry_type"))
+        # Accept explicit atoms/bonds and visual primitives as data structures,
+        # not as subject-name triggers.
+        explicit_edges = p.get("edges") or p.get("connections") or p.get("relations") or p.get("bonds") or molecule.get("bonds") or molecular_structure.get("bonds")
         has_grouped_nodes = bool(p.get("groups") or p.get("subgraphs"))
         has_mermaid_structure = str(p.get("format") or "").strip().lower() == "mermaid" and str(p.get("source") or p.get("mermaid") or "").strip()
         return bool(
             str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip()
-            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and (
-                (has_explicit_edges and bool(p.get("edges") or p.get("connections") or p.get("relations")))
-                or (has_explicit_edges and (has_grouped_nodes or has_mermaid_structure or bool(p.get("layout"))))
-            ))
-            or (isinstance(p.get("elements"), list) and bool(p["elements"]))
-            or (isinstance(p.get("shapes"), list) and bool(p["shapes"]))
+            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and isinstance(explicit_edges, list) and bool(explicit_edges))
+            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and (has_grouped_nodes or has_mermaid_structure))
+            or any(
+                isinstance(p.get(key), list) and bool(p.get(key))
+                for key in ("elements", "visual_elements", "visualElements", "drawing_elements", "drawingElements", "shapes", "primitives", "objects", "objects_3d", "objects3d")
+            )
+            or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
+            or geometry_has_drawables
         )
     if block_type in {"image", "gallery"}:
         images = p.get("images") or p.get("items") or p.get("gallery") or p.get("sources")
@@ -4527,15 +4176,11 @@ def prepare_render_blocks_for_room_dispatch(
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
-    electrical_diagram_from_answer = {}  # no keyword-based schematic injection
-    electrical_diagram_from_request = {}  # use the interpreted request/payload only
-    diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
+    # Diagram objects come from the model's structured scene payload or explicit
+    # same-turn Mermaid source; request wording alone never creates geometry.
     if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
         # This code fence is a visual representation of the graph, not source code.
         # Values are transferred to GraphBlock below; don't render it a second time.
-        code_match = None
-    if code_match and electrical_diagram_from_answer:
-        # The ASCII sketch is source evidence for the diagram, not a separate code artifact.
         code_match = None
     formula_matches = re.findall(r"\\\[([\s\S]*?)\\\]|\\\((.*?)\\\)", source_answer)
     formulas_from_answer = [a or b for a, b in formula_matches if (a or b).strip()]
@@ -4580,6 +4225,18 @@ def prepare_render_blocks_for_room_dispatch(
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
+        "technical_drawing": "diagram", "blueprint": "diagram", "circuit_diagram": "diagram",
+        "electrical_schematic": "diagram", "flowchart": "diagram", "flow_chart": "diagram",
+        "process_diagram": "diagram", "network_diagram": "diagram", "mind_map": "diagram",
+        "geometry_diagram": "diagram", "math_diagram": "diagram", "physics_diagram": "diagram",
+        "chemistry_diagram": "diagram", "molecular_structure": "diagram", "reaction_scheme": "diagram",
+        "trigonometry_diagram": "diagram", "uml": "diagram",
+        "geometry": "diagram", "geometry_scene": "diagram", "mathematical_diagram": "diagram",
+        "mathematics_diagram": "diagram", "physics_scheme": "diagram", "scientific_diagram": "diagram",
+        "molecule": "diagram", "molecular_graph": "diagram", "chemical_structure": "diagram",
+        "chemistry": "diagram", "reaction": "diagram", "reaction_network": "diagram",
+        "engineering_drawing": "diagram", "mechanical_drawing": "diagram",
+        "electrical_circuit": "diagram", "circuit": "diagram", "process": "diagram",
         "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "svgblock": "diagram", "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
         "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
@@ -4645,8 +4302,9 @@ def prepare_render_blocks_for_room_dispatch(
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
             if "graph" in requested and not _has_render_payload("graph", payload):
                 candidate_graph = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-                if not candidate_graph:
-                    candidate_graph = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
+                # Do not synthesize graph objects from request keywords. The
+                # Provider's concrete scene payload or an explicit structure in
+                # its answer is the source of truth.
                 if candidate_graph:
                     payload = candidate_graph
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
@@ -4657,15 +4315,6 @@ def prepare_render_blocks_for_room_dispatch(
             parsed = _mermaid_payload(source)
             if parsed:
                 payload = {**payload, **parsed}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif electrical_diagram_from_answer:
-                payload = {**payload, **deepcopy(electrical_diagram_from_answer)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif electrical_diagram_from_request:
-                payload = {**payload, **deepcopy(electrical_diagram_from_request)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif diagram_from_request:
-                payload = {**payload, **deepcopy(diagram_from_request)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
         elif block_type == "gallery" and not _has_render_payload("gallery", payload):
             if markdown_images:
@@ -4778,8 +4427,8 @@ def prepare_render_blocks_for_room_dispatch(
             graph_payload = deepcopy(section_graph_from_answer)
         if not graph_payload:
             graph_payload = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-        if not graph_payload:
-            graph_payload = _graph_payload_from_request(current_request, source_answer, interpreted_graph_policy)
+        # No request-word graph fallback: only model scene data, explicit answer
+        # data, or a source table may create drawable graph objects.
         if graph_payload and interpreted_graph_policy:
             graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
             graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
@@ -4821,8 +4470,8 @@ def prepare_render_blocks_for_room_dispatch(
                 "source_room": "C_LINK_ROOM",
             })
             existing_types.add("link")
-    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer or electrical_diagram_from_request or diagram_from_request) and "diagram" not in existing_types:
-        diagram_payload = diagram_from_answer or electrical_diagram_from_answer or electrical_diagram_from_request or diagram_from_request
+    if ("diagram" in requested or diagram_from_answer) and "diagram" not in existing_types:
+        diagram_payload = diagram_from_answer
         if diagram_payload:
             prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
@@ -4972,7 +4621,20 @@ def prepare_render_blocks_for_room_dispatch(
         except Exception:
             pass
 
-    render_aliases = {"gallery": "image", "image_gallery": "image", "generated_image": "image", "svg": "diagram", "math": "formula", "latex": "formula", "chart": "graph", "plot": "graph", "links": "link", "hyperlink": "link"}
+    render_aliases = {
+        "gallery": "image", "image_gallery": "image", "generated_image": "image",
+        "svg": "diagram", "schematic": "diagram", "technical_drawing": "diagram",
+        "blueprint": "diagram", "engineering_drawing": "diagram", "mechanical_drawing": "diagram",
+        "circuit_diagram": "diagram", "electrical_schematic": "diagram", "electrical_circuit": "diagram",
+        "flowchart": "diagram", "flow_chart": "diagram", "process_diagram": "diagram",
+        "network_diagram": "diagram", "mind_map": "diagram", "geometry_diagram": "diagram",
+        "math_diagram": "diagram", "mathematical_diagram": "diagram", "mathematics_diagram": "diagram",
+        "physics_diagram": "diagram", "physics_scheme": "diagram", "scientific_diagram": "diagram",
+        "trigonometry_diagram": "diagram", "chemistry_diagram": "diagram", "molecular_structure": "diagram",
+        "molecule": "diagram", "chemical_structure": "diagram", "reaction": "diagram",
+        "reaction_network": "diagram", "reaction_scheme": "diagram", "uml": "diagram", "mermaid": "diagram",
+        "math": "formula", "latex": "formula", "chart": "graph", "plot": "graph", "links": "link", "hyperlink": "link",
+    }
     rendered_types = {
         render_aliases.get(str(item.get("type") or item.get("artifact_type") or "").strip().lower(), str(item.get("type") or item.get("artifact_type") or "").strip().lower())
         for item in result if isinstance(item, dict)
