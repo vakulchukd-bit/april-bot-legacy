@@ -496,9 +496,12 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
         return {}
     allowed = (
         "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
-        "mime_type", "asset_role", "source_type", "asset_message_id", "asset_id",
-        "artifact_id", "id", "ref", "url", "path", "size_bytes", "sequence_index",
-        "description", "summary", "alt", "caption", "label", "format", "language",
+        "mime_type", "content_type", "media_type", "renderer", "viewer", "chart_type",
+        "graph_type", "asset_role", "source_type", "source_message_id", "asset_message_id",
+        "asset_id", "artifact_id", "id", "ref", "url", "path", "size_bytes", "sequence_index",
+        "series_count", "point_count", "row_count", "column_count", "dimensions", "checksum",
+        "topic_id", "branch_id", "parent_message_id", "description", "summary", "data_summary",
+        "preview", "alt", "caption", "label", "format", "language",
     )
     item: dict[str, Any] = {}
     for key in allowed:
@@ -520,8 +523,17 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
                 item[key] = int(value_part)
             except (TypeError, ValueError):
                 continue
-        elif key in {"description", "summary"}:
-            item[key] = _text(value_part)[:280]
+        elif key in {"description", "summary", "data_summary", "preview"}:
+            # Descriptive metadata only: never persist inline render/data payloads.
+            summary = _text(value_part)
+            if summary.lower().startswith(("data:", "blob:")):
+                continue
+            item[key] = summary[:280]
+        elif key in {"series_count", "point_count", "row_count", "column_count", "sequence_index", "size_bytes"}:
+            try:
+                item[key] = max(0, int(value_part))
+            except (TypeError, ValueError):
+                continue
         else:
             item[key] = _text(value_part)[:180]
     if default_role and not item.get("asset_role"):
@@ -580,33 +592,80 @@ def _build_dialogue_thread_context(
         "branch-" + hashlib.sha256(branch_seed.encode("utf-8")).hexdigest()[:20]
     )
 
+    # Reuse the branch's compact durable trail, not just the last isolated pair.
+    # This keeps earlier constraints and sequence metadata recoverable when the
+    # retrieval window selects only one or two canonical USER↔APRIL pairs.
     steps = []
+    seen_step_ids = set()
     for pair in selected[-5:]:
         if not isinstance(pair, dict):
             continue
+        for prior_step in pair.get("recent_steps") or []:
+            if not isinstance(prior_step, dict):
+                continue
+            prior_id = _text(prior_step.get("message_id"))
+            if prior_id and prior_id not in seen_step_ids:
+                steps.append(dict(prior_step))
+                seen_step_ids.add(prior_id)
         pair_id = _text(pair.get("message_id") or pair.get("source_message_id"))
-        steps.append({
-            "message_id": pair_id[:120],
-            "user_request": _text(pair.get("user") or pair.get("user_text"))[:240],
-            "answer_summary": _text(pair.get("april") or pair.get("summary") or pair.get("branch_summary"))[:280],
-            "topic_id": _text(pair.get("topic_id") or topic_id)[:120],
-            "branch_id": _text(pair.get("branch_id") or branch_id)[:120],
-        })
+        if pair_id and pair_id not in seen_step_ids:
+            steps.append({
+                "message_id": pair_id[:120],
+                "user_request": _text(pair.get("user") or pair.get("user_text"))[:240],
+                "answer_summary": _text(pair.get("april") or pair.get("summary") or pair.get("branch_summary"))[:280],
+                "topic_id": _text(pair.get("topic_id") or topic_id)[:120],
+                "branch_id": _text(pair.get("branch_id") or branch_id)[:120],
+            })
+            seen_step_ids.add(pair_id)
+    steps = steps[-6:]
 
+    # Merge prior question decomposition with this turn's decomposition, preserving
+    # stable topic/branch bindings and avoiding duplicates from overlapping pairs.
     question_steps = []
+    seen_question_keys = set()
+    for pair in selected[-5:]:
+        if not isinstance(pair, dict):
+            continue
+        for prior_question in pair.get("question_sequence") or []:
+            if not isinstance(prior_question, dict):
+                continue
+            prior_item = dict(prior_question)
+            prior_request = _text(prior_item.get("request") or prior_item.get("question"))
+            prior_key = (
+                _text(prior_item.get("message_id") or prior_item.get("request_key")),
+                prior_request.casefold(),
+                _text(prior_item.get("topic_id") or prior_item.get("topic")).casefold(),
+            )
+            if prior_key not in seen_question_keys:
+                question_steps.append(prior_item)
+                seen_question_keys.add(prior_key)
     for item in (question_sequence or [])[:8]:
         if not isinstance(item, dict):
             continue
         dialogue_search = item.get("dialogue_search") if isinstance(item.get("dialogue_search"), dict) else {}
         outputs = item.get("output_types") if isinstance(item.get("output_types"), list) else []
-        question_steps.append({
+        current_step = {
+            "message_id": message_id[:120],
+            "request_key": _text(item.get("request_key"))[:120],
             "step_index": item.get("step_index"),
             "request": _text(item.get("request") or item.get("question") or item.get("text"))[:220],
             "intent": _text(item.get("semantic_intent") or item.get("intent"))[:80],
-            "relation": _text(dialogue_search.get("relation") or item.get("relation") or "NEW").upper()[:32],
-            "topic": _text(dialogue_search.get("topic") or item.get("topic"))[:140],
+            "relation": _text(dialogue_search.get("relation") or item.get("relation") or relation or "NEW").upper()[:32],
+            "topic": _text(dialogue_search.get("topic") or item.get("topic") or topic)[:140],
+            "topic_id": topic_id[:120],
+            "branch_id": branch_id[:120],
             "output_types": [_text(x)[:40] for x in outputs[:8] if _text(x)],
-        })
+        }
+        current_request = _text(current_step.get("request"))
+        current_key = (
+            _text(current_step.get("message_id") or current_step.get("request_key")),
+            current_request.casefold(),
+            _text(current_step.get("topic_id") or current_step.get("topic")).casefold(),
+        )
+        if current_key not in seen_question_keys:
+            question_steps.append(current_step)
+            seen_question_keys.add(current_key)
+    question_steps = question_steps[-8:]
 
     artifact_index = []
     for pair in selected[-5:]:
