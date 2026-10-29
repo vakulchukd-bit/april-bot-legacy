@@ -158,7 +158,7 @@ When the user refers to earlier topics, search the named subject/time first; use
 source IDs and exact supplied values. Related renderers must complement each other (text connects, table compares, diagram shows
 structure, graph shows numeric relations, formula shows mathematics, image shows the requested visual, code gives source).
 Do not repeat the same explanation or payload in multiple renderers, and do not omit an explicitly requested renderer.
-ACTIVE_WORK_BRANCH is present only when State Manager matched this request to a live task/interaction.
+ACTIVE_TOPIC_CONTEXT, when present, is the complete indexed topic manifest reconstructed from canonical USER↔APRIL pairs: use its root, branch identities, branch summaries, question sequence, source-message IDs and artifact index to understand what has already happened across the whole topic. Continue in the branch matched to CURRENT_REQUEST; use sibling-branch summaries to avoid repeating or contradicting prior work, but do not merge incompatible branch payloads. In ACTIVE_TOPIC_CONTEXT.branches, i=branch ID, t=branch topic, r=branch root, s=summary, n=pair count, l=last source message ID; the branch marked active contains the latest user/answer summaries and recent step/question trail. Artifact index keys i/k/s/b refer to asset ID/type/source message/branch; n/d/r/m, when present, are name/description/reference/MIME. Artifact entries are references/descriptions, not binary data; restore or use the exact asset tied to the selected branch/message ID. Never ask the user to restate a fact already present in the active topic manifest or selected canonical pairs. ACTIVE_WORK_BRANCH is present only when State Manager matched this request to a live task/interaction.
 When active, use it as the FIRST context source: apply the current task state and selected canonical
 work pairs before general topic/history ranking. Treat last_assistant_answer and recent_steps.april_text as
 canonical exact records of what April actually output, especially for numeric values, single letters, one-word
@@ -1705,6 +1705,150 @@ def _should_preserve_current_request_verbatim(value: Any) -> bool:
     return len(source) <= 1200 and ui_help
 
 
+
+
+def _active_topic_context_minimum(value: Any) -> dict[str, Any]:
+    """Keep every branch discoverable without duplicating the full topic transcript."""
+    if not isinstance(value, dict) or not value:
+        return {}
+    active_branch_id = _text(value.get("active_branch_id"))[:120]
+    topic_root = _text(value.get("root_message_id"))[:120]
+    out: dict[str, Any] = {
+        "schema": _text(value.get("schema") or "april_active_topic_context_v1")[:50],
+        "topic_id": _text(value.get("topic_id"))[:120],
+        "topic": _clip(value.get("topic"), 120),
+        "root_message_id": topic_root,
+        "pair_count": max(0, int(value.get("pair_count") or 0)),
+        "branch_count": max(0, int(value.get("branch_count") or 0)),
+        "summary": _semantic_compress(value.get("summary"), 70),
+        "active_branch_id": active_branch_id,
+        "artifact_count": max(0, int(value.get("artifact_count") or 0)),
+    }
+    branches = []
+    for item in (value.get("branches") or []) if isinstance(value.get("branches"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        branch_id = _text(item.get("branch_id"))[:100]
+        is_active = bool(active_branch_id and branch_id == active_branch_id)
+        branch = {
+            "i": branch_id,
+            "t": _clip(item.get("topic"), 36),
+            "s": _semantic_compress(item.get("summary"), 7),
+            "n": max(0, int(item.get("pair_count") or 0)),
+            "l": _text(item.get("last_message_id"))[:100],
+        }
+        branch_root = _text(item.get("root_message_id"))[:100]
+        if branch_root and branch_root != topic_root:
+            branch["r"] = branch_root
+        if is_active:
+            branch["active"] = True
+            branch["last_user"] = _semantic_compress(item.get("last_user_request"), 7)
+            branch["last_answer"] = _semantic_compress(item.get("last_answer_summary"), 8)
+            branch["steps"] = [
+                {
+                    "i": _text(step.get("message_id"))[:100],
+                    "q": _semantic_compress(step.get("user_request") or step.get("request"), 6),
+                    "a": _semantic_compress(step.get("answer_summary") or step.get("summary"), 7),
+                }
+                for step in (item.get("recent_steps") or [])[-3:]
+                if isinstance(step, dict)
+            ]
+            branch["questions"] = [
+                {
+                    "i": _text(question.get("request_key"))[:70],
+                    "q": _semantic_compress(question.get("request") or question.get("question"), 6),
+                    "o": [_text(output)[:16] for output in (question.get("output_types") or [])[:2]],
+                }
+                for question in (item.get("question_sequence") or [])[-3:]
+                if isinstance(question, dict)
+            ]
+        if branch["i"] or branch["s"] or branch["t"]:
+            branches.append({k: v for k, v in branch.items() if v not in (None, "", [], {}, 0)})
+    # Keep every branch's identity and compact summary; the exact canonical turns remain in PostgreSQL.
+    out["branches"] = branches[:80]
+
+    artifacts = []
+    artifact_sources: list[dict[str, Any]] = []
+    branch_items = [item for item in (value.get("branches") or []) if isinstance(item, dict)]
+    active_branch = next((item for item in branch_items if (
+        active_branch_id and _text(item.get("branch_id")) == active_branch_id
+    )), None)
+    # Exact active-branch assets come first, then a small recent sample from every
+    # sibling branch, then the latest global asset inventory. Binary payloads are
+    # never placed in the context card.
+    if isinstance(active_branch, dict):
+        artifact_sources.extend([
+            item for item in (active_branch.get("artifact_index") or [])[-20:]
+            if isinstance(item, dict)
+        ])
+    for branch_item in branch_items:
+        if branch_item is active_branch:
+            continue
+        artifact_sources.extend([
+            item for item in (branch_item.get("artifact_index") or [])[-1:]
+            if isinstance(item, dict)
+        ])
+    global_artifacts = value.get("artifact_index") if isinstance(value.get("artifact_index"), list) else []
+    artifact_sources.extend([item for item in global_artifacts[-80:] if isinstance(item, dict)])
+    seen_source_assets = set()
+    prioritized_artifact_sources = []
+    for item in artifact_sources:
+        source_key = "|".join((
+            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id") or item.get("asset_message_id")),
+            _text(item.get("source_message_id") or item.get("asset_message_id") or item.get("parent_message_id")),
+            _text(item.get("branch_id")),
+            _text(item.get("kind") or item.get("type") or item.get("artifact_type") or item.get("output_type")),
+        ))
+        if source_key != "|||" and source_key not in seen_source_assets:
+            seen_source_assets.add(source_key)
+            prioritized_artifact_sources.append(item)
+    for item in prioritized_artifact_sources[:80]:
+        if not isinstance(item, dict):
+            continue
+        aid = _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
+                    or item.get("asset_message_id"))[:100]
+        source_id = _text(item.get("source_message_id") or item.get("asset_message_id")
+                           or item.get("parent_message_id"))[:100]
+        branch_id = _text(item.get("branch_id"))[:100]
+        kind = _text(item.get("kind") or item.get("type") or item.get("artifact_type")
+                     or item.get("output_type") or item.get("renderer"))[:28]
+        artifact = {"i": aid, "k": kind, "s": source_id, "b": branch_id}
+        # Detailed metadata belongs on the currently matched branch. Sibling assets retain
+        # their stable source/branch pointers, and can be rehydrated by exact ID on a later turn.
+        if active_branch_id and branch_id == active_branch_id:
+            name = _clip(item.get("filename") or item.get("title") or item.get("name"), 48)
+            desc = _semantic_compress(item.get("description") or item.get("summary")
+                                      or item.get("caption") or item.get("alt"), 4)
+            ref = _clip(item.get("ref") or item.get("url") or item.get("path"), 80)
+            if ref.lower().startswith(("data:", "blob:")):
+                ref = ""
+            if name:
+                artifact["n"] = name
+            if desc:
+                artifact["d"] = desc
+            if ref:
+                artifact["r"] = ref
+            mime = _text(item.get("mime_type"))[:24]
+            if mime:
+                artifact["m"] = mime
+        if aid or source_id:
+            artifacts.append({k: v for k, v in artifact.items() if v not in (None, "", [], {})})
+    out["artifact_index"] = artifacts[:80]
+    out["recent_steps"] = [
+        {
+            "i": _text(step.get("message_id"))[:100],
+            "q": _semantic_compress(step.get("user_request") or step.get("request"), 5),
+            "a": _semantic_compress(step.get("answer_summary") or step.get("summary"), 6),
+            "b": _text(step.get("branch_id"))[:100],
+        }
+        for step in (value.get("recent_steps") or [])[-5:]
+        if isinstance(step, dict)
+    ]
+    source_ids = [_text(item)[:100] for item in (value.get("source_message_ids") or []) if _text(item)]
+    out["source_message_ids"] = list(dict.fromkeys(source_ids[:1] + source_ids[-8:]))
+    return {key: val for key, val in out.items() if val not in (None, "", [], {})}
+
+
 def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: int = 0) -> tuple[str, str, int, str]:
     """Fit system prompt + dynamic JSON card + attachment labels to the token budget."""
     data = json.loads(json.dumps(structured, ensure_ascii=False))
@@ -2338,6 +2482,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 and value not in (None, "", {}, [])
             } if isinstance(data.get("ACTIVE_WORK_BRANCH"), dict) else {},
             "DIALOGUE_COMMUNICATION": data.get("DIALOGUE_COMMUNICATION") or {},
+            "ACTIVE_TOPIC_CONTEXT": _active_topic_context_minimum(data.get("ACTIVE_TOPIC_CONTEXT")),
             "HISTORY_REQUEST": is_history,
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
             "HISTORY_TOPIC_MINIMUM": minimum_topic_count if is_history else 0,
@@ -2627,6 +2772,55 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if externalized_structures:
                 total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
 
+    if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("ACTIVE_TOPIC_CONTEXT"), dict):
+        topic_manifest = minimal["ACTIVE_TOPIC_CONTEXT"]
+        topic_manifest["summary"] = _semantic_compress(topic_manifest.get("summary"), 180)
+        for branch in topic_manifest.get("branches") or []:
+            if isinstance(branch, dict):
+                branch["s"] = _semantic_compress(branch.get("s"), 4)
+                branch["last_user"] = _semantic_compress(branch.get("last_user"), 3)
+                branch["last_answer"] = _semantic_compress(branch.get("last_answer"), 3)
+                branch["steps"] = (branch.get("steps") or [])[-1:]
+                branch["questions"] = (branch.get("questions") or [])[-1:]
+        for asset in topic_manifest.get("artifact_index") or []:
+            if isinstance(asset, dict) and asset.get("b") != topic_manifest.get("active_branch_id"):
+                for detail_key in ("n", "d", "r", "m"):
+                    asset.pop(detail_key, None)
+        topic_manifest["source_message_ids"] = (topic_manifest.get("source_message_ids") or [])[-5:]
+        # Cap per-prompt asset references before the emergency card. Preserve one
+        # resolvable artifact pointer per represented branch, then at most two extra
+        # recent assets from the active branch. The canonical DB and saved manifest
+        # keep the complete asset catalog for future targeted retrieval.
+        asset_rows = [
+            item for item in (topic_manifest.get("artifact_index") or [])
+            if isinstance(item, dict)
+        ]
+        active_id = _text(topic_manifest.get("active_branch_id"))
+        first_by_branch: dict[str, dict[str, Any]] = {}
+        for item in asset_rows:
+            branch_key = _text(item.get("b"))
+            first_by_branch.setdefault(branch_key or "__unknown_branch__", item)
+        one_per_branch = list(first_by_branch.values())
+        active_extra = [
+            item for item in asset_rows
+            if active_id and _text(item.get("b")) == active_id and item not in one_per_branch
+        ][:2]
+        kept_assets = []
+        seen_asset_keys = set()
+        for item in active_extra + one_per_branch + asset_rows:
+            asset_key = "|".join((
+                _text(item.get("i")), _text(item.get("s")), _text(item.get("b")), _text(item.get("k"))
+            ))
+            if asset_key not in seen_asset_keys:
+                seen_asset_keys.add(asset_key)
+                kept_assets.append(item)
+            if len(kept_assets) >= 52:
+                break
+        topic_manifest["artifact_index"] = kept_assets
+        # Branch identities and source IDs stay available even if narrative summaries
+        # must shrink to fit Premium's fixed input budget.
+        card, total = count(system, minimal)
+
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("CONTINUATION_CONTEXT"), list):
         # Preserve the strongest selected pair and the exact protected structures;
         # remove verbose prose/history details from the non-protected context.
@@ -2706,7 +2900,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
-            "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
+            "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
         )
         emergency = {key: minimal[key] for key in essential_keys if key in minimal}
 
@@ -2789,6 +2983,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
         if isinstance(emergency.get("DIALOGUE_TABLE_MARKDOWN"), str):
             emergency["DIALOGUE_TABLE_MARKDOWN"] = _clip(emergency["DIALOGUE_TABLE_MARKDOWN"], 1200) if not emergency.get("DIALOGUE_HISTORY_TOPICS") else ""
+        if isinstance(emergency.get("ACTIVE_TOPIC_CONTEXT"), dict):
+            topic_manifest = emergency["ACTIVE_TOPIC_CONTEXT"]
+            topic_manifest["summary"] = _semantic_compress(topic_manifest.get("summary"), 180)
+            for branch in topic_manifest.get("branches") or []:
+                if isinstance(branch, dict):
+                    branch["s"] = _semantic_compress(branch.get("s"), 4)
+                    branch["last_user"] = _semantic_compress(branch.get("last_user"), 3)
+                    branch["last_answer"] = _semantic_compress(branch.get("last_answer"), 3)
+                    branch["steps"] = (branch.get("steps") or [])[-1:]
+                    branch["questions"] = (branch.get("questions") or [])[-1:]
+            for asset in topic_manifest.get("artifact_index") or []:
+                if isinstance(asset, dict):
+                    for detail_key in ("n", "d", "r", "m"):
+                        if detail_key in asset and asset.get("b") != topic_manifest.get("active_branch_id"):
+                            asset.pop(detail_key, None)
+            topic_manifest["source_message_ids"] = (topic_manifest.get("source_message_ids") or [])[-5:]
+            # Keep source IDs and artifact references as the lossless retrieval map.
         if isinstance(emergency.get("CONTINUATION_GUIDANCE"), dict):
             guidance = emergency["CONTINUATION_GUIDANCE"]
             emergency["CONTINUATION_GUIDANCE"] = {
@@ -3503,6 +3714,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "CONTINUATION_GUIDANCE": continuation_guidance,
         "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
         "ACTIVE_WORK_BRANCH": active_work_branch,
+        "ACTIVE_TOPIC_CONTEXT": memory.get("topic_context") if isinstance(memory.get("topic_context"), dict) else {},
         "DIALOGUE_COMMUNICATION": dialogue_communication,
         "HISTORY_REQUEST": history_request,
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
