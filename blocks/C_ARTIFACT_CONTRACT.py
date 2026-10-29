@@ -2472,74 +2472,18 @@ def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
 
 
 def _electrical_diagram_payload_from_request(request_text: str, answer: str = "") -> Dict[str, Any]:
-    """Build a grounded battery/switch/lamp circuit from an already-routed diagram request.
+    """Deprecated compatibility shim.
 
-    This is a payload adapter, not an intent trigger: callers invoke it only after
-    Interpretation has already requested the diagram renderer. Components are
-    included only when named by the user; a fuse is never silently added.
+    Never infer a specific circuit from keyword co-occurrence. The diagram room
+    must use the interpreted request and model-produced concrete payload; this
+    adapter intentionally returns no payload to prevent historical-topic bleed.
     """
-    text = " ".join((str(request_text or ""), str(answer or ""))).lower().replace("ё", "е")
-    has_battery = bool(re.search(r"аккумулятор\w*|батаре\w*|battery|12\s*[- ]?вольт\w*|12\s*v\b", text, re.I))
-    has_switch = bool(re.search(r"выключател\w*|переключател\w*|switch", text, re.I))
-    has_lamp = bool(re.search(r"лампоч\w*|ламп\w*|светильник\w*|bulb|lamp|light\s*bulb", text, re.I))
-    has_connection_context = bool(re.search(r"схем\w*|подключ\w*|соедин\w*|цеп\w*|провод\w*|wiring|circuit|connect", text, re.I))
-    if not (has_battery and has_switch and has_lamp and has_connection_context):
-        return {}
-
-    explicit_fuse = bool(re.search(r"предохранител\w*|\bfuse\b|\bF\s*\d+\b", str(request_text or ""), re.I))
-    explicitly_without_fuse = bool(re.search(r"без\s+(?:предохранител\w*|fuse)|не\s+(?:нужен|ставь|добавляй)\s+предохранител\w*", str(request_text or ""), re.I))
-    include_fuse = explicit_fuse and not explicitly_without_fuse
-    voltage_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*[- ]?\s*(?:в|вольт\w*|v)\b", text, re.I)
-    voltage = (voltage_match.group(1).replace(",", ".") + " В") if voltage_match else ""
-
-    nodes: List[Dict[str, Any]] = [
-        {"id": "battery", "kind": "power_supply", "symbol": "battery", "label": "Батарея", "voltage": voltage, "terminals": ["+", "−"]},
-    ]
-    if include_fuse:
-        nodes.append({"id": "fuse", "kind": "fuse", "symbol": "fuse", "label": "Предохранитель F1"})
-    nodes.extend([
-        {"id": "switch", "kind": "switch", "symbol": "switch", "label": "Выключатель S1", "state": "unspecified", "terminals": ["вход", "выход"]},
-        {"id": "lamp", "kind": "lamp", "symbol": "lamp", "label": "Лампочка", "voltage": voltage, "terminals": ["+", "−"]},
-    ])
-
-    positive_target = "fuse" if include_fuse else "switch"
-    edges: List[Dict[str, Any]] = []
-    edges.append({"from": "battery", "to": positive_target, "from_terminal": "+", "to_terminal": "вход", "label": "+ питания"})
-    if include_fuse:
-        edges.append({"from": "fuse", "to": "switch", "from_terminal": "выход", "to_terminal": "вход", "label": "после предохранителя"})
-    edges.extend([
-        {"from": "switch", "to": "lamp", "from_terminal": "выход", "to_terminal": "+", "label": "управляемый плюс"},
-        {"from": "lamp", "to": "battery", "from_terminal": "−", "to_terminal": "−", "label": "обратный провод на минус батареи"},
-    ])
-    return {
-        "representation": "electrical_schematic",
-        "diagram_type": "electrical_schematic",
-        "title": "Схема подключения батареи и лампочки",
-        "description": "Плюсовой провод проходит через выключатель; минус лампы соединён напрямую с минусом батареи.",
-        "layout": {"direction": "LR", "responsive": True},
-        "nodes": nodes,
-        "edges": edges,
-        "source": "interpretation_requested_diagram_current_request",
-    }
+    return {}
 
 
 def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
-    """Promote an explicit fenced battery/switch/lamp sketch to structured wiring."""
-    match = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", str(answer or ""), re.IGNORECASE)
-    if not match:
-        return {}
-    drawing = match.group(1)
-    if not re.search(r"аккумулятор|батаре\w*|battery", drawing, re.IGNORECASE):
-        return {}
-    if not re.search(r"(?:выключател|\bS\s*\d+\b|switch)", drawing, re.IGNORECASE):
-        return {}
-    if not re.search(r"(?:лампоч|ламп[аыуе]|светодиод|lamp|bulb|LED)", drawing, re.IGNORECASE):
-        return {}
-    payload = _electrical_diagram_payload_from_request(drawing, drawing)
-    if not payload:
-        return {}
-    payload["source"] = "same_turn_ascii_electrical_schematic"
-    return payload
+    """Do not convert generic prose/ASCII sketches into a guessed circuit."""
+    return {}
 
 
 def _is_ascii_line_chart_fence(text: str) -> bool:
@@ -3676,8 +3620,8 @@ def prepare_render_blocks_for_room_dispatch(
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
-    electrical_diagram_from_answer = _electrical_schematic_payload(source_answer) if "diagram" in requested else {}
-    electrical_diagram_from_request = _electrical_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
+    electrical_diagram_from_answer = {}  # no keyword-based schematic injection
+    electrical_diagram_from_request = {}  # use the interpreted request/payload only
     diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
     if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
         # This code fence is a visual representation of the graph, not source code.
