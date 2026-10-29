@@ -486,6 +486,176 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+
+
+def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dict[str, Any]:
+    """Keep only compact, non-binary artifact metadata for dialogue continuity."""
+    if isinstance(value, str):
+        value = {"name": value}
+    if not isinstance(value, dict):
+        return {}
+    allowed = (
+        "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
+        "mime_type", "asset_role", "source_type", "asset_message_id", "asset_id",
+        "artifact_id", "id", "ref", "url", "path", "size_bytes", "sequence_index",
+        "description", "summary", "alt", "caption", "label", "format", "language",
+    )
+    item: dict[str, Any] = {}
+    for key in allowed:
+        value_part = value.get(key)
+        if value_part in (None, "", [], {}):
+            continue
+        if key in {"url", "path", "ref"}:
+            locator = _text(value_part)
+            if locator.lower().startswith(("data:", "blob:")) or len(locator) > 480:
+                continue
+            item[key] = locator[:480]
+        elif key == "size_bytes":
+            try:
+                item[key] = max(0, int(value_part))
+            except (TypeError, ValueError):
+                continue
+        elif key == "sequence_index":
+            try:
+                item[key] = int(value_part)
+            except (TypeError, ValueError):
+                continue
+        elif key in {"description", "summary"}:
+            item[key] = _text(value_part)[:280]
+        else:
+            item[key] = _text(value_part)[:180]
+    if default_role and not item.get("asset_role"):
+        item["asset_role"] = default_role[:40]
+    if not any(item.get(key) for key in ("filename", "name", "title", "asset_id", "artifact_id", "id", "ref", "url", "path", "kind", "type", "artifact_type", "output_type")):
+        return {}
+    return item
+
+
+def _build_dialogue_thread_context(
+    *,
+    user_id: Any,
+    user_text: str,
+    dialogue_context: dict[str, Any],
+    question_sequence: list[dict[str, Any]],
+    identity: dict[str, Any],
+    attachments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a compact topic→branch index while retaining the existing memory engine."""
+    context = dialogue_context if isinstance(dialogue_context, dict) else {}
+    branch = context.get("active_branch") if isinstance(context.get("active_branch"), dict) else {}
+    anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
+    selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
+    relation = _text(context.get("relation") or "NEW").upper()
+    continuing = relation == "CONTINUE" and bool(anchor or selected)
+    uid = _text(user_id)
+    dialog_id = _text(identity.get("dialog_id") or identity.get("conversation_id"))
+    message_id = _text(identity.get("message_id"))
+    parent_message_id = _text(
+        branch.get("message_id") or anchor.get("message_id") or anchor.get("source_message_id")
+    ) if continuing else ""
+    root_message_id = _text(
+        branch.get("topic_origin_message_id") or anchor.get("topic_origin_message_id")
+        or anchor.get("origin_message_id") or branch.get("origin_message_id")
+    ) if continuing else message_id
+    if continuing and not root_message_id:
+        root_message_id = parent_message_id or message_id
+
+    topic = (
+        _text(branch.get("topic") or anchor.get("topic") or anchor.get("branch_summary")
+              or context.get("active_topic") or user_text)
+        if continuing else _text(user_text)
+    )[:240]
+    persisted_topic_id = _text(
+        branch.get("selected_topic_id") or anchor.get("topic_id")
+        or anchor.get("selected_topic_id") or branch.get("topic_id")
+    )
+    topic_seed = "|".join((uid, dialog_id, root_message_id or message_id, topic.casefold()))
+    topic_id = persisted_topic_id or (
+        "topic-" + hashlib.sha256(topic_seed.encode("utf-8")).hexdigest()[:20]
+    )
+    persisted_branch_id = _text(branch.get("branch_id") or anchor.get("branch_id"))
+    active_work_branch = context.get("active_work_branch") if isinstance(context.get("active_work_branch"), dict) else {}
+    branch_seed = "|".join((uid, dialog_id, topic_id, root_message_id or parent_message_id or message_id))
+    branch_id = persisted_branch_id or (
+        "branch-" + hashlib.sha256(branch_seed.encode("utf-8")).hexdigest()[:20]
+    )
+
+    steps = []
+    for pair in selected[-5:]:
+        if not isinstance(pair, dict):
+            continue
+        pair_id = _text(pair.get("message_id") or pair.get("source_message_id"))
+        steps.append({
+            "message_id": pair_id[:120],
+            "user_request": _text(pair.get("user") or pair.get("user_text"))[:240],
+            "answer_summary": _text(pair.get("april") or pair.get("summary") or pair.get("branch_summary"))[:280],
+            "topic_id": _text(pair.get("topic_id") or topic_id)[:120],
+            "branch_id": _text(pair.get("branch_id") or branch_id)[:120],
+        })
+
+    question_steps = []
+    for item in (question_sequence or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        dialogue_search = item.get("dialogue_search") if isinstance(item.get("dialogue_search"), dict) else {}
+        outputs = item.get("output_types") if isinstance(item.get("output_types"), list) else []
+        question_steps.append({
+            "step_index": item.get("step_index"),
+            "request": _text(item.get("request") or item.get("question") or item.get("text"))[:220],
+            "intent": _text(item.get("semantic_intent") or item.get("intent"))[:80],
+            "relation": _text(dialogue_search.get("relation") or item.get("relation") or "NEW").upper()[:32],
+            "topic": _text(dialogue_search.get("topic") or item.get("topic"))[:140],
+            "output_types": [_text(x)[:40] for x in outputs[:8] if _text(x)],
+        })
+
+    artifact_index = []
+    for pair in selected[-5:]:
+        if not isinstance(pair, dict):
+            continue
+        artifacts = pair.get("artifact_index") if isinstance(pair.get("artifact_index"), list) else []
+        for artifact in artifacts[:6]:
+            descriptor = _dialogue_thread_asset_descriptor(artifact)
+            if descriptor:
+                artifact_index.append(descriptor)
+    for attachment in (attachments or [])[:12]:
+        descriptor = _dialogue_thread_asset_descriptor(attachment, "user_input")
+        if descriptor:
+            artifact_index.append(descriptor)
+    # Keep this index purely descriptive; never copy render payloads or base64 into it.
+    deduped_artifacts = []
+    seen_artifacts = set()
+    for item in artifact_index:
+        key = (
+            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
+                  or item.get("asset_message_id") or item.get("filename") or item.get("name")),
+            _text(item.get("asset_role") or item.get("kind") or item.get("type")),
+        )
+        if key != ("", "") and key not in seen_artifacts:
+            seen_artifacts.add(key)
+            deduped_artifacts.append(item)
+    return {
+        "schema": "april_dialogue_thread_v1",
+        "topic_id": topic_id[:120],
+        "branch_id": branch_id[:120],
+        "topic": topic,
+        "branch_summary": _text(branch.get("branch_summary") or anchor.get("branch_summary") or topic)[:640],
+        "relation": relation,
+        "topic_origin_message_id": root_message_id[:120],
+        "origin_message_id": root_message_id[:120],
+        "parent_message_id": parent_message_id[:120],
+        "last_message_id": message_id[:120],
+        "dialog_id": dialog_id[:120],
+        "active_topic_id": _text(branch.get("active_topic_id") or topic_id)[:120],
+        "selected_topic_id": _text(branch.get("selected_topic_id") or topic_id)[:120],
+        "work_id": _text(active_work_branch.get("work_id"))[:120],
+        "last_action": _text(context.get("user_operation", {}).get("type") if isinstance(context.get("user_operation"), dict) else "")[:100],
+        "request_summary": _text(user_text)[:320],
+        "recent_steps": steps[-5:],
+        "question_sequence": question_steps,
+        "artifact_index": deduped_artifacts[-12:],
+    }
+
+
 def _stable_scene_id(identity: dict[str, str]) -> str:
     """Return one deterministic scene ID for the progressive and final turn payloads.
 
@@ -3595,7 +3765,16 @@ async def execute(
     )
 
     interpretation_started = time.perf_counter()
+    dialogue_thread_context = _build_dialogue_thread_context(
+        user_id=uid,
+        user_text=original or current_text,
+        dialogue_context=dialogue_context,
+        question_sequence=question_sequence,
+        identity=identity,
+        attachments=attachments or [],
+    )
     interpretation_memory = dict(dialogue_context)
+    interpretation_memory["dialogue_thread_context"] = dialogue_thread_context
     # The inline data URI is private to the renderer/reuse branch and must never
     # enter the model prompt, structured card, or response metadata.
     interpretation_memory["restored_assets"] = [
@@ -3666,6 +3845,7 @@ async def execute(
             "window_hours": int(dialogue_context.get("window_hours") or 24),
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
+            "dialogue_thread_context": dict(dialogue_thread_context),
             "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
             "active_branch": dict(dialogue_context.get("active_branch") or {}),
             "active_work_branch": (
@@ -5614,12 +5794,135 @@ async def execute(
         render_blocks=list(response.render_blocks or []),
         artifacts=list(response.artifacts or []),
     )
+
+    # Persist a compact, stable topic→branch trail beside the already-existing
+    # dialogue pair. The binary/artifact payload remains in the established asset
+    # columns; this index contains descriptions and references only.
+    response_summary = _text(
+        response_memory_record.get("summary") or raw.get("summary")
+        or response.summary or answer
+    )[:640]
+    dialogue_thread = dict(dialogue_thread_context)
+    if _text(dialogue_context.get("relation")).upper() == "CONTINUE":
+        thread_topic = _text(dialogue_thread.get("topic") or dialogue_context.get("active_topic") or original or current_text)
+    else:
+        thread_topic = _text(
+            response_memory_record.get("topic") or response_memory_record.get("title")
+            or dialogue_thread.get("topic") or original or current_text
+        )
+    last_action = _text(
+        ((interpretation.get("intent") or {}).get("task"))
+        or ((interpretation.get("intent") or {}).get("action"))
+        or dialogue_thread.get("last_action")
+    )[:100]
+    current_step = {
+        "message_id": _text(identity.get("message_id"))[:120],
+        "user_request": _text(original or current_text)[:240],
+        "answer_summary": response_summary[:280],
+        "topic_id": _text(dialogue_thread.get("topic_id"))[:120],
+        "branch_id": _text(dialogue_thread.get("branch_id"))[:120],
+        "relation": _text(dialogue_context.get("relation") or "NEW").upper()[:32],
+        "requested_outputs": [_text(value)[:40] for value in list(request.requested_outputs or [])[:8] if _text(value)],
+    }
+    recent_steps = [
+        item for item in (dialogue_thread.get("recent_steps") or [])
+        if isinstance(item, dict)
+        and _text(item.get("message_id")) != _text(identity.get("message_id"))
+    ][-5:]
+    recent_steps.append(current_step)
+    artifact_index = [
+        dict(item) for item in (dialogue_thread.get("artifact_index") or [])
+        if isinstance(item, dict)
+    ]
+    for item in (attachment_refs or [])[:12]:
+        descriptor = _dialogue_thread_asset_descriptor(item, "user_input")
+        if descriptor:
+            artifact_index.append(descriptor)
+    for item in (output_asset_refs or [])[:12]:
+        descriptor = _dialogue_thread_asset_descriptor(item, "april_output")
+        if descriptor:
+            artifact_index.append(descriptor)
+    for item in (response.artifacts or [])[:12]:
+        descriptor = _dialogue_thread_asset_descriptor(item, "april_output")
+        if descriptor:
+            artifact_index.append(descriptor)
+    for item in (response.render_blocks or [])[:12]:
+        descriptor = _dialogue_thread_asset_descriptor(item, "render_block")
+        if descriptor:
+            artifact_index.append(descriptor)
+    unique_artifacts = []
+    seen_artifacts = set()
+    for item in artifact_index:
+        artifact_key = (
+            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
+                  or item.get("asset_message_id") or item.get("filename") or item.get("name")
+                  or item.get("title") or item.get("ref")),
+            _text(item.get("asset_role") or item.get("kind") or item.get("type")
+                  or item.get("artifact_type") or item.get("output_type")),
+        )
+        if artifact_key != ("", "") and artifact_key not in seen_artifacts:
+            seen_artifacts.add(artifact_key)
+            unique_artifacts.append(item)
+    prior_branch_summary = _text(dialogue_thread.get("branch_summary"))
+    last_step_summary = (
+        f"Последний шаг: {_text(original or current_text)[:160]} → {response_summary[:260]}"
+    )
+    branch_parts = [thread_topic] if thread_topic else []
+    if prior_branch_summary and prior_branch_summary.casefold() not in thread_topic.casefold():
+        branch_parts.append(prior_branch_summary)
+    if not prior_branch_summary or last_step_summary.casefold() not in prior_branch_summary.casefold():
+        branch_parts.append(last_step_summary)
+    branch_summary = " — ".join(part for part in branch_parts if part)[:640]
+    if len(branch_summary) >= 620:
+        # Keep the topic root and latest development visible when accumulated
+        # summaries would otherwise cut the newest continuation off at the end.
+        branch_summary = f"{thread_topic} — {last_step_summary}"[:640]
+    dialogue_thread.update({
+        "schema": "april_dialogue_thread_v1",
+        "topic": thread_topic[:240],
+        "branch_summary": branch_summary,
+        "topic_id": _text(dialogue_thread.get("topic_id"))[:120],
+        "branch_id": _text(dialogue_thread.get("branch_id"))[:120],
+        "topic_origin_message_id": _text(
+            dialogue_thread.get("topic_origin_message_id") or identity.get("message_id")
+        )[:120],
+        "origin_message_id": _text(
+            dialogue_thread.get("origin_message_id") or dialogue_thread.get("topic_origin_message_id")
+            or identity.get("message_id")
+        )[:120],
+        "parent_message_id": _text(dialogue_thread.get("parent_message_id"))[:120],
+        "last_message_id": _text(identity.get("message_id"))[:120],
+        "last_action": last_action,
+        "request_summary": _text(original or current_text)[:320],
+        "response_summary": response_summary[:480],
+        "recent_steps": recent_steps[-6:],
+        "question_sequence": list(dialogue_thread.get("question_sequence") or [])[:8],
+        "artifact_index": unique_artifacts[-12:],
+    })
+    # The response record is copied before enrichment so the provider's raw
+    # response metadata object is not mutated in-place.
+    response_memory_record = dict(response_memory_record)
+    response_memory_record.update({
+        "topic": thread_topic[:240],
+        "summary": response_summary[:640],
+        "topic_id": dialogue_thread["topic_id"],
+        "branch_id": dialogue_thread["branch_id"],
+        "topic_origin_message_id": dialogue_thread["topic_origin_message_id"],
+        "origin_message_id": dialogue_thread["origin_message_id"],
+        "parent_message_id": dialogue_thread["parent_message_id"],
+        "last_message_id": dialogue_thread["last_message_id"],
+        "last_action": last_action,
+        "recent_steps": recent_steps[-6:],
+        "artifact_index": unique_artifacts[-12:],
+        "dialogue_thread": dialogue_thread,
+    })
     structured_request = _strip_inline_binary({
         "request_id": request.request_id,
         "goal": request.goal,
         "intent": dict(request.intent),
         "conversation": dict(request.conversation),
         "memory": dict(request.memory),
+        "dialogue_thread": dialogue_thread,
         "visual_context": safe_visual_context,
         "attachments": list(attachments or []),
         "attachment_index": attachment_index,
@@ -5653,6 +5956,7 @@ async def execute(
             "april_outputs": output_asset_refs,
         },
         "dialogue_memory_record": response_memory_record,
+        "dialogue_thread": dialogue_thread,
         **({"active_work_branch": active_work_record} if active_work_record else {}),
     })
 
