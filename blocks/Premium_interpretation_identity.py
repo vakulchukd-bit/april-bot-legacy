@@ -419,7 +419,11 @@ def _is_structured_visual_explanation_request(text: Any) -> bool:
         r"show.{0,45}(?:formula|equation).{0,30}(?:visually|in\s+(?:an?\s+)?image|as\s+a\s+diagram)|visuali[sz]e.{0,45}(?:formula|equation))",
         low, re.I | re.S
     ))
-    return visual_explanation and not existing_image and not explicit_new_picture
+    # Formula annotations must not suppress a concrete visual deliverable. If the
+    # current user turn affirmatively asks for an image/illustration, retain that
+    # action and let the normal output planner distinguish raster image from diagram.
+    affirmative_visual_action = _has_affirmative_visual_instruction(low)
+    return visual_explanation and not existing_image and not explicit_new_picture and not affirmative_visual_action
 
 
 def _is_dialogue_based_self_portrait_request(text: str) -> bool:
