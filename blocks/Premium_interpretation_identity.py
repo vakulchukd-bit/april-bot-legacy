@@ -1238,6 +1238,57 @@ def _is_feedback_control_help_request(text: Any) -> bool:
     return feedback_target and interaction_question and not explicit_artifact_creation
 
 
+def _is_object_level_diagram_request(text: Any) -> bool:
+    """Recognize object/connection drawings even when the user omits the noun 'diagram'.
+
+    This is deliberately narrow: it requires a drawing/show action plus a concrete
+    technical or scientific subject. It must not turn arbitrary explanatory prose
+    into a diagram or an Images Generator request.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    visual_action = bool(re.search(
+        r"(?:\b(?:draw|show|display|create|build|render|visuali[sz]e)\b|"
+        r"нарис\w*|покаж\w*|показ\w*|изобраз\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|визуализир\w*)",
+        low, re.IGNORECASE,
+    ))
+    # Only explicit picture/photo language reserves Images Generator. Its broad
+    # drawable-subject heuristic also matches nouns such as "triangle"; those
+    # shapes belong in the structured diagram renderer instead.
+    explicit_image = bool(re.search(
+        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
+        low, re.IGNORECASE,
+    )) or _detect_portrait_request(low)
+    if not visual_action or explicit_image:
+        return False
+
+    # Wiring is a diagram-level task by itself when the request names connected
+    # electrical objects. Two distinct object classes are required to avoid false
+    # positives on ordinary questions about a battery, lamp, or switch.
+    electrical_part = r"(?:батар\w*|аккумулятор\w*|лампоч\w*|ламп\w*|выключател\w*|переключател\w*|провод\w*|предохранител\w*|резистор\w*|battery|accumulator|bulb|lamp|switch|wire|fuse|resistor)"
+    electrical_objects = re.findall(electrical_part, low, flags=re.IGNORECASE)
+    electrical_action = bool(re.search(
+        r"(?:подключ\w*|соедин\w*|провод\w*|замкнут\w*\s+цеп\w*|электрическ\w*\s+цеп\w*|"
+        r"connect\w*|wire\w*|circuit|schematic)", low, re.IGNORECASE,
+    ))
+    if len(electrical_objects) >= 2 and electrical_action:
+        return True
+
+    # Scientific drawing cues: actual shapes, molecular/atomic structures, vectors,
+    # rays, waves, and mechanical objects. A subject noun alone is not enough.
+    drawable_subject = bool(re.search(
+        r"(?:треугольник\w*|квадрат\w*|прямоугольник\w*|окружност\w*|круг\w*|угол\w*|"
+        r"геометрическ\w*\s+фигур\w*|координатн\w*\s+ос\w*|парабол\w*|график\w*\s+функц\w*|"
+        r"молекул\w*|атом\w*|химическ\w*\s+связ\w*|электронн\w*\s+оболоч\w*|"
+        r"вектор\w*|сил\w*\s+тяготен\w*|луч\w*\s+свет\w*|оптическ\w*\s+схем\w*|"
+        r"маятник\w*|волнов\w*\s+процесс\w*|магнитн\w*\s+пол\w*|линз\w*|пружин\w*|"
+        r"triangle\w*|square\w*|rectangle\w*|circle\w*|angle\w*|geometric\s+shape|coordinate\s+axes|"
+        r"parabola\w*|molecule\w*|atom\w*|chemical\s+bond|electron\s+shell|vector\w*|force\s+diagram|"
+        r"light\s+ray|optical\s+diagram|pendulum\w*|wave\s+diagram|magnetic\s+field|lens\w*|spring\w*)",
+        low, re.IGNORECASE,
+    ))
+    return drawable_subject
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -1320,6 +1371,21 @@ def _detect_requested_outputs(text: str) -> list[str]:
     ))
     if explicit_diagram_target and diagram_visual_action and not explicit_image_request and "diagram" not in result:
         result.append("diagram")
+    # A technical drawing can be implicit in a request such as "show me how to
+    # connect the battery, switch and lamp". Do not require the user to know the
+    # renderer's vocabulary, and do not route this to image generation.
+    object_level_diagram = _is_object_level_diagram_request(low)
+    explicit_picture_noun = bool(re.search(
+        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
+        low, re.IGNORECASE,
+    ))
+    if object_level_diagram and not explicit_picture_noun:
+        # Prefer vector/object rendering over inferred image generation for shapes,
+        # molecules, and connection schematics. An explicit request for a picture
+        # still wins and never receives an extra diagram.
+        result = [kind for kind in result if kind != "image"]
+        if "diagram" not in result:
+            result.append("diagram")
 
     # Catch compound/hyphenated programming requests such as "Python-код" even when
     # the exact phrase is absent from the phrase table. A code noun alone is not enough.
@@ -1429,8 +1495,13 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not _has_affirmative_visual_instruction(low)
         and not _is_self_portrait_generation_request(low)
     )
-    explicit_image_request = False if incidental_nonvisual_followup else _detect_image_generation_request(low)
-    portrait_request = False if incidental_nonvisual_followup else _detect_portrait_request(low)
+    object_level_diagram = _is_object_level_diagram_request(low)
+    explicit_picture_noun = bool(re.search(
+        r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
+        low, re.IGNORECASE,
+    ))
+    explicit_image_request = False if (incidental_nonvisual_followup or (object_level_diagram and not explicit_picture_noun)) else _detect_image_generation_request(low)
+    portrait_request = False if (incidental_nonvisual_followup or (object_level_diagram and not explicit_picture_noun)) else _detect_portrait_request(low)
     structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
@@ -1530,6 +1601,14 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     ))
     if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
+    if _is_object_level_diagram_request(low) and "diagram" not in outputs:
+        explicit_picture_noun = bool(re.search(
+            r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фотограф\w*|фото\b|снимок|\b(?:image|picture|photo|illustration)\b)",
+            low, re.IGNORECASE,
+        ))
+        if not explicit_picture_noun:
+            outputs = [kind for kind in outputs if kind != "image"]
+            outputs.append("diagram")
     if (
         visual_action
         and not explicit_diagram_intent
@@ -4323,7 +4402,7 @@ def build_question_sequence(
             "image": r"(?:фотк\w*|фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|иллюстрац\w*|\bphoto\w*|\bimage\w*|\bpicture\w*)",
             "table": r"(?:таблиц\w*|\btable\b)",
             "graph": r"(?:график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b)",
-            "diagram": r"(?:схем\w*|чертеж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b)",
+            "diagram": r"(?:схем\w*|черт[её]ж\w*|диаграмм\w*|\bdiagram\b|\bflowchart\b|\bschematic\b|(?:подключ\w*|соедин\w*|connect\w*|wire\w*).{0,70}(?:батар\w*|аккумулятор\w*|ламп\w*|лампочк\w*|выключател\w*|battery|lamp|bulb|switch)|(?:батар\w*|аккумулятор\w*|ламп\w*|лампочк\w*|выключател\w*|battery|lamp|bulb|switch).{0,70}(?:подключ\w*|соедин\w*|connect\w*|wire\w*))",
             "formula": r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b|\blatex\b)",
             "code": r"(?:код\w*|скрипт\w*|\bcode\b|\bscript\b)",
             "link": r"(?:ссылк\w*|\blink\b|\burl\b)",
