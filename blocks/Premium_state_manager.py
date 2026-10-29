@@ -4505,8 +4505,98 @@ def _query_targets_graph_or_diagram(query: str, query_interpretation: dict[str, 
     ))
 
 
+def _row_has_saved_image_output(row: dict[str, Any]) -> bool:
+    """Check the persisted answer contract for an image April actually returned.
+
+    User-uploaded inputs do not count as output. This distinction lets a follow-up
+    continue from April's generated/edited result instead of accidentally restoring
+    only an unrelated input photo from an older task.
+    """
+    if not isinstance(row, dict):
+        return False
+    _, response, memory_record = _response_and_request_records(row)
+    for owner in (response, memory_record):
+        if not isinstance(owner, dict):
+            continue
+        for key in ("render_blocks", "artifacts", "rendered_artifacts", "outputs"):
+            values = owner.get(key)
+            if isinstance(values, dict):
+                values = list(values.values())
+            if not isinstance(values, (list, tuple)):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                signal = item.get("signal") if isinstance(item.get("signal"), dict) else {}
+                kind = str(
+                    item.get("artifact_type") or item.get("type") or item.get("kind")
+                    or signal.get("artifact_type") or signal.get("type") or ""
+                ).strip().lower()
+                if kind in {"image", "gallery", "generated_image", "image_edit"}:
+                    # The saved response contract represents an output. Explicitly
+                    # input-only asset records are handled below and never qualify.
+                    return True
+        assets = owner.get("asset_payloads") or owner.get("assets") or []
+        if isinstance(assets, dict):
+            assets = list(assets.values())
+        if isinstance(assets, (list, tuple)):
+            for item in assets:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or item.get("artifact_type") or "").strip().lower()
+                role = str(item.get("asset_role") or item.get("role") or "").strip().lower()
+                if kind in {"image", "gallery", "generated_image", "image_edit"} and role not in {"user_input", "input", "source_input"}:
+                    if role in {"april_output", "assistant_output", "generated_output", "edited_output"} or item.get("generated") or item.get("edited"):
+                        return True
+    return False
+
+
+def _is_visual_scene_development_followup(
+    query: str,
+    query_interpretation: dict[str, Any] | None,
+    *,
+    has_image: bool,
+) -> bool:
+    """Resolve an edit/development operation against the current visual branch.
+
+    Prefer the interpretation layer's continuation semantics. The existing image
+    edit detector remains a compatibility path for utterances that explicitly ask
+    for a returned photo but omit a demonstrative image noun (for example, adding
+    an object to the ship and asking for the photo in the same sentence).
+    A new attachment is authoritative and therefore bypasses history re-anchoring.
+    """
+    if has_image or not _text(query):
+        return False
+    interpretation = query_interpretation if isinstance(query_interpretation, dict) else {}
+    if interpretation.get("history_request") or interpretation.get("explicit_topic_switch"):
+        return False
+    if _is_image_discussion_without_new_visual_action(query):
+        return False
+    if _detect_image_modification(query) or _is_explicit_visual_revision_request(query):
+        return True
+
+    primary_intent = _text(interpretation.get("primary_intent")).upper()
+    relation_hint = _text(interpretation.get("relation_hint")).upper()
+    direction = _text(interpretation.get("direction")).upper()
+    feature_map = interpretation.get("features") if isinstance(interpretation.get("features"), dict) else {}
+    pragmatic = interpretation.get("pragmatic_features") if isinstance(interpretation.get("pragmatic_features"), dict) else {}
+    semantically_continues = bool(
+        primary_intent in {"TOPIC_CONTINUATION", "FOLLOW_UP", "CONTINUE"}
+        or relation_hint == "CONTINUE"
+        or direction in {"SEARCH_ACTIVE_OR_REFERENCED_TOPIC", "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"}
+        or feature_map.get("explicit_visual_revision")
+        or pragmatic.get("explicit_visual_revision")
+    )
+    return bool(semantically_continues and _BRANCH_OPERATION_RE.search(_text(query)))
+
+
 def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
-    """Select the nearest prior explicit visual task, not an older semantically similar reply."""
+    """Select the best matching saved visual operation, including AI output-only roots.
+
+    The old recency-only rank could attach a ship edit to an unrelated newer photo.
+    Existing subject/topic similarity now chooses the matching scene first; actual
+    saved image output and recency break ties. No subject vocabulary is hard-coded.
+    """
     low_query = _text(query).lower().replace("ё", "е")
     numeric_query = set(re.findall(r"\d+(?:[.,:]\d+)*", low_query))
     visual_noun = re.compile(r"(?:фото\w*|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)", re.I)
@@ -4515,24 +4605,42 @@ def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) ->
         r"созда\w*|сгенерир\w*|нарис\w*|изобраз\w*|\bedit\w*|\bmodify\w*|\badd\w*|"
         r"\breplace\w*|\bcreate\w*|\bgenerate\w*|\bdraw\w*)", re.I,
     )
-    ranked: list[tuple[int, float, int, dict[str, Any]]] = []
+    query_subjects = _subject_tokens(query)
+    ranked: list[tuple[float, float, int, int, float, int, dict[str, Any]]] = []
     for row in rows or []:
         if not isinstance(row, dict):
             continue
         user_text = _text(row.get("user_text") or row.get("user"))
-        if not user_text or not visual_noun.search(user_text) or not visual_action.search(user_text):
+        if not user_text or not visual_action.search(user_text):
+            continue
+        has_saved_output = _row_has_saved_image_output(row)
+        # Generated image requests such as “Нарисуй корабль в пустыне” do not
+        # necessarily contain the word “photo/image”; the persisted render is
+        # sufficient evidence that this user turn created a visual artifact.
+        if not visual_noun.search(user_text) and not has_saved_output:
             continue
         if _is_image_discussion_without_new_visual_action(user_text):
             continue
+        _, response, memory_record = _response_and_request_records(row)
         row_numbers = set(re.findall(r"\d+(?:[.,:]\d+)*", user_text.lower()))
         numeric_hits = len(numeric_query & row_numbers)
+        row_subjects = _row_subject_tokens(row)
+        subject_fit = _subject_overlap(query_subjects, row_subjects) if query_subjects and row_subjects else 0.0
+        topic_text = " ".join((
+            user_text,
+            _text(row.get("april_text") or row.get("april")),
+            _text(row.get("memory_summary")),
+            _text(memory_record.get("topic")),
+            _text(response.get("summary")),
+        ))
+        topic_fit = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
         timestamp = float(row.get("created_at") or 0.0)
         turn = int(row.get("turn_index") or 0)
-        ranked.append((numeric_hits, timestamp, turn, row))
+        ranked.append((subject_fit, topic_fit, int(has_saved_output), numeric_hits, timestamp, turn, row))
     if not ranked:
         return None
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    return ranked[0][3]
+    ranked.sort(key=lambda item: item[:-1], reverse=True)
+    return ranked[0][-1]
 
 
 def search_dialogue_context(
@@ -4571,9 +4679,12 @@ def search_dialogue_context(
             or query_pragmatic_for_repair.get("explicit_previous_answer_correction")
         )
     )
+    contextual_visual_development = _is_visual_scene_development_followup(
+        query, query_interpretation, has_image=has_image
+    )
     targeted_active_repair = bool(
         retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
-        or explicit_active_restatement
+        or explicit_active_restatement or contextual_visual_development
     )
     state = hydrate(
         uid,
@@ -4621,8 +4732,9 @@ def search_dialogue_context(
                 source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
                 recent_rows=len(same_dialog_rows), reason=(
                     "retrospective_image_feedback" if retrospective_image_discussion else (
+                    "contextual_visual_scene_development" if contextual_visual_development else (
                     "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
-                )
+                ))
                 ),
             )
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
