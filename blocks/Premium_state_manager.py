@@ -4484,6 +4484,27 @@ def _is_visual_misroute_correction(query: Any) -> bool:
     return bool(visual_reference and misroute_correction)
 
 
+def _query_targets_graph_or_diagram(query: str, query_interpretation: dict[str, Any] | None = None) -> bool:
+    """Identify graph/diagram continuation before the image-only anchor selector runs."""
+    interpretation = query_interpretation if isinstance(query_interpretation, dict) else {}
+    # An explicit photo edit must retain its current image workflow even if the
+    # message also discusses an earlier graph; do not let graph vocabulary hijack it.
+    if _is_explicit_visual_revision_request(query):
+        return False
+    outputs = interpretation.get("requested_outputs") or interpretation.get("output_types") or []
+    if isinstance(outputs, str):
+        outputs = [outputs]
+    output_set = {str(value).strip().lower() for value in outputs if str(value).strip()}
+    if output_set.intersection({"graph", "diagram"}):
+        return True
+    low = _text(query).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\b3\s*д\b|тр[её]хмерн\w*|\bgraph\b|\bchart\b|\bplot\b|"
+        r"график\w*|диаграмм\w*|схем\w*|scatterplot|surface\s*plot)",
+        low, re.IGNORECASE,
+    ))
+
+
 def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     """Select the nearest prior explicit visual task, not an older semantically similar reply."""
     low_query = _text(query).lower().replace("ё", "е")
@@ -4578,7 +4599,18 @@ def search_dialogue_context(
             all_rows = sorted(all_rows, key=lambda row: (
                 float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
             ))[-16:]
-        visual_anchor = _select_recent_visual_task_anchor(all_rows, query)
+        explicit_graph_or_diagram_target = _query_targets_graph_or_diagram(query, query_interpretation)
+        visual_anchor = None if explicit_graph_or_diagram_target else _select_recent_visual_task_anchor(all_rows, query)
+        if explicit_graph_or_diagram_target:
+            # The visual-anchor helper is deliberately image-specific. A correction
+            # about a 3D graph/diagram must continue from a saved graph artifact, not
+            # collapse history to the latest photograph operation.
+            _apr_timing_log(
+                "image_anchor_skipped_for_structured_visual_target", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                requested_kinds=["graph_or_diagram"], retained_rows=len(all_rows),
+                reason="preserve_matching_graph_or_diagram_history",
+            )
         if visual_anchor is not None:
             # Re-anchor to the original user task so its asset IDs and typed render
             # data are restored instead of injecting an older, text-similar branch.
