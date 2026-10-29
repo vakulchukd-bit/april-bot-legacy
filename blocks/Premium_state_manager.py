@@ -130,7 +130,10 @@ def load_dialogue_pairs(
             # entitlement without running a broad UPDATE over the whole table.
             # This function only returns an active Premium user's history, so the
             # effective retention is 24 hours even if a legacy row still contains 12.
-            retention_clause = "created_at + INTERVAL '24 hours' > %s"
+            # Keep created_at bare on both range bounds so PostgreSQL can use
+            # idx_dialogue_memory_user_created instead of evaluating an expression
+            # for every retained row. The existing parameter order stays unchanged.
+            retention_clause = "created_at > (%s - INTERVAL '24 hours')"
             params: list[Any] = [owner_ids, current, current]
             params.extend(dialog_params)
             if limit:
@@ -4979,12 +4982,13 @@ def search_dialogue_context(
         # Scoring every large structured row here defeats the fast path and was taking
         # ~43 seconds for 69 rows in the supplied production log.
         scoring_rows = []
-    elif len(rows) > 18 and not needs_full_candidate_rank:
-        # First pass considers every scoped row cheaply; the expensive scoring pass
-        # (partial-string ratios, answer/entity scoring and payload inspection) runs
-        # only on the strongest semantic candidates. The separate history fallback
-        # below scans all retained rows independently, so this is an optimization,
-        # not a limit on the user's searchable history.
+    elif len(rows) > 18:
+        # Keep the complete retained history available to topic/time/history layers,
+        # but bound deep payload scoring to a semantic shortlist. A request for an
+        # image, structured artifact, or continuation must not force every saved
+        # JSON scene to be parsed with expensive fuzzy and payload scoring. Small
+        # scopes still receive full ranking; large scopes use this loss-minimizing
+        # prefilter and explicitly preserve the latest active-dialogue row/anchor.
         query_tokens_light = _semantic_tokens(query)
         lightweight_rank: list[tuple[float, float, dict[str, Any]]] = []
         rank_now = time.time()
@@ -5012,6 +5016,10 @@ def search_dialogue_context(
             seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows}
             if _text(latest_same_dialog_row.get("message_id")) not in seen_scoring_ids:
                 scoring_rows.append(latest_same_dialog_row)
+        if resume_anchor_row is not None:
+            seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows}
+            if _text(resume_anchor_row.get("message_id")) not in seen_scoring_ids:
+                scoring_rows.append(resume_anchor_row)
         light_prefilter_used = True
 
     # Preserve source recall while avoiding a full deep-score pass over every
@@ -5171,7 +5179,14 @@ def search_dialogue_context(
     topics = _build_topic_index(
         all_rows,
         include_sections=needs_section_index,
-        include_structured=needs_structured_search,
+        # On a large retained history, structured fields are deep-scored only for
+        # shortlisted candidates above. A full structured topic-index pass remains
+        # enabled for small scopes and explicit time-window searches where those
+        # payload details are essential; general history inventories stay lightweight.
+        include_structured=bool(
+            needs_structured_search
+            and (len(all_rows) <= 18 or bool(time_filter.get("applied")))
+        ),
         include_pending=history_request,
     )
     requested_limit = query_interpretation.get("requested_topic_count")
@@ -5276,6 +5291,24 @@ def search_dialogue_context(
             key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
             reverse=True,
         )
+        if len(scoped_work_rows) > 18 and not history_request and not time_filter.get("applied"):
+            # Active-work inference inspects nested scene/render payloads. Retain all
+            # rows for semantic/history retrieval, but inspect likely matches and a
+            # recent hot-branch window here rather than parsing every old artifact.
+            shortlist_ids = {
+                _text(row.get("message_id")) for row in scoring_rows if isinstance(row, dict)
+            }
+            recent_work_rows = scoped_work_rows[:8]
+            bounded_work_rows = [
+                row for row in scoped_work_rows
+                if _text(row.get("message_id")) in shortlist_ids
+            ]
+            seen_work_ids = {_text(row.get("message_id")) for row in bounded_work_rows}
+            bounded_work_rows.extend(
+                row for row in recent_work_rows
+                if _text(row.get("message_id")) not in seen_work_ids
+            )
+            scoped_work_rows = bounded_work_rows
         for work_index, work_row in enumerate(scoped_work_rows):
             work_profile = _infer_active_work_branch(work_row)
             if work_profile.get("active"):
