@@ -3458,6 +3458,118 @@ def _geometry_diagram_payload_from_request(
     }
 
 
+def _graph_payload_from_table_3d(
+    table: Dict[str, Any],
+    graph_policy: Dict[str, Any] | None = None,
+    current_request: str = "",
+) -> Dict[str, Any]:
+    """Promote an explicit x/y/z table to a lossless 3D scatter payload.
+
+    This function only returns a 3D payload when the table itself contains three
+    independently named numeric coordinates. It never fabricates a z-axis.
+    """
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    request_text = str(current_request or "").lower().replace("ё", "е")
+    explicit_3d = str(policy.get("mode") or "").lower() in {
+        "explicit_3d", "inferred_spatial_scene", "structured_3d_data"
+    } or bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|3д|тр[её]хмерн\w*|three[- ]dimensional)",
+        request_text, re.IGNORECASE,
+    ))
+    if not explicit_3d or not isinstance(table, dict):
+        return {}
+    columns = table.get("columns") or table.get("headers") or []
+    rows = table.get("rows") or []
+    if not isinstance(columns, list) or len(columns) < 3 or not isinstance(rows, list) or len(rows) < 2:
+        return {}
+
+    def normalized_header(value: Any) -> str:
+        return re.sub(r"[^a-zа-яё0-9]+", " ", str(value or "").lower().replace("ё", "е")).strip()
+
+    headers = [normalized_header(value) for value in columns]
+    axis_indices: dict[str, int] = {}
+    axis_patterns = {
+        "x": re.compile(r"^(?:ось |координата |координаты )?x(?: координата| координаты)?(?: .*)?$|^x axis$"),
+        "y": re.compile(r"^(?:ось |координата |координаты )?y(?: координата| координаты)?(?: .*)?$|^y axis$"),
+        "z": re.compile(r"^(?:ось |координата |координаты )?z(?: координата| координаты)?(?: .*)?$|^z axis$"),
+    }
+    for axis, pattern in axis_patterns.items():
+        found = next((idx for idx, header in enumerate(headers) if pattern.fullmatch(header)), None)
+        if found is None:
+            # Handle common headers such as “X coordinate (day)” while keeping
+            # the axis letter unambiguous and isolated from arbitrary words.
+            found = next((idx for idx, header in enumerate(headers)
+                          if re.search(rf"(?:^|\s){axis}(?:$|\s| coordinate| координат)", header)), None)
+        if found is None:
+            return {}
+        axis_indices[axis] = found
+
+    points: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, (list, tuple)):
+            continue
+        if max(axis_indices.values()) >= len(row):
+            continue
+        xyz = {axis: _number_for_render(row[column_index]) for axis, column_index in axis_indices.items()}
+        if any(value is None for value in xyz.values()):
+            continue
+        point: dict[str, Any] = {axis: value for axis, value in xyz.items()}
+        label_index = next((idx for idx, header in enumerate(headers)
+                            if idx not in axis_indices.values()
+                            and re.search(r"(?:^|\s)(?:точка|point|метка|название|name|label|объект|object)(?:$|\s)", header)), None)
+        if label_index is not None and label_index < len(row) and str(row[label_index] or "").strip():
+            point["label"] = str(row[label_index]).strip()
+        elif row_index < len(rows):
+            point["label"] = str(row_index + 1)
+        points.append(point)
+    if len(points) < 2:
+        return {}
+
+    x_title = str(columns[axis_indices["x"]])
+    y_title = str(columns[axis_indices["y"]])
+    z_title = str(columns[axis_indices["z"]])
+    title = str(table.get("title") or "Трёхмерный график по координатам X, Y, Z")
+    # Discrete rows are points, not a surface grid. scatter3d is the accurate
+    # renderer and preserves the third coordinate all the way into GraphBlock.
+    return {
+        "representation": "scatter3d",
+        "graph_type": "scatter3d",
+        "chart_type": "scatter3d",
+        "dimensions": 3,
+        "three_d": True,
+        "title": title,
+        "description": "Трёхмерные точки построены по значениям X, Y и Z из таблицы.",
+        "series": [{"label": title, "type": "points", "points": deepcopy(points)}],
+        "points": deepcopy(points),
+        "x_values": [point["x"] for point in points],
+        "y_values": [point["y"] for point in points],
+        "z_values": [point["z"] for point in points],
+        "x_axis": {"title": x_title},
+        "y_axis": {"title": y_title},
+        "z_axis": {"title": z_title},
+        "data_table": {"columns": list(columns), "rows": deepcopy(rows)},
+        "graph_policy": deepcopy(policy),
+        "source": "same_turn_markdown_table_xyz",
+    }
+
+
+def _graph_payload_has_z_coordinates(payload: Dict[str, Any]) -> bool:
+    """True when a graph payload contains actual per-point z values."""
+    if not isinstance(payload, dict):
+        return False
+    candidates: list[Any] = [payload.get("points")]
+    for series in payload.get("series") or payload.get("datasets") or payload.get("traces") or []:
+        if isinstance(series, dict):
+            candidates.append(series.get("points"))
+    for points in candidates:
+        if isinstance(points, list) and any(
+            isinstance(point, dict) and _number_for_render(point.get("z")) is not None
+            for point in points
+        ):
+            return True
+    return False
+
+
 def _graph_payload_from_table(table: Dict[str, Any]) -> Dict[str, Any]:
     columns = table.get("columns") or table.get("headers") or []
     rows = table.get("rows") or []
@@ -4379,6 +4491,21 @@ def prepare_render_blocks_for_room_dispatch(
                 payload.setdefault("representation", preferred_3d)
                 payload.setdefault("dimensions", 3)
         if block_type == "graph":
+            table_graph_3d = _graph_payload_from_table_3d(
+                table_from_answer, interpreted_graph_policy, current_request
+            ) if "graph" in requested and table_from_answer else {}
+            if table_graph_3d and not _graph_payload_has_z_coordinates(payload):
+                # The table is the lossless source of coordinates. Prefer it over a
+                # provider's accidental 2D placeholder when the user explicitly asked
+                # for 3D; do not overwrite a graph that already has real z values.
+                for metadata_key in ("title", "description", "caption", "step_index", "step_title"):
+                    if payload.get(metadata_key) not in (None, "", [], {}):
+                        table_graph_3d.setdefault(metadata_key, deepcopy(payload[metadata_key]))
+                payload = table_graph_3d
+                block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
+            if block_type == "graph" and explicit_3d_type:
+                payload.setdefault("representation", "scene3d")
+                payload.setdefault("dimensions", 3)
             payload = _canonicalize_premium_3d_payload(payload, explicit_3d_type=explicit_3d_type)
 
         # Room payloads are hydrated only from evidence already returned for this turn.
@@ -4388,7 +4515,9 @@ def prepare_render_blocks_for_room_dispatch(
                 block["source_room"] = block.get("source_room") or "C_TABLE_ROOM"
         elif block_type == "graph" and not _has_render_payload("graph", payload):
             if "graph" in requested and table_from_answer:
-                candidate_graph = _graph_payload_from_table(table_from_answer)
+                candidate_graph = _graph_payload_from_table_3d(
+                    table_from_answer, interpreted_graph_policy, current_request
+                ) or _graph_payload_from_table(table_from_answer)
                 if candidate_graph:
                     payload = candidate_graph
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
@@ -4472,6 +4601,16 @@ def prepare_render_blocks_for_room_dispatch(
         prepared.append(block)
 
     existing_types = {str(b.get("type") or "").lower() for b in prepared if isinstance(b, dict)}
+    # The provider sometimes returns valid Mermaid in its text answer but omits the
+    # separate DiagramBlock. Parse and promote only that explicit source; otherwise
+    # Scene Contract silently loses a user-requested diagram.
+    if "diagram" in requested and diagram_from_answer and "diagram" not in existing_types:
+        prepared.append({
+            "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
+            "viewer": "DiagramRenderer", "payload": deepcopy(diagram_from_answer),
+            "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_mermaid_source",
+        })
+        existing_types.add("diagram")
     if "diagram" in requested and experiment_steps_from_answer and "diagram" not in existing_types:
         prepared.append({
             "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
@@ -4516,7 +4655,10 @@ def prepare_render_blocks_for_room_dispatch(
         prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_candidate, "source_room": "C_TABLE_ROOM" if table_from_answer else "C_ARTIFACT_CONTRACT"})
         existing_types.add("table")
     if "graph" in requested and "graph" not in existing_types:
-        graph_payload = _graph_payload_from_table(table_from_answer) if table_from_answer else {}
+        graph_payload = (
+            _graph_payload_from_table_3d(table_from_answer, interpreted_graph_policy, current_request)
+            or _graph_payload_from_table(table_from_answer)
+        ) if table_from_answer else {}
         if not graph_payload and section_graph_from_answer:
             graph_payload = deepcopy(section_graph_from_answer)
         if not graph_payload:
