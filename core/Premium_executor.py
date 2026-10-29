@@ -4865,7 +4865,7 @@ async def execute(
                             variant_index=result_index,
                             error=(type(result_item).__name__ if isinstance(result_item, BaseException) else _text((result_item or {}).get("error"))[:100]),
                         )
-        if image_edit_workflow and isinstance(image_result, dict) and image_result.get("image_bytes"):
+        if is_image_edit_operation and isinstance(image_result, dict) and image_result.get("image_bytes"):
             _emit_image_workflow_stage("saving")
         _apr_timing_log(
             "image_edit" if image_intent.get("image_operation") == "edit" else "image_generation",
