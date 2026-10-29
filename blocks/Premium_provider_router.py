@@ -5329,18 +5329,12 @@ async def _repair_requested_diagram(
     # another model call. This code is reached only after Interpretation selected
     # the diagram renderer; it does not classify intent or change room routing.
     try:
-        from blocks.Premium_C_ARTIFACT_CONTRACT import (
-            _electrical_diagram_payload_from_request,
-            _geometry_diagram_payload_from_request,
-        )
+        from blocks.Premium_C_ARTIFACT_CONTRACT import _geometry_diagram_payload_from_request
         from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
-        selected_context_text = "\n".join(
-            f"{item.get('user', '')}\n{item.get('april', '')}" for item in context if isinstance(item, dict)
-        )
-        deterministic_request_context = "\n".join(part for part in (selected_context_text, current_request) if part)
-        deterministic_payload = _electrical_diagram_payload_from_request(deterministic_request_context, answer_context)
-        if not deterministic_payload:
-            deterministic_payload = _geometry_diagram_payload_from_request(deterministic_request_context, answer_context)
+        # Deterministic geometry recovery may inspect only the current user request.
+        # Do not merge historical dialogue or the model's prose into an inferred
+        # physical-system diagram: that caused topic bleed (e.g. old lamp examples).
+        deterministic_payload = _geometry_diagram_payload_from_request(str(current_request or ""), "")
         if isinstance(deterministic_payload, dict) and deterministic_payload:
             deterministic_payload = ensure_readable_diagram_payload(
                 deterministic_payload, title=_text(deterministic_payload.get("title"))
@@ -5395,7 +5389,7 @@ async def _repair_requested_diagram(
         "Return one JSON object only, in this schema: {\\\"diagram\\\": {\\\"title\\\": string, \\\"description\\\": string, \\\"representation\\\": string, \\\"diagram_type\\\": string, \\\"nodes\\\": [], \\\"edges\\\": [], \\\"elements\\\": [], \\\"svg\\\": string, \\\"anchor_text\\\": string}}. "
         "Omit unused optional fields. Create the visual subject requested by CURRENT_REQUEST, resolved with SELECTED_DIALOGUE_CONTEXT only when the current message refers back to it. "
         "Do not redraw the answer outline, headings, paragraphs, or numbered instructions. A diagram is not a paraphrase: draw the subject itself and the meaningful relationships. "
-        "For a connection/wiring drawing, model the actual components and terminals as nodes and the actual wires as edges; use diagram_type='electrical_schematic' and node symbol/kind values such as 'power_supply' or 'lamp' when appropriate. "
+        "For a connection/wiring drawing, model the actual components and terminals as nodes and the actual wires as edges; use diagram_type='electrical_schematic' and grounded component symbols/kinds only when supported by the current request and selected context. "
         "For geometry, output the requested shapes/coordinates; for math, the relevant mathematical structure; for a real process-flow request, concise actions and transitions. "
         "Use supplied numeric values exactly. Do not invent measurements, ratings, components, or causal links. If dimensions are unspecified, mark the drawing as schematic/illustrative. "
         "Prefer nodes+edges with explicit positions and terminal/edge labels, or a complete useful SVG with multiple drawable elements. A text-only title/description is invalid. "
