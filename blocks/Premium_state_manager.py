@@ -3792,6 +3792,14 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
             dict(artifact) for artifact in (thread.get("artifact_index") or [])
             if isinstance(artifact, dict)
         ][:8],
+        "recent_steps": [
+            dict(step) for step in (thread.get("recent_steps") or [])
+            if isinstance(step, dict)
+        ][-6:],
+        "question_sequence": [
+            dict(step) for step in (thread.get("question_sequence") or [])
+            if isinstance(step, dict)
+        ][-8:],
         "topic_origin_at": item.get("topic_origin_at"),
         "topic_last_at": item.get("topic_last_at"),
         "source_message_id": _text(item.get("message_id")),
@@ -4827,13 +4835,21 @@ def _should_probe_hot_branch_first(
         or features.get("explicit_previous_answer_correction")
         or features.get("answer_followup")
         or features.get("topic_reference_fragment")
+        or features.get("strong_anaphoric_reference")
         or _text(profile.get("saved_artifact_followup_kind"))
     )
     return bool(continuation)
 
 
 def _hot_branch_result_is_clear(result: dict[str, Any] | None) -> bool:
-    """Reject weak/default matches so a miss falls through to full history search."""
+    """Accept a grounded hot-branch continuation before doing a history scan.
+
+    Long anaphoric turns may contain many descriptive nouns ("мне в нём всё
+    нравится: сюжет, флора и фауна"), so lexical subject-switch flags alone must
+    not veto a same-dialog antecedent already selected by the active-branch route.
+    Explicit topic switches, topic introductions, conflicting durable topic IDs,
+    and failed/new work roots remain hard boundaries.
+    """
     if not isinstance(result, dict):
         return False
     if (
@@ -4843,9 +4859,8 @@ def _hot_branch_result_is_clear(result: dict[str, Any] | None) -> bool:
         or result.get("topic_closure_barrier")
         or result.get("current_topic_closure")
         or result.get("explicit_topic_switch")
-        or result.get("decision_subject_switch")
-        or result.get("active_subject_conflict")
-        or result.get("self_contained_subject_switch")
+        or result.get("explicit_topic_introduction")
+        or result.get("new_topic_request")
         or not isinstance(result.get("anchor"), dict)
     ):
         return False
@@ -4860,26 +4875,63 @@ def _hot_branch_result_is_clear(result: dict[str, Any] | None) -> bool:
     if not anchor_id or (selected_ids and anchor_id not in selected_ids):
         return False
 
+    dialog_id = _text(result.get("dialog_id"))
+    anchor_dialog_id = _text(anchor.get("dialog_id"))
+    # The hot-only probe is SQL-scoped to this authenticated dialogue. Still check
+    # explicit row provenance when both identifiers are available.
+    if dialog_id and anchor_dialog_id and dialog_id != anchor_dialog_id:
+        return False
+
+    active_branch = result.get("active_branch") if isinstance(result.get("active_branch"), dict) else {}
+    evidence = result.get("routing_evidence") if isinstance(result.get("routing_evidence"), dict) else {}
+    route_decision = _text(result.get("routing_decision")).upper()
+    active_topic_id = _text(active_branch.get("active_topic_id"))
+    selected_topic_id = _text(active_branch.get("selected_topic_id") or anchor.get("topic_id"))
+    # Stable topic identity is authoritative if both sides are present.
+    if active_topic_id and selected_topic_id and active_topic_id != selected_topic_id:
+        return False
+
+    strong_contextual_route = bool(
+        route_decision == "ACTIVE_BRANCH_FIRST"
+        and evidence.get("contextual_antecedent")
+        and (
+            evidence.get("anaphoric_predicate")
+            or result.get("strong_anaphoric_reference")
+            or result.get("topic_reference_fragment")
+            or result.get("contextual_antecedent")
+        )
+        and not result.get("explicit_topic_switch")
+        and not result.get("explicit_topic_introduction")
+        and (not dialog_id or not anchor_dialog_id or dialog_id == anchor_dialog_id)
+    )
+
+    # These switches are often inferred from lexical mismatch between a topic noun
+    # and its attributes, not from a real user-requested topic change. Allow them
+    # only when the same-dialog route has independently grounded an anaphoric
+    # antecedent; explicit switch markers remain hard boundaries above.
+    inferred_subject_switch = bool(
+        result.get("semantic_subject_switch")
+        or result.get("decision_subject_switch")
+        or result.get("self_contained_subject_switch")
+        or result.get("active_subject_conflict")
+    )
+    if inferred_subject_switch and not strong_contextual_route:
+        return False
+    if result.get("unrelated_active_work_topic") and not strong_contextual_route:
+        return False
+
+    if _text(active_branch.get("status")).upper() != "ACTIVE":
+        return False
+    if (not active_topic_id or not selected_topic_id) and not strong_contextual_route:
+        return False
+    if result.get("new_work_root_request") or result.get("historical_task_override"):
+        return False
+
     try:
         confidence = float(result.get("relation_confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    if confidence < 0.42:
-        return False
-
-    active_branch = result.get("active_branch") if isinstance(result.get("active_branch"), dict) else {}
-    active_topic_id = _text(active_branch.get("active_topic_id"))
-    selected_topic_id = _text(active_branch.get("selected_topic_id") or anchor.get("topic_id"))
-    # Skip full history only when both the current hot topic and the chosen anchor
-    # resolve to the same stable topic ID. An old/similar topic must fall through.
-    if (
-        _text(active_branch.get("status")).upper() != "ACTIVE"
-        or not active_topic_id
-        or not selected_topic_id
-        or active_topic_id != selected_topic_id
-        or result.get("new_work_root_request")
-        or result.get("historical_task_override")
-    ):
+    if confidence < 0.42 and not strong_contextual_route:
         return False
 
     return bool(selected or anchor.get("topic") or anchor.get("april") or anchor.get("summary"))
@@ -4909,6 +4961,7 @@ def search_dialogue_context(
     uid = _uid(user_id)
     query_interpretation = dict(query_interpretation or {})
 
+    hot_branch_probe_missed = False
     if not _hot_branch_only and _should_probe_hot_branch_first(
         query, query_interpretation,
         dialog_id=str(dialog_id or ""),
@@ -4962,6 +5015,7 @@ def search_dialogue_context(
                                       != ((hot_result or {}).get("active_branch") or {}).get("selected_topic_id")),
             fallback="FULL_HISTORY",
         )
+        hot_branch_probe_missed = True
 
     retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_visual_revision = _is_explicit_visual_revision_request(query)
@@ -7995,10 +8049,27 @@ def search_dialogue_context(
         or route_features.get("active_branch_repair")
         or route_pragmatic.get("active_branch_repair")
     )
+    route_anaphoric_predicate = bool(
+        not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and re.search(
+            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
+            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|in\s+it|within\s+it|its)\b",
+            _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+        )
+        and re.search(
+            r"\b(?:нрав\w*|понрав\w*|особенн\w*|сюжет\w*|драматург\w*|"
+            r"флор\w*|фаун\w*|показан\w*|запомн\w*|сцен\w*|интересн\w*|"
+            r"красочн\w*|впечатл\w*|like\w*|enjoy\w*|especially|plot|story|shown)\b",
+            _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+        )
+    )
     route_is_contextual = bool(
         route_is_repair
         or route_features.get("context_dependent_question")
         or route_features.get("context_dependent_reaction")
+        or route_features.get("strong_anaphoric_reference")
+        or route_anaphoric_predicate
         or route_features.get("continuation_action")
         or route_features.get("answer_followup")
         or route_features.get("topic_reference_fragment")
@@ -8081,6 +8152,12 @@ def search_dialogue_context(
         and not query_interpretation.get("explicit_topic_switch")
     ):
         route_query_subjects = set()
+    # Do not use pronoun-stripped hot-branch subjects for the history fallback:
+    # those descriptive nouns are the only remaining semantic evidence once the
+    # immediate branch has genuinely failed to match.
+    route_history_subjects = set(route_query_subjects)
+    if route_anaphoric_predicate and query_subjects:
+        route_history_subjects = set(query_subjects)
     route_subject_overlap = _subject_overlap(route_query_subjects, latest_route_subjects) if route_query_subjects and latest_route_subjects else 0.0
     route_subject_conflict = _subject_conflicts(route_query_subjects, latest_route_subjects)
     # An anaphoric question/repair may ask about an attribute whose noun differs
@@ -8091,7 +8168,8 @@ def search_dialogue_context(
         and not query_interpretation.get("explicit_topic_introduction")
         and not query_interpretation.get("explicit_topic_switch")
         and (
-            not query_subjects
+            route_anaphoric_predicate
+            or not query_subjects
             or not route_subject_conflict
             or bool(route_features.get("context_dependent_question"))
         )
@@ -8128,7 +8206,8 @@ def search_dialogue_context(
         and not query_modalities
     )
     prefer_hot_branch = bool(
-        not route_blocked
+        not hot_branch_probe_missed
+        and not route_blocked
         and latest_route_row
         and not query_modalities
         and not query_interpretation.get("explicit_topic_switch")
@@ -8137,7 +8216,7 @@ def search_dialogue_context(
                 not new_work_root_request
                 and (
                     underspecified_turn
-                    or (contextual_antecedent and (not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
+                    or (contextual_antecedent and (route_anaphoric_predicate or not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
                     or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
                 )
             )
@@ -8187,7 +8266,7 @@ def search_dialogue_context(
         route_decision = "ACTIVE_BRANCH_FIRST"
     elif (
         not route_blocked
-        and route_query_subjects
+        and (route_query_subjects or (hot_branch_probe_missed and route_history_subjects))
         and not query_modalities
     ):
         # The active-branch test above has already failed. Search the user's full
@@ -8207,7 +8286,7 @@ def search_dialogue_context(
                 continue
             row_subject_text = search_subject_text(historical_row)
             row_subjects = _subject_tokens(row_subject_text)
-            subject_score = _subject_overlap(route_query_subjects, row_subjects) if row_subjects else 0.0
+            subject_score = _subject_overlap(route_history_subjects, row_subjects) if row_subjects else 0.0
             topic_text = " ".join((row_subject_text, search_topic_label(historical_row)))
             topic_score = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
             # Accept either a grounded subject overlap or a strong topic-phrase hit.
@@ -8601,20 +8680,39 @@ def search_dialogue_context(
         or anchor_thread_meta.get("work_id") or (anchor or {}).get("branch_id")
         or (anchor_payload or {}).get("branch_id") or selected_topic_entry.get("active_branch_id")
     )
+    # An unrelated *work marker* must not erase the distinct conversational topic
+    # when the current turn is a grounded same-dialog anaphoric continuation. Keep
+    # the dialogue branch addressable, while the unrelated artifact/work marker is
+    # still detached from active_work_branch above.
+    preserve_anaphoric_dialogue_branch = bool(
+        relation == "CONTINUE"
+        and latest_same_dialog
+        and contextual_antecedent
+        and route_anaphoric_predicate
+        and not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not new_work_root_request
+        and not history_request
+        and not current_topic_closure
+    )
+    detach_branch_descriptor = bool(
+        new_work_root_request
+        or (unrelated_active_work_topic and not preserve_anaphoric_dialogue_branch)
+    )
     active_branch_descriptor = {
-        "active_topic_id": "" if (new_work_root_request or unrelated_active_work_topic) else active_topic_id[:120],
-        "selected_topic_id": "" if (new_work_root_request or unrelated_active_work_topic) else selected_topic_id[:120],
-        "branch_id": "" if (new_work_root_request or unrelated_active_work_topic) else selected_branch_id[:120],
-        "parent_message_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor_payload or {}).get("parent_message_id") or anchor_thread_meta.get("parent_message_id"))[:120],
-        "status": "NONE" if (new_work_root_request or unrelated_active_work_topic) else ("ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE")),
-        "topic": _text(query)[:240] if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
-        "message_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
-        "dialog_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
-        "topic_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text(selected_topic_id or active_topic_id or (anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:120],
-        "topic_origin_message_id": "" if (new_work_root_request or unrelated_active_work_topic) else _text((anchor or {}).get("topic_origin_message_id") or anchor_thread_meta.get("topic_origin_message_id") or anchor_thread_meta.get("origin_message_id") or selected_topic_entry.get("origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id") or latest_topic_entry.get("origin_message_id"))[:120],
+        "active_topic_id": "" if detach_branch_descriptor else active_topic_id[:120],
+        "selected_topic_id": "" if detach_branch_descriptor else selected_topic_id[:120],
+        "branch_id": "" if detach_branch_descriptor else selected_branch_id[:120],
+        "parent_message_id": "" if detach_branch_descriptor else _text((anchor_payload or {}).get("parent_message_id") or anchor_thread_meta.get("parent_message_id"))[:120],
+        "status": "NONE" if detach_branch_descriptor else ("ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE")),
+        "topic": _text(query)[:240] if detach_branch_descriptor else _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
+        "message_id": "" if detach_branch_descriptor else _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
+        "dialog_id": "" if detach_branch_descriptor else _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
+        "topic_id": "" if detach_branch_descriptor else _text(selected_topic_id or active_topic_id or (anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:120],
+        "topic_origin_message_id": "" if detach_branch_descriptor else _text((anchor or {}).get("topic_origin_message_id") or anchor_thread_meta.get("topic_origin_message_id") or anchor_thread_meta.get("origin_message_id") or selected_topic_entry.get("origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id") or latest_topic_entry.get("origin_message_id"))[:120],
         "semantic_intent_match": bool(semantic_active_branch_intent),
         "subject_conflict_detected": bool(active_subject_conflict),
-        "branch_preserved": bool(not new_work_root_request and not unrelated_active_work_topic and relation == "CONTINUE" and latest_same_dialog),
+        "branch_preserved": bool(not detach_branch_descriptor and relation == "CONTINUE" and latest_same_dialog),
         "hot_work_match": bool(hot_work_followup),
         "hot_work_match_reason": _text(hot_work_match_reason)[:80],
         "work_kind": _text(active_work_branch.get("kind"))[:60],
@@ -8739,6 +8837,7 @@ def search_dialogue_context(
         "routing_decision": route_decision,
         "routing_evidence": {
             "latest_message_id": _text((latest_route_row or {}).get("message_id"))[:120],
+            "anaphoric_predicate": bool(route_anaphoric_predicate),
             "query_subjects": sorted(route_query_subjects)[:12],
             "latest_subjects": sorted(latest_route_subjects)[:12],
             "subject_overlap": round(float(route_subject_overlap), 4),
