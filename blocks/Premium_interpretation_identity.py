@@ -637,6 +637,64 @@ def _has_independent_nonvisual_artifact_request(text: str) -> bool:
     return bool(re.search(r"\b" + action + r"\b.{0,100}\b" + artifact + r"\b", low, re.IGNORECASE | re.DOTALL))
 
 
+def _split_inline_numbered_items(text: str) -> list[str]:
+    """Split a compact inline numbered list only when markers are sequential.
+
+    This handles mobile messages such as ``1 question 2 question 3 question``
+    without treating decimal values, dates, or isolated numbers as list markers.
+    Original item text is preserved apart from its numbering and outer whitespace.
+    """
+    source = _text(text)
+    if not source:
+        return []
+    marker_re = re.compile(r"(?<!\S)(\d{1,2})[.)]?\s+(?=\S)")
+    markers = list(marker_re.finditer(source))
+    if len(markers) < 2 or int(markers[0].group(1)) != 1:
+        return []
+    numbers = [int(match.group(1)) for match in markers]
+    if numbers != list(range(1, len(numbers) + 1)):
+        return []
+    parts: list[str] = []
+    for index, match in enumerate(markers):
+        start = match.end()
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(source)
+        item = source[start:end].strip(" \t\r\n;,-")
+        if not item:
+            return []
+        parts.append(item)
+    return parts if len(parts) >= 2 else []
+
+
+def _is_standalone_assistant_self_question(text: str) -> bool:
+    """Recognize self-contained questions about the assistant, not dialogue repair."""
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    inline_items = _split_inline_numbered_items(low)
+    if inline_items:
+        return all(_is_standalone_assistant_self_question(item) for item in inline_items)
+    if re.search(
+        r"(?:я\s+(?:же\s+)?(?:спрашивал\w*|спросил\w*|просил\w*|попросил\w*)|"
+        r"i\s+(?:already\s+)?(?:asked|requested|told)\s+you)",
+        low, re.IGNORECASE,
+    ):
+        return False
+    if _has_affirmative_visual_instruction(low) or _has_independent_nonvisual_artifact_request(low):
+        return False
+    patterns = (
+        r"\bкак\s+ты\s+(?:себя\s+)?(?:чувству\w*|пожива\w*|жив\w*|дела\b)",
+        r"\bтебе\s+(?:нравит\w*|интересн\w*|хочется|приятно)\b",
+        r"\bчто\s+ты\s+(?:уме\w*|мож\w*|любишь|думаешь|предпочитаешь)\b",
+        r"\bчем\s+ты\s+занимаешься\b",
+        r"\bкак\s+ты\s+работаешь\b",
+        r"\bhow\s+are\s+you\b|\bhow\s+are\s+you\s+feeling\b",
+        r"\bwhat\s+do\s+you\s+(?:like|enjoy|think|prefer)\b",
+        r"\bwhat\s+can\s+you\s+do\b|\bwhat\s+are\s+you\s+able\s+to\s+do\b",
+        r"\bwhat\s+are\s+you\s+doing\s+in\s+your\s+free\s+time\b",
+    )
+    return any(re.search(pattern, low, re.IGNORECASE) for pattern in patterns)
+
+
 def _is_visual_capability_question(text: str) -> bool:
     """Recognize questions about image capabilities without starting an edit job.
 
@@ -669,7 +727,13 @@ def _is_visual_capability_question(text: str) -> bool:
         r"рисова\w*|нарисова\w*|edit\w*|modify\w*|generate\w*|draw\w*|make)\b",
         low, re.IGNORECASE | re.DOTALL,
     ))
-    return asks_about_capability or ability_plus_image
+    asks_about_preference = bool(re.search(
+        r"\bтебе\s+(?:нравит\w*|интересн\w*|хочется)\b.{0,100}"
+        r"\b(?:изменя\w*|редактир\w*|созда\w*|генерир\w*|рисова\w*|фото\b|фотк\w*|"
+        r"картинк\w*|изображени\w*)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    return asks_about_capability or ability_plus_image or asks_about_preference
 
 
 def _is_image_discussion_without_new_visual_action(text: str) -> bool:
@@ -682,6 +746,11 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    inline_items = _split_inline_numbered_items(low)
+    if inline_items:
+        # A single image-related item must not turn an unrelated numbered list into
+        # an image continuation. Apply the detector to each semantic item alone.
+        return all(_is_image_discussion_without_new_visual_action(item) for item in inline_items)
     image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     visual_overlay_noun = bool(re.search(r"(?:стрелк\w*|указател\w*|маркер\w*|подсветк\w*|обводк\w*|callout\w*|pointer|arrow|marker|highlight)", low, re.IGNORECASE))
     visual_feedback_marker = bool(re.search(
@@ -1168,6 +1237,18 @@ def _is_feedback_control_help_request(text: Any) -> bool:
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
+    inline_items = _split_inline_numbered_items(low)
+    if inline_items:
+        merged: list[str] = []
+        for item in inline_items:
+            for output in _detect_requested_outputs(item):
+                if output not in merged:
+                    merged.append(output)
+        if "text" not in merged:
+            merged.insert(0, "text")
+        return merged
+    if _is_standalone_assistant_self_question(low):
+        return ["text"]
     if _is_feedback_control_help_request(low):
         # A route diagram is useful for "where do I click?"; photo/graph/code
         # words in the same sentence are examples of earlier answers, not deliverables.
@@ -1308,6 +1389,19 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     generic style verb alone; this does not invent data or external-source URLs.
     """
     low = _text(text).lower().replace("ё", "е")
+    inline_items = _split_inline_numbered_items(low)
+    if inline_items:
+        merged: list[str] = []
+        for item in inline_items:
+            item_outputs = _enhance_requested_outputs(item, _detect_requested_outputs(item))
+            for output in item_outputs:
+                if output not in merged:
+                    merged.append(output)
+        if "text" not in merged:
+            merged.insert(0, "text")
+        return merged
+    if _is_standalone_assistant_self_question(low):
+        return ["text"]
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     incidental_nonvisual_followup = bool(
         _has_independent_nonvisual_artifact_request(low)
@@ -3294,7 +3388,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
 
     # A compact feature vector makes routing inspectable; values are deterministic
     # feature activations, not neural embeddings or calibrated probabilities.
-    if visual_capability_question and not explicit_topic_switch and not site_navigation_request:
+    if visual_capability_question and not explicit_topic_switch and not site_navigation_request and not explicit_visual_revision:
         primary_intent = "NEW_INFORMATION"
         direction = "ANSWER_NEW_REQUEST"
         topic_reference = "VISUAL_CAPABILITIES"
@@ -3305,6 +3399,52 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 0
         relation_hint = "NEW"
         reason = "visual_capability_question_not_image_edit"
+        context_dependent_question = False
+        context_dependent_reaction = False
+        active_branch_repair = False
+        previous_answer_reference = False
+    elif (
+        _is_standalone_assistant_self_question(source)
+        and not explicit_topic_switch
+        and not site_navigation_request
+        and not history_request
+        and not explicit_visual_revision
+        and not active_branch_repair
+        and not previous_answer_reference
+    ):
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "ASSISTANT_SELF_DESCRIPTION_OR_CAPABILITIES"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "standalone_question_about_assistant_state_or_capabilities"
+        context_dependent_question = False
+        context_dependent_reaction = False
+        active_branch_repair = False
+        previous_answer_reference = False
+        dialogue_act_profile = dict(dialogue_act_profile)
+        dialogue_act_profile.update({
+            "speech_act": "INFORMATION_QUESTION",
+            "communicative_act": "ASK_ABOUT_ASSISTANT",
+            "pragmatic_intent": "assistant_self_description_or_capabilities",
+            "message_function": "answer_standalone_question",
+            "context_dependent_reaction": False,
+            "active_branch_repair": False,
+            "previous_answer_reference": False,
+            "recommended_response_action": "ANSWER_SELF_DESCRIPTION_OR_CAPABILITY",
+        })
+        self_question_pragmatic = dict(dialogue_act_profile.get("pragmatic_features") or {})
+        self_question_pragmatic.update({
+            "has_independent_payload": True,
+            "context_dependent_reaction": False,
+            "active_branch_repair": False,
+            "previous_answer_reference": False,
+        })
+        dialogue_act_profile["pragmatic_features"] = self_question_pragmatic
 
     features = {
         "dialogue_action": bool(dialogue_action),
@@ -3637,6 +3777,21 @@ def _has_explicit_independent_non_ui_action(text: Any) -> bool:
     ))
 
 
+def _is_dependent_tail_action_fragment(text: str) -> bool:
+    """Recognize a trailing "describe/show it" fragment whose object is prior context."""
+    low = _text(text).lower().replace("ё", "е").strip(" \t\r\n,;:")
+    if not low or len(low.split()) > 7:
+        return False
+    return bool(re.fullmatch(
+        r"(?:(?:и|а\s+также|и\s+потом|then|and|also)\s+)?"
+        r"(?:опиши(?:те)?|расскажи(?:те)?|покажи(?:те)?|объясни(?:те)?|поясни(?:те)?|"
+        r"describe|show|tell\s+me|explain)"
+        r"(?:\s+(?:мне|нам|это|его|ее|её|их|об\s+этом|подробнее|детальнее|it|this|that|me|us|more|in\s+detail))*"
+        r"[.!?？]*",
+        low, re.IGNORECASE,
+    ))
+
+
 def _split_request_sequence(text: str) -> list[str]:
     """Find ordered questions/tasks without rewriting or de-duplicating user text.
 
@@ -3744,6 +3899,12 @@ def _split_request_sequence(text: str) -> list[str]:
         # Keep the user's wording intact; presentation_sequence controls render order.
         return [source]
 
+    inline_numbered_items = _split_inline_numbered_items(source)
+    if inline_numbered_items:
+        # Preserve each user-numbered question as its own semantic request. The
+        # executor still assembles them into the same response/scene contract.
+        return inline_numbered_items
+
     lines = [line.strip() for line in source.splitlines() if line.strip()] or [source]
     parts: list[str] = []
     for line in lines:
@@ -3770,7 +3931,16 @@ def _split_request_sequence(text: str) -> list[str]:
             flags=re.IGNORECASE,
         )
         questions = [piece.strip() for piece in boundary_pattern.split(line) if piece.strip()]
-        for question in questions or [line]:
+        # Keep a tail such as "И опиши мне" with the preceding named subject;
+        # sending the fragment to memory separately loses its antecedent and can
+        # redirect it to an unrelated active branch.
+        merged_questions: list[str] = []
+        for question in questions:
+            if merged_questions and _is_dependent_tail_action_fragment(question):
+                merged_questions[-1] = merged_questions[-1].rstrip() + " " + question
+            else:
+                merged_questions.append(question)
+        for question in merged_questions or [line]:
             # A semicolon is an explicit task boundary even when there are only
             # two parts (one separator).
             semicolon_parts = [piece.strip() for piece in re.split(r"\s*;\s*", question) if piece.strip()]
@@ -3780,6 +3950,16 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    # _split_explicit_tasks can find the final imperative after a prior question.
+    # Re-bind tiny objectless actions ("describe it", "show me") to their named
+    # subject after all split passes, so they do not trigger a separate memory route.
+    rebundled: list[str] = []
+    for part in cleaned:
+        if rebundled and _is_dependent_tail_action_fragment(part):
+            rebundled[-1] = rebundled[-1].rstrip() + " " + part
+        else:
+            rebundled.append(part)
+    cleaned = rebundled
     # Modal openers (“Можешь…”, “Можно…”, ASR typo “Можес…”, “Could you…”) are
     # the beginning of the following task, not independent tasks. Merge them before
     # semantic search so one user sentence performs one memory lookup rather than
