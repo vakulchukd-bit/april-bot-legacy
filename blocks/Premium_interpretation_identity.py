@@ -1304,6 +1304,23 @@ def _detect_requested_outputs(text: str) -> list[str]:
         # does not enter this branch and keeps the diagram route.
         result = [kind for kind in result if kind != "diagram"]
 
+    # Keep a diagram request when the user asks for an explanation first and then
+    # asks to show its structure in a scheme. Include both common Russian verb stems
+    # (`покажи` and `показала/показать`) so clause order/inflection does not erase
+    # the visual deliverable. This describes output intent, not a topic-specific trigger.
+    explicit_diagram_target = bool(re.search(
+        r"(?:\b(?:diagram|schematic|blueprint|technical drawing|engineering drawing|flowchart)\b|"
+        r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
+        low, re.IGNORECASE,
+    ))
+    diagram_visual_action = bool(re.search(
+        r"(?:\b(?:draw|show|display|create|build|render|visuali[sz]e)\b|"
+        r"нарис\w*|постро\w*|покаж\w*|показ\w*|отобраз\w*|изобраз\w*|сдела\w*|визуализир\w*)",
+        low, re.IGNORECASE,
+    ))
+    if explicit_diagram_target and diagram_visual_action and not explicit_image_request and "diagram" not in result:
+        result.append("diagram")
+
     # Catch compound/hyphenated programming requests such as "Python-код" even when
     # the exact phrase is absent from the phrase table. A code noun alone is not enough.
     has_code_noun = bool(re.search(
@@ -1498,7 +1515,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # a separate mathematical/data visualization route.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|"
-        r"нарис\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        r"нарис\w*|покаж\w*|показ\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*)(?![\w\u0080-\uffff])",
         low,
     ))
     explicit_diagram_intent = bool(re.search(
