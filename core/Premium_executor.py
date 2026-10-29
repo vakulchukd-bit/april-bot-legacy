@@ -2377,41 +2377,6 @@ def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool
     return False
 
 
-def _is_gratitude_only(text: Any) -> bool:
-    """Recognize pure thanks (optionally naming the delivered artifact), not new work."""
-    value = _text(text).lower().replace("ё", "е")
-    if not value or not re.search(r"(?:спасибо|спасиб\w*|благодар\w*|thank\s+you|thanks|дякую|дяку\w*|merci|gracias)", value):
-        return False
-    # A question, repair/change request, critique or additional instruction is not a pure thanks.
-    task_or_issue = re.search(
-        r"(?:\?|\b(?:исправ\w*|добав\w*|измени?\w*|передел\w*|перестро\w*|покаж\w*|выдай\w*|пришл\w*|создай\w*|построй\w*|объясн\w*|расскажи\w*|продолж\w*|сделай\w*|можешь\b|почему\b|ошиб\w*|плохо\b|неправ\w*|не\s+хвата\w*|пропал\w*|потерял\w*|missing\b|missed\b|lost\b|but\b|however\b|но\b|а\s+теперь\b|again\b|fix\b|add\b|show\b|change\b|edit\b|why\b|how\b))",
-        value,
-    )
-    return not bool(task_or_issue)
-
-
-def _polite_acknowledgement(language: str, user_text: Any = "") -> str:
-    raw_user_text = _text(user_text).lower().replace("ё", "е")
-    if re.search(r"(?:дякую|дяку\w*)", raw_user_text):
-        language = "uk"
-    elif re.search(r"(?:спасибо|спасиб\w*|благодар\w*)", raw_user_text):
-        language = "ru"
-    elif re.search(r"(?:thank\s+you|thanks)", raw_user_text):
-        language = "en"
-    elif re.search(r"merci", raw_user_text):
-        language = "fr"
-    elif re.search(r"gracias", raw_user_text):
-        language = "es"
-    lang = _text(language).lower().split("-", 1)[0]
-    return {
-        "uk": "Будь ласка! Продовжимо, коли буде потрібно.",
-        "en": "You're welcome! We can continue whenever you're ready.",
-        "fr": "Avec plaisir ! Nous pourrons continuer quand vous le souhaitez.",
-        "es": "¡De nada! Podemos continuar cuando lo necesites.",
-        "ru": "Пожалуйста! Продолжим тему, когда понадобится.",
-    }.get(lang, "Пожалуйста! Продолжим тему, когда понадобится.")
-
-
 def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | None:
     payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
     if not payload and isinstance(block.get("spec"), dict):
@@ -3118,20 +3083,6 @@ async def execute(
     memory_started = time.perf_counter()
     semantic_started = time.perf_counter()
     semantic_interpretation = interpret_request_semantics(original or current_text)
-    gratitude_only = _is_gratitude_only(original or current_text)
-    if gratitude_only:
-        # Keep the active branch attached to the turn, without requesting its visual again.
-        semantic_interpretation.update({
-            "primary_intent": "TOPIC_CONTINUATION",
-            "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
-            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
-            "requires_memory": True,
-            "history_request": False,
-            "speech_act": "GRATITUDE_OR_APPRECIATION",
-            "communicative_act": "GRATITUDE_OR_APPRECIATION",
-            "recommended_response_action": "ACKNOWLEDGE_AND_CONTINUE",
-            "reason": "pure_gratitude_reaction_to_previous_turn",
-        })
     _apr_timing_log(
         "semantic_preinterpretation", semantic_started,
         user_key=_apr_diag_ref(uid),
@@ -3217,126 +3168,16 @@ async def execute(
             "features": semantic_interpretation.get("features", {}),
             "context_signature": semantic_interpretation.get("context_signature", {}),
         }
-        # Do not trust a lexical NEW label as proof that the message has no dialogue
-        # dependency. A short named topic (“Einstein”), a requested missing deliverable
-        # (“where are the formulas/examples?”), or a topic-development request can be
-        # related to the last active thread even when it contains no literal trigger.
-        # Let the canonical State Manager inspect the retained Premium window on normal
-        # turns; its subject-conflict, explicit-switch, topic-match and closure checks
-        # decide whether any context is actually safe to pass. Only an explicit switch
-        # to a different topic may bypass this retrieval pass.
-        _single_features = single_semantics.get("features") if isinstance(single_semantics.get("features"), dict) else {}
-        _single_pragmatic = single_semantics.get("pragmatic_features") if isinstance(single_semantics.get("pragmatic_features"), dict) else {}
-        _single_topic_reference = _text(single_semantics.get("topic_reference")).upper()
-        _single_direction = _text(single_semantics.get("direction")).upper()
-        _single_relation_hint = _text(single_semantics.get("relation_hint")).upper()
-        _explicit_context_signal = bool(
-            single_semantics.get("history_request")
-            or single_semantics.get("history_inventory_request")
-            or single_semantics.get("has_explicit_time_window")
-            or single_semantics.get("explicit_topic_switch")
-            or single_semantics.get("active_branch_repair")
-            or single_semantics.get("previous_answer_reference")
-            or single_semantics.get("factual_verification_request")
-            or _single_topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
-            or _single_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
-            or _single_relation_hint in {"CONTINUE", "HISTORY_LOOKUP"}
-            or any(bool(_single_features.get(key)) for key in (
-                "context_dependent_question", "context_dependent_reaction", "topic_reference_fragment",
-                "previous_answer_reference", "active_branch_repair", "selection_followup_candidate",
-                "explicit_previous_answer_correction", "factual_verification_request",
-                "recall_action", "continuation_action", "answer_followup",
-            ))
-            or any(bool(_single_pragmatic.get(key)) for key in (
-                "previous_answer_reference", "active_branch_repair", "deictic_reference",
-                "topic_reference_fragment", "clarification_request", "continuation_request",
-                "revision_request", "factual_verification_request",
-            ))
+        # Every authenticated Premium request, regardless of intent or modality,
+        # reaches the same canonical State Manager. Semantic labels guide relevance
+        # arbitration but never disable history/hot-branch inspection.
+        # Every authenticated Premium request runs the canonical dialogue-memory
+        # search. The manager evaluates current branch, retained history and artifacts
+        # for relevance; no modality or task type is allowed to bypass interpretation.
+        dialogue_context = await asyncio.to_thread(
+            prepare_dialogue_context,
+            uid, current_text, query_interpretation=single_semantics, **search_kwargs
         )
-        explicit_saved_artifact_kind = _explicit_artifact_followup_kind(original or current_text)
-        explicit_saved_artifact_followup = bool(explicit_saved_artifact_kind)
-        semantic_time_window = single_semantics.get("time_window")
-        has_explicit_time_window = bool(
-            single_semantics.get("has_explicit_time_window")
-            or (isinstance(semantic_time_window, dict) and semantic_time_window.get("has_constraint"))
-        )
-        image_edit_workflow = bool(
-            (explicit_saved_artifact_kind == "image" or _detect_image_modification(original or current_text))
-            and not single_semantics.get("history_request")
-            and not has_explicit_time_window
-            and not _text(resume_message_id)
-        )
-        # If the user attached the image and explicitly asks to modify it, that
-        # attachment is the exact source of truth. Searching 24 hours of old image
-        # and scene JSON adds no value and was taking ~58 seconds on an 81-row
-        # history. Keep the canonical memory path for all other requests.
-        attached_image_edit_fast_path = bool(
-            visual_context
-            and image_edit_workflow
-            and _detect_image_modification(original or current_text)
-            and not single_semantics.get("previous_answer_reference")
-            and not single_semantics.get("active_branch_repair")
-            and not (single_semantics.get("pragmatic_features") or {}).get("active_branch_repair")
-        )
-        if image_edit_workflow:
-            _emit_image_workflow_stage("analyzing")
-        if gratitude_only:
-            single_semantics.update({
-                "primary_intent": "TOPIC_CONTINUATION",
-                "requires_memory": True,
-                "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
-                "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
-                "speech_act": "GRATITUDE_OR_APPRECIATION",
-                "recommended_response_action": "ACKNOWLEDGE_AND_CONTINUE",
-            })
-        # Do not bypass the canonical State Manager on a subject/topic switch.
-        # A switched-to subject may have a real older branch; State Manager checks
-        # the latest topic, then matching history, then a clean NEW-topic fallback.
-        skip_memory_search = attached_image_edit_fast_path
-        if skip_memory_search:
-            dialogue_context = {
-                "window_hours": 24,
-                "relation": "NEW",
-                "relation_confidence": 1.0,
-                "active_branch_repair": False,
-                "active_branch": {},
-                "active_work_branch": {},
-                "hot_work_followup": False,
-                "hot_work_match_reason": "",
-                "user_operation": {},
-                "source_retrieval": {},
-                "previous_answer_reference": False,
-                "factual_verification_request": False,
-                "explicit_topic_switch": False,
-                "reason": "attached_image_edit_fast_path",
-                "active_topic": _text(original or current_text)[:140],
-                "selected_pairs": [],
-                "candidates": [],
-                "matches": [],
-                "history_topics": [],
-                "topic_index": [],
-                "known_topic_count": 0,
-                "history_request": False,
-                "contextual_history_match": False,
-                "matched_topic_count": 0,
-                "requested_topic_count": 10,
-                "minimum_topic_count": 0,
-                "time_window": {},
-                "time_filter": {},
-                "topic_table_markdown": "",
-                "anchor": {},
-                "selected_section": {},
-                "clarification_needed": False,
-                "clarification_prompt": "",
-                "pending_clarification": {},
-                "clarification_resolution": {},
-                "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
-            }
-        else:
-            dialogue_context = await asyncio.to_thread(
-                prepare_dialogue_context,
-                uid, current_text, query_interpretation=single_semantics, **search_kwargs
-            )
         if question_sequence:
             question_sequence[0]["dialogue_search"] = _compact_question_search(
                 dialogue_context, current_text, single_semantics
@@ -3355,7 +3196,7 @@ async def execute(
             candidates=len(dialogue_context.get("candidates") or []),
             selected_pairs=len(dialogue_context.get("selected_pairs") or []),
             topic_index_count=len(dialogue_context.get("topic_index") or []),
-            status="attached_image_edit_fast_path" if skip_memory_search else "ok",
+            status="ok",
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
@@ -3374,13 +3215,10 @@ async def execute(
             }
             and not _text(resume_message_id)
         )
-        # Every root clause goes through the canonical hot-branch -> all-history
-        # -> new-topic arbiter. Do not bypass memory merely because the wording is
-        # self-contained or split into several tasks: a self-contained question can
-        # still refer to an earlier branch in this user's retained dialogue history.
-        # Related child clauses reuse the selected parent context below, so this does
-        # not require a second search for every phrase in the same topic.
-        compound_turn_is_new = False
+        # Every root clause goes through the canonical interpreter and State Manager.
+        # A dependent child may reuse a context already selected for its parent, but
+        # there is no NEW-topic or modality-based path that manufactures an empty
+        # dialogue context instead of searching the authenticated user's history.
         # Keep whole-turn meaning alongside each decomposed clause. Search and work-branch
         # compatibility must see that "continue about Newton; tell me facts" is one
         # text-information request, not a command to resume an older image-editing task.
@@ -3484,7 +3322,6 @@ async def execute(
                     and not question_item.get("explicit_topic_switch")
                 )
                 use_current_turn_context = bool(inherits_subject and current_request_subject_context)
-                use_new_root_fast_path = bool(index == 0 and compound_turn_is_new)
                 if reuse_parent_branch_context or reuse_parent_topic_context:
                     # The source pair, topic anchor and asset provenance are shared;
                     # the ordered REQUEST_SEQUENCE still preserves every subtask for
@@ -3497,53 +3334,19 @@ async def execute(
                         "parent_active_branch_context_reuse" if reuse_parent_branch_context
                         else "parent_active_topic_context_reuse"
                     )
-                elif use_current_turn_context or use_new_root_fast_path:
-                    active_subject = _text((current_request_subject_context or {}).get("active_topic") or search_query)[:140]
-                    task_context = {
-                        "window_hours": 24,
-                        "relation": "NEW",
-                        "relation_confidence": 1.0 if use_new_root_fast_path else 0.0,
-                        "active_branch_repair": False,
-                        "active_branch": {},
-                        "active_work_branch": {},
-                        "hot_work_followup": False,
-                        "hot_work_match_reason": "",
-                        "user_operation": {},
-                        "source_retrieval": {},
-                        "previous_answer_reference": False,
-                        "factual_verification_request": False,
-                        "explicit_topic_switch": False,
-                        "reason": "self_contained_new_topic_fast_path" if use_new_root_fast_path else "current_request_subject_inheritance",
-                        "active_topic": active_subject,
-                        "selected_pairs": [],
-                        "candidates": [],
-                        "matches": [],
-                        "history_topics": [],
-                        "topic_index": [],
-                        "known_topic_count": 0,
-                        "history_request": False,
-                        "contextual_history_match": False,
-                        "matched_topic_count": 0,
-                        "requested_topic_count": 10,
-                        "minimum_topic_count": 0,
-                        "time_window": {},
-                        "time_filter": {},
-                        "topic_table_markdown": "",
-                        "anchor": {},
-                        "selected_section": {},
-                        "clarification_needed": False,
-                        "clarification_prompt": "",
-                        "pending_clarification": {},
-                        "clarification_resolution": {},
-                        "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
-                    }
+                elif use_current_turn_context:
+                    # This is not a memory bypass: the parent clause already completed
+                    # the full canonical search, and this child explicitly inherits its
+                    # subject. Reuse that result while keeping the child's own output
+                    # contract and ordered render task.
+                    active_subject = _text(
+                        (current_request_subject_context or {}).get("active_topic") or search_query
+                    )[:140]
+                    task_context = dict(current_request_subject_context or {})
+                    task_context["active_topic"] = active_subject
                     task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    if use_current_turn_context:
-                        task_search["inherits_current_request_subject"] = True
-                        task_search["reason"] = "current_request_subject_inheritance"
-                    else:
-                        task_search["reason"] = "self_contained_new_topic_fast_path"
-                        current_request_subject_context = task_context
+                    task_search["inherits_current_request_subject"] = True
+                    task_search["reason"] = "current_request_subject_inheritance"
                 else:
                     task_context = await asyncio.to_thread(
                         prepare_dialogue_context,
@@ -3809,45 +3612,8 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
-    if gratitude_only:
-        gratitude_intent = interpretation.setdefault("intent", {})
-        gratitude_intent["requested_outputs"] = ["text"]
-        gratitude_intent["task"] = "acknowledge_and_continue"
-        gratitude_intent["wants_image"] = False
-        gratitude_intent["wants_file"] = False
-        gratitude_intent["wants_code"] = False
-        gratitude_intent["wants_graph"] = False
-        gratitude_intent["wants_3d_graph"] = False
-        gratitude_intent["wants_table"] = False
-        gratitude_intent["wants_formula"] = False
-        gratitude_intent["wants_diagram"] = False
-        gratitude_intent["wants_links"] = False
-        for _question_item in question_sequence:
-            if isinstance(_question_item, dict):
-                _question_item["output_types"] = ["text"]
-                _question_item["outputs"] = ["text"]
-    # C_IT_ROOM is the deterministic source for April's own interface map. Do not
-    # make navigation depend on the LLM's semantic classifier: force text + diagram
-    # whenever the current turn asks how to find/use an April screen.
-    try:
-        from blocks.C_IT_ROOM import prepare_site_help_interpretation as _prepare_site_help_interpretation
-        _prepare_site_help_interpretation(interpretation, current_text, question_sequence, dialogue_context)
-    except Exception as _site_interpretation_error:
-        _apr_timing_log("site_help_interpretation_unavailable", None, error=type(_site_interpretation_error).__name__)
-
-    # Bind the user's preferred display name to the already-authenticated ID.
-    # This is prompt metadata only: it does not alter stored message text,
-    # dialogue identity, history, or the canonical chat route.
-    user_display_name = _text(kwargs.get("user_display_name"))[:80]
-    if user_display_name:
-        identity_context = interpretation.setdefault("identity", {})
-        if isinstance(identity_context, dict):
-            identity_context["display_name"] = user_display_name
-
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
-    if gratitude_only:
-        request_structure["presentation_sequence"] = [{"step_index": 1, "output_types": ["text"], "title": "Acknowledgement"}]
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_active_repair"
     request_structure["semantic_interpretation"] = semantic_interpretation
@@ -5362,22 +5128,6 @@ async def execute(
         text_block["content"] = answer
         text_block["text"] = answer
         packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
-
-    if gratitude_only:
-        # User reaction is a dialogue act, not a command to replay the referenced graph,
-        # formula, code, image, or other RenderMessage payload.
-        answer = _polite_acknowledgement(display_language, original or current_text)
-        packaged["answer"] = answer
-        packaged["content"] = answer
-        packaged["summary"] = "Acknowledged the user's thanks and kept the current topic available."
-        packaged["artifacts"] = []
-        packaged["render_blocks"] = [{
-            "type": "text",
-            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-            "content": answer,
-            "text": answer,
-        }]
 
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
