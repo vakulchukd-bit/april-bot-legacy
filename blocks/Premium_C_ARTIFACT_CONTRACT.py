@@ -325,7 +325,15 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
         has_svg = any(str(payload.get(key) or "").strip() for key in ("svg", "svg_payload", "drawing"))
-        if (canonical_nodes and canonical_edges) or has_svg:
+        # Node-only diagrams are valid when the source defines an explicit visual
+        # collection (for example, a Mermaid subgraph containing lab equipment).
+        # Do not invent relationships merely to satisfy an edge-only validator.
+        has_node_composition = len(canonical_nodes) >= 2 and (
+            str(payload.get("format") or "").strip().lower() == "mermaid"
+            or bool(payload.get("groups") or payload.get("subgraphs"))
+            or bool(payload.get("representation") or payload.get("layout"))
+        )
+        if has_node_composition or (canonical_nodes and canonical_edges) or has_svg:
             normalized = ensure_readable_diagram_payload(
                 payload,
                 title=str(payload.get("title") or payload.get("description") or "Схема"),
@@ -3707,33 +3715,83 @@ def _graph_payload_from_table(table: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _mermaid_payload(source: str) -> Dict[str, Any]:
-    """Parse the limited flowchart syntax already emitted by a structured plan."""
+    """Parse concrete Mermaid flowcharts and grouped visual compositions.
+
+    A set of explicitly declared nodes inside a Mermaid subgraph is a drawable
+    composition even when the source contains no arrows. Edges are preserved when
+    supplied, but are never invented just to make a diagram pass validation.
+    """
     text = str(source or "").strip()
-    if not re.search(r"(?im)^\s*(?:flowchart|graph)\s+(?:LR|RL|TB|TD|BT)\b", text):
+    direction_match = re.search(r"(?im)^\s*(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b", text)
+    if not direction_match:
         return {}
     node_labels: Dict[str, str] = {}
     edges: List[Dict[str, Any]] = []
+    groups: List[Dict[str, Any]] = []
+    current_group: Dict[str, Any] | None = None
+    node_group: Dict[str, str] = {}
     # Node declaration/edge forms: A[Label] --> B[Label], A --> B.
     edge_pattern = re.compile(r"([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))?\s*(?:-->|---|-.+?\.->|==>|--\s*[^-]+\s*-->)\s*([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))?")
-    for line in text.splitlines():
-        line = line.strip()
+    subgraph_pattern = re.compile(r"^subgraph\s+([A-Za-z0-9_-]+)(?:\s*\[\s*\"([^\"]+)\"\s*\]|\s*\[([^\]]+)\])?\s*$", re.IGNORECASE)
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         if not line or line.lower().startswith(("flowchart", "graph", "%%")):
+            continue
+        group_match = subgraph_pattern.match(line)
+        if group_match:
+            group_id, quoted_title, plain_title = group_match.groups()
+            current_group = {"id": group_id, "label": (quoted_title or plain_title or group_id).strip(), "nodes": []}
+            groups.append(current_group)
+            continue
+        if line.lower() == "end":
+            current_group = None
             continue
         match = edge_pattern.search(line)
         if match:
             left, left_square, left_round, right, right_square, right_round = match.groups()
             node_labels.setdefault(left, (left_square or left_round or left).replace("<br/>", " ").replace("<br>", " ").strip())
             node_labels.setdefault(right, (right_square or right_round or right).replace("<br/>", " ").replace("<br>", " ").strip())
+            if current_group:
+                node_group.setdefault(left, str(current_group["id"]))
+                node_group.setdefault(right, str(current_group["id"]))
+                for node_id in (left, right):
+                    if node_id not in current_group["nodes"]:
+                        current_group["nodes"].append(node_id)
             edges.append({"from": left, "to": right})
             continue
         declaration = re.match(r"^([A-Za-z0-9_-]+)(?:\[([^\]]+)\]|\(([^\)]+)\))$", line)
         if declaration:
             node_id, square, round_label = declaration.groups()
-            node_labels.setdefault(node_id, (square or round_label or node_id).strip())
-    nodes = [{"id": key, "label": value} for key, value in node_labels.items()]
-    if len(nodes) < 2 or not edges:
+            node_labels.setdefault(node_id, (square or round_label or node_id).replace("<br/>", " ").replace("<br>", " ").strip())
+            if current_group:
+                node_group.setdefault(node_id, str(current_group["id"]))
+                if node_id not in current_group["nodes"]:
+                    current_group["nodes"].append(node_id)
+    nodes = []
+    for key, value in node_labels.items():
+        item = {"id": key, "label": value}
+        if key in node_group:
+            item["group_id"] = node_group[key]
+        nodes.append(item)
+    # A standalone `flowchart LR` is an empty shell, not a drawable payload.
+    # Explicit nodes are enough for an unconnected composition, e.g. objects laid
+    # out in a lab illustration; a connected process retains its edges as given.
+    if len(nodes) < 2:
         return {}
-    return {"source": text, "mermaid": text, "format": "mermaid", "nodes": nodes, "edges": edges, "direction": re.search(r"(?im)^\s*(?:flowchart|graph)\s+(LR|RL|TB|TD|BT)\b", text).group(1)}
+    result = {
+        "source": text,
+        "mermaid": text,
+        "format": "mermaid",
+        "representation": "schematic",
+        "nodes": nodes,
+        "edges": edges,
+        "direction": direction_match.group(1),
+        "layout": {"direction": direction_match.group(1), "rankdir": direction_match.group(1), "responsive": True},
+    }
+    if groups:
+        result["groups"] = groups
+        result.setdefault("title", str(groups[0].get("label") or "Схема"))
+    return result
 
 
 def _experiment_steps_payload(answer: str) -> Dict[str, Any]:
@@ -3972,7 +4030,14 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
                 for item in merged["links"]
             ]
     if block_type == "diagram" and not (merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or merged.get("nodes")):
-        mermaid_source = str(merged.get("mermaid") or merged.get("source") or block.get("mermaid") or "").strip()
+        # Mermaid source is frequently carried as a plain string on the block
+        # envelope, not inside `payload`. Read it before generic aliases are merged
+        # so the canonical parser can convert it to drawable node/edge data.
+        mermaid_source = str(
+            merged.get("mermaid") or merged.get("source") or block.get("mermaid")
+            or block.get("source") or block.get("code") or block.get("content")
+            or block.get("text") or block.get("markdown") or ""
+        ).strip()
         if mermaid_source and re.search(r"(?im)^\s*(?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|mindmap|timeline)\b", mermaid_source):
             parsed_mermaid = _mermaid_payload(mermaid_source)
             if isinstance(parsed_mermaid, dict) and parsed_mermaid:
@@ -4069,10 +4134,17 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         )
     if block_type == "diagram":
         diagram_nodes = p.get("nodes") or p.get("components") or p.get("vertices")
-        diagram_edges = p.get("edges") or p.get("connections") or p.get("relations")
+        # Treat an explicit edge list (including an empty one) as structural
+        # evidence that the producer supplied a diagram rather than an empty shell.
+        has_explicit_edges = any(key in p and isinstance(p.get(key), list) for key in ("edges", "connections", "relations"))
+        has_grouped_nodes = bool(p.get("groups") or p.get("subgraphs"))
+        has_mermaid_structure = str(p.get("format") or "").strip().lower() == "mermaid" and str(p.get("source") or p.get("mermaid") or "").strip()
         return bool(
             str(p.get("svg") or p.get("svg_payload") or p.get("drawing") or "").strip()
-            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and isinstance(diagram_edges, list) and bool(diagram_edges))
+            or (isinstance(diagram_nodes, list) and len(diagram_nodes) >= 2 and (
+                (has_explicit_edges and bool(p.get("edges") or p.get("connections") or p.get("relations")))
+                or (has_explicit_edges and (has_grouped_nodes or has_mermaid_structure or bool(p.get("layout"))))
+            ))
             or (isinstance(p.get("elements"), list) and bool(p["elements"]))
             or (isinstance(p.get("shapes"), list) and bool(p["shapes"]))
         )
@@ -5851,6 +5923,12 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             if linked_to and linked_to in {block_id, str(block.get("id") or "")}:
                 continue
 
+        # For an anchored renderer with a real continuation, the next text
+        # fragment is already the explanation in context. Avoid inserting a
+        # second, synthetic paraphrase between that fragment and the answer.
+        if block.get("_anchor_has_continuation") and isinstance(following, dict) and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}:
+            continue
+
         payload = _render_payload(block)
         explanation = str(_render_block_field(block, payload, "explanation", "render_explanation", "what_it_shows") or "").strip()
         if block_type in {"image", "gallery"} and _looks_like_image_prompt_echo(explanation):
@@ -5926,6 +6004,110 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
     except Exception:
         pass
     return ordered
+
+
+def _set_scene_text_aliases(block: Dict[str, Any], value: str) -> None:
+    """Synchronize visible text aliases without duplicating the full narrative."""
+    text_keys = ("content", "text", "markdown", "display_text")
+    found = False
+    for key in text_keys:
+        if isinstance(block.get(key), str):
+            block[key] = value
+            found = True
+    if not found:
+        block["content"] = value
+    payload = block.get("payload")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload_found = False
+        for key in text_keys:
+            if isinstance(payload.get(key), str):
+                payload[key] = value
+                payload_found = True
+        if not payload_found and any(key in payload for key in ("content", "text", "markdown", "display_text")):
+            payload["content"] = value
+        block["payload"] = payload
+
+
+def _interleave_scene_blocks_by_anchor(blocks: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], bool]:
+    """Place renderer blocks after exact provider-authored anchors in the answer.
+
+    This implements the existing provider contract (`anchor_text` / `insert_after_text`)
+    without topic keywords or new intent triggers. The sentence remains in the left
+    text fragment; the following explanation continues in a distinct fragment.
+    Unmatched anchors are left in their original stream position rather than guessed.
+    """
+    stream = [dict(block) for block in blocks if isinstance(block, dict)]
+    anchored_blocks = [
+        block for block in stream
+        if _scene_block_type(block) not in {"text", "markdown", "message", "message_text"}
+        and not bool(block.get("final_output"))
+        and str(block.get("anchor_text") or block.get("insert_after_text") or (
+            (block.get("payload") or {}).get("anchor_text") if isinstance(block.get("payload"), dict) else ""
+        ) or "").strip()
+    ]
+    changed = False
+    used_ids = {str(b.get("block_id") or b.get("id") or "") for b in stream}
+
+    for visual in anchored_blocks:
+        if not any(candidate is visual for candidate in stream):
+            continue
+        payload = visual.get("payload") if isinstance(visual.get("payload"), dict) else {}
+        anchor = str(visual.get("anchor_text") or visual.get("insert_after_text") or payload.get("anchor_text") or payload.get("insert_after_text") or "").strip()
+        if not anchor or len(anchor) > 260:
+            continue
+        # The anchor must be a unique exact substring of one visible text block.
+        target_index = -1
+        target_text = ""
+        for index, candidate in enumerate(stream):
+            if _scene_block_type(candidate) not in {"text", "markdown", "message", "message_text"}:
+                continue
+            candidate_text = _scene_text(candidate)
+            if candidate_text and candidate_text.count(anchor) == 1:
+                target_index, target_text = index, candidate_text
+                break
+        if target_index < 0:
+            continue
+        end = target_text.find(anchor) + len(anchor)
+        left_text = target_text[:end].rstrip()
+        right_text = target_text[end:].lstrip()
+        target = stream[target_index]
+        base_id = str(target.get("block_id") or target.get("id") or f"text_anchor_{target_index + 1}")
+        left = dict(target)
+        _set_scene_text_aliases(left, left_text)
+        insert_items: List[Dict[str, Any]] = [left, visual]
+        if right_text:
+            # The following provider-authored text is the continuation after this
+            # renderer; it serves as the explanation and should not receive an
+            # automatically generated paraphrase in between.
+            visual["_anchor_has_continuation"] = True
+            right = dict(target)
+            candidate_id = f"{base_id}_continuation_{_scene_hash({'anchor': anchor, 'text': right_text})[:8]}"
+            while candidate_id in used_ids:
+                candidate_id += "_2"
+            used_ids.add(candidate_id)
+            right["block_id"] = candidate_id
+            right.pop("id", None)
+            _set_scene_text_aliases(right, right_text)
+            insert_items.append(right)
+        # Remove the visual at its previous location, then replace the located text.
+        visual_index = next((i for i, candidate in enumerate(stream) if candidate is visual), -1)
+        if visual_index >= 0:
+            stream.pop(visual_index)
+        if visual_index < target_index:
+            target_index -= 1
+        stream[target_index:target_index + 1] = insert_items
+        changed = True
+
+    if changed:
+        # `final_output=true` is already defined by the provider contract as the
+        # terminal item. Keep it terminal after moving anchored renderers in-stream.
+        stream = [item for item in stream if not bool(item.get("final_output"))] + [
+            item for item in stream if bool(item.get("final_output"))
+        ]
+        for item in stream:
+            item["_anchor_order_override"] = True
+    return stream, changed
 
 
 def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
@@ -6053,6 +6235,11 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             for key in payload_text_keys:
                 payload[key] = cleaned_text
 
+    # Honor renderer placement anchors emitted by the provider. This happens only
+    # after invalid render shells are filtered and the cleaned text is synchronized,
+    # so a missing renderer cannot cause its explanatory sentence to disappear.
+    blocks, anchor_order_override = _interleave_scene_blocks_by_anchor(blocks)
+
     # Empty text shells must not mount in Web. The structured renderer remains;
     # useful prose is preserved in `answer` and restored below when necessary.
     blocks = [
@@ -6112,8 +6299,11 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         block["topic_group"] = str(block.get("topic_group") or scene.topic_group or blueprint.get("topic_group") or "").strip()
         block["continuation"] = bool(block.get("continuation", scene.continuation))
         block["render_id"] = str(block.get("render_id") or f"render_{_scene_hash({'scene': scene.scene_id, 'block': block_id, 'renderer': renderer})}")
-        block["sequence_index"] = order_pos.get(block_id, index)
+        block["sequence_index"] = index if anchor_order_override or block.pop("_anchor_order_override", False) else order_pos.get(block_id, index)
+        block.pop("_anchor_order_override", None)
         block["scene_contract"] = True
+        block.pop("_anchor_has_continuation", None)
+        block.pop("_anchor_order_override", None)
         block["signal_version"] = UNIFIED_RENDER_SIGNAL_VERSION
         block_payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
         if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "code", "link", "file", "audio", "video"} and not _scene_payload_has_content(block_type, block_payload, block):
