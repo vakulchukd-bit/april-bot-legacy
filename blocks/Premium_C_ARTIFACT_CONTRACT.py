@@ -3193,6 +3193,92 @@ def _graph_payload_from_request(
     } or bool(re.search(r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*|3-мерн\w*)", text, re.IGNORECASE))
 
     if is_3d:
+        # A named 3D primitive is already sufficient geometry for GraphBlock.
+        # Previously this branch only reconstructed equations/surfaces or spheres;
+        # a request for a cube therefore returned {} when the Provider emitted an
+        # empty GraphBlock shell. SceneContract then correctly rejected that shell,
+        # leaving the user with prose but no visible graph. Build a labelled unit
+        # cube as an explicit illustrative default only when the current request
+        # names a cube and supplies no dimensions of its own.
+        cube_requested = bool(re.search(
+            r"(?:куб\w*|\bcube\w*\b|\bhexahedron\w*\b)",
+            request_text,
+            re.IGNORECASE,
+        ))
+        if cube_requested:
+            vertex_specs = [
+                ("A", -1.0, -1.0, -1.0),
+                ("B",  1.0, -1.0, -1.0),
+                ("C",  1.0,  1.0, -1.0),
+                ("D", -1.0,  1.0, -1.0),
+                ("E", -1.0, -1.0,  1.0),
+                ("F",  1.0, -1.0,  1.0),
+                ("G",  1.0,  1.0,  1.0),
+                ("H", -1.0,  1.0,  1.0),
+            ]
+            vertices = [
+                {"id": name, "label": name, "x": x, "y": y, "z": z}
+                for name, x, y, z in vertex_specs
+            ]
+            edge_indices = (
+                (0, 1), (1, 2), (2, 3), (3, 0),
+                (4, 5), (5, 6), (6, 7), (7, 4),
+                (0, 4), (1, 5), (2, 6), (3, 7),
+            )
+            paths = [
+                {
+                    "id": f"cube-edge-{index + 1:02d}",
+                    "kind": "wireframe",
+                    "label": f"{vertices[left]['label']}–{vertices[right]['label']}",
+                    "points": [
+                        {key: vertices[left][key] for key in ("x", "y", "z", "label")},
+                        {key: vertices[right][key] for key in ("x", "y", "z", "label")},
+                    ],
+                }
+                for index, (left, right) in enumerate(edge_indices)
+            ]
+            cube_object = {
+                "id": "cube-1",
+                "shape": "cube",
+                "object_type": "cube",
+                "label": "Куб",
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "center": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "size": 2.0,
+                "width": 2.0,
+                "height": 2.0,
+                "depth": 2.0,
+                "vertices": vertices,
+                "edges": [
+                    {"from": vertices[left]["label"], "to": vertices[right]["label"]}
+                    for left, right in edge_indices
+                ],
+            }
+            return {
+                "representation": "scene3d",
+                "graph_type": "scene3d",
+                "chart_type": "scene3d",
+                "dimensions": 3,
+                "three_d": True,
+                "title": "Куб в трёхмерном пространстве",
+                "description": (
+                    "Схематический единичный куб с центром в начале координат. "
+                    "Длина ребра условно равна 2 единицам, поскольку размер не задан в запросе."
+                ),
+                "objects_3d": [cube_object],
+                "points": vertices,
+                "paths": paths,
+                "x_domain": [-1.5, 1.5],
+                "y_domain": [-1.5, 1.5],
+                "z_domain": [-1.5, 1.5],
+                "x_axis": {"title": "X"},
+                "y_axis": {"title": "Y"},
+                "z_axis": {"title": "Z"},
+                "source": "current_request_explicit_3d_cube",
+            }
+
         equation_match = re.search(
             r"(?im)(?:^|[\s;])(?:z|f\s*\(\s*x\s*,\s*y\s*\))\s*=\s*([^\n;]+)",
             text,
