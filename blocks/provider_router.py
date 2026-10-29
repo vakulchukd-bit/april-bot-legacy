@@ -23,11 +23,10 @@ from blocks.C_ARTIFACT_CONTRACT import (
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
-# Free has its own output ceiling, deliberately below Premium's 12,000-token cap.
-# Allocate the budget as 80% explanatory text and 20% concrete render payloads.
+# Free keeps its 6,000-token ceiling; text and visuals share it adaptively.
 FREE_OUTPUT_TOKEN_LIMIT = 6000
-FREE_RENDER_TOKEN_BUDGET = int(FREE_OUTPUT_TOKEN_LIMIT * 0.20)
-FREE_TEXT_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT - FREE_RENDER_TOKEN_BUDGET
+FREE_RENDER_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
+FREE_TEXT_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
 INPUT_TOKEN_TARGET = 1800
 MAX_PROMPT_TOKENS = min(1800, max(256, int(os.getenv("APRIL_OPENAI_PROMPT_TOKEN_BUDGET", "1800") or 1800)))
 MAX_TOPIC_PROMPT_TOKENS = max(1, int(MAX_PROMPT_TOKENS * 0.30))
@@ -49,7 +48,7 @@ PER-TURN LANGUAGE AND CROSS-LANGUAGE CONVERSATION:
 USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
 FREE RESPONSE PROFILE (complete, concise, budgeted):
 - Free output ceiling: exactly 6000 output tokens per response attempt. Stay inside the ceiling and finish valid JSON with room to spare.
-- When visual renderers are requested or materially required, target 80% of the output budget for complete explanatory text (up to 4800 tokens) and 20% for concrete render payloads (up to 1200 tokens). This is a target, not a reason to invent visuals or omit required facts.
+- Text and every required visual share the same 6000-token ceiling. There is no fixed text/visual percentage or renderer quota; allocate tokens to the complete requested explanation and all useful concrete renderers, compressing repetition before requested content.
 - Give a clear, useful, complete answer; ordinary informational answers should stay concise. For broad multi-part requests, answer every requested part in order and use short sections. Expand beyond the usual 600–1400-token target only when the request warrants it.
 - Do not repeat the same conclusion in multiple sections or add tangential background. Include a short synthesis only when it helps understanding.
 - Use images and other visual renderers only when explicitly requested by the user or when the task itself requires a structured artifact; do not generate an illustrative image solely to make a routine answer look richer.
@@ -59,7 +58,8 @@ FREE RESPONSE PROFILE (complete, concise, budgeted):
   answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
   the visible answer. `summary` is metadata only and must remain short.
 - Required visual structures belong in separate typed `render_blocks` with concrete payloads.
-- RENDER COVERAGE: when C_ARTIFACT_RENDER_PLAN requests multiple visual outputs, emit a valid typed block for each applicable requested renderer; for four or more requested visual types, never return fewer than half with concrete payloads. Keep about 80% of the output budget for complete explanatory text and up to 20% for concrete visual/render payloads; add visuals alongside the explanation, not in place of it. Concept explanations may use a grounded network graph (representation="network", nodes+edges); numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
+- SEMANTIC DIAGRAM CONTRACT: when the processor requests a diagram, depict the actual subject, components, connections, geometry, dimensions, labels and terminals. Use real physical symbols and high-contrast figures with compact labels and units; if multiple distinct views or independent objects are needed, return multiple diagram blocks with step_index rather than a single outline. For wiring, use real components and electrical connections, not a list of steps. Use a concrete SVG or structured nodes/edges/elements; do not return only headings, boxes and arrows that merely summarize prose. If dimensions are absent, clearly mark a schematic drawing as illustrative rather than inventing measurements. Preserve all requested parts and every separate useful render block.
+- RENDER COVERAGE: honor every requested visual object and output type with its own concrete typed payload when applicable; there is no renderer-count quota and no fixed text/render percentage. Several diagrams, schematics, drawings, graphs, code blocks, images or links may appear in one answer when requested or materially useful. All text and renderers share the single 6000-token ceiling. Keep the explanation complete, and compress repetition/metadata before removing requested elements. Concept explanations may use a grounded network graph (representation="network", nodes+edges); numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
 - Before returning, verify that no requested numbered step or required renderer was omitted.
 
 The processor is authoritative.  It already performed:
@@ -241,7 +241,7 @@ route/memory/identity or expose hidden reasoning.
 `content` may be empty because the canonical normalizer fills it from `answer`. `internal_answer_en`
 is at most one concise sentence, never the hidden place for the full explanation. Keep `summary` short
 and emit required visual structures as typed render blocks.
-Free output ceiling is 6000 tokens. When renderers are needed, target 80% explanatory text (up to 4800 tokens) and 20% concrete render payloads (up to 1200 tokens). When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, provide concrete payloads for them; at least half of four-or-more requested visual types must render. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs. `content` may be empty; the canonical normalizer fills it from the complete `answer`.
+Free output ceiling is 6000 tokens shared by prose and render payloads. There is no fixed text/visual split or renderer-count quota: provide every requested applicable renderer, including multiple diagrams, and compress repetition before requested substance. For non-numeric concepts use a grounded network graph, never fake numeric data. Images need the generator signal; links need real URLs. `content` may be empty; the canonical normalizer fills it from the complete `answer`.
 Use CURRENT_REQUEST as the task. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. For person references, first
 person in USER messages means the authenticated user and first person in APRIL responses means April;
@@ -286,9 +286,7 @@ April Provider: one canonical call; processor owns authenticated identity, memor
 `answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` and the full text render
 block must match it. `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
-concrete payloads and verify all numbered steps before returning. Free output ceiling is 6000 tokens;
-when renderers are needed, target 80% explanatory text (up to 4800 tokens) and 20% render payloads
-(up to 1200 tokens). Multiple visual outputs must cover at least half of four-or-more requested types.
+concrete payloads and verify all numbered steps before returning. Free output ceiling is 6000 tokens shared by prose and render payloads; there is no fixed text/visual split or renderer-count quota. Render every applicable requested visual, including multiple diagrams, and compress repeated prose before requested content.
 Use grounded network graphs for concepts, never invent numeric measurements; images require the
  generator signal and links require real URLs. `content` may be empty and will be filled from `answer`.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
@@ -2003,7 +2001,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "ROOM_KNOWLEDGE_CONTEXT": room_context_min,
             "C_ARTIFACT_RENDER_PLAN": [
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
-                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:4] if isinstance(item, dict)
+                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or []) if isinstance(item, dict)
             ],
             "SCENE_CONTRACT": {
                 "required": True,
@@ -2017,8 +2015,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "application_output_token_limit": FREE_OUTPUT_TOKEN_LIMIT,
                 "response_style": "free_concise_complete_with_visuals",
                 "detail_level": "concise_but_complete",
-                "text_share_target_percent": 80,
-                "visual_share_target_percent": 20,
+                "text_share_target_percent": "adaptive_no_fixed_share",
+                "visual_share_target_percent": "adaptive_no_fixed_share",
+                "renderer_quota": "none",
+                "allocation_policy": "all_requested_text_and_visuals_share_one_6000_token_ceiling; compress_repetition_before_requested_content",
                 "explanation_answer_token_budget": FREE_TEXT_TOKEN_BUDGET,
                 "render_payload_token_budget": FREE_RENDER_TOKEN_BUDGET,
                 "render_budget_included_in_total": True,
@@ -2805,7 +2805,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "links": "provide real destinations with a brief explanation of relevance",
         },
         "preserve_each_explicitly_requested_renderer": True,
-        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its quota. Never create a renderer merely to meet a quota.",
+        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its shared 6000-token ceiling. Never create a renderer merely to meet a quota.",
         "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
     }
 
@@ -2931,8 +2931,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "application_output_token_limit": FREE_OUTPUT_TOKEN_LIMIT,
             "response_style": "free_concise_complete_with_visuals",
             "detail_level": "concise_but_complete",
-            "text_share_target_percent": 80,
-            "visual_share_target_percent": 20,
+            "text_share_target_percent": "adaptive_no_fixed_share",
+            "visual_share_target_percent": "adaptive_no_fixed_share",
+            "renderer_quota": "none",
+            "allocation_policy": "all_requested_text_and_visuals_share_one_6000_token_ceiling; compress_repetition_before_requested_content",
             "explanation_answer_token_budget": FREE_TEXT_TOKEN_BUDGET,
             "render_payload_token_budget": FREE_RENDER_TOKEN_BUDGET,
             "render_budget_included_in_total": True,
@@ -3501,6 +3503,22 @@ def normalize_render_blocks(
         item.setdefault("renderer", renderer)
         item.setdefault("viewer", viewer)
         if block_type == "diagram":
+            diagram_keys = {
+                "title", "description", "representation", "diagram_type", "format", "layout", "direction",
+                "nodes", "components", "edges", "connections", "relations", "segments", "elements",
+                "drawing_elements", "drawingElements", "shapes", "primitives", "points", "vertices", "geometry",
+                "dimensions", "annotations", "labels", "legend", "states", "notes", "caption", "svg", "svg_payload",
+                "drawing", "mermaid", "source", "anchor_text", "linked_formula", "renderer",
+            }
+            nested_payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            if not nested_payload and isinstance(item.get("spec"), dict):
+                nested_payload = item.get("spec")
+            direct_payload = {key: value for key, value in item.items() if key in diagram_keys and value not in (None, "", [], {})}
+            normalized_payload = {**direct_payload, **nested_payload}
+            if normalized_payload:
+                item["payload"] = normalized_payload
+                for key, value in normalized_payload.items():
+                    item.setdefault(key, value)
             _diagram_payload = item.get("payload") if isinstance(item.get("payload"), dict) else item.get("data") if isinstance(item.get("data"), dict) else {}
             if any(isinstance(_diagram_payload.get(key), str) and _diagram_payload.get(key).strip().lower().startswith("<svg") for key in ("svg", "svg_payload", "drawing")):
                 item["renderer"] = "SvgBlock"
