@@ -813,6 +813,27 @@ def _detect_image_modification(text: str) -> bool:
     explicit_edit_action = bool(re.search(rf"\b{edit_action}\b", low, re.IGNORECASE))
     if generic_canvas_creation and not explicit_edit_action and not specific_source:
         return False
+
+    # Displaying or sending an image is an output request, not an edit operation.
+    # Treat it as modification only when the message also names a concrete mutation
+    # (add/remove/change/mark/highlight) or an explicitly requested overlay.
+    delivery_only_verb = bool(re.search(
+        r"\b(?:show|display|send|share|deliver|покаж\w*|показ\w*|пришл\w*|отправ\w*|выдай\w*|дай)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_overlay_request = bool(re.search(
+        r"(?:стрелк\w*|указател\w*|маркер\w*|подсветк\w*|обводк\w*|надпис\w*|"
+        r"arrow\w*|pointer\w*|marker\w*|highlight\w*|label\w*|callout\w*)",
+        low, re.IGNORECASE,
+    ))
+    if (
+        delivery_only_verb
+        and re.search(image_target, low, re.IGNORECASE)
+        and not explicit_edit_action
+        and not explicit_overlay_request
+    ):
+        return False
+
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
         # Bare "draw on image" markers are overridden above; the remaining
         # markers describe actual mutation/edit operations.
@@ -870,7 +891,7 @@ def _detect_image_generation_request(text: str) -> bool:
     if self_portrait:
         return True
 
-    action = r"(?:draw|show|display|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
+    action = r"(?:draw|show|display|create|make|generate|render|send|share|deliver|нарис\w*|покаж\w*|показ\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*|пришл\w*|отправ\w*|выдай\w*|дай)"
     image_noun = r"(?:picture|image|illustration|photo|картинк\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
@@ -901,6 +922,21 @@ def _detect_image_generation_request(text: str) -> bool:
         or re.search(coordinated_before, low, flags=re.IGNORECASE)
     )
     if explicit_image_noun_action:
+        return True
+
+    # A coordinated fresh-topic request may mention images first and ask to show
+    # them only in the final clause. This is a new deliverable, not an edit of a
+    # saved artifact; require an explicit topic introduction plus delivery verb.
+    trailing_visual_delivery = bool(
+        _has_explicit_topic_introduction(low)
+        and re.search(image_noun, low, re.IGNORECASE)
+        and re.search(
+            r"\b(?:пришл\w*|отправ\w*|выдай\w*|дай|покаж\w*|показ\w*|send|share|show|display)\b",
+            low, re.IGNORECASE,
+        )
+        and not _detect_image_modification(low)
+    )
+    if trailing_visual_delivery:
         return True
 
     # "Draw a tractor/model/person" is an image request even when the user does
@@ -1033,11 +1069,14 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
     # Possessives describe the subject of a new deliverable; they do not by
     # themselves identify a previously rendered artifact. Reuse needs an actual
     # saved-item reference or a clear edit/extension operation.
+    artifact_pattern = next((pattern for name, pattern in artifact_patterns if name == kind), r"(?!)")
+    # Demonstratives must refer to the artifact noun itself; "этот фестиваль"
+    # does not refer to a previously generated picture in the same sentence.
     saved_reference = bool(re.search(
-        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
-        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
-        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
-        low, re.IGNORECASE,
+        rf"(?:\b(?:этот|эта|эту|этой|эти|this|that|same|previous|earlier)\s+(?:[\w-]+\s+){{0,2}}{artifact_pattern}|"
+        rf"(?:^|\b)(?:снова|ещё?\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*)\b.{{0,45}}{artifact_pattern}|"
+        rf"{artifact_pattern}.{{0,45}}\b(?:снова|ещё?\s+раз|again|once\s+more)\b)",
+        low, re.IGNORECASE | re.DOTALL,
     ))
     return kind if (edit_or_extend or saved_reference) else ""
 
@@ -1921,7 +1960,7 @@ def _has_explicit_topic_switch(text: str) -> bool:
         return True
     # “Теперь про X” is a branch change when X is explicitly named. Do not
     # interpret an ordinary continuation preface (“а теперь объясни это”) as one.
-    return bool(re.search(
+    named_topic_switch = bool(re.search(
         r"(?:^|[.!?;:]\s*)теперь\s+(?:о|про|об|обо)\s+"
         r"(?!него\b|неё\b|нее\b|ней\b|ним\b|нем\b|нём\b|них\b|"
         r"мне\b|нас\b|это\b|этого\b|этой\b|этот\b|этом\b|эту\b|эти\b|"
@@ -1929,6 +1968,19 @@ def _has_explicit_topic_switch(text: str) -> bool:
         low,
         flags=re.IGNORECASE,
     ))
+    if named_topic_switch:
+        return True
+    # In a compound request, "и теперь покажи новую картинку фестиваля" is a
+    # switch when the new asset is explicitly named as new and belongs to a
+    # different subject. Deictic requests ("покажи эту картинку ещё раз") remain
+    # continuations and are handled by artifact-reference semantics instead.
+    fresh_visual_subject = bool(
+        re.search(r"\b(?:и\s+)?теперь\b", low, re.IGNORECASE)
+        and re.search(r"\b(?:нов\w*|друг\w*)\s+(?:картинк\w*|изображен\w*|фото\b|фотограф\w*|иллюстрац\w*|график\w*|таблиц\w*)", low, re.IGNORECASE)
+        and not re.search(r"\b(?:эту|это|этот|эта|эти|предыдущ\w*|такую|такой|снова|опять|ещё?\s+раз|его|её|ее|их|this|that|previous|again)\b", low, re.IGNORECASE)
+        and bool(re.search(r"\b(?:фестивал\w*|праздник\w*|гагауз\w*|премиум|график\w*|таблиц\w*)\b", low, re.IGNORECASE))
+    )
+    return fresh_visual_subject
 
 
 
@@ -2442,7 +2494,7 @@ def _infer_dialogue_act_profile(
         "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
         "ты путаешь", "ты что-то путаешь", "ты шо-то путаешь", "ты опять путаешь",
         "я тебе про", "какие зайчики", "какие еще зайчики", "какие ещё зайчики",
-        "я просил", "я просила", "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "я просил", "я просила", "я же просил", "я же просила", "я попросил", "я попросила", "я же попросил", "я же попросила", "ты должен был", "ты должна была",
         "not what i asked", "you misunderstood", "you did not understand", "you mixed it up", "you got it mixed up", "i don't understand", "i do not understand",
         "you don't understand me", "you do not understand me", "i hate this", "i hate it", "this is annoying",
         "i'm frustrated", "im frustrated", "doesn't work", "does not work",
@@ -2460,7 +2512,7 @@ def _infer_dialogue_act_profile(
         "не про это спрашивала", "я не это спрашивал", "я не это спрашивала",
         "not that", "not what i meant", "i meant", "that's not right",
         "ты все напутал", "ты всё напутал", "ты напутал", "ты перепутал", "ты перепутала",
-        "я же просил", "я же просила", "ты должен был", "ты должна была",
+        "я же просил", "я же просила", "я попросил", "я попросила", "я же попросил", "я же попросила", "ты должен был", "ты должна была",
         "я просил выдать", "я просила выдать", "я просил дать", "я просила дать",
         "you mixed it up", "you got it mixed up", "you were supposed to",
     )
@@ -2496,7 +2548,7 @@ def _infer_dialogue_act_profile(
     explicit_previous_answer_correction = bool(re.search(
         r"\b(?:ты\s+(?:все|всё)\s+напутал\w*|ты\s+перепутал\w*|"
         r"ты\s+(?:что|шо)[- ]?то\s+путаешь|ты\s+путаешь|ты\s+опять\s+путаешь|"
-        r"я\s+(?:же\s+)?просил\w*|ты\s+(?:должен\s+был|должна\s+была)|"
+        r"я\s+(?:же\s+)?(?:по)?просил\w*|я\s+(?:же\s+)?(?:по)?просила\w*|ты\s+(?:должен\s+был|должна\s+была)|"
         r"не\s+то,?\s+что\s+я\s+просил\w*|you\s+(?:mixed\s+it\s+up|got\s+it\s+mixed\s+up)|"
         r"you\s+were\s+supposed\s+to|you\s+(?:are|keep)\s+mixing\s+(?:it\s+)?up)\b",
         low, flags=re.IGNORECASE,
@@ -2505,14 +2557,17 @@ def _infer_dialogue_act_profile(
     clarification = has_phrase(clarification_terms)
     explanation_request = has_phrase(explanation_terms) or (interrogative and bool(token_set & {"почему", "как", "зачем", "why", "how"}))
     own_topic_or_output = explicit_topic_introduction or (has_independent_payload and not topic_reference_fragment)
+    # A corrective turn may restate the original subject ("I already asked you
+    # to tell me about X"). Naming that subject does not cancel the correction;
+    # only an explicit topic switch does. Short ambiguous reactions stay conservative.
     correction_of_active = bool(
-        not explicit_topic_introduction
-        and not _has_explicit_topic_switch(text)
+        not _has_explicit_topic_switch(text)
         and (
-            previous_answer_reference
-            or explicit_previous_answer_correction
+            explicit_previous_answer_correction
+            or previous_answer_reference
             or (
-                short and (correction or dissatisfaction or revision_request)
+                not explicit_topic_introduction
+                and short and (correction or dissatisfaction or revision_request)
                 and ((not meaningful_subjects and not numeric_anchors) or has_deictic_reference or topic_reference_fragment or bool(re.search(
                     r"\b(?:я\s+имел\w*\s+в\s*(?:виду|ввиду)|я\s+имела\w*\s+в\s*(?:виду|ввиду)|я\s+не\s+про\b|не\s+про\s+.+\s+спрашивал\w*|не\s+про\s+.+\s+спрашивала\w*|ты\s+не\s+понял\w*|ты\s+меня\s+не\s+понима\w*)\b",
                     low,
@@ -2520,22 +2575,23 @@ def _infer_dialogue_act_profile(
             )
         )
     )
+    # The correction component may point backward while the same message names the
+    # requested subject. Other reaction cues still require a genuine referent.
     context_dependent_reaction = bool(
-        not explicit_topic_introduction
-        and (
-            (acknowledgement and len(tokens) <= 5 and not has_independent_payload)
-            or waiting_acknowledgement
-            or (gratitude and not has_independent_payload)
-            or (positive_evaluation and not has_independent_payload)
-            or correction_of_active
-            or previous_answer_reference
-            or (negation and (not has_independent_payload or has_deictic_reference))
-            or ((clarification or explanation_request) and short and not has_independent_payload)
-            # Short anaphoric fragments such as “теперь о нём подробнее” point
-            # back to the current exchange even without a question mark or a fixed
-            # continuation verb. A named independent subject still bypasses this.
-            or (has_deictic_reference and short and not has_independent_payload)
-            or topic_reference_fragment
+        correction_of_active
+        or previous_answer_reference
+        or (
+            not explicit_topic_introduction
+            and (
+                (acknowledgement and len(tokens) <= 5 and not has_independent_payload)
+                or waiting_acknowledgement
+                or (gratitude and not has_independent_payload)
+                or (positive_evaluation and not has_independent_payload)
+                or (negation and (not has_independent_payload or has_deictic_reference))
+                or ((clarification or explanation_request) and short and not has_independent_payload)
+                or (has_deictic_reference and short and not has_independent_payload)
+                or topic_reference_fragment
+            )
         )
     )
 
@@ -2608,7 +2664,14 @@ def _infer_dialogue_act_profile(
         "waiting_acknowledgement": bool(waiting_acknowledgement),
         "topic_reference_fragment": bool(topic_reference_fragment),
         "previous_answer_reference": bool(previous_answer_reference),
-        "active_branch_repair": bool(not explicit_topic_introduction and (correction_of_active or previous_answer_reference)),
+        "active_branch_repair": bool(
+            not _has_explicit_topic_switch(text)
+            and (
+                explicit_previous_answer_correction
+                or previous_answer_reference
+                or (not explicit_topic_introduction and correction_of_active)
+            )
+        ),
         "factual_verification_request": bool(factual_verification_request),
         "tone": tone,
         "recommended_response_action": (
@@ -3419,6 +3482,18 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         and bool(re.search(r"(?:на\s+(?:это\s+|эту\s+|этой\s+|мою\s+)?фот\w*|фото\s+с\s+монет\w*|присланн\w*\s+фото)", low, re.I))
     ))
     image_generation = _detect_image_generation_request(request) or unambiguous_new_image
+    saved_artifact_kind = _text(
+        sem.get("saved_artifact_followup_kind") or sem.get("artifact_followup_kind")
+    ).lower().replace("-", "_")
+    modifies_referenced_artifact = bool(
+        saved_artifact_kind
+        and re.search(
+            r"\b(?:измен\w*|передел\w*|добав\w*|убер\w*|удал\w*|исправ\w*|обнов\w*|"
+            r"дополни\w*|перестро\w*|перерис\w*|modify|change|revise|add|remove|delete|"
+            r"update|fix|edit|correct|adjust)\b",
+            low, re.IGNORECASE,
+        )
+    )
     history_detector = globals().get("_is_history_request")
     history_action_phrase = bool(re.search(
         r"(?:во\s+сколько\s+(?:времени\s+)?мы\s+(?:говорил\w*|обсуждал\w*|разговаривал\w*)|"
@@ -3447,9 +3522,46 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         source_requirement = "тема пользователя и/или указанное время должны совпасть с записью истории"
     elif image_edit:
         action, domain, target = "EDIT_EXISTING_IMAGE", "image", "explicit_source_image"
-        must_not = ["не подменять исходное фото новой картинкой", "не использовать последнюю генерацию вместо указанного исходника"]
-        success = ["привязать задачу к конкретному источнику", "при отсутствии доступного оригинала попросить прикрепить именно его", "сохранить изображение результата и связать его с этой задачей"]
+        must_not = [
+            "не добавлять стрелки, подписи, маркеры, объекты и иные элементы, если пользователь явно их не запросил",
+            "строго соблюдать отрицательные ограничения пользователя, включая запрет на конкретные элементы",
+            "не менять незатронутые детали исходного изображения",
+            "не подменять исходное фото новой картинкой",
+            "не использовать последнюю генерацию вместо указанного исходника",
+        ]
+        success = [
+            "привязать задачу к конкретному источнику",
+            "выполнить только запрошенные изменения",
+            "при отсутствии доступного оригинала попросить прикрепить именно его",
+            "сохранить изображение результата и связать его с этой задачей",
+        ]
         source_requirement = "конкретное прикреплённое или найденное в той же ветке исходное изображение; не выбирать по принципу самого свежего"
+    elif modifies_referenced_artifact:
+        action, domain, target = "REVISE_SAVED_ARTIFACT", "artifact", f"referenced_{saved_artifact_kind}_artifact"
+        must_not = [
+            "не создавать новый несвязанный артефакт вместо изменения указанного",
+            "не терять данные и свойства исходного артефакта, не затронутые просьбой",
+            "не добавлять элементы или содержание, не запрошенные пользователем",
+            "соблюдать отрицания, числовые значения и ограничения пользователя",
+        ]
+        success = [
+            "изменён именно найденный артефакт из релевантной ветки",
+            "сохранены все не затронутые данные",
+            "результат привязан к исходному артефакту и текущему сообщению",
+        ]
+        source_requirement = f"сохранённый {saved_artifact_kind} из подтверждённой активной/исторической ветки"
+    elif saved_artifact_kind:
+        action, domain, target = "RETURN_SAVED_ARTIFACT", "artifact", f"referenced_{saved_artifact_kind}_artifact"
+        must_not = [
+            "не генерировать новый артефакт вместо показа запрошенного сохранённого результата",
+            "не подменять найденный источник похожим, но несвязанным артефактом",
+            "не менять содержание сохранённого результата при повторном показе",
+        ]
+        success = [
+            "найден и возвращён именно запрошенный артефакт",
+            "сохранена связь с исходным запросом и его рендером",
+        ]
+        source_requirement = f"сохранённый {saved_artifact_kind} из подтверждённой активной/исторической ветки"
     elif image_generation:
         action, domain, target = "GENERATE_NEW_IMAGE", "image", "new_image_output"
         must_not = ["не выдавать текстовое описание за созданный файл", "не смешивать с просьбой редактировать существующий источник"]
@@ -3517,6 +3629,54 @@ def _split_request_sequence(text: str) -> list[str]:
         return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
+
+    # A correction can quote/restate the user's original task after describing the
+    # failed answer. Keep the utterance together so an opening fragment such as
+    # "А что случилось?" is not sent to history search without the corrected subject.
+    source_profile = _infer_dialogue_act_profile(
+        source,
+        interrogative=("?" in source or "？" in source),
+        context_dependent_question=False,
+        answer_followup=False,
+        continuation_action=False,
+        explicit_topic_introduction=_has_explicit_topic_introduction(source),
+        topic_reference_fragment=False,
+    )
+    source_pragmatic = source_profile.get("pragmatic_features") if isinstance(source_profile.get("pragmatic_features"), dict) else {}
+    if (
+        source_pragmatic.get("explicit_previous_answer_correction")
+        and source_pragmatic.get("has_independent_payload")
+        and not _has_explicit_topic_switch(source)
+    ):
+        # Keep a corrective restatement intact when it repairs one response.
+        # But a correction followed by a genuinely independent, named topic must
+        # still be decomposed so each part can be searched in its own context.
+        correction_parts = _split_explicit_tasks(source)
+        mixed_visual_and_new_topic = False
+        if len(correction_parts) > 1:
+            for visual_index, visual_part in enumerate(correction_parts):
+                visual_low = visual_part.lower().replace("ё", "е")
+                if not _is_explicit_visual_revision_request(visual_part):
+                    continue
+                visual_sig = _context_signature(visual_part)
+                visual_terms = set(visual_sig.get("subject_terms") or [])
+                for later_part in correction_parts[visual_index + 1:]:
+                    if not _has_explicit_topic_introduction(later_part):
+                        continue
+                    later_sig = _context_signature(later_part)
+                    later_terms = set(later_sig.get("subject_terms") or [])
+                    explicit_independent_marker = bool(re.search(
+                        r"\b(?:отдельно|дополнительно|а\s+теперь|другая\s+тема|"
+                        r"другой\s+вопрос|вдобавок|independently|separately|another\s+topic)\b",
+                        later_part.lower().replace("ё", "е"), re.IGNORECASE,
+                    ))
+                    if explicit_independent_marker or (later_terms and not visual_terms.intersection(later_terms)):
+                        mixed_visual_and_new_topic = True
+                        break
+                if mixed_visual_and_new_topic:
+                    break
+        if not mixed_visual_and_new_topic:
+            return [source]
 
     # A repair that explains the previous visual-operation mistake is one request,
     # even if its punctuation resembles several independent commands. Splitting it
@@ -3639,6 +3799,21 @@ def _split_request_sequence(text: str) -> list[str]:
     # Never collapse repeated steps: repetition can be intentional, and the output
     # sequence must stay one-to-one with the user's requested order.
     cleaned = [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
+    # If a splitter isolates a transition at the end of the previous clause
+    # ("... графика и теперь" + "покажи новую картинку фестиваля"), bind the
+    # transition to the following clause so semantics are interpreted locally.
+    for cue_index in range(len(cleaned) - 1):
+        cue_match = re.search(
+            r"(?:\s+и\s+|\s+а\s+|\s+)?(?:теперь|отдельно|дополнительно|вдобавок)\s*$",
+            cleaned[cue_index], flags=re.IGNORECASE,
+        )
+        if not cue_match:
+            continue
+        prefix = cleaned[cue_index][:cue_match.start()].strip(" ,.!?…—-")
+        cue = cleaned[cue_index][cue_match.start():].strip(" ,.!?…—-")
+        if prefix and cue:
+            cleaned[cue_index] = prefix
+            cleaned[cue_index + 1] = (cue + " " + cleaned[cue_index + 1]).strip()
     # Modal openers (“Можешь…”, “Можно…”, ASR typo “Можес…”, “Could you…”) are
     # the beginning of the following task, not independent tasks. Merge them before
     # semantic search so one user sentence performs one memory lookup rather than
@@ -3761,37 +3936,6 @@ def build_question_sequence(
         and (parent.get("active_branch_repair") or parent_pragmatic.get("active_branch_repair"))
     )
     parent_outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
-    if (
-        _is_explicit_visual_revision_request(text)
-        and not _has_independent_nonvisual_artifact_request(text)
-        and not _is_site_navigation_request(text)
-    ):
-        return [{
-            "step_index": 1,
-            "request": _text(text),
-            "output_types": ["text", "image"],
-            "answer_in_order": True,
-            "semantic_intent": "TOPIC_CONTINUATION",
-            "search_direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
-            "time_scope": "ACTIVE_DIALOGUE",
-            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
-            "requires_memory": True,
-            "history_request": False,
-            "semantic_reason": "explicit_visual_revision_kept_as_single_task",
-            "features": {"explicit_visual_revision": True, "active_branch_repair": True},
-            "action_contract": {
-                "action": "REVISE_ACTIVE_IMAGE_ARTIFACT",
-                "input_source": "current_upload_or_latest_compatible_same_dialogue_image",
-                "output_types": ["text", "image"],
-                "must_not": [
-                    "не добавлять элементы, которых нет в текущей просьбе",
-                    "сохранить все не затронутые детали изображения",
-                    "обязательно учесть запреты и отрицательные ограничения пользователя",
-                    "не разбивать уточнение изображения на отдельные независимые запросы",
-                ],
-                "success": ["вернуть изменённое изображение", "кратко описать только запрошенные изменения"],
-            },
-        }]
     if _is_dialogue_based_self_portrait_request(text):
         # Analysis subject and image output are one semantic task. Splitting after
         # "based on our dialogue" or before "draw an image" discards the evidence
@@ -3858,8 +4002,8 @@ def build_question_sequence(
         item_introduces_subject = _has_explicit_topic_introduction(item)
         item_low = item.lower().replace("ё", "е")
         item_has_anaphor = bool(re.search(
-            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|him|her|them|he|she|his|their|"
-            r"какой|какая|какое|какие|который|которая|которое|которые|which|what)\b",
+            r"\b(?:его|её|ее|он|она|они|ним|нему|него|ней|них|ему|ей|их|там|тут|этот|эта|эту|этого|этой|этом|эти|"
+            r"который|которая|которое|которые|какой|какая|какое|какие|фестивал\w*|праздник\w*|him|her|them|he|she|his|their|which|what)\b",
             item_low, flags=re.IGNORECASE,
         ))
         # Evaluation/choice clauses can refer to alternatives from the preceding
@@ -3879,7 +4023,29 @@ def build_question_sequence(
             r"|\b(?:покажи|покажите|нарисуй|сделай|объясни|сравни|show|draw|make|explain|compare)\b.{0,28}\b(?:оба|обе|все|both|all)\b",
             item_low, flags=re.IGNORECASE | re.DOTALL,
         ))
-        item_has_anaphor = item_has_anaphor or evaluative_dependency or alternative_dependency
+        action_only_followup = bool(re.fullmatch(
+            r"\s*(?:и\s+|а\s+)?(?:опиши(?:те)?|расскажи(?:те)?|покажи(?:те)?|объясни(?:те)?|уточни(?:те)?|"
+            r"перечисли(?:те)?|сравни(?:те)?|describe|tell\s+me|show(?:\s+me)?|explain|list|compare)"
+            r"(?:\s+(?:мне|нам|это|его|ее|её|их|там|пожалуйста|еще|ещё|подробнее))*[.!?…\s]*",
+            item_low,
+            flags=re.IGNORECASE,
+        ))
+        generic_deliverable_followup = bool(re.fullmatch(
+            r"\s*(?:(?:и|а)\s+)?(?:покажи(?:те)?|пришли(?:те)?|отправь(?:те)?|дай(?:те)?|выдай(?:те)?|"
+            r"создай(?:те)?|сгенерируй(?:те)?|сделай(?:те)?|построй(?:те)?|нарисуй(?:те)?|"
+            r"show|send|give|create|make|build|display)\s+"
+            r"(?:(?:мне|нам|пожалуйста|нов\w*|какую-то|какой-то|какую-либо|какой-либо|"
+            r"a|an|some|another|new)\s+)*"
+            r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фото\b|фотограф\w*|снимок\w*|"
+            r"таблиц\w*|table\b|график\w*|graph\b|chart\b|диаграмм\w*|diagram\b|"
+            r"схем\w*|формул\w*|код\w*|скрипт\w*|ссылк\w*|файл\w*|документ\w*)"
+            r"(?:\s+(?:снова|опять|ещё?\s+раз|подробнее|again))?\s*[.!?…\s]*",
+            item_low, flags=re.IGNORECASE,
+        ))
+        item_has_anaphor = (
+            item_has_anaphor or evaluative_dependency or alternative_dependency
+            or action_only_followup or generic_deliverable_followup
+        )
         preceding_clause = " ".join(pieces[:index - 1])
         preceding_signature = _context_signature(preceding_clause) if preceding_clause else {}
         preceding_has_subject = bool(
@@ -3894,8 +4060,9 @@ def build_question_sequence(
             and not item_introduces_subject
             and preceding_has_subject
         )
-        # The first clause owns the subject for this turn even when its task verb is
-        # uncommon. Executor uses this metadata for a safe NEW-topic fast path.
+        # The first substantive clause owns the subject for this turn even when its
+        # task verb is uncommon. Later dependent clauses can reuse this searched
+        # subject context; independent clauses still run their own State Manager search.
         if index == 1 and (
             (parent_is_self_contained_new and parent_signature.get("has_explicit_subject"))
             or first_piece_is_turn_root
@@ -3928,12 +4095,6 @@ def build_question_sequence(
         if "text" not in outputs:
             outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
-        if parent_explicit_topic_switch:
-            item_semantics["explicit_topic_switch"] = True
-            item_semantics["active_branch_repair"] = False
-            item_semantics.setdefault("features", {})["active_branch_repair"] = False
-            item_semantics["features"]["explicit_topic_switch"] = True
-            item_semantics.setdefault("pragmatic_features", {})["active_branch_repair"] = False
         parent_subject_terms = set(parent_signature.get("subject_terms") or [])
         child_subject_terms = set((item_semantics.get("context_signature") or {}).get("subject_terms") or [])
         shared_repair_subject_terms = parent_subject_terms.intersection(child_subject_terms)
@@ -4013,7 +4174,7 @@ def build_question_sequence(
             item_semantics["time_window"] = parent_window
             item_semantics["has_explicit_time_window"] = True
             item_semantics["time_scope"] = parent.get("time_scope", "EXPLICIT_TIME_WINDOW")
-        if parent.get("history_request") and not item_introduces_subject:
+        if parent.get("history_request") and not item_introduces_subject and not subject_intro_seen:
             # A decomposed clause can omit the temporal/history words that made the
             # whole request unambiguous. Preserve that parent context for dependent
             # follow-ups without forcing it onto a separately introduced new subject.
@@ -4133,7 +4294,7 @@ def build_question_sequence(
             "previous_answer_reference": bool(item_semantics.get("previous_answer_reference")),
             "active_branch_repair": bool(item_semantics.get("active_branch_repair") or repair_linked_clause),
             "factual_verification_request": bool(item_semantics.get("factual_verification_request")),
-            "explicit_topic_switch": bool(parent_explicit_topic_switch or item_semantics.get("explicit_topic_switch")),
+            "explicit_topic_switch": bool(item_semantics.get("explicit_topic_switch") or _has_explicit_topic_switch(item)),
             "explicit_topic_introduction": bool(item_semantics.get("explicit_topic_introduction")),
             "explicit_topic_closure": bool(item_semantics.get("explicit_topic_closure")),
             "saved_artifact_followup_kind": item_semantics.get("saved_artifact_followup_kind", ""),
