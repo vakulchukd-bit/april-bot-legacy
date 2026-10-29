@@ -4560,7 +4560,6 @@ def prepare_render_blocks_for_room_dispatch(
     mermaid_match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
     mermaid_from_answer = mermaid_match.group(1).strip() if mermaid_match else ""
     diagram_from_answer = _mermaid_payload(mermaid_from_answer) if mermaid_from_answer else {}
-    experiment_steps_from_answer = _experiment_steps_payload(source_answer) if "diagram" in requested else {}
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
@@ -4697,9 +4696,6 @@ def prepare_render_blocks_for_room_dispatch(
             elif electrical_diagram_from_answer:
                 payload = {**payload, **deepcopy(electrical_diagram_from_answer)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
-            elif experiment_steps_from_answer:
-                payload = {**payload, **deepcopy(experiment_steps_from_answer)}
-                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
             elif diagram_from_request:
                 payload = {**payload, **deepcopy(diagram_from_request)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
@@ -4767,13 +4763,6 @@ def prepare_render_blocks_for_room_dispatch(
             "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
             "viewer": "DiagramRenderer", "payload": deepcopy(diagram_from_answer),
             "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_mermaid_source",
-        })
-        existing_types.add("diagram")
-    if "diagram" in requested and experiment_steps_from_answer and "diagram" not in existing_types:
-        prepared.append({
-            "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
-            "viewer": "DiagramRenderer", "payload": deepcopy(experiment_steps_from_answer),
-            "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_experiment_steps",
         })
         existing_types.add("diagram")
     # An outline diagram is opt-in. Automatically drawing the answer's headings
@@ -4877,31 +4866,12 @@ def prepare_render_blocks_for_room_dispatch(
         if formulas_from_answer:
             prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}})
 
-    # Adaptive diagrams complement substantial structured explanations only when
-    # no different visual form was explicitly requested. The outline is derived
-    # from this turn's real headings/paragraphs, never from fixed topic templates.
+    # Do not manufacture a diagram from the answer's headings or numbered prose.
+    # If Interpretation requested a diagram, Premium_provider_router repairs a
+    # missing visual with a focused semantic payload; explicit answer-outline
+    # requests are handled separately by the dedicated outline path above.
     try:
-        from blocks.C_DIAGRAM_ROOM import (
-            build_answer_outline_payload as _build_answer_outline_payload,
-            ensure_readable_diagram_payload as _ensure_readable_diagram_payload,
-            should_add_adaptive_diagram as _should_add_adaptive_diagram,
-        )
-        present_diagrams = [
-            item for item in prepared
-            if isinstance(item, dict) and _scene_block_type(item) == "diagram"
-        ]
-        if not present_diagrams and _should_add_adaptive_diagram(current_request, source_answer, requested):
-            adaptive_payload = _build_answer_outline_payload(source_answer)
-            if adaptive_payload:
-                prepared.append({
-                    "type": "diagram", "artifact_type": "diagram",
-                    "renderer": "DiagramRenderer", "viewer": "DiagramRenderer",
-                    "title": adaptive_payload.get("title"), "payload": adaptive_payload,
-                    "description": adaptive_payload.get("description"),
-                    "source_room": "C_ARTIFACT_CONTRACT",
-                    "source": "same_turn_adaptive_answer_outline",
-                    "adaptive_visual": True,
-                })
+        from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload as _ensure_readable_diagram_payload
         # The canonical web diagram renderer was receiving node/edge-only graphs.
         # On mobile those could collapse to tiny labels in the corner. Convert all
         # concrete node/edge diagrams to a readable portrait SVG before the shared
