@@ -287,11 +287,14 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         source = edge.get("from") or edge.get("source") or edge.get("start")
         target = edge.get("to") or edge.get("target") or edge.get("end")
         if source and target:
-            canonical_edges.append({
-                "from": str(source),
-                "to": str(target),
-                **({"label": str(edge["label"])} if edge.get("label") is not None else {}),
-            })
+            # Preserve renderer-specific relation metadata (electrical terminals,
+            # directions, ports, styles and annotations) while canonicalizing endpoints.
+            canonical_edge = deepcopy(edge)
+            canonical_edge["from"] = str(source)
+            canonical_edge["to"] = str(target)
+            if canonical_edge.get("label") is not None:
+                canonical_edge["label"] = str(canonical_edge["label"])
+            canonical_edges.append(canonical_edge)
 
     payload["nodes"] = canonical_nodes
     payload["edges"] = canonical_edges
@@ -2468,70 +2471,75 @@ def _strip_first_markdown_table(answer: str, expected: Dict[str, Any]) -> str:
     return answer
 
 
-def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
-    """Turn an explicit ASCII battery wiring sketch into a structural diagram.
+def _electrical_diagram_payload_from_request(request_text: str, answer: str = "") -> Dict[str, Any]:
+    """Build a grounded battery/switch/lamp circuit from an already-routed diagram request.
 
-    Components and their order are read only from the fenced sketch returned in
-    this turn; the adapter does not add a component that the sketch did not show.
+    This is a payload adapter, not an intent trigger: callers invoke it only after
+    Interpretation has already requested the diagram renderer. Components are
+    included only when named by the user; a fuse is never silently added.
     """
+    text = " ".join((str(request_text or ""), str(answer or ""))).lower().replace("ё", "е")
+    has_battery = bool(re.search(r"аккумулятор\w*|батаре\w*|battery|12\s*[- ]?вольт\w*|12\s*v\b", text, re.I))
+    has_switch = bool(re.search(r"выключател\w*|переключател\w*|switch", text, re.I))
+    has_lamp = bool(re.search(r"лампоч\w*|ламп\w*|светильник\w*|bulb|lamp|light\s*bulb", text, re.I))
+    has_connection_context = bool(re.search(r"схем\w*|подключ\w*|соедин\w*|цеп\w*|провод\w*|wiring|circuit|connect", text, re.I))
+    if not (has_battery and has_switch and has_lamp and has_connection_context):
+        return {}
+
+    explicit_fuse = bool(re.search(r"предохранител\w*|\bfuse\b|\bF\s*\d+\b", str(request_text or ""), re.I))
+    explicitly_without_fuse = bool(re.search(r"без\s+(?:предохранител\w*|fuse)|не\s+(?:нужен|ставь|добавляй)\s+предохранител\w*", str(request_text or ""), re.I))
+    include_fuse = explicit_fuse and not explicitly_without_fuse
+    voltage_match = re.search(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*[- ]?\s*(?:в|вольт\w*|v)\b", text, re.I)
+    voltage = (voltage_match.group(1).replace(",", ".") + " В") if voltage_match else ""
+
+    nodes: List[Dict[str, Any]] = [
+        {"id": "battery", "kind": "power_supply", "symbol": "battery", "label": "Батарея", "voltage": voltage, "terminals": ["+", "−"]},
+    ]
+    if include_fuse:
+        nodes.append({"id": "fuse", "kind": "fuse", "symbol": "fuse", "label": "Предохранитель F1"})
+    nodes.extend([
+        {"id": "switch", "kind": "switch", "symbol": "switch", "label": "Выключатель S1", "state": "unspecified", "terminals": ["вход", "выход"]},
+        {"id": "lamp", "kind": "lamp", "symbol": "lamp", "label": "Лампочка", "voltage": voltage, "terminals": ["+", "−"]},
+    ])
+
+    positive_target = "fuse" if include_fuse else "switch"
+    edges: List[Dict[str, Any]] = []
+    edges.append({"from": "battery", "to": positive_target, "from_terminal": "+", "to_terminal": "вход", "label": "+ питания"})
+    if include_fuse:
+        edges.append({"from": "fuse", "to": "switch", "from_terminal": "выход", "to_terminal": "вход", "label": "после предохранителя"})
+    edges.extend([
+        {"from": "switch", "to": "lamp", "from_terminal": "выход", "to_terminal": "+", "label": "управляемый плюс"},
+        {"from": "lamp", "to": "battery", "from_terminal": "−", "to_terminal": "−", "label": "обратный провод на минус батареи"},
+    ])
+    return {
+        "representation": "electrical_schematic",
+        "diagram_type": "electrical_schematic",
+        "title": "Схема подключения батареи и лампочки",
+        "description": "Плюсовой провод проходит через выключатель; минус лампы соединён напрямую с минусом батареи.",
+        "layout": {"direction": "LR", "responsive": True},
+        "nodes": nodes,
+        "edges": edges,
+        "source": "interpretation_requested_diagram_current_request",
+    }
+
+
+def _electrical_schematic_payload(answer: str) -> Dict[str, Any]:
+    """Promote an explicit fenced battery/switch/lamp sketch to structured wiring."""
     match = re.search(r"```(?:text|plain|plaintext)?\s*\n([\s\S]*?)\n```", str(answer or ""), re.IGNORECASE)
     if not match:
         return {}
     drawing = match.group(1)
-    if not re.search(r"аккумулятор|battery", drawing, re.IGNORECASE):
+    if not re.search(r"аккумулятор|батаре\w*|battery", drawing, re.IGNORECASE):
         return {}
-    if not re.search(r"(?:предохранител|\bF\d+\b)", drawing, re.IGNORECASE):
+    if not re.search(r"(?:выключател|\bS\s*\d+\b|switch)", drawing, re.IGNORECASE):
         return {}
-    if not re.search(r"(?:выключател|\bS\d+\b)", drawing, re.IGNORECASE):
+    if not re.search(r"(?:лампоч|ламп[аыуе]|светодиод|lamp|bulb|LED)", drawing, re.IGNORECASE):
         return {}
-    if not re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", drawing, re.IGNORECASE):
+    payload = _electrical_diagram_payload_from_request(drawing, drawing)
+    if not payload:
         return {}
-
-    components: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for line in drawing.splitlines():
-        clean = line.strip()
-        if not clean:
-            continue
-        found: List[tuple[str, str]] = []
-        if re.search(r"(?:плюс\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*\+|\+\s*12\s*в|positive\s+(?:battery|terminal))", clean, re.IGNORECASE):
-            found.append(("positive", "Плюс аккумулятора (+12 В)"))
-        if re.search(r"(?:предохранител|\bF\d+\b|fuse)", clean, re.IGNORECASE):
-            found.append(("fuse", "Предохранитель (F1)"))
-        if re.search(r"(?:выключател|\bS\d+\b|switch)", clean, re.IGNORECASE):
-            found.append(("switch", "Выключатель (S1)"))
-        if re.search(r"(?:двигател|мотор|лампоч|ламп[аыуе]|светодиод|\bM\d+\b|motor|lamp|bulb|LED)", clean, re.IGNORECASE):
-            if re.search(r"двигател|\bM\d+\b|motor", clean, re.IGNORECASE):
-                found.append(("load", "Электродвигатель 12 В"))
-            elif re.search(r"светодиод|\bLED\b", clean, re.IGNORECASE):
-                found.append(("load", "Светодиод"))
-            else:
-                found.append(("load", "Лампочка"))
-        if re.search(r"(?:минус\s+аккумулятора|аккумулятор(?:а)?\s*\(\s*-|negative\s+(?:battery|terminal)|-\s*12\s*в)", clean, re.IGNORECASE):
-            found.append(("negative", "Минус аккумулятора (−)"))
-        for key, label in found:
-            # ASCII art usually repeats each component's ID and its caption on
-            # adjacent lines. Keep one node per component in the drawn order.
-            if key in seen:
-                continue
-            seen.add(key)
-            components.append({"id": key, "label": label, "level": len(components)})
-
-    order = [item["id"] for item in components]
-    if len(components) < 4 or not {"positive", "fuse", "switch", "load", "negative"}.issubset(set(order)):
-        return {}
-    edges = [{"from": left["id"], "to": right["id"], "label": "подключение"}
-             for left, right in zip(components, components[1:])]
-    return {
-        "representation": "diagram",
-        "layout": "hierarchical",
-        "direction": "TB",
-        "title": "Схема подключения аккумулятора 12 В",
-        "description": "Компоненты расположены в том же порядке, что и в текстовой схеме.",
-        "nodes": components,
-        "edges": edges,
-        "source": "same_turn_ascii_electrical_schematic",
-    }
+    payload["source"] = "same_turn_ascii_electrical_schematic"
+    return payload
 
 
 def _is_ascii_line_chart_fence(text: str) -> bool:
@@ -3475,7 +3483,19 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
         block.get("content") if isinstance(block.get("content"), dict) else None,
         block.get("payload"),
     ))
+    diagram_direct_keys = {
+        "title", "description", "representation", "diagram_type", "format", "layout", "direction",
+        "nodes", "components", "edges", "connections", "relations", "elements", "drawing_elements",
+        "drawingElements", "shapes", "points", "vertices", "geometry", "dimensions", "annotations",
+        "legend", "labels", "states", "notes", "caption", "renderer", "svg", "svg_payload", "drawing",
+        "source", "mermaid", "anchor_text", "linked_formula",
+    }
     merged: Dict[str, Any] = {}
+    if block_type == "diagram":
+        # OpenAI may return drawable fields directly on the render-block envelope.
+        # Copy them into the canonical payload before nested payloads are merged.
+        merged.update({key: deepcopy(value) for key, value in block.items()
+                       if key in diagram_direct_keys and value not in (None, "", [], {})})
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
@@ -3657,6 +3677,7 @@ def prepare_render_blocks_for_room_dispatch(
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
     electrical_diagram_from_answer = _electrical_schematic_payload(source_answer) if "diagram" in requested else {}
+    electrical_diagram_from_request = _electrical_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
     diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
     if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
         # This code fence is a visual representation of the graph, not source code.
@@ -3745,6 +3766,9 @@ def prepare_render_blocks_for_room_dispatch(
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
             elif electrical_diagram_from_answer:
                 payload = {**payload, **deepcopy(electrical_diagram_from_answer)}
+                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
+            elif electrical_diagram_from_request:
+                payload = {**payload, **deepcopy(electrical_diagram_from_request)}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
             elif experiment_steps_from_answer:
                 payload = {**payload, **deepcopy(experiment_steps_from_answer)}
@@ -3892,8 +3916,8 @@ def prepare_render_blocks_for_room_dispatch(
                 "source_room": "C_LINK_ROOM",
             })
             existing_types.add("link")
-    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer or diagram_from_request) and "diagram" not in existing_types:
-        diagram_payload = diagram_from_answer or electrical_diagram_from_answer or diagram_from_request
+    if ("diagram" in requested or diagram_from_answer or electrical_diagram_from_answer or electrical_diagram_from_request or diagram_from_request) and "diagram" not in existing_types:
+        diagram_payload = diagram_from_answer or electrical_diagram_from_answer or electrical_diagram_from_request or diagram_from_request
         if diagram_payload:
             prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
