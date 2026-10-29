@@ -26,9 +26,11 @@ MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
 # Premium answer ceiling is 12,000 output tokens. Renderers are relevance-driven;
 # there is no fixed text/render ratio, and the visible text answer must stay complete.
 PREMIUM_OUTPUT_TOKEN_LIMIT = 12000
-PREMIUM_RENDER_TOKEN_BUDGET = int(PREMIUM_OUTPUT_TOKEN_LIMIT * 0.40)
-PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT - PREMIUM_RENDER_TOKEN_BUDGET
+# Text and renderer payloads share one ceiling; neither is assigned a fixed slice.
+PREMIUM_RENDER_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
+PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
 PREMIUM_RECOVERY_RETRIES = 1
+PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX = 3600
 INPUT_TOKEN_TARGET = 3600
 MAX_PROMPT_TOKENS = min(3600, max(256, int(os.getenv("APRIL_PREMIUM_OPENAI_PROMPT_TOKEN_BUDGET", "3600") or 3600)))
 MAX_TOPIC_PROMPT_TOKENS = max(1, int(MAX_PROMPT_TOKENS * 0.30))
@@ -100,8 +102,8 @@ USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
 - PER-RENDER EXPLANATIONS (Premium): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, normally 1 short, specific sentence. For images, write a natural conversational caption that sounds like April continuing the reply (for example, “Вот что получилось” only when followed by a real description, or “Готово — добавила корабль, сохранив вид океана”). NEVER copy or paraphrase the user’s imperative as the caption (for example, do not output “Нарисуй фотку пшеничного поля”), and NEVER expose internal English prompt/instruction text such as “Edit the supplied source image…”. Mention the requested subject or actual edit and one relevant visual detail only when supported by the payload. Avoid mechanical headings such as “Что показывает изображение”, “Изображение связано с разделом”, status-report wording, generic claims about the renderer, and repetitive caveats that an ordinary generated picture is not an archival photograph. If the canonical answer already says the same thing, make the caption add a useful, distinct detail; never repeat the same sentence. A user’s first name may be used occasionally only if the authenticated user profile explicitly provides it and the wording sounds natural; do not insert a name mechanically or invent one. Do not invent feelings or image details; warmth belongs in the phrasing, not in unsupported claims. For diagrams, identify the nodes/relationships or action sequence; do not restate the full numbered steps. For tables/graphs/formulas, name the columns/axes/variables and the visual takeaway without repeating the whole answer. For code, name the real file/functions and the concrete change. Use the actual payload, not generic filler. SceneContract displays this field immediately after the renderer, so keep it complementary and do not create a duplicate standalone explanation block.
 - SINGLE-OWNER PRESENTATION: keep `answer` and ordinary text blocks as the coherent overall narrative. Give each renderer a brief introduction/context there, but do not repeat its `explanation`, variable-by-variable interpretation, table takeaway, code walkthrough, image description, or graph trend elsewhere in the narrative. The detailed interpretation belongs immediately after its own renderer in that renderer's `explanation` field. Do not duplicate the same concrete render block or create multiple explanations for one renderer; retain the prose needed to explain the overall topic. Every mathematical expression that remains in prose must use explicit KaTeX-compatible delimiters (`\(...\)` inline or `\[...\]` display); never leave raw, unwrapped LaTeX commands in ordinary text.
 - RENDER COVERAGE: honor each explicitly requested output type and emit a concrete payload when it materially helps. There is no fixed prose/render allocation and no renderer quota. Keep the complete explanation in text; diagrams show only relationships, structure or action order that is not already obvious from the prose. Interleave useful renderers with their related text by step_index. Concept explanations may use a grounded network graph (representation="network", nodes+edges) only when the relations are real and visually useful; numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
-- SEMANTIC DIAGRAM CONTRACT: a diagram represents the subject the user asked to see, not an outline of April's prose. For a physical system or connection request, draw the actual parts/terminals and their real relationships; edges must show the requested connections, not merely a reading order. For geometry, draw the requested figure/coordinates; for math, show the relevant mathematical structure; for a process, use an action flow only when process order is itself the requested visual. Never manufacture a diagram from the answer's headings or numbered instructions as a fallback. A diagram render block is incomplete unless it has drawable SVG/elements or structured nodes/edges.
-- PREMIUM OUTPUT BUDGET: max_output_tokens is exactly 12000 for each completed answer attempt. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
+- SEMANTIC DIAGRAM CONTRACT: a diagram represents the subject the user asked to see, not an outline of April's prose. For a physical system or connection request, draw the actual parts/terminals and their real relationships; edges must show the requested connections, not merely a reading order. For geometry, draw the requested figure/coordinates and all supplied dimensions; for math, show the relevant mathematical structure; for a process, use an action flow only when process order is itself the requested visual. Show physical symbols/figures on a clear high-contrast canvas, with compact labels, units, dimensions and a short title; keep supporting explanation adjacent in the block explanation, not crowded into the drawing. When a request requires several distinct useful views or separate objects, emit multiple diagram render blocks in order with step_index; do not collapse them into one generic outline. Never manufacture a diagram from the answer's headings or numbered instructions as a fallback. A diagram render block is incomplete unless it has drawable SVG/elements or structured nodes/edges.
+- PREMIUM OUTPUT BUDGET: total generated output across the primary response, bounded retry, refusal adapter and diagram repair must not exceed 12000 tokens for one user request. Each recovery uses only the remaining headroom; when none remains, do not issue another provider call. Deterministic local rendering may still run at zero model-output cost. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
 - ADAPTIVE VISUALS: even when the user did not explicitly request a renderer, add a concrete table/diagram/graph/formula/code/link/image payload when it materially improves a substantial explanation. For an answer likely to exceed ~2000 tokens, consider an image spec only when an illustration materially clarifies the topic; it will be processed by C_APRIL_IMAGES_GENERATOR. Never call a generated illustration an authentic photograph.
 - TABLE INTEGRITY: never return an empty type="table" shell. Every table block needs populated columns/headers and at least one row. Prefer one record/entity per row and one fact per cell; never pack an entire multi-item list into a single cell when it can be structured as rows/cells. Keep tables readable on mobile.
 - COMPOSITE OUTPUTS: independent outputs in one request are cumulative, not alternatives. A request for a table and a photograph requires both the TableBlock payload and the image-generator specification; answer each request-sequence item in order.
@@ -957,12 +959,21 @@ def _refusal_rewrite_context(request: Any, refusal_text: str, *, premium: bool =
     return adapter_input, data, fallback, current
 
 
-async def _adapt_provider_refusal(client: Any, request: Any, refusal_text: str, *, premium: bool = False) -> tuple[str, str, dict[str, int]]:
+async def _adapt_provider_refusal(
+    client: Any, request: Any, refusal_text: str, *, premium: bool = False,
+    max_output_tokens: int = 1200,
+) -> tuple[str, str, dict[str, int]]:
     """Rewrite refusal wording only; never resubmit the original operation for execution."""
     adapter_input, data, fallback, current = _refusal_rewrite_context(request, refusal_text, premium=premium)
     usage_data: dict[str, int] = {}
+    adapter_output_cap = max(0, min(1200, int(max_output_tokens or 0)))
     try:
-        response = await asyncio.to_thread(client.responses.create, model=MODEL, input=adapter_input)
+        if adapter_output_cap < 256:
+            raise RuntimeError("SHARED_OUTPUT_BUDGET_EXHAUSTED")
+        response = await asyncio.to_thread(
+            client.responses.create, model=MODEL, input=adapter_input,
+            max_output_tokens=adapter_output_cap,
+        )
         usage = getattr(response, "usage", None)
         if usage is not None:
             usage_data = {
@@ -2542,7 +2553,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "ROOM_KNOWLEDGE_CONTEXT": room_context_min,
             "C_ARTIFACT_RENDER_PLAN": [
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
-                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or [])[:4] if isinstance(item, dict)
+                for item in (data.get("C_ARTIFACT_RENDER_PLAN") or []) if isinstance(item, dict)
             ],
             "SCENE_CONTRACT": {
                 "required": True,
@@ -2556,8 +2567,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
                 "response_style": "premium_detailed_visual",
                 "detail_level": "expanded_structured_explanation",
-                "visual_share_target_percent": 40,
-                "text_share_target_percent": 60,
+                "visual_share_target_percent": "adaptive_no_fixed_share",
+                "text_share_target_percent": "adaptive_no_fixed_share",
+                "renderer_quota": "none",
+                "allocation_policy": "all_requested_text_and_visuals_share_one_12000_token_ceiling; compress_repetition_before_requested_content",
                 "adaptive_visuals_when_materially_useful": True,
                 "render_payload_token_budget": PREMIUM_RENDER_TOKEN_BUDGET,
                 "explanation_answer_token_budget": PREMIUM_TEXT_TOKEN_BUDGET,
@@ -2567,6 +2580,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "complete_answer_required": True,
                 "single_provider_call": False,
                 "bounded_output_recovery_retries": PREMIUM_RECOVERY_RETRIES,
+                "diagram_repair_output_max": PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+                "all_recovery_output_is_charged_to_shared_ceiling": True,
                 "compress_repetition_before_substance": True,
                 "protected_structured_data_lossless": True,
                 "compress_explanation_before_protected_values": True,
@@ -3663,7 +3678,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "links": "provide real destinations with a brief explanation of relevance",
         },
         "preserve_each_explicitly_requested_renderer": True,
-        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its quota. Never create a renderer merely to meet a quota.",
+        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its shared 6000-token ceiling. Never create a renderer merely to meet a quota.",
         "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
     }
 
@@ -3796,7 +3811,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         # Bodies are supplied exactly once as adjacent input_text parts below;
         # this manifest avoids copying thousands of file characters into JSON.
         "ATTACHED_TEXT_FILES": text_file_manifest,
-        "C_ARTIFACT_RENDER_PLAN": _safe_prompt_manifest(render_plan, limit=16),
+        "C_ARTIFACT_RENDER_PLAN": _safe_prompt_manifest(render_plan, limit=len(render_plan)),
         "SELECTED_ROOMS": routing.get("selected_rooms") or [],
         # Present only when Interpretation selected April site-navigation help.
         "ROOM_KNOWLEDGE_CONTEXT": routing.get("room_knowledge_context") or {},
@@ -3821,8 +3836,10 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
             "response_style": "premium_detailed_visual",
             "detail_level": "expanded_structured_explanation",
-            "visual_share_target_percent": 40,
-            "text_share_target_percent": 60,
+            "visual_share_target_percent": "adaptive_no_fixed_share",
+            "text_share_target_percent": "adaptive_no_fixed_share",
+            "renderer_quota": "none",
+            "allocation_policy": "all_requested_text_and_visuals_share_one_12000_token_ceiling; compress_repetition_before_requested_content",
             "adaptive_visuals_when_materially_useful": True,
             "render_payload_token_budget": PREMIUM_RENDER_TOKEN_BUDGET,
             "explanation_answer_token_budget": PREMIUM_TEXT_TOKEN_BUDGET,
@@ -3832,6 +3849,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "complete_answer_required": True,
             "single_provider_call": False,
             "bounded_output_recovery_retries": PREMIUM_RECOVERY_RETRIES,
+            "diagram_repair_output_max": PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+            "all_recovery_output_is_charged_to_shared_ceiling": True,
             "compress_repetition_before_substance": True,
             "priority_order": [
                 "answer_all_requested_steps",
@@ -4464,6 +4483,17 @@ def normalize_render_blocks(
                 direct_payload.setdefault("representation", "scene3d")
                 direct_payload.setdefault("dimensions", 3)
             payload = {**direct_payload, **payload}
+        elif block_type == "diagram":
+            diagram_keys = {
+                "title", "description", "summary", "content", "representation", "diagram_type", "format",
+                "layout", "direction", "nodes", "components", "edges", "connections", "relations", "segments",
+                "elements", "drawing_elements", "drawingElements", "shapes", "primitives", "points", "vertices",
+                "geometry", "dimensions", "annotations", "labels", "legend", "states", "notes", "caption",
+                "svg", "svg_payload", "drawing", "mermaid", "source", "anchor_text", "linked_formula", "renderer",
+            }
+            direct_payload = {key: value for key, value in item.items() if key in diagram_keys and value not in (None, "", [], {})}
+            payload = {**direct_payload, **payload}
+
         # Promote canonical source fields for the viewer while preserving the entire
         # nested payload/spec unchanged for history, subsequent edits and new schemas.
         for key, nested_value in payload.items():
@@ -4485,9 +4515,10 @@ def normalize_render_blocks(
             if any(isinstance(_diagram_payload.get(key), str) and _diagram_payload.get(key).strip().lower().startswith("<svg") for key in ("svg", "svg_payload", "drawing")):
                 item["renderer"] = "SvgBlock"
                 item["viewer"] = "SvgBlock"
-        if block_type == "graph" and payload:
+        if block_type in {"graph", "diagram"} and payload:
             item["payload"] = payload
-            item.setdefault("representation", payload.get("representation", ""))
+            if block_type == "graph":
+                item.setdefault("representation", payload.get("representation", ""))
         if block_type == "code":
             code_value = next((value for value in (
                 item.get("code"), item.get("source_code"), item.get("content"), item.get("text")
@@ -5282,6 +5313,7 @@ async def _repair_requested_diagram(
     current_request: str,
     answer: str,
     display_language: str,
+    max_output_tokens: int = PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
 ) -> tuple[dict[str, Any] | None, dict[str, int], dict[str, Any]]:
     """Ask the same provider for the missing drawable payload, without rewriting prose.
 
@@ -5292,6 +5324,70 @@ async def _repair_requested_diagram(
     language = _text(display_language or "ru")
     context = _selected_diagram_context(request)
     answer_context = str(answer or "")
+
+    # Recover well-specified electrical/geometry visuals locally before paying for
+    # another model call. This code is reached only after Interpretation selected
+    # the diagram renderer; it does not classify intent or change room routing.
+    try:
+        from blocks.Premium_C_ARTIFACT_CONTRACT import (
+            _electrical_diagram_payload_from_request,
+            _geometry_diagram_payload_from_request,
+        )
+        from blocks.C_DIAGRAM_ROOM import ensure_readable_diagram_payload
+        selected_context_text = "\n".join(
+            f"{item.get('user', '')}\n{item.get('april', '')}" for item in context if isinstance(item, dict)
+        )
+        deterministic_request_context = "\n".join(part for part in (selected_context_text, current_request) if part)
+        deterministic_payload = _electrical_diagram_payload_from_request(deterministic_request_context, answer_context)
+        if not deterministic_payload:
+            deterministic_payload = _geometry_diagram_payload_from_request(deterministic_request_context, answer_context)
+        if isinstance(deterministic_payload, dict) and deterministic_payload:
+            deterministic_payload = ensure_readable_diagram_payload(
+                deterministic_payload, title=_text(deterministic_payload.get("title"))
+            ) or deterministic_payload
+            anchor = _diagram_anchor_sentence(answer_context)
+            block = {
+                "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
+                "viewer": "DiagramRenderer", "title": _text(deterministic_payload.get("title") or "Схема"),
+                "payload": deterministic_payload,
+                "explanation": _text(deterministic_payload.get("description")),
+                "source": "deterministic_interpretation_requested_diagram", "integrity_repaired": True,
+            }
+            if anchor:
+                block["anchor_text"] = anchor
+            normalized = normalize_render_blocks([block], answer_context)
+            repaired = next((item for item in normalized if isinstance(item, dict)
+                             and _text(item.get("type") or item.get("artifact_type")).lower() == "diagram"
+                             and _premium_diagram_has_concrete_payload(item)), None)
+            if repaired:
+                _payload = repaired.get("payload") if isinstance(repaired.get("payload"), dict) else deterministic_payload
+                return repaired, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                                  "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, {
+                    "status": "deterministic_payload_repaired", "output_chars": 0, "model": "local_diagram_adapter",
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                              "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+                    "renderer": _text(repaired.get("renderer")), "node_count": len(_payload.get("nodes") or []),
+                    "edge_count": len(_payload.get("edges") or []),
+                    "svg_present": bool(_payload.get("svg") or _payload.get("svg_payload")),
+                    "anchor_found": bool(anchor), "recovery": "no_additional_provider_call",
+                }
+    except Exception as exc:
+        _apr_timing_log("deterministic_diagram_recovery_skipped", None, error=type(exc).__name__)
+    # The optional model repair shares the same 12k Premium output ceiling as
+    # the primary response. A deterministic local repair above costs no tokens.
+    remaining_output_budget = max(0, min(
+        PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+        int(max_output_tokens or 0),
+    ))
+    if remaining_output_budget <= 0:
+        return None, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                      "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, {
+            "status": "skipped_output_budget_exhausted", "output_chars": 0,
+            "model": "not_called", "usage": {"input_tokens": 0, "output_tokens": 0,
+                "total_tokens": 0, "cached_input_tokens": 0, "cache_write_tokens": 0,
+                "reasoning_tokens": 0},
+            "recovery": "shared_premium_output_budget",
+        }
     if _estimate_tokens(answer_context) > 900:
         answer_context = _semantic_compress(answer_context, 900)
     repair_system = (
@@ -5324,7 +5420,7 @@ async def _repair_requested_diagram(
             {"role": "system", "content": repair_system},
             {"role": "user", "content": json.dumps(repair_payload, ensure_ascii=False, separators=(",", ":"))},
         ],
-        max_output_tokens=2200,
+        max_output_tokens=remaining_output_budget,
     )
     raw = _text(getattr(response, "output_text", ""))
     usage_obj = getattr(response, "usage", None)
@@ -5507,11 +5603,17 @@ async def generate_text(
                     "reasoning_tokens": int(getattr(first_usage, "reasoning_tokens", 0) or 0),
                 }
                 usage_data = dict(prior_usage_data)
-            if first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0:
+            retry_output_cap = max(
+                0,
+                min(
+                    PREMIUM_OUTPUT_TOKEN_LIMIT,
+                    PREMIUM_OUTPUT_TOKEN_LIMIT - int(prior_usage_data.get("output_tokens", 0) or 0),
+                ),
+            )
+            if first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0 and retry_output_cap >= 256:
                 # One bounded recovery on the same canonical route for truncated,
-                # empty, malformed, or non-public output. Re-emit a fresh complete
-                # response from the original input; never continue malformed output
-                # or start a new conversation.
+                # empty, malformed, or non-public output. It consumes only the
+                # unused portion of the same 12k output ceiling.
                 retry_input = [dict(item) if isinstance(item, dict) else item for item in base_input]
                 recovery_rule = "\n\n" + PREMIUM_RECOVERY_RULE
                 if retry_input and isinstance(retry_input[0], dict) and retry_input[0].get("role") == "system":
@@ -5525,7 +5627,8 @@ async def generate_text(
                 _log_json("OUTPUT_RECOVERY", {
                     "request_fingerprint": key[:16], "retry": 1,
                     "reason": first_recovery_reason,
-                    "output_limit_tokens": PREMIUM_OUTPUT_TOKEN_LIMIT,
+                    "output_limit_tokens": retry_output_cap,
+                    "shared_output_budget_remaining": retry_output_cap,
                     "same_canonical_route": True,
                 })
                 retry_started = time.perf_counter()
@@ -5533,10 +5636,19 @@ async def generate_text(
                     client.responses.create,
                     model=MODEL,
                     input=retry_input,
+                    max_output_tokens=retry_output_cap,
                 )
                 provider_retries = 1
                 _apr_timing_log("openai_recovery_roundtrip", retry_started,
                     request_fingerprint=key[:16], outcome=_text(getattr(response, "status", "unknown")).lower())
+            elif first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0:
+                _log_json("OUTPUT_RECOVERY", {
+                    "request_fingerprint": key[:16], "retry": 1,
+                    "reason": first_recovery_reason,
+                    "status": "skipped_output_budget_exhausted",
+                    "output_limit_tokens": retry_output_cap,
+                    "same_canonical_route": True,
+                })
             if not provider_retries:
                 # No recovery call occurred; count the first attempt's usage only once.
                 prior_usage_data = {}
@@ -5562,7 +5674,13 @@ async def generate_text(
             refusal_adapter_applied = False
             refusal_candidate = _text(getattr(response, "refusal_text", "")) or _visible_refusal_from_output(raw)
             if refusal_candidate:
-                rewritten_raw, refusal_adapter_status, adapter_usage = await _adapt_provider_refusal(client, request, refusal_candidate, premium=True)
+                remaining_refusal_output = max(
+                    0, PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0)
+                )
+                rewritten_raw, refusal_adapter_status, adapter_usage = await _adapt_provider_refusal(
+                    client, request, refusal_candidate, premium=True,
+                    max_output_tokens=remaining_refusal_output,
+                )
                 raw = rewritten_raw
                 usage_data = _merge_refusal_usage(usage_data, adapter_usage)
                 refusal_adapter_applied = True
@@ -5639,15 +5757,25 @@ async def generate_text(
                     diagram_repair_usage: dict[str, int] = {}
                     if diagram_requested and not diagram_exists:
                         diagram_repair_started = time.perf_counter()
+                        remaining_diagram_output = max(
+                            0,
+                            min(
+                                PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+                                PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
+                            ),
+                        )
                         _log_json("SEMANTIC_DIAGRAM_REPAIR", {
                             "status": "started", "request_fingerprint": key[:16],
                             "reason": "requested_diagram_missing_concrete_payload",
-                            "answer_outline_fallback": False, "output_token_cap": 2200,
+                            "answer_outline_fallback": False,
+                            "output_token_cap": remaining_diagram_output,
+                            "shared_output_budget_remaining": remaining_diagram_output,
                         })
                         try:
                             repaired_diagram, diagram_repair_usage, diagram_repair_meta = await _repair_requested_diagram(
                                 client, request, current_request=normalized_current_request,
                                 answer=_text(machine.get("answer") or answer), display_language=display_language,
+                                max_output_tokens=remaining_diagram_output,
                             )
                             if repaired_diagram:
                                 out_blocks = list(out_blocks)
