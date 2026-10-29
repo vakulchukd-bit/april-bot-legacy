@@ -213,6 +213,558 @@ def _select_renderer(payload: Dict[str, Any]) -> str:
 
 
 
+def _node_semantic_text(node: Dict[str, Any]) -> str:
+    """Collect object identity fields without changing provider-supplied labels."""
+    return " ".join(
+        _text(node.get(key))
+        for key in ("kind", "symbol", "type", "object_type", "component_type", "element", "state", "label", "name", "title", "ref")
+        if _text(node.get(key))
+    ).lower().replace("ё", "е")
+
+
+def _electrical_role(node: Dict[str, Any]) -> str:
+    text = _node_semantic_text(node)
+    if re.search(r"(?:power[_ -]?supply|battery|accumulator|cell|батар\w*|аккумулятор\w*|источник\s+питан\w*)", text):
+        return "battery"
+    if re.search(r"(?:switch|toggle|выключател\w*|переключател\w*)", text):
+        return "switch"
+    if re.search(r"(?:lamp|bulb|light[_ -]?bulb|лампоч\w*|ламп\w*|светильник\w*)", text):
+        return "lamp"
+    if re.search(r"(?:fuse|предохранител\w*)", text):
+        return "fuse"
+    if re.search(r"(?:resistor|резистор\w*)", text):
+        return "resistor"
+    if re.search(r"(?:motor|двигател\w*)", text):
+        return "motor"
+    return ""
+
+
+def _is_electrical_payload(payload: Dict[str, Any], nodes: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Recognize electrical diagrams from the declared representation or real parts."""
+    declared = " ".join(
+        _text(payload.get(key)) for key in ("diagram_type", "representation", "format", "discipline", "domain", "title")
+    ).lower().replace("ё", "е")
+    if re.search(r"(?:electrical|wiring|circuit|electric[_ -]?schematic|электрическ\w*|электросхем\w*|схем\w*\s+подключен\w*)", declared):
+        return True
+    candidate_nodes = nodes if isinstance(nodes, list) else _list(payload.get("nodes") or payload.get("components") or payload.get("vertices"))
+    roles = {_electrical_role(node) for node in candidate_nodes if isinstance(node, dict)}
+    return "battery" in roles and "lamp" in roles and ("switch" in roles or "fuse" in roles or len(roles) >= 3)
+
+
+def _node_visual_kind(node: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Map explicit object metadata to a drawable symbol; labels remain untouched."""
+    text = _node_semantic_text(node)
+    shape = _text(node.get("shape") or node.get("geometry_type") or node.get("figure_type")).lower().replace("-", "_").replace(" ", "_")
+    combined = f"{shape} {text}"
+    if _electrical_role(node):
+        return _electrical_role(node)
+    representation = " ".join(_text(payload.get(key)) for key in ("representation", "diagram_type", "discipline", "domain")).lower()
+    if re.search(r"(?:chemistry|molecule|molecular|хими\w*|молекул\w*|атом\w*)", representation + " " + combined):
+        if re.search(r"\b(?:H|C|N|O|S|P|F|Cl|Br|I)\b|водород\w*|кислород\w*|углерод\w*|азот\w*", text, re.I):
+            return "atom"
+        return "molecule"
+    if re.search(r"(?:triangle|треугольник|equilateral_triangle)", combined): return "triangle"
+    if re.search(r"(?:square|квадрат)", combined): return "square"
+    if re.search(r"(?:rectangle|прямоугольник)", combined): return "rectangle"
+    if re.search(r"(?:circle|окружност|круг\b)", combined): return "circle"
+    if re.search(r"(?:sphere|сфера|шар\b)", combined): return "sphere"
+    if re.search(r"(?:cube|куб\b)", combined): return "cube"
+    if re.search(r"(?:vector|force|вектор\w*|сил\w*|направлен\w*)", combined): return "vector"
+    if re.search(r"(?:wave|волна|волнов\w*)", combined): return "wave"
+    if re.search(r"(?:spring|пружин\w*)", combined): return "spring"
+    if re.search(r"(?:lens|линз\w*|ray|луч\w*)", combined): return "lens"
+    if shape in {"line", "segment", "height", "base", "altitude"} or re.search(r"(?:\bheight\b|\bbase\b|отрезок|основан\w*|высот\w*)", combined): return "line"
+    if re.search(r"(?:atom|electron|атом\w*|электрон\w*)", combined): return "atom"
+    return "object"
+
+
+def _is_object_geometry_payload(payload: Dict[str, Any], nodes: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Detect structured geometry/physics objects that should be drawn on a canvas."""
+    candidate_nodes = nodes if isinstance(nodes, list) else _normalize_nodes(payload)
+    declared = " ".join(
+        _text(payload.get(key)) for key in ("diagram_type", "representation", "discipline", "domain", "title", "description")
+    ).lower().replace("ё", "е")
+    if re.search(r"(?:flowchart|process[_ -]?flow|workflow|navigation[_ -]?flow|network[_ -]?diagram|блок[- ]схем|навигац\w*|маршрут\w*)", declared):
+        return False
+    geometry_declared = bool(re.search(
+        r"(?:geometry|geometric|mathemat\w*|physics|physical|technical[_ -]?drawing|geometric[_ -]?drawing|геометр\w*|математ\w*|физик\w*|черт[её]ж|механик\w*|оптик\w*)",
+        declared,
+    ))
+    kinds = {"triangle", "square", "rectangle", "circle", "sphere", "cube", "vector", "wave", "spring", "lens", "line"}
+    recognized = [
+        node for node in candidate_nodes if isinstance(node, dict)
+        and _node_visual_kind(node, payload) in kinds
+    ]
+    explicit_shape = any(
+        isinstance(node, dict) and any(_text(node.get(key)) for key in ("shape", "geometry_type", "figure_type"))
+        for node in candidate_nodes
+    )
+    return bool(recognized and (geometry_declared or explicit_shape or len(recognized) >= 2))
+
+
+def _build_readable_object_geometry_svg(payload: Dict[str, Any], nodes: List[Dict[str, Any]], *, title: str = "") -> str:
+    """Draw real primitive geometry/physics figures, rather than cards containing headings."""
+    kinds = {"triangle", "square", "rectangle", "circle", "sphere", "cube", "vector", "wave", "spring", "lens", "line"}
+    objects: List[Dict[str, Any]] = []
+    for index, raw in enumerate(nodes[:8]):
+        if not isinstance(raw, dict):
+            continue
+        kind = _node_visual_kind(raw, payload)
+        if kind not in kinds:
+            continue
+        item = dict(raw)
+        item["id"] = _text(item.get("id") or item.get("node_id") or item.get("key")) or f"geometry_{index + 1}"
+        item["_kind"] = kind
+        item["_label"] = _text(item.get("label") or item.get("name") or item.get("title") or kind.title())
+        item["_detail"] = _text(item.get("measurement") or item.get("value") or item.get("dimensions_label"))
+        objects.append(item)
+    if not objects:
+        return ""
+
+    width, height = 440, (330 if len(objects) <= 2 else 420)
+    title_text = _text(title or payload.get("title") or "Геометрический чертёж")[:56]
+    title_size = 21 if len(title_text) <= 28 else 18 if len(title_text) <= 40 else 16
+    if len(objects) == 1:
+        centers = [(220.0, 180.0, 1.0)]
+    elif len(objects) == 2:
+        centers = [(125.0, 175.0, 0.62), (315.0, 175.0, 0.62)]
+    elif len(objects) <= 4:
+        centers = [(125.0, 135.0, 0.50), (315.0, 135.0, 0.50), (125.0, 292.0, 0.50), (315.0, 292.0, 0.50)]
+    else:
+        centers = [(78.0 + (i % 3) * 142.0, 136.0 + (i // 3) * 150.0, 0.40) for i in range(len(objects))]
+    positions: Dict[str, tuple[float, float]] = {}
+    for obj, (cx, cy, scale) in zip(objects, centers):
+        pos = obj.get("position") if isinstance(obj.get("position"), dict) else obj.get("coordinates")
+        if isinstance(pos, dict):
+            try:
+                px, py = float(pos.get("x")), float(pos.get("y"))
+                if 0 <= px <= 1 and 0 <= py <= 1:
+                    cx, cy = 34 + px * 372, 72 + py * (height - 126)
+                elif 0 <= px <= width and 0 <= py <= height:
+                    cx, cy = px, py
+            except (TypeError, ValueError):
+                pass
+        obj["_cx"], obj["_cy"], obj["_scale"] = cx, cy, scale
+        positions[obj["id"]] = (cx, cy)
+
+    esc = html.escape
+    context_text = " ".join([
+        title_text, _text(payload.get("description")),
+        " ".join(_text(x) for x in _list(payload.get("annotations"))),
+        " ".join(_node_semantic_text(x) for x in objects),
+    ]).lower().replace("ё", "е")
+    wants_height = bool(re.search(r"(?:\bheight\b|altitude|высот\w*)", context_text))
+    wants_base = bool(re.search(r"(?:\bbase\b|основан\w*)", context_text))
+    wants_radius = bool(re.search(r"(?:\bradius\b|радиус\w*)", context_text))
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%;height:auto" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<defs><marker id="april-geometry-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"/></marker></defs>',
+        f'<rect width="{width}" height="{height}" rx="18" fill="#f8fafc"/>',
+        f'<text x="220" y="30" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{title_size}" font-weight="750" fill="#0f172a">{esc(title_text)}</text>',
+    ]
+    # Preserve explicit relationships between separate supplied objects.
+    id_to_object = {obj["id"]: obj for obj in objects}
+    raw_edges = next((payload.get(key) for key in ("edges", "connections", "relations") if isinstance(payload.get(key), list)), [])
+    for edge in raw_edges[:20]:
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+            source, target, edge_label, directed = _text(edge[0]), _text(edge[1]), "", False
+        elif isinstance(edge, dict):
+            source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+            target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+            edge_label = _text(edge.get("label") or edge.get("relation"))
+            directed = bool(edge.get("directed") or edge.get("arrow") or edge.get("directed_edge"))
+        else:
+            continue
+        if source not in positions or target not in positions or source == target:
+            continue
+        x1, y1 = positions[source]
+        x2, y2 = positions[target]
+        marker = ' marker-end="url(#april-geometry-arrow)"' if directed else ""
+        parts.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="#64748b" stroke-width="1.8"{marker}/>')
+        if edge_label:
+            parts.append(f'<text x="{(x1+x2)/2:.1f}" y="{(y1+y2)/2-7:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" fill="#475569">{esc(edge_label[:24])}</text>')
+
+    for obj in objects:
+        cx, cy, scale = obj["_cx"], obj["_cy"], obj["_scale"]
+        kind, label = obj["_kind"], obj["_label"]
+        display_label = label
+        # A drawing title may already carry the full instruction; keep the in-shape
+        # label short enough to stay on the canvas and prioritize the object's name.
+        if kind == "triangle" and re.search(r"\bABC\b", label, re.IGNORECASE):
+            display_label = "Треугольник ABC"
+        elif len(display_label) > 24:
+            localized_kinds = {
+                "triangle": "Треугольник", "square": "Квадрат", "rectangle": "Прямоугольник",
+                "circle": "Окружность", "sphere": "Сфера", "cube": "Куб", "vector": "Вектор",
+                "wave": "Волна", "spring": "Пружина", "lens": "Линза", "line": "Отрезок",
+            }
+            display_label = localized_kinds.get(kind, display_label[:23].rstrip() + "…")
+        stroke = _text(obj.get("color") or obj.get("stroke") or "#2563eb")
+        fill = _text(obj.get("fill") or "#dbeafe")
+        sw = 2.8 if scale >= 0.9 else 2.2
+        if kind == "triangle":
+            left, right, base_y, apex_x, apex_y = cx-104*scale, cx+104*scale, cy+55*scale, cx+12*scale, cy-88*scale
+            parts.append(f'<polygon points="{left:.1f},{base_y:.1f} {right:.1f},{base_y:.1f} {apex_x:.1f},{apex_y:.1f}" fill="{esc(fill)}" fill-opacity="0.45" stroke="{esc(stroke)}" stroke-width="{sw}" stroke-linejoin="round"/>')
+            for letter, x, y in (("A", left, base_y), ("B", right, base_y), ("C", apex_x, apex_y)):
+                parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{4*scale:.1f}" fill="{esc(stroke)}"/><text x="{x:.1f}" y="{y+(16*scale if y < cy else 17*scale):.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{12*scale:.1f}" fill="#334155">{letter}</text>')
+            if wants_height:
+                hx = (left + right) / 2
+                parts.append(f'<line x1="{hx:.1f}" y1="{apex_y:.1f}" x2="{hx:.1f}" y2="{base_y:.1f}" stroke="#dc2626" stroke-width="{2*scale:.1f}" stroke-dasharray="5 4"/>')
+                parts.append(f'<text x="{hx+6*scale:.1f}" y="{(apex_y+base_y)/2:.1f}" font-family="Inter,Arial,sans-serif" font-size="{12*scale:.1f}" fill="#b91c1c">h</text>')
+            if wants_base:
+                parts.append(f'<text x="{cx:.1f}" y="{base_y+30*scale:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{12*scale:.1f}" fill="#334155">основание</text>')
+        elif kind in {"square", "rectangle"}:
+            try:
+                actual_w = float(obj.get("width") or obj.get("side") or obj.get("side_length") or 0)
+                actual_h = float(obj.get("height") or obj.get("side") or obj.get("side_length") or 0)
+            except (TypeError, ValueError):
+                actual_w = actual_h = 0
+            box_w = (132 if kind == "square" else 182) * scale
+            box_h = (132 if kind == "square" else 98) * scale
+            parts.append(f'<rect x="{cx-box_w/2:.1f}" y="{cy-box_h/2:.1f}" width="{box_w:.1f}" height="{box_h:.1f}" rx="2" fill="{esc(fill)}" fill-opacity="0.45" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+            if actual_w:
+                parts.append(f'<text x="{cx:.1f}" y="{cy+box_h/2+15*scale:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{11*scale:.1f}" fill="#334155">{esc(_text(obj.get("width") or obj.get("side") or obj.get("side_length")))}</text>')
+            if actual_h and kind == "rectangle":
+                parts.append(f'<text x="{cx+box_w/2+6*scale:.1f}" y="{cy:.1f}" font-family="Inter,Arial,sans-serif" font-size="{11*scale:.1f}" fill="#334155">{esc(_text(obj.get("height")))}</text>')
+        elif kind in {"circle", "sphere"}:
+            radius = 72*scale
+            parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{radius:.1f}" fill="{esc(fill)}" fill-opacity="0.35" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+            if kind == "sphere":
+                parts.append(f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{radius:.1f}" ry="{radius*.30:.1f}" fill="none" stroke="{esc(stroke)}" stroke-width="{1.4*scale:.1f}"/><ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{radius*.32:.1f}" ry="{radius:.1f}" fill="none" stroke="{esc(stroke)}" stroke-width="{1.4*scale:.1f}"/>')
+            if wants_radius or obj.get("radius") or obj.get("diameter"):
+                parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{3*scale:.1f}" fill="{esc(stroke)}"/><line x1="{cx:.1f}" y1="{cy:.1f}" x2="{cx+radius:.1f}" y2="{cy:.1f}" stroke="#dc2626" stroke-width="{2*scale:.1f}"/><text x="{cx+radius/2:.1f}" y="{cy-7*scale:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{12*scale:.1f}" fill="#b91c1c">r</text>')
+        elif kind == "cube":
+            side, off = 92*scale, 28*scale
+            x0, y0 = cx-side/2, cy-side/2
+            parts.append(f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{side:.1f}" height="{side:.1f}" fill="{esc(fill)}" fill-opacity="0.30" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+            parts.append(f'<path d="M {x0:.1f} {y0:.1f} l {off:.1f} {-off:.1f} h {side:.1f} v {side:.1f} l {-off:.1f} {off:.1f} M {x0+side:.1f} {y0:.1f} l {off:.1f} {-off:.1f} M {x0+side:.1f} {y0+side:.1f} l {off:.1f} {-off:.1f}" fill="none" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+        elif kind == "vector":
+            parts.append(f'<line x1="{cx-72*scale:.1f}" y1="{cy+52*scale:.1f}" x2="{cx+66*scale:.1f}" y2="{cy-50*scale:.1f}" stroke="{esc(stroke)}" stroke-width="{3*scale:.1f}" marker-end="url(#april-geometry-arrow)"/>')
+        elif kind == "wave":
+            wave_path = f'M {cx-82*scale:.1f} {cy:.1f} C {cx-60*scale:.1f} {cy-48*scale:.1f}, {cx-34*scale:.1f} {cy-48*scale:.1f}, {cx-12*scale:.1f} {cy:.1f} S {cx+36*scale:.1f} {cy+48*scale:.1f}, {cx+58*scale:.1f} {cy:.1f} S {cx+80*scale:.1f} {cy-48*scale:.1f}, {cx+82*scale:.1f} {cy:.1f}'
+            parts.append(f'<line x1="{cx-88*scale:.1f}" y1="{cy:.1f}" x2="{cx+88*scale:.1f}" y2="{cy:.1f}" stroke="#94a3b8" stroke-width="1.2"/><path d="{wave_path}" fill="none" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+        elif kind == "spring":
+            points = " ".join(f'{cx+x*scale:.1f},{cy+y*scale:.1f}' for x,y in [(-76,0),(-58,-20),(-40,20),(-22,-20),(-4,20),(14,-20),(32,20),(50,-20),(68,0)])
+            parts.append(f'<polyline points="{points}" fill="none" stroke="{esc(stroke)}" stroke-width="{sw}" stroke-linejoin="round"/>')
+        elif kind == "lens":
+            parts.append(f'<line x1="{cx-92*scale:.1f}" y1="{cy:.1f}" x2="{cx+92*scale:.1f}" y2="{cy:.1f}" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4 4"/><path d="M {cx:.1f} {cy-76*scale:.1f} C {cx-38*scale:.1f} {cy-48*scale:.1f}, {cx-38*scale:.1f} {cy+48*scale:.1f}, {cx:.1f} {cy+76*scale:.1f} C {cx+38*scale:.1f} {cy+48*scale:.1f}, {cx+38*scale:.1f} {cy-48*scale:.1f}, {cx:.1f} {cy-76*scale:.1f} Z" fill="{esc(fill)}" fill-opacity="0.4" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+        elif kind == "line":
+            if re.search(r"(?:height|высот)", label, re.I):
+                parts.append(f'<line x1="{cx:.1f}" y1="{cy-70*scale:.1f}" x2="{cx:.1f}" y2="{cy+70*scale:.1f}" stroke="{esc(stroke)}" stroke-width="{sw}" stroke-dasharray="5 4"/>')
+            else:
+                parts.append(f'<line x1="{cx-88*scale:.1f}" y1="{cy:.1f}" x2="{cx+88*scale:.1f}" y2="{cy:.1f}" stroke="{esc(stroke)}" stroke-width="{sw}"/>')
+        label_y = cy + 103*scale
+        label_lines = [display_label]
+        if len(display_label) > 23:
+            # Prefer a word boundary when wrapping the second line.
+            split_at = display_label.rfind(" ", 0, 23)
+            if split_at < 8:
+                split_at = 23
+            label_lines = [display_label[:split_at].strip(), display_label[split_at:].strip()[:23]]
+        tspan_markup = "".join(
+            f'<tspan x="{cx:.1f}" dy="{0 if line_index == 0 else 13*scale:.1f}">{esc(line)}</tspan>'
+            for line_index, line in enumerate(label_lines) if line
+        )
+        parts.append(f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{11.5*scale:.1f}" font-weight="700" fill="#0f172a">{tspan_markup}</text>')
+        if obj["_detail"]:
+            detail_y = label_y + 15*scale*len(label_lines)
+            parts.append(f'<text x="{cx:.1f}" y="{detail_y:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{10*scale:.1f}" fill="#475569">{esc(obj["_detail"][:34])}</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def _is_chemistry_payload(payload: Dict[str, Any], nodes: Optional[List[Dict[str, Any]]] = None) -> bool:
+    declared = " ".join(
+        _text(payload.get(key)) for key in ("diagram_type", "representation", "discipline", "domain", "title")
+    ).lower().replace("ё", "е")
+    if re.search(r"(?:chemistry|molecule|molecular|chemical[_ -]?structure|хими\w*|молекул\w*|химическ\w*\s+связ\w*)", declared):
+        return True
+    candidate_nodes = nodes if isinstance(nodes, list) else _list(payload.get("nodes") or payload.get("components") or payload.get("vertices"))
+    candidate_edges = next((payload.get(key) for key in ("edges", "connections", "relations") if isinstance(payload.get(key), list)), [])
+    if len(candidate_nodes) < 2 or not candidate_edges:
+        return False
+    atom_like = 0
+    for node in candidate_nodes:
+        if not isinstance(node, dict):
+            continue
+        text = _node_semantic_text(node)
+        if re.search(r"(?:\b(?:H|C|N|O|S|P|F|Cl|Br|I|Na|K|Ca|Mg)\b|hydrogen|oxygen|carbon|nitrogen|sulfur|phosphorus|водород|кислород|углерод|азот|сера|фосфор)", text, re.I):
+            atom_like += 1
+    return atom_like >= 2
+
+
+def _chemical_symbol(node: Dict[str, Any]) -> str:
+    explicit = _text(node.get("element") or node.get("symbol")).strip()
+    allowed = {"H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca", "Fe", "Cu", "Zn", "Br", "I"}
+    if explicit in allowed:
+        return explicit
+    text = _node_semantic_text(node)
+    names = {
+        "hydrogen": "H", "водород": "H", "oxygen": "O", "кислород": "O",
+        "carbon": "C", "углерод": "C", "nitrogen": "N", "азот": "N",
+        "sulfur": "S", "сера": "S", "phosphorus": "P", "фосфор": "P",
+        "chlorine": "Cl", "хлор": "Cl", "sodium": "Na", "натрий": "Na",
+        "calcium": "Ca", "кальций": "Ca", "iron": "Fe", "железо": "Fe",
+    }
+    for name, symbol in names.items():
+        if name in text:
+            return symbol
+    match = re.search(r"(?<![A-Za-z])(?:Cl|Br|Na|Mg|Ca|Fe|Cu|Zn|H|C|N|O|S|P|F|I|K)(?![a-z])", explicit or _text(node.get("label") or node.get("name")))
+    return match.group(0) if match else "X"
+
+
+def _build_readable_molecular_svg(payload: Dict[str, Any], nodes: List[Dict[str, Any]], *, title: str = "") -> str:
+    """Render atom nodes and bond edges as a molecule, not a flowchart of labels."""
+    if len(nodes) < 2:
+        return ""
+    raw_edges = next((payload.get(key) for key in ("edges", "connections", "relations") if isinstance(payload.get(key), list)), [])
+    alias_to_id: Dict[str, str] = {}
+    normalized_nodes: List[Dict[str, Any]] = []
+    for index, node in enumerate(nodes[:10]):
+        node_id = _text(node.get("id") or node.get("node_id") or node.get("component_id") or node.get("key")) or f"atom_{index+1}"
+        normalized = {**node, "id": node_id, "symbol": _chemical_symbol(node)}
+        normalized_nodes.append(normalized)
+        for alias_key in ("id", "node_id", "component_id", "key", "element", "symbol", "label", "name", "title"):
+            alias = _text(node.get(alias_key)).strip().lower()
+            if alias and alias not in alias_to_id:
+                alias_to_id[alias] = node_id
+        alias_to_id.setdefault(node_id.lower(), node_id)
+    if not normalized_nodes:
+        return ""
+    width = 440
+    title_text = _text(title or payload.get("title") or "Молекулярная структура")
+    # honor normalized supplied positions; otherwise use a clear mobile-width row
+    # for simple molecules. More complex structures wrap into two staggered rows.
+    positions: Dict[str, tuple[float, float]] = {}
+    count = len(normalized_nodes)
+    for index, node in enumerate(normalized_nodes):
+        pos = node.get("position") if isinstance(node.get("position"), dict) else node.get("coordinates")
+        x = y = None
+        if isinstance(pos, dict):
+            try:
+                px, py = float(pos.get("x")), float(pos.get("y"))
+                if 0 <= px <= 1 and 0 <= py <= 1:
+                    x, y = 28 + px * 384, 90 + py * 140
+                elif 0 <= px <= 440 and 0 <= py <= 280:
+                    x, y = px, py
+            except (TypeError, ValueError):
+                pass
+        if x is None or y is None:
+            if count <= 6:
+                x = 42 + index * (356 / max(1, count - 1))
+                y = 160 + (18 if index % 2 else -18)
+            else:
+                col = index % 5
+                row = index // 5
+                x = 48 + col * 86
+                y = 125 + row * 90 + (22 if col % 2 else 0)
+        positions[node["id"]] = (x, y)
+    height = max(260, int(max(y for _, y in positions.values()) + 92))
+    esc = html.escape
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%;height:auto" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<rect width="440" height="100%" rx="18" fill="#f8fafc"/>',
+        f'<text x="220" y="31" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="21" font-weight="750" fill="#0f172a">{esc(title_text[:58])}</text>',
+        '<text x="220" y="52" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#64748b">АТОМЫ И ХИМИЧЕСКИЕ СВЯЗИ</text>',
+    ]
+    # Bonds behind atoms; edge order controls single/double/triple lines.
+    for edge in raw_edges[:24]:
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+            source, target = _text(edge[0]), _text(edge[1]); edge_data = {}
+        elif isinstance(edge, dict):
+            source = _text(edge.get("from") or edge.get("source") or edge.get("start"))
+            target = _text(edge.get("to") or edge.get("target") or edge.get("end"))
+            edge_data = edge
+        else:
+            continue
+        source = alias_to_id.get(source.strip().lower(), source)
+        target = alias_to_id.get(target.strip().lower(), target)
+        if source not in positions or target not in positions:
+            continue
+        x1, y1 = positions[source]; x2, y2 = positions[target]
+        order_value = _text(edge_data.get("bond_order") or edge_data.get("order") or edge_data.get("type") or "1").lower()
+        multiplicity = 3 if order_value in {"3", "triple", "тройная", "тройная связь"} else 2 if order_value in {"2", "double", "двойная", "двойная связь"} else 1
+        dx, dy = x2 - x1, y2 - y1
+        length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+        nx, ny = -dy / length * 3.2, dx / length * 3.2
+        for line_index in range(multiplicity):
+            offset = (line_index - (multiplicity - 1) / 2) * 3.2
+            parts.append(f'<line x1="{x1 + nx*offset:.1f}" y1="{y1 + ny*offset:.1f}" x2="{x2 + nx*offset:.1f}" y2="{y2 + ny*offset:.1f}" stroke="#475569" stroke-width="2.8" stroke-linecap="round"/>')
+    element_colors = {"H": ("#ffffff", "#94a3b8"), "C": ("#334155", "#0f172a"), "N": ("#dbeafe", "#2563eb"), "O": ("#fee2e2", "#dc2626"), "S": ("#fef3c7", "#a16207"), "P": ("#ffedd5", "#c2410c"), "Cl": ("#dcfce7", "#15803d"), "Na": ("#f3e8ff", "#7e22ce")}
+    for node in normalized_nodes:
+        x, y = positions[node["id"]]
+        symbol = node["symbol"]
+        fill, stroke = element_colors.get(symbol, ("#e0f2fe", "#0369a1"))
+        label = _text(node.get("label") or node.get("name") or node.get("title"))
+        value = _text(node.get("charge") or node.get("value"))
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="22" fill="{fill}" stroke="{stroke}" stroke-width="2.5"/>')
+        parts.append(f'<text x="{x:.1f}" y="{y+6:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="800" fill="{("#ffffff" if symbol == "C" else "#0f172a")}">{esc(symbol)}</text>')
+        if value:
+            parts.append(f'<text x="{x:.1f}" y="{y-27:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#64748b">{esc(value[:12])}</text>')
+        if label and label.lower() != symbol.lower():
+            parts.append(f'<text x="{x:.1f}" y="{y+39:.1f}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" fill="#475569">{esc(label[:18])}</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def _build_readable_electrical_schematic_svg(
+    payload: Dict[str, Any], nodes: List[Dict[str, Any]], *, title: str = ""
+) -> str:
+    """Render battery/switch/lamp components as electrical objects, not text cards.
+
+    The drawing uses a clear closed-loop example only when the payload actually
+    identifies a battery and lamp; it never invents component ratings. Provider
+    node labels and values are retained as labels in the drawing.
+    """
+    role_nodes: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        role = _electrical_role(node)
+        if role and role not in role_nodes:
+            role_nodes[role] = node
+    if not ("battery" in role_nodes and "lamp" in role_nodes):
+        return ""
+
+    # Do not replace arbitrary electrical topology with a stereotyped circuit.
+    # A specialized battery/lamp drawing is allowed only when the source graph
+    # confirms the component sequence. Otherwise the general diagram renderer
+    # keeps the provider's real relationships instead of inventing wires.
+    raw_edges = next((payload.get(key) for key in ("edges", "connections", "relations", "segments") if isinstance(payload.get(key), list)), [])
+    if not raw_edges:
+        return ""
+
+    aliases: Dict[str, str] = {}
+    for role, node in role_nodes.items():
+        for key in ("id", "node_id", "component_id", "key", "label", "name", "title"):
+            alias = _text(node.get(key)).strip().lower()
+            if alias and alias not in aliases:
+                aliases[alias] = role
+    # Also recognize endpoint aliases on any node, not just the component-role nodes.
+    for node in nodes:
+        role = _electrical_role(node)
+        if not role:
+            continue
+        for key in ("id", "node_id", "component_id", "key", "label", "name", "title"):
+            alias = _text(node.get(key)).strip().lower()
+            if alias and alias not in aliases:
+                aliases[alias] = role
+
+    linked_roles = set()
+    for edge in raw_edges:
+        if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+            source, target = _text(edge[0]).strip().lower(), _text(edge[1]).strip().lower()
+        elif isinstance(edge, dict):
+            source = _text(edge.get("from") or edge.get("source") or edge.get("start")).strip().lower()
+            target = _text(edge.get("to") or edge.get("target") or edge.get("end")).strip().lower()
+        else:
+            continue
+        source_role, target_role = aliases.get(source), aliases.get(target)
+        if source_role and target_role and source_role != target_role:
+            linked_roles.add(frozenset((source_role, target_role)))
+
+    required_links = set()
+    if "switch" in role_nodes:
+        if "fuse" in role_nodes:
+            required_links.update((frozenset(("battery", "fuse")), frozenset(("fuse", "switch"))))
+        else:
+            required_links.add(frozenset(("battery", "switch")))
+        required_links.add(frozenset(("switch", "lamp")))
+    elif "fuse" in role_nodes:
+        required_links.update((frozenset(("battery", "fuse")), frozenset(("fuse", "lamp"))))
+    else:
+        required_links.add(frozenset(("battery", "lamp")))
+    if not required_links.issubset(linked_roles):
+        return ""
+
+    esc = html.escape
+    width, height = 440, 330
+    title_text = _text(title or payload.get("title") or "Схема подключения")
+    title_font_size = 21 if len(title_text) <= 30 else 18 if len(title_text) <= 40 else 16
+    title_text = title_text[:52]
+    battery = role_nodes["battery"]
+    switch = role_nodes.get("switch")
+    lamp = role_nodes["lamp"]
+    fuse = role_nodes.get("fuse")
+
+    def label_for(node: Dict[str, Any], fallback: str) -> str:
+        return _text(node.get("label") or node.get("name") or node.get("title"), fallback)
+
+    def rating_for(node: Dict[str, Any]) -> str:
+        return _text(node.get("value") or node.get("rating") or node.get("voltage") or node.get("power"))
+
+    battery_label = label_for(battery, "Батарейка")
+    battery_value = rating_for(battery)
+    switch_label = label_for(switch, "Выключатель") if switch else ""
+    lamp_label = label_for(lamp, "Лампочка")
+    lamp_value = rating_for(lamp)
+    switch_text = _node_semantic_text(switch or {})
+    switch_closed = bool(re.search(r"(?:closed|on|замкнут\w*|включен\w*)", switch_text))
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" style="display:block;width:100%;max-width:100%;height:auto" viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">',
+        '<defs><filter id="april-circuit-shadow" x="-15%" y="-15%" width="130%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#0f172a" flood-opacity=".12"/></filter></defs>',
+        '<rect width="440" height="330" rx="18" fill="#f8fafc"/>',
+        f'<text x="220" y="30" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="{title_font_size}" font-weight="750" fill="#0f172a">{esc(title_text)}</text>',
+        '<text x="220" y="51" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="650" letter-spacing="1" fill="#64748b">ЭЛЕКТРИЧЕСКАЯ ЦЕПЬ • СХЕМАТИЧНО</text>',
+        # Wires are drawn first, with an explicit return path to show the circuit loop.
+        '<path d="M108 156 L130 156 L130 88 L160 88" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>',
+    ]
+    if fuse:
+        parts.extend([
+            '<line x1="130" y1="88" x2="145" y2="88" stroke="#334155" stroke-width="4"/>',
+            '<rect x="145" y="78" width="34" height="20" rx="4" fill="#fff7ed" stroke="#c2410c" stroke-width="2.5"/>',
+            '<line x1="179" y1="88" x2="191" y2="88" stroke="#334155" stroke-width="4"/>',
+        ])
+    switch_left = 191 if fuse else 160
+    switch_right = switch_left + 54
+    lamp_x = 342
+    # switch branch; state is shown only if the source node explicitly specifies it.
+    if switch:
+        parts.extend([
+            f'<path d="M{switch_right} 88 L{lamp_x} 88 L{lamp_x} 126" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>',
+        ])
+    else:
+        parts.append(f'<path d="M{switch_left} 88 L{lamp_x} 88 L{lamp_x} 126" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>')
+    parts.extend([
+        f'<path d="M{lamp_x} 198 L{lamp_x} 260 L108 260 L108 187" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>',
+        # Battery: body and distinct positive/negative terminals.
+        '<g filter="url(#april-circuit-shadow)"><rect x="25" y="137" width="77" height="69" rx="11" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/></g>',
+        '<text x="63.5" y="163" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="800" fill="#1d4ed8">DC</text>',
+        '<text x="39" y="184" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="800" fill="#15803d">+</text>',
+        '<text x="89" y="184" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="17" font-weight="800" fill="#b91c1c">−</text>',
+        '<circle cx="108" cy="156" r="5" fill="#15803d"/><circle cx="108" cy="187" r="5" fill="#b91c1c"/>',
+        # Lamp symbol: bulb + filament cross.
+        '<g filter="url(#april-circuit-shadow)"><circle cx="342" cy="162" r="36" fill="#fffbeb" stroke="#a16207" stroke-width="3"/></g>',
+        '<path d="M322 142 L362 182 M362 142 L322 182" stroke="#a16207" stroke-width="3.5" stroke-linecap="round"/>',
+        '<circle cx="342" cy="126" r="4" fill="#334155"/><circle cx="342" cy="198" r="4" fill="#334155"/>',
+    ])
+    if switch:
+        parts.extend([
+            f'<circle cx="{switch_left}" cy="88" r="5" fill="#0369a1"/>',
+            f'<circle cx="{switch_right}" cy="88" r="5" fill="#0369a1"/>',
+            (f'<line x1="{switch_left}" y1="88" x2="{switch_right-2}" y2="88" stroke="#0369a1" stroke-width="4" stroke-linecap="round"/>' if switch_closed else f'<line x1="{switch_left}" y1="88" x2="{switch_right-9}" y2="66" stroke="#0369a1" stroke-width="4" stroke-linecap="round"/>'),
+        ])
+    # Human-readable labels are secondary; the physical symbols and wires remain the focus.
+    parts.extend([
+        f'<text x="63" y="229" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#0f172a">{esc(battery_label[:22])}</text>',
+        f'<text x="63" y="245" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#475569">{esc(battery_value[:18])}</text>' if battery_value else '',
+        f'<text x="{(switch_left+switch_right)/2:.1f}" y="132" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="700" fill="#0f172a">{esc(switch_label[:20])}</text>' if switch else '',
+        f'<text x="342" y="229" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#0f172a">{esc(lamp_label[:22])}</text>',
+        f'<text x="342" y="245" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#475569">{esc(lamp_value[:18])}</text>' if lamp_value else '',
+        '<text x="220" y="302" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#475569">Выключатель разомкнут — лампа выключена.</text>' if switch and not switch_closed else '<text x="220" y="302" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" fill="#475569">Проверь напряжение лампы и полярность источника перед включением.</text>',
+        '</svg>',
+    ])
+    svg = "".join(parts)
+    # When a fuse exists, retain its identity visibly near the positive lead.
+    if fuse:
+        fuse_label = esc(label_for(fuse, "Предохранитель")[:20])
+        svg = svg.replace(
+            '<text x="220" y="302"',
+            f'<text x="162" y="113" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="700" fill="#9a3412">{fuse_label}</text><text x="220" y="302"',
+            1,
+        )
+    return svg
+
+
 def _node_ports(node: Dict[str, Any]) -> List[Dict[str, str]]:
     raw = node.get("ports") or node.get("terminals") or node.get("contacts") or []
     out: List[Dict[str, str]] = []
@@ -694,8 +1246,8 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     ).lower()
 
     if not svg and not svg_payload and (nodes or edges):
-        electrical = diagram_type in {"electrical_schematic", "wiring", "circuit", "electrical"} or any(
-            _text(n.get("symbol") or n.get("kind")).lower() in {"power_supply","fuse","switch","lamp","motor","resistor","controller"}
+        electrical = _is_electrical_payload(source, nodes) or any(
+            _text(n.get("symbol") or n.get("kind") or n.get("type")).lower().replace("-", "_") in {"power_supply", "fuse", "switch", "lamp", "motor", "resistor", "controller"}
             for n in nodes
         )
         if electrical:
@@ -866,7 +1418,7 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
             node_id = f"{node_id}_{index + 1}"
         ids_seen.add(node_id)
         label = _text(node.get("label") or node.get("name") or node.get("title") or node_id)
-        lines = _wrap_lines(label, limit=31, max_lines=4)
+        lines = _wrap_lines(label, limit=23, max_lines=4)
         node.update({"id": node_id, "label": label, "_display_lines": lines})
         nodes.append(node)
     if len(nodes) < 2:
@@ -972,11 +1524,38 @@ def build_readable_diagram_svg(payload: dict[str, Any], *, title: str = "") -> s
             f'<g filter="url(#april-flow-shadow)"><rect x="{card_x}" y="{y}" width="{card_w}" height="{node_h}" '
             f'rx="16" fill="{fill}" stroke="{stroke}" stroke-width="2"/></g>'
         )
+        visual_kind = _node_visual_kind(node, payload)
+        icon_x = card_x + 40
+        icon_y = y + node_h / 2
+        icon_stroke = "#0f766e"
+        if visual_kind == "triangle":
+            parts.append(f'<polygon points="{icon_x},{icon_y-21} {icon_x-21},{icon_y+17} {icon_x+21},{icon_y+17}" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round"/>')
+        elif visual_kind in {"circle", "sphere"}:
+            parts.append(f'<circle cx="{icon_x}" cy="{icon_y}" r="20" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5"/>')
+            if visual_kind == "sphere":
+                parts.append(f'<ellipse cx="{icon_x}" cy="{icon_y}" rx="9" ry="20" fill="none" stroke="#2563eb" stroke-width="1.5"/><ellipse cx="{icon_x}" cy="{icon_y}" rx="20" ry="8" fill="none" stroke="#2563eb" stroke-width="1.5"/>')
+        elif visual_kind in {"square", "rectangle", "cube"}:
+            parts.append(f'<rect x="{icon_x-18}" y="{icon_y-18}" width="36" height="36" rx="2" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5"/>')
+            if visual_kind == "cube":
+                parts.append(f'<path d="M {icon_x-18} {icon_y-18} l 10 -8 h 36 l -10 8 M {icon_x+18} {icon_y-18} l 10 -8 v 36 l -10 8" fill="none" stroke="#2563eb" stroke-width="1.5"/>')
+        elif visual_kind in {"atom", "molecule"}:
+            parts.append(f'<ellipse cx="{icon_x}" cy="{icon_y}" rx="22" ry="9" fill="none" stroke="#7c3aed" stroke-width="1.8" transform="rotate(0 {icon_x} {icon_y})"/><ellipse cx="{icon_x}" cy="{icon_y}" rx="22" ry="9" fill="none" stroke="#7c3aed" stroke-width="1.8" transform="rotate(60 {icon_x} {icon_y})"/><ellipse cx="{icon_x}" cy="{icon_y}" rx="22" ry="9" fill="none" stroke="#7c3aed" stroke-width="1.8" transform="rotate(120 {icon_x} {icon_y})"/><circle cx="{icon_x}" cy="{icon_y}" r="5" fill="#7c3aed"/>')
+        elif visual_kind in {"vector", "lens"}:
+            parts.append(f'<path d="M {icon_x-22} {icon_y+12} L {icon_x+18} {icon_y-12} M {icon_x+5} {icon_y-13} L {icon_x+18} {icon_y-12} L {icon_x+13} {icon_y+1}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>')
+            if visual_kind == "lens":
+                parts.append(f'<ellipse cx="{icon_x}" cy="{icon_y}" rx="8" ry="22" fill="#dbeafe" fill-opacity="0.6" stroke="#2563eb" stroke-width="2"/>')
+        elif visual_kind == "wave":
+            parts.append(f'<path d="M {icon_x-24} {icon_y} C {icon_x-18} {icon_y-22} {icon_x-10} {icon_y-22} {icon_x-4} {icon_y} S {icon_x+10} {icon_y+22} {icon_x+16} {icon_y} S {icon_x+28} {icon_y-18} {icon_x+30} {icon_y}" fill="none" stroke="#2563eb" stroke-width="2.5"/>')
+        elif visual_kind == "spring":
+            parts.append(f'<path d="M {icon_x-24} {icon_y} l 8 -10 l 8 20 l 8 -20 l 8 20 l 8 -10" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round"/>')
+        else:
+            # An actual bounded object marker, not a heading-shaped placeholder.
+            parts.append(f'<circle cx="{icon_x}" cy="{icon_y}" r="17" fill="#ecfdf5" stroke="{icon_stroke}" stroke-width="2.2"/><circle cx="{icon_x}" cy="{icon_y}" r="5" fill="{icon_stroke}"/>')
         for line_index, line in enumerate(node["_display_lines"]):
             baseline = y + 28 + line_index * 28
             parts.append(
-                f'<text x="{card_x + 22}" y="{baseline}" font-family="Inter,Arial,sans-serif" '
-                f'font-size="21" font-weight="{700 if line_index == 0 else 500}" fill="#0f172a">{esc(line)}</text>'
+                f'<text x="{card_x + 76}" y="{baseline}" font-family="Inter,Arial,sans-serif" '
+                f'font-size="19" font-weight="{700 if line_index == 0 else 500}" fill="#0f172a">{esc(line)}</text>'
             )
     parts.append("</svg>")
     return "".join(parts)
@@ -1385,6 +1964,47 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
             result["readability_profile"] = "april_navigation_ui_svg_v2"
             result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "TB", "responsive": True}
         return result
+    nodes_for_rebuild = result.get("nodes") or result.get("components") or result.get("vertices")
+    normalized_nodes = _normalize_nodes(result) if isinstance(nodes_for_rebuild, list) else []
+    if _is_electrical_payload(result, normalized_nodes):
+        electrical_svg = _build_readable_electrical_schematic_svg(
+            result,
+            normalized_nodes,
+            title=title or _text(result.get("title") or "Схема подключения"),
+        )
+        if electrical_svg:
+            result["svg"] = electrical_svg
+            result["renderer"] = "SvgBlock"
+            result["viewer"] = "SvgBlock"
+            result["readability_profile"] = "mobile_electrical_schematic_v1"
+            result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "LR", "responsive": True}
+            return result
+    if _is_chemistry_payload(result, normalized_nodes):
+        molecule_svg = _build_readable_molecular_svg(
+            result,
+            normalized_nodes,
+            title=title or _text(result.get("title") or "Молекулярная структура"),
+        )
+        if molecule_svg:
+            result["svg"] = molecule_svg
+            result["renderer"] = "SvgBlock"
+            result["viewer"] = "SvgBlock"
+            result["readability_profile"] = "mobile_molecular_structure_v1"
+            result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "LR", "responsive": True}
+            return result
+    if _is_object_geometry_payload(result, normalized_nodes):
+        geometry_svg = _build_readable_object_geometry_svg(
+            result,
+            normalized_nodes,
+            title=title or _text(result.get("title") or "Геометрический чертёж"),
+        )
+        if geometry_svg:
+            result["svg"] = geometry_svg
+            result["renderer"] = "SvgBlock"
+            result["viewer"] = "SvgBlock"
+            result["readability_profile"] = "mobile_object_geometry_v1"
+            result["layout"] = {**(result.get("layout") if isinstance(result.get("layout"), dict) else {}), "direction": "LR", "responsive": True}
+            return result
     has_existing_drawing = False
     for svg_field in svg_fields:
         existing_svg = _text(result.get(svg_field)) if isinstance(result.get(svg_field), str) else ""
@@ -1396,7 +2016,6 @@ def ensure_readable_diagram_payload(payload: Any, *, title: str = "") -> dict[st
         if existing_svg and has_drawable_element:
             has_existing_drawing = True
             break
-    nodes_for_rebuild = result.get("nodes") or result.get("components") or result.get("vertices")
     edges_for_rebuild = next((result.get(key) for key in ("edges", "connections", "relations") if isinstance(result.get(key), list)), None)
     has_rebuildable_graph = isinstance(nodes_for_rebuild, list) and len(nodes_for_rebuild) >= 2 and isinstance(edges_for_rebuild, list)
     if has_existing_drawing:
