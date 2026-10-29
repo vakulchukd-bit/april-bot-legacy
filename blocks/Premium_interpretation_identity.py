@@ -3867,12 +3867,15 @@ def _split_request_sequence(text: str) -> list[str]:
     # once. Independent requests remain split by the established path below.
     parent_outputs = _detect_requested_outputs(source)
     starts_visual_build = bool(re.match(
-        r"^\s*(?:построй(?:те)?|создай(?:те)?|покажи(?:те)?|сделай(?:те)?|нарисуй(?:те)?|визуализируй(?:те)?|побудуй(?:те)?|створи(?:те)?|build|create|show|make|draw|visuali[sz]e|plot)\b",
+        r"^\s*(?:построй(?:те)?|создай(?:те)?|покажи(?:те)?|сделай(?:те)?|нарисуй(?:те)?|визуализируй(?:те)?|"
+        r"перенеси(?:те)?|перестрой(?:те)?|переведи(?:те)?|переобразуй(?:те)?|побудуй(?:те)?|створи(?:те)?|"
+        r"build|create|show|make|draw|visuali[sz]e|plot|move|convert|transfer)\b",
         source,
         flags=re.IGNORECASE,
     ))
     has_3d_scene_language = bool(re.search(
-        r"(?:\b3\s*[- ]?d\b|\bthree[- ]dimensional\b|тр[её]хмерн\w*|3d[- ]?(?:поверхност|сцен|модел|визуализац))",
+        r"(?:\b3\s*[- ]?d\b|\b3\s*д\b|\bthree[- ]dimensional\b|"
+        r"тр[её]хмерн\w*|3d[- ]?(?:поверхност|сцен|модел|визуализац))",
         source,
         flags=re.IGNORECASE,
     ))
@@ -3882,6 +3885,29 @@ def _split_request_sequence(text: str) -> list[str]:
         flags=re.IGNORECASE,
     ))
     only_graph_artifact_outputs = set(parent_outputs).issubset({"text", "graph"})
+    # A phrase like “перенеси эти данные в 3D-график и построй модель” describes
+    # one graph artifact. Splitting after “график” made the verbless tail “построй
+    # модель” look like a fresh image-generation request, which diverted Premium
+    # away from GraphBlock. Keep this coordinated 3D graph/model instruction atomic.
+    coordinated_graph_model = bool(
+        "graph" in parent_outputs
+        and has_3d_scene_language
+        and re.search(
+            r"\b(?:и|а также|затем|потом|and|then)\s+(?:построй(?:те)?|создай(?:те)?|сделай(?:те)?|"
+            r"сформируй(?:те)?|build|create|make)\s+(?:модель|модел[ьи]|сцену|график|model|scene|graph)\b",
+            source, re.IGNORECASE,
+        )
+    )
+    graph_correction_bundle = bool(
+        "graph" in parent_outputs
+        and has_3d_scene_language
+        and re.search(r"(?:не\s+(?:построил|построила|создал|создала)|не\s+получил\w*|не\s+сделал\w*|didn['’]?t\s+(?:build|make|create)|failed\s+to\s+(?:build|create))", low_source, re.IGNORECASE)
+        and re.search(r"(?:\bпострой(?:те)?\s+(?:его|ее|её|их)|\bсоздай(?:те)?\s+(?:его|ее|её|их)|\bсделай(?:те)?\s+(?:его|ее|её|их)|\bпо\s+(?:нашим\s+)?данным\b|\bпо\s+этим\s+данным\b|\bbuild\s+it\b)", low_source, re.IGNORECASE)
+    )
+    if coordinated_graph_model or graph_correction_bundle:
+        # Both clauses refer to one graph artifact. Preserve the correction and the
+        # actual requested operation as a single context-bearing instruction.
+        return [source]
     if starts_visual_build and "graph" in parent_outputs and only_graph_artifact_outputs and (has_3d_scene_language or has_visual_artifact_noun) and not re.search(r"[?？]\s+\S", source):
         return [source]
 
