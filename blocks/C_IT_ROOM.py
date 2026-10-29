@@ -13956,19 +13956,50 @@ _SITE_NAVIGATION_ACTION_RE = re.compile(
     r"where\s+(?:do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate|download|save|copy|share)|how\s+to\s+(?:download|save|copy|share)|where\s+is|show\s+me\s+where)",
     re.IGNORECASE,
 )
+
+# Explicit interface targets are separate from generic media nouns. Merely saying
+# "show it in a picture" or "help me connect this" is not a request to navigate April.
+_SITE_UI_TARGET_RE = re.compile(
+    r"(?:кабинет|профил\w*|аккаунт|раздел|кнопк\w*|меню|сайт|интерфейс|страниц\w*|"
+    r"истор\w*\s+диалог\w*|сообществ\w*|тариф\w*|подписк\w*|памят\w*|удален\w*|"
+    r"поддержк\w*|community|profile|account|settings|history|support|help center|features|capabilities|"
+    r"april\s+(?:web|interface|site|screen|account|profile)|април\w*.{0,25}(?:сайт|интерфейс|страниц|профил|настройк)|"
+    r"эйприл\w*.{0,25}(?:сайт|интерфейс|страниц|профил|настройк)|скриншот\w*|снимок\s+экрана|"
+    r"screen\s+(?:of\s+)?april|screenshot|website|web\s+interface|ui\b)",
+    re.IGNORECASE,
+)
+_SITE_GENERIC_MEDIA_RE = re.compile(
+    r"(?:картинк\w*|изображени\w*|фото\w*|picture\w*|image\w*|photo\w*)",
+    re.IGNORECASE,
+)
+_SITE_MEDIA_CONTROL_ACTION_RE = re.compile(
+    r"(?:скача\w*|сохран\w*|скопир\w*|поделит\w*|download|save|copy|share|"
+    r"куда\s+нажать|какую\s+кнопку|кнопк\w*|меню\s+действий|стрелк\w*|указател\w*|mark|point\s+out)",
+    re.IGNORECASE,
+)
+
+def _has_site_ui_target(query: str) -> bool:
+    """Recognize an actual April/UI referent, not a generic picture or diagram."""
+    low = str(query or "").lower().replace("ё", "е")
+    if _SITE_UI_TARGET_RE.search(low):
+        return True
+    # Image-control questions are UI help only when the requested action concerns
+    # saving/sharing/copying/downloading or a visible control, not any picture request.
+    return bool(_SITE_GENERIC_MEDIA_RE.search(low) and _SITE_MEDIA_CONTROL_ACTION_RE.search(low))
+
 def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None) -> bool:
     """Route visual questions about April UI to its real SVG navigation map."""
     low = str(query or "").strip().lower().replace("ё", "е")
     referenced_ids = {str(value).strip().lower() for value in (referenced_area_ids or []) if str(value).strip()} if isinstance(referenced_area_ids, (list, tuple, set)) else set()
-    ui_target = bool(referenced_ids.intersection({"space", "history", "settings", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "memory", "chat", "image-controls"})) or bool(re.search(
-        r"(?:сообществ\w*|community|saved\s+dialogues?|истори\w*\s+диалог\w*|history|"
-        r"кабинет|профил\w*|настройк\w*|settings|account|help\s+center|справк\w*|"
-        r"support|поддержк\w*|тариф\w*|premium|памят\w*|удален\w*\s+аккаунт|"
-        r"privacy\s+policy|terms\s+of\s+service|chat\s+with\s+april|основн\w*\s+чат|"
-        r"интерфейс\w*|скриншот\w*|снимок\s+экрана|экран\w*|ui\b|карт\w*\s+сайт\w*|site\s+map|структур\w*\s+интерфейс\w*|схем\w*\s+интерфейс\w*|реальн\w*\s+(?:экран|интерфейс)|"
-        r"картинк\w*|изображени\w*|фото|image|picture|скача\w*|сохран\w*|скопир\w*|поделит\w*|download|share)",
-        low, re.IGNORECASE,
-    ))
+    explicit_ui_target = _has_site_ui_target(low)
+    # A stale site-navigation anchor must not override a complete new task. Keep
+    # inherited UI referents only for short/elliptical follow-ups or text that names
+    # a real interface target or a UI-specific image action.
+    substantive_words = _site_words(low)
+    if len(substantive_words) >= 7 and not explicit_ui_target:
+        referenced_ids = set()
+    referenced_ui_target = bool(referenced_ids.intersection({"space", "history", "settings", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "memory", "chat", "image-controls"}))
+    ui_target = explicit_ui_target or referenced_ui_target
     if not ui_target or _SITE_NO_DIAGRAM_RE.search(low):
         return False
     if re.search(
@@ -14077,15 +14108,9 @@ def is_site_help_query(query: str) -> bool:
         return True
     semantic_scores = _semantic_site_area_scores(low)
     semantic_ui_target = any(score >= 2.8 for score, area_id in semantic_scores if area_id != "admin-support")
-    if semantic_ui_target and (_SITE_NAVIGATION_ACTION_RE.search(low) or re.search(r"(?:помог\w*|запутал\w*|не\s+нахожу|не\s+могу\s+найти|как\s+работает|куда\s+пройти|что\s+нажать|where|how\s+do\s+i)", low, re.IGNORECASE)):
+    ui_target = _has_site_ui_target(low)
+    if semantic_ui_target and ui_target and (_SITE_NAVIGATION_ACTION_RE.search(low) or re.search(r"(?:помог\w*|запутал\w*|не\s+нахожу|не\s+могу\s+найти|как\s+работает|куда\s+пройти|что\s+нажать|where|how\s+do\s+i)", low, re.IGNORECASE)):
         return True
-    ui_target = bool(re.search(
-        r"(?:кабинет|профил|аккаунт|раздел|кнопк|меню|сайт|интерфейс|страниц|истор|диалог|сообществ|"
-        r"тариф|подписк|памят|удален|поддержк|функци|возможност|как работает|как устроен|умеет|умеешь|"
-        r"community|profile|account|settings|history|support|help center|features|capabilities|how does april work|"
-        r"картинк|изображени|фото|image|picture|скача|сохран|скопир|поделиться|download|save|copy|share)",
-        low,
-    ))
     return bool(_SITE_NAVIGATION_ACTION_RE.search(low) and ui_target)
 
 
@@ -14760,6 +14785,24 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
 
 
 def _site_help_requested(machine_request: Any) -> bool:
+    query = _current_user_query(machine_request)
+    # The current turn is authoritative. An old `site_navigation` capability or
+    # continuation anchor must not hijack a full non-UI request (for example, a
+    # physical wiring schematic) and replace its intended C_DIAGRAM_ROOM render.
+    if query:
+        query_words = _site_words(query)
+        explicit_ui_target = _has_site_ui_target(query)
+        explicit_april_knowledge_query = bool(
+            _SITE_GUIDE_TOPIC_RE.search(query)
+            and re.search(r"(?:\bapril\b|април\w*|эйприл\w*|/api/|\bapi\b|endpoint\b)", query, re.IGNORECASE)
+        )
+        if (
+            len(query_words) >= 7
+            and not explicit_ui_target
+            and not explicit_april_knowledge_query
+            and not is_site_help_query(query)
+        ):
+            return False
     if isinstance(machine_request, dict):
         intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
     else:
