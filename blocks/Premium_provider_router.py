@@ -4682,6 +4682,207 @@ def _premium_explanation_diagram_payload(current_request: str, answer: str) -> d
     }
 
 
+
+def _normalize_direct_table_payload(value: Any) -> dict[str, Any]:
+    """Canonicalize a top-level `table` value without manufacturing table facts."""
+    payload: dict[str, Any]
+    if isinstance(value, dict):
+        nested = value.get("payload")
+        if not isinstance(nested, dict):
+            nested = value.get("spec")
+        payload = dict(nested if isinstance(nested, dict) else value)
+    elif isinstance(value, (list, tuple)):
+        payload = {"rows": list(value)}
+    elif isinstance(value, str):
+        # Promote only a real Markdown table with a header, separator, and body.
+        lines = value.replace("\r", "").splitlines()
+        def cells(line: str) -> list[str]:
+            return [cell.strip() for cell in line.strip().strip("|").split("|")]
+        payload = {}
+        for index in range(max(0, len(lines) - 1)):
+            headers = cells(lines[index]) if "|" in lines[index] else []
+            separator = cells(lines[index + 1]) if "|" in lines[index + 1] else []
+            if len(headers) < 2 or len(separator) != len(headers):
+                continue
+            if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator):
+                continue
+            rows: list[list[str]] = []
+            for line in lines[index + 2:]:
+                if not line.strip():
+                    if rows:
+                        break
+                    continue
+                row = cells(line) if "|" in line else []
+                if len(row) != len(headers):
+                    break
+                rows.append(row)
+            if rows:
+                payload = {"columns": headers, "rows": rows, "source": "top_level_markdown_table"}
+                break
+    else:
+        return {}
+
+    if not isinstance(payload.get("rows"), (list, tuple, dict)) or not payload.get("rows"):
+        for alias in ("data", "values", "items", "records"):
+            candidate = payload.get(alias)
+            if isinstance(candidate, (list, tuple, dict)) and candidate:
+                payload["rows"] = candidate
+                break
+
+    columns = payload.get("columns") or payload.get("headers") or payload.get("fields") or []
+    if isinstance(columns, str):
+        columns = [part.strip() for part in columns.split("|")] if "|" in columns else [columns.strip()]
+    elif isinstance(columns, dict):
+        columns = list(columns.keys())
+    elif not isinstance(columns, (list, tuple)):
+        columns = []
+    columns = [str(column).strip() for column in columns if column is not None and str(column).strip()]
+
+    rows_value = payload.get("rows") or []
+    if isinstance(rows_value, dict):
+        rows_value = list(rows_value.values())
+    elif isinstance(rows_value, tuple):
+        rows_value = list(rows_value)
+    elif not isinstance(rows_value, list):
+        rows_value = [rows_value] if rows_value not in (None, "") else []
+    rows_value = [row for row in rows_value if row is not None]
+    if not rows_value:
+        return {}
+
+    if not columns and any(isinstance(row, dict) for row in rows_value):
+        columns = list(dict.fromkeys(str(key) for row in rows_value if isinstance(row, dict) for key in row.keys()))
+    if not columns:
+        first = next((row for row in rows_value if isinstance(row, (list, tuple))), None)
+        width = len(first) if first is not None else 1
+        columns = [f"Column {index + 1}" for index in range(max(1, width))]
+
+    normalized_rows: list[list[Any]] = []
+    for row in rows_value:
+        if isinstance(row, dict):
+            values = [row.get(column, "") for column in columns]
+        elif isinstance(row, (list, tuple)):
+            values = list(row)
+        else:
+            values = [row]
+        if len(values) < len(columns):
+            values.extend([""] * (len(columns) - len(values)))
+        elif len(values) > len(columns):
+            values = values[:len(columns)]
+        normalized_rows.append(values)
+
+    if not normalized_rows or not columns:
+        return {}
+    payload["columns"] = columns
+    payload["rows"] = normalized_rows
+    payload.setdefault("table_schema", "april.table.canonical.v2")
+    return payload
+
+
+def _direct_structured_output_block(data: dict[str, Any], field_name: str, canonical_type: str) -> dict[str, Any] | None:
+    """Recover an explicit typed JSON field into the existing canonical block list."""
+    value = data.get(field_name)
+    if value is None or value == "" or value == [] or value == {}:
+        return None
+
+    if canonical_type == "table":
+        payload = _normalize_direct_table_payload(value)
+        if not payload:
+            return None
+    elif isinstance(value, dict):
+        nested = value.get("payload")
+        if not isinstance(nested, dict):
+            nested = value.get("spec")
+        payload = dict(nested if isinstance(nested, dict) else value)
+        if not nested and isinstance(value.get("data"), dict) and not any(
+            key in value for key in ("rows", "columns", "headers", "series", "points", "x", "y", "nodes", "edges", "formula", "latex", "code", "url", "href", "svg", "mermaid")
+        ):
+            payload = dict(value["data"])
+    elif canonical_type == "graph" and isinstance(value, (list, tuple)):
+        payload = {"points": list(value)}
+    elif canonical_type == "formula" and isinstance(value, str):
+        payload = {"formula": value.strip(), "latex": value.strip()}
+    elif canonical_type == "code" and isinstance(value, str):
+        payload = {"code": value, "content": value, "language": str(data.get("language") or "text")}
+    elif canonical_type == "link" and isinstance(value, str):
+        payload = {"url": value.strip(), "href": value.strip()}
+    elif canonical_type == "link" and isinstance(value, (list, tuple)):
+        payload = {"links": list(value)}
+    elif canonical_type == "file" and isinstance(value, str):
+        payload = {"url": value.strip(), "href": value.strip()}
+    elif canonical_type == "diagram" and isinstance(value, str):
+        source = value.strip()
+        payload = {"svg": source} if source.lower().startswith("<svg") else {"mermaid": source, "source": source}
+    elif canonical_type in {"image", "gallery"} and isinstance(value, str):
+        payload = {"src": value.strip(), "url": value.strip()}
+    else:
+        return None
+
+    # Image prompts/specifications are not image assets. They stay on the existing
+    # generator path and are never converted into blank gallery cards here.
+    if canonical_type in {"image", "gallery"} and not _has_concrete_image_source(payload):
+        return None
+
+    artifact = {"type": canonical_type, "artifact_type": canonical_type, "payload": payload}
+    block = _artifact_render_block(artifact)
+    if not isinstance(block, dict):
+        return None
+    block["source"] = "top_level_structured_output"
+    block["restored_from_field"] = field_name
+    return block
+
+
+def _provider_render_block_is_concrete(block: dict[str, Any]) -> bool:
+    """Check whether an existing typed block actually contains renderer data."""
+    block_type = _text(block.get("type") or block.get("artifact_type")).lower().replace("-", "_")
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if not payload:
+        payload = block.get("data") if isinstance(block.get("data"), dict) else {}
+    if block_type == "table":
+        columns = payload.get("columns") or payload.get("headers")
+        rows = payload.get("rows") or payload.get("data")
+        return isinstance(columns, (list, tuple)) and bool(columns) and isinstance(rows, (list, tuple, dict)) and bool(rows)
+    if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
+        series = payload.get("series") or payload.get("datasets") or payload.get("traces")
+        if isinstance(series, list) and any(isinstance(item, dict) and any(item.get(key) not in (None, "", [], {}) for key in ("points", "data", "values", "x", "y")) for item in series):
+            return True
+        for x_key, y_key in (("x", "y"), ("x_values", "y_values")):
+            x_values, y_values = payload.get(x_key), payload.get(y_key)
+            if isinstance(x_values, (list, tuple)) and isinstance(y_values, (list, tuple)) and min(len(x_values), len(y_values)) >= 2:
+                return True
+        for key in ("points", "data_points", "objects_3d", "objects", "shapes", "meshes", "spheres", "primitives", "surface_grid", "matrix", "z_values", "trajectories", "orbits", "vectors", "field_lines"):
+            if isinstance(payload.get(key), (list, tuple)) and bool(payload[key]):
+                return True
+        expression_keys = ("surface_function", "z_function", "z_expression", "equation", "expression", "fn", "function")
+        if any(payload.get(key) not in (None, "", [], {}) for key in expression_keys):
+            representation = _text(payload.get("representation") or payload.get("graph_type") or payload.get("chart_type")).lower()
+            if representation in {"function", "function2d", "function_2d", "line", "line_chart", "surface3d", "surface_3d", "3d_surface", "surface", "scene3d", "mesh3d", "mesh_3d"} or any(payload.get(key) for key in ("surface_function", "z_function", "z_expression", "fn", "function")):
+                return True
+        nested = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
+        geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
+        return bool(
+            (isinstance(nested.get("objects"), list) and nested["objects"])
+            or (isinstance(geometry.get("objects"), list) and geometry["objects"])
+            or (isinstance(payload.get("nodes"), list) and payload.get("nodes") and isinstance(payload.get("edges"), list) and payload.get("edges"))
+        )
+    if block_type == "diagram":
+        return _premium_diagram_has_concrete_payload(block)
+    if block_type == "formula":
+        return _has_concrete_formula_payload(block)
+    if block_type in {"image", "gallery"}:
+        return _has_concrete_image_source(block)
+    if block_type == "code":
+        return any(isinstance(value, str) and value.strip() for value in (payload.get("code"), payload.get("content"), block.get("code")))
+    if block_type == "link":
+        values = [payload.get("url"), payload.get("href")]
+        links = payload.get("links")
+        if isinstance(links, list):
+            values.extend(item if isinstance(item, str) else ((item.get("url") or item.get("href")) if isinstance(item, dict) else "") for item in links)
+        return any(isinstance(value, str) and value.strip().lower().startswith(("http://", "https://")) for value in values)
+    if block_type == "file":
+        return any(str(payload.get(key) or block.get(key) or "").strip() for key in ("url", "href", "path", "content", "file_url", "download_url", "file_data_uri", "data_uri", "base64"))
+    return bool(payload)
+
+
 def _normalize(
     data: dict[str, Any], *, display_language: str = "", current_request: str = "",
     requested_outputs: list[str] | None = None,
@@ -4756,9 +4957,12 @@ def _normalize(
     # matching render_blocks entry. Carry those payloads into the canonical
     # SceneContract rather than silently dropping a renderer at the provider
     # boundary. The image-generator spec exception above remains enforced.
+    # A renderer type is only present if it already carries concrete data.
+    # An empty shell must not block recovery from another explicit structured field.
     present_types = {
         _text(block.get("type") or block.get("artifact_type")).lower()
-        for block in blocks if isinstance(block, dict)
+        for block in blocks
+        if isinstance(block, dict) and _provider_render_block_is_concrete(block)
     }
     restored_artifact_types: list[str] = []
     for artifact in normalized_artifacts:
@@ -4775,6 +4979,47 @@ def _normalize(
         _log_json("ARTIFACT_RENDER_BLOCK_RESTORATION", {
             "status": "restored_to_scene_contract",
             "types": restored_artifact_types,
+            "render_block_count": len(blocks),
+        })
+
+    # Structured fields occasionally arrive beside `answer` instead of inside
+    # `render_blocks` or `artifacts`. The old adapter ignored these fields, so
+    # `{"table": {...}, "text": "..."}` became a text-only scene even
+    # when Interpretation requested a table. Restore explicit typed outputs into
+    # the same block list; the existing authenticated SceneContract remains the
+    # only transport. This is payload repair, not a trigger or route selector.
+    direct_output_fields = (
+        ("table", "table"), ("table_data", "table"),
+        ("graph", "graph"), ("chart", "graph"), ("plot", "graph"),
+        ("diagram", "diagram"), ("mermaid", "diagram"), ("svg", "diagram"),
+        ("formula", "formula"), ("equation", "formula"), ("math", "formula"), ("latex", "formula"),
+        ("code", "code"), ("source_code", "code"),
+        ("link", "link"), ("links", "link"), ("file", "file"),
+        ("image", "image"), ("gallery", "gallery"),
+    )
+    restored_direct_types: list[str] = []
+    restored_direct_fields: list[str] = []
+    for field_name, canonical_type in direct_output_fields:
+        if canonical_type in present_types:
+            continue
+        direct_block = _direct_structured_output_block(data, field_name, canonical_type)
+        if not direct_block:
+            continue
+        normalized_direct = normalize_render_blocks([direct_block], "")
+        if not normalized_direct:
+            continue
+        candidate = normalized_direct[0]
+        if not _provider_render_block_is_concrete(candidate):
+            continue
+        blocks.append(candidate)
+        present_types.add(canonical_type)
+        restored_direct_types.append(canonical_type)
+        restored_direct_fields.append(field_name)
+    if restored_direct_types:
+        _log_json("STRUCTURED_OUTPUT_RENDER_BLOCK_RESTORATION", {
+            "status": "restored_from_top_level_fields",
+            "types": restored_direct_types,
+            "fields": restored_direct_fields,
             "render_block_count": len(blocks),
         })
 
