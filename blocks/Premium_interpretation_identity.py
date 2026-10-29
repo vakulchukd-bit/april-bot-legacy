@@ -2698,6 +2698,27 @@ def _infer_dialogue_act_profile(
         "него", "нее", "неё", "ней", "ним", "нем", "нём", "них",
         "it", "this", "that", "he", "she", "they", "him", "her", "them",
     })
+    # Long responses can still be anaphoric. Do not require a short message or
+    # an empty subject signature when the user explicitly says "в нём всё нравится",
+    # "у неё ...", "особенно ... в фильме" etc. The State Manager must validate the
+    # antecedent against the active branch; this flag only asks it to retain context.
+    strong_anaphoric_reference = bool(
+        not explicit_topic_introduction
+        and not _has_explicit_topic_switch(text)
+        and re.search(
+            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
+            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|"
+            r"in\s+it|within\s+it|about\s+it|its)\b",
+            low, flags=re.IGNORECASE,
+        )
+        and re.search(
+            r"\b(?:нрав\w*|понрав\w*|особенн\w*|сюжет\w*|драматург\w*|"
+            r"флор\w*|фаун\w*|показан\w*|запомн\w*|сцен\w*|интересн\w*|"
+            r"красочн\w*|работа\w*|устро\w*|впечатл\w*|like\w*|enjoy\w*|"
+            r"especially|plot|story|shown|impress\w*)\b",
+            low, flags=re.IGNORECASE,
+        )
+    )
 
     agreement_terms = {
         "да", "ага", "угу", "ок", "окей", "ладно", "хорошо", "верно", "точно", "именно",
@@ -2820,6 +2841,9 @@ def _infer_dialogue_act_profile(
             # continuation verb. A named independent subject still bypasses this.
             or (has_deictic_reference and short and not has_independent_payload)
             or topic_reference_fragment
+            # A long, descriptive answer may name several attributes while still
+            # depending on a pronoun from April's immediately preceding question.
+            or strong_anaphoric_reference
         )
     )
 
@@ -2874,7 +2898,7 @@ def _infer_dialogue_act_profile(
         communicative_act = "CLARIFICATION"
         recommended_response_action = "CLARIFY_THE_PREVIOUS_POINT"
         tone = "CURIOUS_OR_UNCERTAIN"
-    elif context_dependent_question or answer_followup or topic_reference_fragment:
+    elif context_dependent_question or answer_followup or topic_reference_fragment or strong_anaphoric_reference:
         communicative_act = "CONTINUE_ACTIVE_DIALOGUE"
         recommended_response_action = "ANSWER_FROM_THE_RELEVANT_DIALOGUE_CONTEXT"
         tone = "NEUTRAL"
@@ -2889,6 +2913,7 @@ def _infer_dialogue_act_profile(
         "pragmatic_intent": speech_act.lower(),
         "message_function": communicative_act.lower(),
         "context_dependent_reaction": context_dependent_reaction,
+        "strong_anaphoric_reference": bool(strong_anaphoric_reference),
         "waiting_acknowledgement": bool(waiting_acknowledgement),
         "topic_reference_fragment": bool(topic_reference_fragment),
         "previous_answer_reference": bool(previous_answer_reference),
@@ -3555,6 +3580,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "answer_followup": bool(answer_followup),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction or retrospective_image_discussion),
+        "strong_anaphoric_reference": bool(dialogue_act_profile.get("strong_anaphoric_reference")),
         "topic_reference_fragment": bool(topic_reference_fragment or saved_artifact_followup_kind),
         "previous_answer_reference": bool(previous_answer_reference),
         "active_branch_repair": bool(active_branch_repair),
