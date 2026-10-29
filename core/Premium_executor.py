@@ -3653,6 +3653,43 @@ async def execute(
                     "clarification_prompt": "",
                     "clarification_options": [],
                 }
+            # Interpretation is authoritative for whether the current task actually
+            # depends on older dialogue. State Manager may surface a plausible
+            # historical candidate for a self-contained request; that candidate is
+            # not permission to attach the old branch to the model prompt.
+            task_is_self_contained_new = bool(
+                _text(task_semantics.get("primary_intent")).upper() == "NEW_INFORMATION"
+                and not task_semantics.get("requires_memory")
+                and not task_semantics.get("history_request")
+                and not task_semantics.get("previous_answer_reference")
+                and not task_semantics.get("active_branch_repair")
+                and not task_semantics.get("explicit_topic_switch")
+            )
+            if task_is_self_contained_new and _text(task_context.get("relation")).upper() == "CONTINUE":
+                task_context = dict(task_context)
+                task_context.update({
+                    "relation": "NEW",
+                    "relation_confidence": 0.0,
+                    "reason": "self_contained_semantic_request_overrides_stale_history_candidate",
+                    "selected_pairs": [],
+                    "selected_section": {},
+                    "topic_index": [],
+                    "history_topics": [],
+                    "anchor": {},
+                    "active_branch": {},
+                    "active_work_branch": {},
+                    "hot_work_followup": False,
+                    "contextual_history_match": False,
+                    "history_request": False,
+                    "topic_context": {},
+                    "topic_context_expansion": {},
+                    "continuation_context": [],
+                    "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+                })
+                task_search = _compact_question_search(task_context, search_query, task_semantics)
+                task_search["semantic_route_override"] = "NEW_SELF_CONTAINED_REQUEST"
+                if index == 0:
+                    current_request_subject_context = None
             question_item["dialogue_search"] = task_search
             question_item["search_query"] = search_query[:500]
             question_contexts.append(task_context)
@@ -3705,11 +3742,6 @@ async def execute(
             or parent_features.get("context_dependent_question")
             or parent_features.get("context_dependent_reaction")
             or parent_features.get("answer_followup")
-            or re.search(
-                r"(?:\b(?:дальше|продолж\w*|подробнее|конкретн\w*|точнее|как\s+ты\s+(?:сказал|писал|объяснил)|это|этот|эта|эту|там|тогда|следующ\w*)\b|"
-                r"\b(?:continue|go\s+on|more\s+specifically|in\s+more\s+detail|what\s+next|as\s+you\s+said|that|this|there)\b)",
-                _text(current_text).lower().replace("ё", "е"), re.IGNORECASE,
-            )
         ) and not bool(semantic_interpretation.get("explicit_topic_switch"))
         continuation_candidates: list[tuple[tuple[int, float, int, int], int, dict[str, Any]]] = []
         if parent_continuation_signal:
