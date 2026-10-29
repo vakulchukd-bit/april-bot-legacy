@@ -2705,18 +2705,42 @@ def _infer_dialogue_act_profile(
     strong_anaphoric_reference = bool(
         not explicit_topic_introduction
         and not _has_explicit_topic_switch(text)
-        and re.search(
-            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
-            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|"
-            r"in\s+it|within\s+it|about\s+it|its)\b",
-            low, flags=re.IGNORECASE,
-        )
-        and re.search(
-            r"\b(?:нрав\w*|понрав\w*|особенн\w*|сюжет\w*|драматург\w*|"
-            r"флор\w*|фаун\w*|показан\w*|запомн\w*|сцен\w*|интересн\w*|"
-            r"красочн\w*|работа\w*|устро\w*|впечатл\w*|like\w*|enjoy\w*|"
-            r"especially|plot|story|shown|impress\w*)\b",
-            low, flags=re.IGNORECASE,
+        and (
+            (
+                re.search(
+                    r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
+                    r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|"
+                    r"in\s+it|within\s+it|about\s+it|its)\b",
+                    low, flags=re.IGNORECASE,
+                )
+                and re.search(
+                    r"\b(?:нрав\w*|понрав\w*|особенн\w*|сюжет\w*|драматург\w*|"
+                    r"флор\w*|фаун\w*|показан\w*|запомн\w*|сцен\w*|интересн\w*|"
+                    r"красочн\w*|работа\w*|устро\w*|впечатл\w*|like\w*|enjoy\w*|"
+                    r"especially|plot|story|shown|impress\w*)\b",
+                    low, flags=re.IGNORECASE,
+                )
+            )
+            # Long answers may refer to an object introduced by April using a
+            # possessive or personal pronoun, followed by a causal/explanatory
+            # question. Keep "его формула..." / "как он пришёл к этой формуле?"
+            # attached to the active topic; the State Manager verifies the antecedent.
+            or (
+                re.search(
+                    r"\b(?:он|она|оно|они|его|ее|её|ему|ей|им|их|этот|эта|это|этой|"
+                    r"этому|эту|этого|к\s+этой|к\s+этому|that|this|he|she|they|its)\b",
+                    low, flags=re.IGNORECASE,
+                )
+                and re.search(
+                    r"\b(?:формул\w*|сподвиг\w*|подтолкнул\w*|заставил\w*|"
+                    r"повлиял\w*|приш[её]л\w*|прив[её]л\w*|придумал\w*|"
+                    r"создал\w*|изобр[её]л\w*|объясн\w*|почему|зачем|как|"
+                    r"сюжет\w*|драматург\w*|флор\w*|фаун\w*|"
+                    r"показан\w*|нрав\w*|особенн\w*|impressed|motivated|inspired|"
+                    r"formula|invented|created|why|how)\b",
+                    low, flags=re.IGNORECASE,
+                )
+            )
         )
     )
 
@@ -2939,6 +2963,7 @@ def _infer_dialogue_act_profile(
             "explanation_request": bool(explanation_request),
             "continuation_request": bool(continuation_action),
             "deictic_reference": bool(has_deictic_reference),
+            "strong_anaphoric_reference": bool(strong_anaphoric_reference),
             "topic_reference_fragment": bool(topic_reference_fragment),
             "has_independent_payload": bool(has_independent_payload),
             "previous_answer_reference": bool(previous_answer_reference),
