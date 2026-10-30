@@ -102,6 +102,13 @@ For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage le
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
+The latest April answer is an integral part of the active exchange, not disposable output. Treat its named entities,
+examples, options, definitions, constraints and unanswered questions as live dialogue state. When April offered choices
+and the user replies with a brief selection (including «да, давай…»), resolve that reply against April's exact offer.
+When the user asks to expand a name or item April itself just listed, use that item and its surrounding topic; do not ask
+which name they mean when it is present in the selected answer. When the user corrects April's subject, accept the
+corrected subject, repair the current branch and do not preserve April's mistaken subject as the active topic.
+Before drafting, compare CURRENT_REQUEST with the latest April turn in CONTINUATION_CONTEXT: understand whether the user is answering April, selecting an offered option, correcting it, narrowing it, or asking to expand something April just named. Keep that semantic branch active when the relationship is clear; do not mistake an item from April's own answer for an unrelated new subject. This check is internal and must not be narrated unless the user asks about it.
 Treat new-topic markers and explicit subject changes as a hard boundary: do not pull an unrelated hot branch into the answer.
 When the user refers to earlier topics, search the named subject/time first; use only ranked, relevant history pairs and preserve
 source IDs and exact supplied values. Related renderers must complement each other (text connects, table compares, diagram shows
@@ -1873,7 +1880,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         anchor_min = {
             "topic": _semantic_compress(dialogue_anchor.get("topic"), max(12, summary_budget // 2)),
             "user": _semantic_compress(dialogue_anchor.get("user"), max(12, summary_budget // 2)),
-            "april": _semantic_compress(dialogue_anchor.get("april"), max(12, summary_budget)),
+            "april": _semantic_compress(
+                dialogue_anchor.get("april"),
+                max(12, summary_budget, 90 if str(data.get("DIALOGUE_RELATION") or "NEW").upper() == "CONTINUE" else 0),
+            ),
             "message_id": dialogue_anchor.get("message_id"),
             "same_dialog": bool(dialogue_anchor.get("same_dialog")),
         }
@@ -1900,7 +1910,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             pair_min = {
                 "turn": item.get("turn"),
                 "user": _semantic_compress(item.get("user"), max(10, summary_budget // (2 if is_recent_pair else 5))),
-                "april": _semantic_compress(item.get("april"), max(12, summary_budget // (1 if is_recent_pair else 3))),
+                "april": _semantic_compress(
+                    item.get("april"),
+                    max(12, summary_budget // (1 if is_recent_pair else 3), 90 if is_hot_continuation and is_recent_pair else 0),
+                ),
                 "topic": _semantic_compress(item.get("topic"), max(8, summary_budget // 3)),
                 "history_time_relation": item.get("history_time_relation"),
                 "history_time_label": item.get("history_time_label"),
@@ -2751,7 +2764,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             result.append({
                 "turn": item.get("turn_index") or item.get("turn"),
                 "user": _clip(item.get("user") or item.get("user_text"), 240),
-                "april": _clip(item.get("april") or item.get("april_text"), 420),
+                "april": _clip(item.get("april") or item.get("april_text"), 760),
                 "topic": _clip(item.get("topic"), 100),
                 "sections": [
                     {"heading": _clip(sec.get("heading") or sec.get("h"), 90),
@@ -2919,7 +2932,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "DIALOGUE_ANCHOR": {
             "topic": _clip(anchor.get("topic"), 120),
             "user": _clip(anchor.get("user"), 220),
-            "april": _clip(anchor.get("april"), 300),
+            "april": _clip(anchor.get("april"), 900),
             "message_id": anchor.get("message_id"),
             "same_dialog": bool(anchor.get("same_dialog")),
         },
