@@ -5115,6 +5115,10 @@ def build_interpretation(
                 "selected_pairs": selected_pairs,
                 "anchor": continuation_anchor,
                 "active_work_branch": dict(memory.get("active_work_branch") or {}) if isinstance(memory.get("active_work_branch"), dict) else {},
+                # Keep the exact latest assistant response as the first continuation
+                # anchor. The selected branch is only expanded after this message
+                # has matched; unrelated 24-hour history must not replace it.
+                "latest_assistant_anchor": dict(memory.get("latest_assistant_anchor") or {}) if isinstance(memory.get("latest_assistant_anchor"), dict) else {},
                 "selected_section": dict(memory.get("selected_section") or {}),
                 "clarification_needed": bool(memory.get("clarification_needed")),
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
