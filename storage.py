@@ -51,6 +51,14 @@ PREMIUM_MEMORY_WINDOW_HOURS = 24
 PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
 PREMIUM_TEST_DURATION_HOURS = 28 * 24
 
+# Free media quota is a shared pack: image generation and input attachment
+# analysis draw from the same six-unit balance. Text and voice transcription
+# without attached media never consume this quota.
+FREE_MEDIA_PACK_UNITS = 6
+FREE_MEDIA_COOLDOWN_SECONDS = 5 * 60 * 60
+FREE_MEDIA_REFERRAL_REWARD_UNITS = 6
+FREE_MEDIA_RESERVATION_TTL_SECONDS = 30 * 60
+
 _USERS_COLUMNS = (
     "user_id",
     "april_id",
@@ -306,6 +314,62 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'legacy'")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
+
+                # Free media quota and referral rewards are independent from
+                # dialogue_memory retention. Every row is keyed by the canonical
+                # authenticated users.user_id, never by a browser-provided ID.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS free_media_quota (
+                        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                        used_units INTEGER NOT NULL DEFAULT 0 CHECK (used_units >= 0),
+                        bonus_units INTEGER NOT NULL DEFAULT 0 CHECK (bonus_units >= 0),
+                        cooldown_until TIMESTAMPTZ,
+                        period_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        referral_code TEXT NOT NULL UNIQUE,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS free_media_usage_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        message_id TEXT NOT NULL,
+                        operation TEXT NOT NULL,
+                        units INTEGER NOT NULL CHECK (units > 0),
+                        base_units INTEGER NOT NULL DEFAULT 0,
+                        bonus_units INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'reserved',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        committed_at TIMESTAMPTZ,
+                        UNIQUE(user_id, message_id, operation)
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_free_media_events_user_created
+                    ON free_media_usage_events(user_id, created_at DESC)
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS april_referral_invites (
+                        id BIGSERIAL PRIMARY KEY,
+                        inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        invitee_user_id TEXT NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
+                        referral_code TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        reward_units INTEGER NOT NULL DEFAULT 6,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        rewarded_at TIMESTAMPTZ,
+                        CHECK (inviter_user_id <> invitee_user_id)
+                    )
+                """)
+                # Older development versions rewarded a referral immediately at
+                # claim time. Keep the same table, but make new claims pending until
+                # the invited account completes its first successful April request.
+                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN status SET DEFAULT 'pending'")
+                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN rewarded_at DROP NOT NULL")
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
+                    ON april_referral_invites(inviter_user_id, created_at DESC)
+                """)
 
                 # Detect whether read receipts existed before this migration.
                 # Only backfill historical rows once; never auto-clear a genuinely
@@ -1943,7 +2007,7 @@ def get_user_subscription_status(user_id):
                 history_row = cur.fetchone() or {}
                 has_premium_history = bool(history_row.get("found"))
 
-                return {
+                payload = {
                     "user_id": uid,
                     "april_id": str(user.get("april_id") or uid),
                     "premium_id": str(user.get("premium_id") or "") or None,
@@ -1952,8 +2016,585 @@ def get_user_subscription_status(user_id):
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
                     "has_premium_history": has_premium_history,
                 }
+                if plan == "free":
+                    payload["free_media"] = get_free_media_quota_status(uid)
+                return payload
     finally:
         conn.close()
+
+
+# =========================================================
+# AUTHENTICATED FREE MEDIA QUOTA + REFERRAL REWARDS
+# =========================================================
+
+def _free_media_make_referral_code() -> str:
+    return secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12].upper()
+
+
+def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
+    """Create the one quota row for a canonical authenticated user."""
+    code = _free_media_make_referral_code()
+    cur.execute(
+        """
+        INSERT INTO free_media_quota (user_id, referral_code)
+        VALUES (%s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (uid, code),
+    )
+    cur.execute(
+        "SELECT * FROM free_media_quota WHERE user_id = %s FOR UPDATE",
+        (uid,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise RuntimeError("FREE_MEDIA_QUOTA_ROW_UNAVAILABLE")
+    return dict(row)
+
+
+def _free_media_normalize_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _free_media_expire_cooldown(cur, uid: str, row: dict[str, Any], current: datetime) -> dict[str, Any]:
+    cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
+    if cooldown_until and cooldown_until <= current:
+        cur.execute(
+            """
+            UPDATE free_media_quota
+            SET used_units = 0, cooldown_until = NULL,
+                period_started_at = %s, updated_at = %s
+            WHERE user_id = %s
+            RETURNING *
+            """,
+            (current, current, uid),
+        )
+        refreshed = cur.fetchone()
+        if refreshed:
+            return dict(refreshed)
+    return row
+
+
+def _free_media_recover_stale_reservations(
+    cur, uid: str, row: dict[str, Any], current: datetime
+) -> dict[str, Any]:
+    """Refund abandoned in-flight reservations after the safety TTL.
+
+    All quota paths lock users.user_id, then free_media_quota, then usage events.
+    Matching that order prevents deadlocks between concurrent send/retry paths.
+    """
+    cutoff = current - timedelta(seconds=FREE_MEDIA_RESERVATION_TTL_SECONDS)
+    cur.execute(
+        """
+        SELECT id, base_units, bonus_units
+        FROM free_media_usage_events
+        WHERE user_id = %s AND status = 'reserved' AND created_at <= %s
+        ORDER BY id
+        FOR UPDATE
+        """,
+        (uid, cutoff),
+    )
+    stale = cur.fetchall() or []
+    if not stale:
+        return row
+
+    stale_ids = [int(item.get("id") or 0) for item in stale if int(item.get("id") or 0) > 0]
+    refund_base = sum(max(0, int(item.get("base_units") or 0)) for item in stale)
+    refund_bonus = sum(max(0, int(item.get("bonus_units") or 0)) for item in stale)
+    new_used = max(0, int(row.get("used_units") or 0) - refund_base)
+    new_bonus = max(0, int(row.get("bonus_units") or 0)) + refund_bonus
+    cooldown = _free_media_normalize_timestamp(row.get("cooldown_until"))
+    if new_used < FREE_MEDIA_PACK_UNITS:
+        cooldown = None
+
+    cur.execute(
+        """
+        UPDATE free_media_quota
+        SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = %s
+        WHERE user_id = %s
+        RETURNING *
+        """,
+        (new_used, new_bonus, cooldown, current, uid),
+    )
+    refreshed = cur.fetchone()
+    if stale_ids:
+        cur.execute(
+            "UPDATE free_media_usage_events SET status = 'released' WHERE id = ANY(%s) AND status = 'reserved'",
+            (stale_ids,),
+        )
+    return dict(refreshed) if refreshed else row
+
+
+def _free_media_status_payload(row: dict[str, Any], current: datetime, *, referral_count: int = 0) -> dict[str, Any]:
+    used = max(0, int(row.get("used_units") or 0))
+    bonus = max(0, int(row.get("bonus_units") or 0))
+    cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
+    retry = max(0, int((cooldown_until - current).total_seconds())) if cooldown_until else 0
+    base_remaining = max(0, FREE_MEDIA_PACK_UNITS - used)
+    remaining = bonus if retry > 0 else base_remaining + bonus
+    return {
+        "limit": FREE_MEDIA_PACK_UNITS,
+        "used": min(FREE_MEDIA_PACK_UNITS, used),
+        "base_remaining": base_remaining if retry <= 0 else 0,
+        "bonus_remaining": bonus,
+        "remaining": max(0, remaining),
+        "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+        "retry_seconds": retry,
+        "cooldown_seconds": FREE_MEDIA_COOLDOWN_SECONDS,
+        "referral_code": str(row.get("referral_code") or ""),
+        "confirmed_invites": max(0, int(referral_count or 0)),
+    }
+
+
+def get_free_media_quota_status(user_id: Any) -> dict[str, Any] | None:
+    """Return a quota snapshot for a canonical authenticated users.user_id."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, email, provider, plan, subscription_until
+                    FROM users WHERE user_id = %s FOR UPDATE
+                    """,
+                    (uid,),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return None
+                current = now()
+                raw_plan = str(user.get("plan") or "free").strip().lower()
+                until = float(user.get("subscription_until") or 0)
+                plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
+                if plan != "free":
+                    return {
+                        "unlimited": True,
+                        "plan": plan,
+                        "limit": None,
+                        "remaining": None,
+                        "used": 0,
+                        "bonus_remaining": 0,
+                        "retry_seconds": 0,
+                    }
+                row = _free_media_ensure_row(cur, uid)
+                row = _free_media_recover_stale_reservations(cur, uid, row, current)
+                row = _free_media_expire_cooldown(cur, uid, row, current)
+                cur.execute(
+                    "SELECT COUNT(*) AS count FROM april_referral_invites WHERE inviter_user_id = %s AND status = 'rewarded'",
+                    (uid,),
+                )
+                referral_count = int((cur.fetchone() or {}).get("count") or 0)
+                return {
+                    "unlimited": False,
+                    "plan": "free",
+                    **_free_media_status_payload(row, current, referral_count=referral_count),
+                }
+    except Exception as exc:
+        print(f"[APRIL_FREE_MEDIA] status_failed type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+def reserve_free_media_units(
+    user_id: Any,
+    message_id: Any,
+    units: int,
+    operation: str,
+) -> dict[str, Any]:
+    """Atomically reserve media units. Retries of the same message are idempotent."""
+    # Every caller is already behind the canonical chat/auth boundary and passes
+    # users.user_id. Resolve and re-open no alias lookup connection here: validate
+    # that exact row under lock in the transaction below.
+    uid = str(user_id or "").strip()
+    message_key = str(message_id or "").strip()[:180]
+    operation_key = str(operation or "").strip().lower()
+    try:
+        unit_count = int(units)
+    except (TypeError, ValueError):
+        unit_count = 0
+    if not uid or not message_key or operation_key not in {"attachment", "generation"} or unit_count < 1 or unit_count > 6:
+        return {"allowed": False, "error_code": "FREE_MEDIA_REQUEST_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"allowed": False, "error_code": "FREE_MEDIA_TRACKING_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Lock the authoritative account row first. This serializes usage
+                # updates even when two Web requests arrive at the same moment.
+                cur.execute(
+                    """
+                    SELECT user_id, email, provider, plan, subscription_until
+                    FROM users WHERE user_id = %s FOR UPDATE
+                    """,
+                    (uid,),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user):
+                    return {"allowed": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                current = now()
+                raw_plan = str(user.get("plan") or "free").strip().lower()
+                until = float(user.get("subscription_until") or 0)
+                active_plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
+                if active_plan != "free":
+                    return {"allowed": True, "tracked": False, "plan": active_plan}
+
+                row = _free_media_ensure_row(cur, uid)
+                row = _free_media_recover_stale_reservations(cur, uid, row, current)
+                row = _free_media_expire_cooldown(cur, uid, row, current)
+                cur.execute(
+                    """
+                    SELECT id, status, units, base_units, bonus_units
+                    FROM free_media_usage_events
+                    WHERE user_id = %s AND message_id = %s AND operation = %s
+                    """,
+                    (uid, message_key, operation_key),
+                )
+                existing = cur.fetchone()
+                if existing and str(existing.get("status") or "") in {"reserved", "committed"}:
+                    return {
+                        "allowed": True,
+                        "tracked": True,
+                        "already_reserved": True,
+                        "event_id": int(existing.get("id") or 0),
+                    }
+
+                used = max(0, int(row.get("used_units") or 0))
+                bonus = max(0, int(row.get("bonus_units") or 0))
+                cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
+                cooling = bool(cooldown_until and cooldown_until > current)
+                base_remaining = 0 if cooling else max(0, FREE_MEDIA_PACK_UNITS - used)
+                available = base_remaining + bonus
+                if unit_count > available:
+                    status = _free_media_status_payload(row, current)
+                    return {
+                        "allowed": False,
+                        "error_code": "FREE_MEDIA_LIMIT_REACHED",
+                        "limit": FREE_MEDIA_PACK_UNITS,
+                        **status,
+                    }
+
+                base_units = min(unit_count, base_remaining)
+                bonus_units = unit_count - base_units
+                new_used = used + base_units
+                new_bonus = bonus - bonus_units
+                new_cooldown = cooldown_until
+                if new_used >= FREE_MEDIA_PACK_UNITS and new_bonus <= 0 and not new_cooldown:
+                    new_cooldown = current + timedelta(seconds=FREE_MEDIA_COOLDOWN_SECONDS)
+                cur.execute(
+                    """
+                    UPDATE free_media_quota
+                    SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = %s
+                    WHERE user_id = %s
+                    """,
+                    (new_used, new_bonus, new_cooldown, current, uid),
+                )
+                if existing:
+                    cur.execute(
+                        """
+                        UPDATE free_media_usage_events
+                        SET units = %s, base_units = %s, bonus_units = %s,
+                            status = 'reserved', created_at = %s, committed_at = NULL
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (unit_count, base_units, bonus_units, current, int(existing["id"])),
+                    )
+                    event = cur.fetchone() or {}
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO free_media_usage_events
+                            (user_id, message_id, operation, units, base_units, bonus_units, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'reserved')
+                        RETURNING id
+                        """,
+                        (uid, message_key, operation_key, unit_count, base_units, bonus_units),
+                    )
+                    event = cur.fetchone() or {}
+                return {
+                    "allowed": True,
+                    "tracked": True,
+                    "event_id": int(event.get("id") or 0),
+                    "units": unit_count,
+                    "base_units": base_units,
+                    "bonus_units": bonus_units,
+                }
+    except Exception as exc:
+        print(f"[APRIL_FREE_MEDIA] reserve_failed type={type(exc).__name__}", flush=True)
+        return {"allowed": False, "error_code": "FREE_MEDIA_TRACKING_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def commit_free_media_reservation(user_id: Any, message_id: Any, operation: str) -> bool:
+    uid = str(user_id or "").strip()
+    message_key = str(message_id or "").strip()[:180]
+    operation_key = str(operation or "").strip().lower()
+    if not uid or not message_key or operation_key not in {"attachment", "generation"}:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE free_media_usage_events
+                    SET status = 'committed', committed_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s AND message_id = %s AND operation = %s
+                      AND status = 'reserved'
+                    """,
+                    (uid, message_key, operation_key),
+                )
+                return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def release_free_media_reservation(user_id: Any, message_id: Any, operation: str) -> bool:
+    """Refund only a reservation that never reached a successful media result."""
+    uid = str(user_id or "").strip()
+    message_key = str(message_id or "").strip()[:180]
+    operation_key = str(operation or "").strip().lower()
+    if not uid or not message_key or operation_key not in {"attachment", "generation"}:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Follow the same lock order as reserve/status: authenticated user,
+                # quota row, then the individual event.
+                cur.execute(
+                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
+                    (uid,),
+                )
+                if not _is_authenticated_row(cur.fetchone()):
+                    return False
+                cur.execute(
+                    "SELECT used_units, bonus_units, cooldown_until FROM free_media_quota WHERE user_id = %s FOR UPDATE",
+                    (uid,),
+                )
+                quota = cur.fetchone()
+                if not quota:
+                    return False
+                cur.execute(
+                    """
+                    SELECT id, base_units, bonus_units
+                    FROM free_media_usage_events
+                    WHERE user_id = %s AND message_id = %s AND operation = %s
+                      AND status = 'reserved'
+                    FOR UPDATE
+                    """,
+                    (uid, message_key, operation_key),
+                )
+                event = cur.fetchone()
+                if not event:
+                    return False
+                new_used = max(0, int(quota.get("used_units") or 0) - int(event.get("base_units") or 0))
+                new_bonus = max(0, int(quota.get("bonus_units") or 0)) + int(event.get("bonus_units") or 0)
+                cooldown = _free_media_normalize_timestamp(quota.get("cooldown_until"))
+                if new_used < FREE_MEDIA_PACK_UNITS and new_bonus > 0:
+                    cooldown = None
+                elif new_used < FREE_MEDIA_PACK_UNITS:
+                    cooldown = None
+                cur.execute(
+                    """
+                    UPDATE free_media_quota
+                    SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                    """,
+                    (new_used, new_bonus, cooldown, uid),
+                )
+                cur.execute(
+                    "UPDATE free_media_usage_events SET status = 'released' WHERE id = %s",
+                    (int(event["id"]),),
+                )
+                return True
+    finally:
+        conn.close()
+
+
+def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, Any]:
+    """Attach a newly authenticated invitee once and award the inviter six units."""
+    # The HTTP bridge resolves the authenticated public April ID before calling
+    # this function; all referral records use the canonical internal user key.
+    invitee = str(invitee_user_id or "").strip()
+    code = str(referral_code or "").strip().upper()[:40]
+    if not invitee or not code:
+        return {"success": False, "error_code": "REFERRAL_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, email, provider, provider_user_id, created_at
+                    FROM users WHERE user_id = %s FOR UPDATE
+                    """,
+                    (invitee,),
+                )
+                invitee_row = cur.fetchone()
+                if not _is_authenticated_row(invitee_row):
+                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                cur.execute(
+                    """
+                    SELECT q.user_id, q.referral_code, u.name, u.provider_user_id, u.email
+                    FROM free_media_quota q
+                    JOIN users u ON u.user_id = q.user_id
+                    WHERE UPPER(q.referral_code) = %s
+                    LIMIT 1
+                    """,
+                    (code,),
+                )
+                inviter_row = cur.fetchone()
+                if not inviter_row:
+                    return {"success": False, "error_code": "REFERRAL_INVALID"}
+                inviter = str(inviter_row.get("user_id") or "")
+                if not inviter or inviter == invitee:
+                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
+                # Referral links apply only to recently-created authenticated
+                # accounts. Existing users cannot acquire a reward retroactively.
+                created_at = _free_media_normalize_timestamp(invitee_row.get("created_at"))
+                current = now()
+                if not created_at or (current - created_at).total_seconds() > 7 * 24 * 60 * 60:
+                    return {"success": False, "error_code": "REFERRAL_REGISTRATION_WINDOW_EXPIRED"}
+                cur.execute(
+                    "SELECT inviter_user_id FROM april_referral_invites WHERE invitee_user_id = %s",
+                    (invitee,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    existing_inviter = str(existing.get("inviter_user_id") or "")
+                    return {
+                        "success": False,
+                        "error_code": "REFERRAL_ALREADY_USED",
+                        "same_inviter": existing_inviter == inviter,
+                        "inviter_name": str(inviter_row.get("name") or "")[:80],
+                    }
+                # Do not reward self-invites made with a duplicate Google identity.
+                cur.execute(
+                    """
+                    SELECT provider_user_id FROM users WHERE user_id = %s
+                    """,
+                    (inviter,),
+                )
+                inviter_identity = cur.fetchone() or {}
+                if (
+                    str(inviter_identity.get("provider_user_id") or "").strip()
+                    and str(inviter_identity.get("provider_user_id") or "").strip()
+                    == str(invitee_row.get("provider_user_id") or "").strip()
+                ):
+                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
+
+                cur.execute(
+                    """
+                INSERT INTO april_referral_invites
+                        (inviter_user_id, invitee_user_id, referral_code, status, reward_units)
+                    VALUES (%s, %s, %s, 'pending', %s)
+                    """,
+                    (inviter, invitee, code, FREE_MEDIA_REFERRAL_REWARD_UNITS),
+                )
+                return {
+                    "success": True,
+                    "error_code": None,
+                    "pending_confirmation": True,
+                    "reward_units": FREE_MEDIA_REFERRAL_REWARD_UNITS,
+                    "inviter_name": str(inviter_row.get("name") or "")[:80],
+                }
+    except Exception as exc:
+        print(f"[APRIL_REFERRAL] claim_failed type={type(exc).__name__}", flush=True)
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def confirm_april_referral_on_first_use(invitee_user_id: Any) -> dict[str, Any]:
+    """Reward the inviter once, after the newly invited account succeeds in chat."""
+    invitee = str(invitee_user_id or "").strip()
+    if not invitee:
+        return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Most authenticated users are not invitees. Use the unique
+                # invitee index as a cheap read first; only pending referrals
+                # enter the row-locking reward transaction.
+                cur.execute(
+                    "SELECT id FROM april_referral_invites WHERE invitee_user_id = %s AND status = 'pending' LIMIT 1",
+                    (invitee,),
+                )
+                if not cur.fetchone():
+                    return {"success": True, "rewarded": False}
+                cur.execute(
+                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
+                    (invitee,),
+                )
+                if not _is_authenticated_row(cur.fetchone()):
+                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                cur.execute(
+                    """
+                    SELECT id, inviter_user_id, reward_units
+                    FROM april_referral_invites
+                    WHERE invitee_user_id = %s AND status = 'pending'
+                    FOR UPDATE
+                    """,
+                    (invitee,),
+                )
+                invite = cur.fetchone()
+                if not invite:
+                    return {"success": True, "rewarded": False}
+                inviter = str(invite.get("inviter_user_id") or "")
+                reward_units = max(1, int(invite.get("reward_units") or FREE_MEDIA_REFERRAL_REWARD_UNITS))
+                if not inviter or inviter == invitee:
+                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
+                inviter_quota = _free_media_ensure_row(cur, inviter)
+                new_bonus = max(0, int(inviter_quota.get("bonus_units") or 0)) + reward_units
+                current = now()
+                cur.execute(
+                    """
+                    UPDATE free_media_quota
+                    SET bonus_units = %s, cooldown_until = NULL, updated_at = %s
+                    WHERE user_id = %s
+                    """,
+                    (new_bonus, current, inviter),
+                )
+                cur.execute(
+                    """
+                    UPDATE april_referral_invites
+                    SET status = 'rewarded', rewarded_at = %s
+                    WHERE id = %s AND status = 'pending'
+                    """,
+                    (current, int(invite.get("id") or 0)),
+                )
+                return {"success": True, "rewarded": True, "reward_units": reward_units}
+    except Exception as exc:
+        print(f"[APRIL_REFERRAL] confirm_failed type={type(exc).__name__}", flush=True)
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    finally:
+        conn.close()
+
 
 
 SUPPORT_COOLDOWN_SECONDS = 24 * 60 * 60
