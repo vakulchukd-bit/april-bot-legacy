@@ -58,6 +58,8 @@ from blocks.Premium_state_manager import (
     prepare_dialogue_context,
     build_active_work_branch_record,
     _explicit_artifact_followup_kind,
+    _subject_tokens,
+    _subject_conflicts,
 )
 
 
@@ -559,16 +561,32 @@ def _build_dialogue_thread_context(
     selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
     topic_context = context.get("topic_context") if isinstance(context.get("topic_context"), dict) else {}
     relation = _text(context.get("relation") or "NEW").upper()
+    latest_assistant_anchor = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    current_dialog_continuation = relation == "CONTINUE" and not context.get("contextual_history_match") and bool(latest_assistant_anchor)
+    if current_dialog_continuation:
+        # Re-anchor thread construction to the last assistant message in the
+        # authenticated chat. Older active-work metadata may enrich the branch,
+        # but it cannot replace the current last answer as the starting point.
+        anchor = {
+            **anchor,
+            "message_id": _text(latest_assistant_anchor.get("message_id")),
+            "user": _text(latest_assistant_anchor.get("user") or latest_assistant_anchor.get("user_request")),
+            "april": _text(latest_assistant_anchor.get("april"))[:480],
+            "assistant_last_message": _text(latest_assistant_anchor.get("assistant_last_message") or latest_assistant_anchor.get("assistant_message"))[:5200],
+            "assistant_structured_output": latest_assistant_anchor.get("assistant_structured_output") or [],
+            "topic_id": _text(latest_assistant_anchor.get("topic_id")),
+            "topic_origin_message_id": _text(latest_assistant_anchor.get("topic_origin_message_id") or latest_assistant_anchor.get("origin_message_id")),
+        }
     continuing = relation == "CONTINUE" and bool(anchor or selected)
     uid = _text(user_id)
     dialog_id = _text(identity.get("dialog_id") or identity.get("conversation_id"))
     message_id = _text(identity.get("message_id"))
     parent_message_id = _text(
-        branch.get("message_id") or anchor.get("message_id") or anchor.get("source_message_id")
+        anchor.get("message_id") or anchor.get("source_message_id") or branch.get("message_id")
     ) if continuing else ""
     root_message_id = _text(
-        branch.get("topic_origin_message_id") or anchor.get("topic_origin_message_id")
-        or anchor.get("origin_message_id") or branch.get("origin_message_id")
+        anchor.get("topic_origin_message_id") or anchor.get("origin_message_id")
+        or branch.get("topic_origin_message_id") or branch.get("origin_message_id")
     ) if continuing else message_id
     # When State Manager matched the hot branch, its expanded manifest supplies the
     # durable topic root. Reuse it instead of deriving a fresh topic from this turn.
@@ -584,8 +602,8 @@ def _build_dialogue_thread_context(
         if continuing else _text(user_text)
     )[:240]
     persisted_topic_id = _text(
-        branch.get("selected_topic_id") or anchor.get("topic_id")
-        or anchor.get("selected_topic_id") or branch.get("topic_id")
+        anchor.get("topic_id") or anchor.get("selected_topic_id")
+        or branch.get("selected_topic_id") or branch.get("topic_id")
     )
     manifest_topic_id = _text(topic_context.get("topic_id"))
     if continuing and manifest_topic_id:
@@ -611,7 +629,7 @@ def _build_dialogue_thread_context(
     # retrieval window selects only one or two canonical USER↔APRIL pairs.
     steps = []
     seen_step_ids = set()
-    for pair in selected[-5:]:
+    for pair in selected[-12:]:
         if not isinstance(pair, dict):
             continue
         for prior_step in pair.get("recent_steps") or []:
@@ -631,13 +649,13 @@ def _build_dialogue_thread_context(
                 "branch_id": _text(pair.get("branch_id") or branch_id)[:120],
             })
             seen_step_ids.add(pair_id)
-    steps = steps[-6:]
+    steps = steps[-24:]
 
     # Merge prior question decomposition with this turn's decomposition, preserving
     # stable topic/branch bindings and avoiding duplicates from overlapping pairs.
     question_steps = []
     seen_question_keys = set()
-    for pair in selected[-5:]:
+    for pair in selected[-12:]:
         if not isinstance(pair, dict):
             continue
         for prior_question in pair.get("question_sequence") or []:
@@ -679,10 +697,10 @@ def _build_dialogue_thread_context(
         if current_key not in seen_question_keys:
             question_steps.append(current_step)
             seen_question_keys.add(current_key)
-    question_steps = question_steps[-8:]
+    question_steps = question_steps[-32:]
 
     artifact_index = []
-    for pair in selected[-5:]:
+    for pair in selected[-12:]:
         if not isinstance(pair, dict):
             continue
         artifacts = pair.get("artifact_index") if isinstance(pair.get("artifact_index"), list) else []
@@ -723,7 +741,7 @@ def _build_dialogue_thread_context(
         "work_id": _text(active_work_branch.get("work_id"))[:120],
         "last_action": _text(context.get("user_operation", {}).get("type") if isinstance(context.get("user_operation"), dict) else "")[:100],
         "request_summary": _text(user_text)[:320],
-        "recent_steps": steps[-5:],
+        "recent_steps": steps[-24:],
         "question_sequence": question_steps,
         "artifact_index": deduped_artifacts[-12:],
         "topic_context_manifest": ({
@@ -885,6 +903,12 @@ def _compact_question_search(
             "topic": _text(item.get("topic"))[:200],
             "user": _text(item.get("user"))[:360],
             "april": _text(item.get("april"))[:480],
+            # Keep April's exact last answer and non-binary structured output as
+            # first-class continuation evidence. The compact outline remains for
+            # token-efficient history summaries; it no longer replaces the answer.
+            "assistant_last_message": _text(item.get("assistant_last_message"))[:5200],
+            "assistant_structured_output": item.get("assistant_structured_output") if isinstance(item.get("assistant_structured_output"), list) else [],
+            "assistant_artifact_index": item.get("assistant_artifact_index") if isinstance(item.get("assistant_artifact_index"), list) else [],
             "sections": sections,
             "message_id": _text(item.get("message_id"))[:120],
             "topic_id": _text(item.get("topic_id"))[:100],
@@ -925,8 +949,32 @@ def _compact_question_search(
     section = context.get("selected_section") if isinstance(context.get("selected_section"), dict) else {}
     # Preserve the five evidence pairs selected by Premium history search. The
     # previous two-pair cap discarded valid temporal/topic matches before the model.
-    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:5]]
+    pairs = [compact_pair(item) for item in (context.get("selected_pairs") or [])[:12]]
     pairs = [item for item in pairs if item]
+    latest_assistant_anchor = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    # For a continuation of the current chat, the last assistant message is the
+    # first evidence pair. Only after it fails semantic matching does the State
+    # Manager select an older 24h topic (contextual_history_match=True).
+    if _text(context.get("relation")).upper() == "CONTINUE" and not context.get("contextual_history_match") and latest_assistant_anchor:
+        latest_id = _text(latest_assistant_anchor.get("message_id"))
+        latest_pair = next((pair for pair in pairs if latest_id and _text(pair.get("message_id")) == latest_id), None)
+        if latest_pair is None:
+            latest_pair = compact_pair(latest_assistant_anchor)
+            if latest_pair:
+                latest_pair["user"] = _text(latest_assistant_anchor.get("user") or latest_assistant_anchor.get("user_request"))[:1800]
+                latest_pair["assistant_last_message"] = _text(
+                    latest_assistant_anchor.get("assistant_last_message")
+                    or latest_assistant_anchor.get("assistant_message")
+                )[:5200]
+                latest_pair["assistant_structured_output"] = latest_assistant_anchor.get("assistant_structured_output") or []
+        elif latest_pair:
+            latest_pair["assistant_last_message"] = _text(
+                latest_assistant_anchor.get("assistant_last_message")
+                or latest_assistant_anchor.get("assistant_message")
+                or latest_pair.get("assistant_last_message")
+            )[:5200]
+        if latest_pair:
+            pairs = [latest_pair] + [pair for pair in pairs if _text(pair.get("message_id")) != _text(latest_pair.get("message_id"))]
     pending = context.get("pending_clarification") if isinstance(context.get("pending_clarification"), dict) else {}
     options = []
     for item in (pending.get("options") or [])[:3]:
@@ -1061,8 +1109,11 @@ def _compact_question_search(
             "topic": _text(anchor.get("topic"))[:200],
             "user": _text(anchor.get("user"))[:360],
             "april": _text(anchor.get("april"))[:480],
+            "assistant_last_message": _text(anchor.get("assistant_last_message"))[:5200],
+            "assistant_structured_output": anchor.get("assistant_structured_output") if isinstance(anchor.get("assistant_structured_output"), list) else [],
             "message_id": _text(anchor.get("message_id"))[:120],
         } if anchor else {},
+        "latest_assistant_anchor": dict(context.get("latest_assistant_anchor") or {}),
         "selected_section": {
             "topic": _text(section.get("topic"))[:200],
             "heading": _text(section.get("heading"))[:180],
@@ -2024,40 +2075,52 @@ def _build_image_spec(
             clean["prompt"] = semantic
             clean["visual_context"]["bounded_safe_alternative_only"] = True
             clean["visual_context"]["original_request_not_forwarded"] = True
-        # The active branch is the source of truth for a visual continuation. Keep
-        # its original goal attached to the current instruction so a short "continue"
-        # cannot accidentally become a generic/ unrelated image request.
+        # A visual continuation is anchored to the exact last assistant response,
+        # never to an old ACTIVE_WORK_BRANCH.goal/topic. The branch manifest can
+        # contain stale roots from older turns; OpenAI's structured visual plan and
+        # the authenticated latest-answer anchor are the only valid sources here.
         dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
         continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
         if _text(dialogue.get("relation")).upper() == "CONTINUE" and not safe_alternative_after_refusal and not dialogue_portrait_prompt:
-            branch = continuation.get("active_work_branch") if isinstance(continuation.get("active_work_branch"), dict) else {}
-            anchor = continuation.get("anchor") if isinstance(continuation.get("anchor"), dict) else {}
-            branch_goal = _text(
-                branch.get("goal") or branch.get("topic") or anchor.get("user_text")
-                or anchor.get("user") or anchor.get("question")
-            )[:1000]
-            if not branch_goal:
-                selected_pairs = continuation.get("selected_pairs") if isinstance(continuation.get("selected_pairs"), list) else []
-                for pair in selected_pairs:
-                    if not isinstance(pair, dict):
-                        continue
-                    candidate = _text(pair.get("user_text") or pair.get("user") or pair.get("question"))
-                    if candidate and candidate != request_text:
-                        branch_goal = candidate[:1000]
-                        break
-            if branch_goal and branch_goal.lower().replace("ё", "е") not in request_text.lower().replace("ё", "е"):
-                clean["visual_context"]["validated_active_task_source"] = branch_goal
-                clean["visual_context"]["current_turn_instruction"] = request_text[:1000]
-                semantic = (
-                    "Continue the same validated visual task from this dialogue branch. "
-                    "Original task/request: " + branch_goal + ". "
-                    "Current user instruction: " + request_text + ". "
-                    "Treat the original task as the stable subject and requirements; "
-                    "apply the current instruction as a continuation/refinement. "
-                    "Do not introduce an unrelated subject or substitute a generic photo for a requested diagram."
+            latest_anchor = (
+                continuation.get("latest_assistant_anchor")
+                if isinstance(continuation.get("latest_assistant_anchor"), dict)
+                else dialogue.get("latest_assistant_anchor")
+                if isinstance(dialogue.get("latest_assistant_anchor"), dict)
+                else {}
+            )
+            latest_answer_text = _text(
+                latest_anchor.get("assistant_last_message") or latest_anchor.get("assistant_message")
+                or latest_anchor.get("april")
+            )[:3600]
+            latest_artifacts = latest_anchor.get("assistant_artifact_index") or latest_anchor.get("artifact_index") or []
+            artifact_facts = []
+            for artifact in latest_artifacts[:8] if isinstance(latest_artifacts, list) else []:
+                if not isinstance(artifact, dict):
+                    continue
+                facts = [
+                    _text(artifact.get(key))[:180]
+                    for key in ("kind", "type", "artifact_type", "title", "label", "summary", "description", "filename", "renderer", "representation")
+                    if _text(artifact.get(key))
+                ]
+                if facts:
+                    artifact_facts.append("; ".join(facts))
+            clean["visual_context"]["latest_assistant_anchor_message_id"] = _text(latest_anchor.get("message_id"))[:120]
+            clean["visual_context"]["latest_assistant_answer"] = latest_answer_text[:1800]
+            clean["visual_context"]["latest_assistant_artifacts"] = artifact_facts[:8]
+            clean["visual_context"]["visual_continuation_source"] = "latest_assistant_message_and_its_artifacts"
+            # Do not rebuild or replace OpenAI's plan with a stale thread title.
+            # The generator receives the current instruction plus the latest reply
+            # and artifact facts as grounding, while the structured plan stays intact.
+            if latest_answer_text or artifact_facts:
+                grounding = (
+                    "Verified latest April answer: " + latest_answer_text[:1800] + ". "
+                    "Objects created in that answer: " + (" | ".join(artifact_facts) if artifact_facts else "none recorded") + ". "
+                    "Current user instruction: " + request_text[:1200] + ". "
+                    "Continue only the object/task evidenced by this latest answer and its artifacts. "
+                    "Do not import an older topic title, old branch root, or unrelated earlier request."
                 )
-                clean["openai_structured_visual_plan_semantic"] = semantic
-                clean["prompt"] = semantic
+                clean["visual_context"]["latest_answer_grounding"] = grounding[:4200]
         # A screenshot-style April navigation illustration must be grounded in the
         # existing screen blueprint. Do not let the image model invent unrelated UI.
         _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
@@ -3976,6 +4039,7 @@ async def execute(
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
             "dialogue_thread_context": dict(dialogue_thread_context),
+            "latest_assistant_anchor": dict(dialogue_context.get("latest_assistant_anchor") or {}),
             "topic_context": dict(dialogue_context.get("topic_context") or {}),
             "topic_context_expansion": dict(dialogue_context.get("topic_context_expansion") or {}),
             "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
