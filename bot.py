@@ -750,6 +750,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "flow_id": result.get("flow_id"),
         "free_media": result.get("free_media"),
         "free_media_limit_reached": bool(result.get("free_media_limit_reached")),
+        "free_media_edit_restricted": bool(result.get("free_media_edit_restricted")),
         "free_media_attachments_skipped": bool(result.get("free_media_attachments_skipped")),
         "web_delivery": {
             "transport": "SceneContract",
@@ -801,11 +802,14 @@ def _handle_payload(
     )
 
     attachments = attachments or []
+    source_image_reference_available = any(
+        _text(getattr(item, "kind", "")).lower() == "image"
+        for item in attachments
+    )
     free_media_attachment_reservation = False
     free_media_units = 0
     free_media_limit_reached = False
     free_media_attachments_skipped = False
-    free_media_limit_reached = False
     input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
@@ -885,6 +889,7 @@ def _handle_payload(
                             "success": False,
                             "error_code": "FREE_MEDIA_LIMIT_REACHED",
                             "free_media": quota,
+                            "free_media_attachments_skipped": True,
                             "canonical_route": CANONICAL_CHAT_ROUTE,
                         }
                     dropped_media_count = free_media_units
@@ -1029,6 +1034,8 @@ def _handle_payload(
             "file_contents": text_file_contents,
             "translation": translation,
             "user_display_name": user_display_name,
+            "source_image_reference_available": source_image_reference_available,
+            "active_plan": active_plan,
             "message_created_at": message_created_at,
             "user_utc_offset_minutes": user_utc_offset_minutes,
         }
@@ -1113,6 +1120,7 @@ def _handle_payload(
                 and result.get("success") is not False
                 and not result.get("degraded")
                 and not result.get("error_code")
+                and not result.get("free_media_edit_restricted")
             )
             if media_analysis_succeeded:
                 commit_free_media_reservation(uid, message_id, "attachment")
@@ -1124,14 +1132,14 @@ def _handle_payload(
             result["free_media_limit_reached"] = True
         if isinstance(result, dict) and free_media_attachments_skipped:
             result["free_media_attachments_skipped"] = True
-        # Referral rewards are only finalized after the invited account has made
-        # its first successful authenticated April request. A share or account
-        # registration alone never grants the inviter a bonus.
+        # New referrals are rewarded immediately during authenticated link claim.
+        # This compatibility check only settles any legacy pending row left by an
+        # older deployment; it is a no-op for every newly claimed referral.
         if isinstance(result, dict) and result.get("success") is not False and not result.get("degraded") and not result.get("error_code"):
             referral_confirmation = confirm_april_referral_on_first_use(uid)
             if referral_confirmation.get("rewarded"):
                 _apr_timing_log(
-                    "referral_reward_confirmed_on_first_use",
+                    "legacy_referral_reward_settled",
                     user_key=_apr_diag_ref(uid),
                     reward_units=int(referral_confirmation.get("reward_units") or 0),
                 )
