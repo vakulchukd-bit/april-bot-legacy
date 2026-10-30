@@ -354,22 +354,74 @@ def init_db() -> None:
                         inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
                         invitee_user_id TEXT NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
                         referral_code TEXT NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'pending',
+                        status TEXT NOT NULL DEFAULT 'rewarded',
                         reward_units INTEGER NOT NULL DEFAULT 6,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         rewarded_at TIMESTAMPTZ,
                         CHECK (inviter_user_id <> invitee_user_id)
                     )
                 """)
-                # Older development versions rewarded a referral immediately at
-                # claim time. Keep the same table, but make new claims pending until
-                # the invited account completes its first successful April request.
-                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN status SET DEFAULT 'pending'")
+                # A referral reward is granted immediately after a new authenticated
+                # account successfully claims the link. The friend does not need to
+                # make a first chat request. Keep older pending records compatible,
+                # but settle them once during this idempotent migration below.
+                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN status SET DEFAULT 'rewarded'")
                 cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN rewarded_at DROP NOT NULL")
+                # Older deployed tables may have a CHECK constraint which only
+                # allowed the legacy statuses. Replace such a constraint once so
+                # immediate rewards can be inserted without breaking old rows.
+                cur.execute(
+                    """SELECT conname, pg_get_constraintdef(oid) AS definition
+                       FROM pg_constraint
+                       WHERE conrelid = 'april_referral_invites'::regclass
+                         AND contype = 'c'
+                         AND pg_get_constraintdef(oid) ILIKE '%status%'"""
+                )
+                referral_status_checks = cur.fetchall() or []
+                if not any("rewarded" in str(row.get("definition") or "").lower() for row in referral_status_checks):
+                    for constraint in referral_status_checks:
+                        constraint_name = str(constraint.get("conname") or "").replace('"', '""')
+                        if constraint_name:
+                            cur.execute(f'ALTER TABLE april_referral_invites DROP CONSTRAINT "{constraint_name}"')
+                    cur.execute(
+                        """ALTER TABLE april_referral_invites
+                           ADD CONSTRAINT april_referral_invites_status_check
+                           CHECK (status IN ('pending', 'accepted', 'rewarded'))"""
+                    )
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
                     ON april_referral_invites(inviter_user_id, created_at DESC)
                 """)
+
+                # Settle legacy pending referrals under row locks. This migration is
+                # idempotent: each invite changes from pending to rewarded in the same
+                # transaction as the inviter's +6 balance update, so restarts cannot
+                # duplicate a bonus. Existing invitees are not required to use chat.
+                cur.execute("""
+                    SELECT id, inviter_user_id, reward_units
+                    FROM april_referral_invites
+                    WHERE status = 'pending'
+                    ORDER BY id
+                    FOR UPDATE
+                """)
+                for pending_invite in (cur.fetchall() or []):
+                    inviter_id = str(pending_invite.get("inviter_user_id") or "").strip()
+                    reward_units = max(1, int(pending_invite.get("reward_units") or FREE_MEDIA_REFERRAL_REWARD_UNITS))
+                    if not inviter_id:
+                        continue
+                    cur.execute("""
+                        UPDATE free_media_quota
+                        SET bonus_units = bonus_units + %s,
+                            cooldown_until = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                    """, (reward_units, inviter_id))
+                    if cur.rowcount > 0:
+                        cur.execute("""
+                            UPDATE april_referral_invites
+                            SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND status = 'pending'
+                        """, (int(pending_invite.get("id") or 0),))
 
                 # Detect whether read receipts existed before this migration.
                 # Only backfill historical rows once; never auto-clear a genuinely
@@ -2432,7 +2484,7 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
 
 
 def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, Any]:
-    """Attach a newly authenticated invitee once and award the inviter six units."""
+    """Reward the inviter immediately when a new authenticated invitee claims a link."""
     # The HTTP bridge resolves the authenticated public April ID before calling
     # this function; all referral records use the canonical internal user key.
     invitee = str(invitee_user_id or "").strip()
@@ -2457,7 +2509,7 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
                     return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
                 cur.execute(
                     """
-                    SELECT q.user_id, q.referral_code, u.name, u.provider_user_id, u.email
+                    SELECT q.user_id, q.referral_code, u.name, u.provider_user_id
                     FROM free_media_quota q
                     JOIN users u ON u.user_id = q.user_id
                     WHERE UPPER(q.referral_code) = %s
@@ -2471,14 +2523,19 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
                 inviter = str(inviter_row.get("user_id") or "")
                 if not inviter or inviter == invitee:
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
-                # Referral links apply only to recently-created authenticated
-                # accounts. Existing users cannot acquire a reward retroactively.
-                created_at = _free_media_normalize_timestamp(invitee_row.get("created_at"))
-                current = now()
-                if not created_at or (current - created_at).total_seconds() > 7 * 24 * 60 * 60:
-                    return {"success": False, "error_code": "REFERRAL_REGISTRATION_WINDOW_EXPIRED"}
+
+                # A canonical authenticated account can claim at most one referral
+                # reward. Check this before the new-registration window so a repeat
+                # attempt always receives the duplicate explanation, even months later.
+                # This unique invitee check also blocks the same person from earning
+                # multiple bonuses by opening different invitation URLs.
                 cur.execute(
-                    "SELECT inviter_user_id FROM april_referral_invites WHERE invitee_user_id = %s",
+                    """
+                    SELECT inviter_user_id, status
+                    FROM april_referral_invites
+                    WHERE invitee_user_id = %s
+                    FOR UPDATE
+                    """,
                     (invitee,),
                 )
                 existing = cur.fetchone()
@@ -2488,36 +2545,54 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
                         "success": False,
                         "error_code": "REFERRAL_ALREADY_USED",
                         "same_inviter": existing_inviter == inviter,
-                        "inviter_name": str(inviter_row.get("name") or "")[:80],
+                        "already_rewarded": str(existing.get("status") or "") == "rewarded",
                     }
-                # Do not reward self-invites made with a duplicate Google identity.
-                cur.execute(
-                    """
-                    SELECT provider_user_id FROM users WHERE user_id = %s
-                    """,
-                    (inviter,),
-                )
-                inviter_identity = cur.fetchone() or {}
+
+                # Only genuinely new accounts may claim a referral, and the
+                # registration window remains seven days. Existing users cannot
+                # generate retroactive rewards by opening a shared URL.
+                created_at = _free_media_normalize_timestamp(invitee_row.get("created_at"))
+                current = now()
+                if not created_at or (current - created_at).total_seconds() > 7 * 24 * 60 * 60:
+                    return {"success": False, "error_code": "REFERRAL_REGISTRATION_WINDOW_EXPIRED"}
+
+                # Guard against duplicate Google identities creating a second
+                # April account that attempts to invite itself.
                 if (
-                    str(inviter_identity.get("provider_user_id") or "").strip()
-                    and str(inviter_identity.get("provider_user_id") or "").strip()
+                    str(inviter_row.get("provider_user_id") or "").strip()
+                    and str(inviter_row.get("provider_user_id") or "").strip()
                     == str(invitee_row.get("provider_user_id") or "").strip()
                 ):
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
+                reward_units = FREE_MEDIA_REFERRAL_REWARD_UNITS
                 cur.execute(
                     """
-                INSERT INTO april_referral_invites
-                        (inviter_user_id, invitee_user_id, referral_code, status, reward_units)
-                    VALUES (%s, %s, %s, 'pending', %s)
+                    UPDATE free_media_quota
+                    SET bonus_units = bonus_units + %s,
+                        cooldown_until = NULL,
+                        updated_at = %s
+                    WHERE user_id = %s
                     """,
-                    (inviter, invitee, code, FREE_MEDIA_REFERRAL_REWARD_UNITS),
+                    (reward_units, current, inviter),
+                )
+                if cur.rowcount != 1:
+                    return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+
+                cur.execute(
+                    """
+                    INSERT INTO april_referral_invites
+                        (inviter_user_id, invitee_user_id, referral_code, status, reward_units, rewarded_at)
+                    VALUES (%s, %s, %s, 'rewarded', %s, %s)
+                    """,
+                    (inviter, invitee, code, reward_units, current),
                 )
                 return {
                     "success": True,
                     "error_code": None,
-                    "pending_confirmation": True,
-                    "reward_units": FREE_MEDIA_REFERRAL_REWARD_UNITS,
+                    "pending_confirmation": False,
+                    "rewarded": True,
+                    "reward_units": reward_units,
                     "inviter_name": str(inviter_row.get("name") or "")[:80],
                 }
     except Exception as exc:
@@ -2528,7 +2603,7 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
 
 
 def confirm_april_referral_on_first_use(invitee_user_id: Any) -> dict[str, Any]:
-    """Reward the inviter once, after the newly invited account succeeds in chat."""
+    """Compatibility handler for legacy pending referrals from older deployments."""
     invitee = str(invitee_user_id or "").strip()
     if not invitee:
         return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
