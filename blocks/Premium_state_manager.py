@@ -1049,7 +1049,7 @@ def _subject_tokens(value: Any) -> set[str]:
     return result
 
 def _row_subject_text(row: dict[str, Any]) -> str:
-    """Prefer the user's original task and persisted request intent over generated prose."""
+    """Derive the route subject from the exact canonical user request and April answer."""
     request = _parse_json(row.get("structured_request"))
     request_structure = request.get("request_structure") if isinstance(request.get("request_structure"), dict) else {}
     request_intent = request.get("intent") if isinstance(request.get("intent"), dict) else {}
@@ -1077,23 +1077,43 @@ def _row_subject_text(row: dict[str, Any]) -> str:
         )
         if _text(item)
     )[:2400]
+    assistant_text = _text(row.get("april_text") or row.get("april_text_en"))[:5200]
+    response_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    response_artifacts = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+    assistant_render_evidence = " ".join(
+        " ".join(_text(block.get(key)) for key in ("type", "artifact_type", "title", "description", "representation", "language"))
+        for block in response_blocks if isinstance(block, dict)
+    )[:1200]
+    assistant_artifact_evidence = " ".join(
+        " ".join(_text(artifact.get(key)) for key in ("type", "artifact_type", "kind", "title", "label", "filename", "summary"))
+        for artifact in response_artifacts if isinstance(artifact, dict)
+    )[:1200]
+    # Routing is anchored to the actual canonical USER request and APRIL answer.
+    # Persisted topic/branch labels are deliberately excluded from the subject
+    # signature: older releases could leave a stale active-work label (for example,
+    # an electric-motor task) attached to a newer Mendeleev answer. Such metadata
+    # may enrich a matched branch later, but it must never decide what the latest
+    # assistant message is about.
     values = (
-        row.get("user_text"), row.get("user_text_en"),
+        row.get("user_text"), row.get("user_text_en"), row.get("user"),
         request_structure.get("user_goal"), request_structure.get("task_goal"),
-        request_intent.get("user_goal"), continuation.get("active_topic"),
-        memory_record.get("topic"), thread_evidence, row.get("memory_summary"),
+        request_intent.get("user_goal"),
+        assistant_text or row.get("april") or row.get("assistant_last_message"),
+        assistant_render_evidence, assistant_artifact_evidence,
     )
     return " ".join(_text(item) for item in values if _text(item))
 
 def _row_subject_text_lightweight(row: dict[str, Any]) -> str:
     """Build a topic signature from bounded plain-text columns; never scan a huge answer."""
     values = (
-        row.get("user_text"), row.get("user_text_en"),
-        row.get("memory_summary"), row.get("topic_summary"), row.get("topic"),
-        str(row.get("april_text") or "")[:1800],
+        row.get("user_text"), row.get("user_text_en"), row.get("user"),
+        str(row.get("april_text") or row.get("april") or row.get("assistant_last_message") or "")[:1800],
         str(row.get("april_text_en") or "")[:900],
     )
-    return " ".join(part for value in values if (part := _text(value)))
+    # Do not let cached topic summaries or thread titles override the last
+    # message's real subject during a latest-answer-first route decision.
+    text = " ".join(part for value in values if (part := _text(value)))
+    return text or _text(row.get("topic"))[:240]
 
 
 def _row_subject_tokens(row: dict[str, Any]) -> set[str]:
@@ -3852,6 +3872,88 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         or thread.get("origin_message_id") or item.get("origin_message_id") or item.get("message_id")
     )
     source_message_id = _text(item.get("message_id"))
+    _, response_record, _ = _response_and_request_records(item)
+    raw_blocks = response_record.get("render_blocks") if isinstance(response_record.get("render_blocks"), list) else []
+    response_blocks = raw_blocks
+    response_artifacts = response_record.get("artifacts") if isinstance(response_record.get("artifacts"), list) else []
+    assistant_structured_output: list[dict[str, Any]] = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+        if block_type not in {
+            "table", "table_data", "diagram", "graph", "chart", "plot",
+            "formula", "equation", "code", "source_code", "image", "gallery",
+            "video", "audio", "scene", "layout", "visual", "renderer_scene",
+        }:
+            continue
+        safe_block = deepcopy(block)
+        def _strip_binary(value: Any, depth: int = 0) -> Any:
+            if depth > 10:
+                return None
+            if isinstance(value, dict):
+                cleaned = {}
+                for key, child in value.items():
+                    normalized_key = str(key).lower()
+                    if normalized_key in {"image_base64", "base64_data", "binary_payload", "raw_bytes"}:
+                        continue
+                    if normalized_key in {"src", "data_uri", "image_data", "image_base64", "video_data", "audio_data"}:
+                        if isinstance(child, str) and (child.strip().lower().startswith("data:") or normalized_key in {"src", "image_data"}):
+                            continue
+                    cleaned[key] = _strip_binary(child, depth + 1)
+                return cleaned
+            if isinstance(value, list):
+                return [_strip_binary(child, depth + 1) for child in value[:1000]]
+            if isinstance(value, str) and value.strip().lower().startswith("data:image/"):
+                return "[image asset stored separately]"
+            return value
+        safe_block = _strip_binary(safe_block)
+        try:
+            if len(json.dumps(safe_block, ensure_ascii=False, default=str)) <= 24000:
+                assistant_structured_output.append(safe_block)
+        except Exception:
+            pass
+    assistant_last_message = _text(item.get("april_text") or item.get("april") or item.get("assistant_text"))
+    user_last_message = _text(item.get("user_text") or item.get("user"))
+    pair_subjects = _subject_tokens(" ".join((user_last_message, assistant_last_message)))
+    metadata_topic = _text(item.get("topic") or thread.get("topic"))
+    metadata_summary = _text(thread.get("branch_summary") or thread.get("summary"))
+    if pair_subjects and metadata_topic and _subject_conflicts(pair_subjects, _subject_tokens(metadata_topic)):
+        metadata_topic = ""
+    if pair_subjects and metadata_summary and _subject_conflicts(pair_subjects, _subject_tokens(metadata_summary)):
+        metadata_summary = ""
+    # A future turn must know exactly what April said and what she created. Keep
+    # compact artifact descriptors alongside the exact answer; binary payloads
+    # remain in the durable asset store and are never copied into dialogue text.
+    assistant_artifact_index: list[dict[str, Any]] = []
+    seen_artifacts: set[tuple[str, str]] = set()
+    for artifact in [
+        *response_artifacts,
+        *[block for block in response_blocks if isinstance(block, dict)],
+    ]:
+        if not isinstance(artifact, dict):
+            continue
+        kind = _text(artifact.get("kind") or artifact.get("type") or artifact.get("artifact_type") or artifact.get("output_type")).lower()
+        artifact_id = _text(artifact.get("artifact_id") or artifact.get("asset_id") or artifact.get("id") or artifact.get("message_id"))
+        key = (kind, artifact_id or _text(artifact.get("filename") or artifact.get("title")))
+        if key in seen_artifacts:
+            continue
+        seen_artifacts.add(key)
+        descriptor = {
+            name: _text(artifact.get(name))[:220]
+            for name in ("kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation")
+            if artifact.get(name) not in (None, "", [], {})
+        }
+        for count_key in ("row_count", "column_count", "node_count", "edge_count", "width", "height", "size_bytes"):
+            if artifact.get(count_key) is not None:
+                try:
+                    descriptor[count_key] = int(artifact.get(count_key))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        if descriptor:
+            assistant_artifact_index.append(descriptor)
+        if len(assistant_artifact_index) >= 10:
+            break
     for section in sections:
         if isinstance(section, dict):
             section["topic_id"] = topic_id
@@ -3861,13 +3963,16 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "turn": item.get("turn_index"),
         "user": _text(item.get("user") or item.get("user_text"))[:360],
         "april": outline[:440],
-        "topic": _text(item.get("topic") or thread.get("topic") or thread.get("branch_summary"))[:200],
+        "assistant_last_message": assistant_last_message[:5200],
+        "assistant_structured_output": assistant_structured_output[:8],
+        "assistant_artifact_index": assistant_artifact_index[:10],
+        "topic": (metadata_topic or _text(item.get("user_text") or item.get("user"))[:200])[:200],
         "topic_id": topic_id,
         "topic_origin_message_id": _text(item.get("topic_origin_message_id") or thread.get("topic_origin_message_id") or thread.get("origin_message_id")),
         "origin_message_id": origin_message_id,
         "branch_id": _text(item.get("branch_id") or thread.get("branch_id") or thread.get("work_id")),
         "parent_message_id": _text(item.get("parent_message_id") or thread.get("parent_message_id")),
-        "branch_summary": _text(thread.get("branch_summary") or thread.get("summary"))[:640],
+        "branch_summary": metadata_summary[:640],
         "artifact_index": [
             dict(artifact) for artifact in (thread.get("artifact_index") or [])
             if isinstance(artifact, dict)
@@ -3875,11 +3980,11 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "recent_steps": [
             dict(step) for step in (thread.get("recent_steps") or [])
             if isinstance(step, dict)
-        ][-6:],
+        ][-18:],
         "question_sequence": [
             dict(step) for step in (thread.get("question_sequence") or [])
             if isinstance(step, dict)
-        ][-8:],
+        ][-24:],
         "topic_origin_at": item.get("topic_origin_at"),
         "topic_last_at": item.get("topic_last_at"),
         "source_message_id": _text(item.get("message_id")),
@@ -4844,6 +4949,11 @@ def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) ->
         row_numbers = set(re.findall(r"\d+(?:[.,:]\d+)*", user_text.lower()))
         numeric_hits = len(numeric_query & row_numbers)
         row_subjects = _row_subject_tokens(row)
+        # A saved raster does not authorize reuse when the current request names
+        # a different semantic subject. Recency and artifact presence only rank
+        # candidates after subject compatibility has been established.
+        if query_subjects and row_subjects and _subject_conflicts(query_subjects, row_subjects):
+            continue
         subject_fit = _subject_overlap(query_subjects, row_subjects) if query_subjects and row_subjects else 0.0
         topic_text = " ".join((
             user_text,
@@ -5397,9 +5507,9 @@ def _build_active_topic_context_descriptor(
     for branch in groups.values():
         branch.pop("_seen_artifacts", None)
         branch.pop("_seen_questions", None)
-        branch["recent_steps"] = branch.get("recent_steps", [])[-5:]
-        branch["question_sequence"] = branch.get("question_sequence", [])[-8:]
-        branch["artifact_index"] = branch.get("artifact_index", [])[-20:]
+        branch["recent_steps"] = branch.get("recent_steps", [])[-24:]
+        branch["question_sequence"] = branch.get("question_sequence", [])[-32:]
+        branch["artifact_index"] = branch.get("artifact_index", [])[-80:]
         branches.append(branch)
     branches.sort(key=lambda item: float(item.get("last_at") or 0.0), reverse=True)
 
@@ -5419,6 +5529,8 @@ def _build_active_topic_context_descriptor(
                 if key_name in {
                     "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
                     "mime_type", "renderer", "viewer", "chart_type", "asset_role", "source_message_id",
+                    "operation", "image_operation", "edit_operation", "edit_mode", "action",
+                    "source_asset_id", "source_asset_message_id", "generation_model", "quality",
                     "asset_message_id", "asset_id", "artifact_id", "id", "ref", "url", "path",
                     "description", "summary", "data_summary", "preview", "alt", "caption", "label",
                     "format", "language", "dimensions", "point_count", "series_count", "row_count",
@@ -5444,7 +5556,7 @@ def _build_active_topic_context_descriptor(
         "branches": branches[:80],
         "artifact_count": len(all_artifact_index),
         "artifact_index": all_artifact_index[-80:],
-        "recent_steps": all_steps[-8:],
+        "recent_steps": all_steps[-24:],
         "source_message_ids": [_text(row.get("message_id"))[:120] for row in ordered if _text(row.get("message_id"))][-160:],
         "first_at": ordered[0].get("created_at"),
         "last_at": ordered[-1].get("created_at"),
@@ -5590,7 +5702,7 @@ def _merge_persisted_topic_context(
             seen_steps.add(step_id)
             steps.append(dict(step))
     if steps:
-        context["recent_steps"] = steps[-8:]
+        context["recent_steps"] = steps[-24:]
 
     source_ids: list[str] = []
     seen_sources: set[str] = set()
@@ -5635,6 +5747,20 @@ def _expand_hot_branch_to_topic(
         or anchor.get("topic_origin_message_id") or anchor.get("origin_message_id")
     )
     topic_label = _text(thread.get("topic") or anchor.get("topic") or result.get("active_topic"))[:240]
+    query_subjects = _subject_tokens(result.get("query") or "")
+    anchor_subjects = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else _subject_tokens(
+        " ".join((_text(anchor.get("user")), _text(anchor.get("assistant_last_message")), _text(anchor.get("topic"))))
+    )
+    if anchor_subjects and topic_label and _subject_conflicts(anchor_subjects, _subject_tokens(topic_label)):
+        topic_label = _text(anchor_row.get("user_text") or anchor_row.get("user") or anchor.get("user"))[:200] or "Текущая тема"
+    if query_subjects and anchor_subjects and _subject_conflicts(query_subjects, anchor_subjects):
+        result["topic_context_expansion"] = {
+            "status": "rejected_subject_conflict",
+            "reason": "latest_request_subject_does_not_match_selected_topic_anchor",
+            "topic_id": topic_id,
+            "root_message_id": root_id,
+        }
+        return result
     uid = _uid(user_id)
     rows: list[dict[str, Any]] = []
 
@@ -5685,6 +5811,10 @@ def _expand_hot_branch_to_topic(
         if not isinstance(source, dict) or _row_is_pending_clarification(source) or _is_failed_provider_row(source):
             continue
         row = dict(source)
+        anchor_subjects_for_topic = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else set()
+        row_subjects_for_topic = _row_subject_tokens(row)
+        if anchor_subjects_for_topic and row_subjects_for_topic and _subject_conflicts(anchor_subjects_for_topic, row_subjects_for_topic):
+            continue
         row_thread = _dialogue_thread_metadata(row)
         persisted_tid = _text(row_thread.get("topic_id"))
         persisted_root = _text(
@@ -5702,14 +5832,77 @@ def _expand_hot_branch_to_topic(
     if not cleaned:
         return result
 
+    # The persisted topic id can span unrelated subjects when an older release
+    # accidentally reused an active-work marker. If its root was excluded by the
+    # semantic subject check, the remaining matching branch is re-rooted at the
+    # latest compatible anchor instead of retaining a dangling old root.
+    cleaned_ids = {_text(row.get("message_id")) for row in cleaned if _text(row.get("message_id"))}
+    stale_root_reanchored = bool(root_id and root_id not in cleaned_ids and anchor_id in cleaned_ids)
+    if stale_root_reanchored:
+        # The previous root was filtered out as a different subject. Establish a
+        # new durable topic identity from the earliest compatible source row, and
+        # rebuild its thread metadata from those matching canonical pairs only.
+        oldest_compatible = min(
+            cleaned,
+            key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        )
+        root_id = _text(oldest_compatible.get("message_id") or anchor_id)
+        topic_label = topic_label or _text(oldest_compatible.get("user_text") or oldest_compatible.get("user"))[:200]
+        scope_id = _text(dialog_id or conversation_id)
+        topic_id = "topic-" + hashlib.sha256(
+            "|".join((uid, scope_id, root_id, topic_label.casefold())).encode("utf-8")
+        ).hexdigest()[:20]
+        branch_id = "branch-" + hashlib.sha256(
+            "|".join((uid, scope_id, topic_id, root_id)).encode("utf-8")
+        ).hexdigest()[:20]
+        retained_ids = set(cleaned_ids)
+        seed_subjects_for_rebuild = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else _subject_tokens(topic_label)
+        for row in cleaned:
+            _, response, _ = _response_and_request_records(row)
+            thread_meta = dict(_dialogue_thread_metadata(row))
+            thread_meta.update({
+                "topic_id": topic_id,
+                "topic": topic_label[:240],
+                "topic_origin_message_id": root_id,
+                "origin_message_id": root_id,
+                "branch_id": branch_id,
+            })
+            old_steps = thread_meta.get("recent_steps") if isinstance(thread_meta.get("recent_steps"), list) else []
+            thread_meta["recent_steps"] = [
+                step for step in old_steps
+                if isinstance(step, dict) and _text(step.get("message_id")) in retained_ids
+            ][-24:]
+            old_questions = thread_meta.get("question_sequence") if isinstance(thread_meta.get("question_sequence"), list) else []
+            thread_meta["question_sequence"] = [
+                step for step in old_questions
+                if isinstance(step, dict)
+                and not _subject_conflicts(seed_subjects_for_rebuild, _subject_tokens(step.get("request") or step.get("question")))
+            ][-32:]
+            old_artifacts = thread_meta.get("artifact_index") if isinstance(thread_meta.get("artifact_index"), list) else []
+            thread_meta["artifact_index"] = [
+                artifact for artifact in old_artifacts
+                if isinstance(artifact, dict)
+                and _text(artifact.get("source_message_id") or artifact.get("asset_message_id") or artifact.get("message_id")) in retained_ids
+            ][-80:]
+            response["dialogue_thread"] = thread_meta
+            row["structured_response"] = json.dumps(response, ensure_ascii=False, default=str)
+            row["topic_id"] = topic_id
+            row["topic_origin_message_id"] = root_id
+            row["origin_message_id"] = root_id
+            row["branch_id"] = branch_id
+            row["topic"] = topic_label[:240]
+            row["branch_summary"] = _compact_memory_summary_lightweight(row)[:640]
+        fallback_mode = "reanchored_after_stale_root_filtered"
+
     context = _build_active_topic_context_descriptor(
         cleaned, topic_id=topic_id, root_message_id=root_id, topic_label=topic_label
     )
-    context = _merge_persisted_topic_context(
-        context, cleaned, topic_id=topic_id, root_message_id=root_id
-    )
+    if not stale_root_reanchored:
+        context = _merge_persisted_topic_context(
+            context, cleaned, topic_id=topic_id, root_message_id=root_id
+        )
     anchor_thread = _dialogue_thread_metadata(anchor_row) if isinstance(anchor_row, dict) else {}
-    active_branch_id = _text(
+    active_branch_id = "" if stale_root_reanchored else _text(
         anchor_thread.get("branch_id") or anchor_thread.get("work_id") or anchor.get("branch_id")
     )[:120]
     if not active_branch_id:
@@ -6011,9 +6204,24 @@ def search_dialogue_context(
                 reason="preserve_matching_graph_or_diagram_history",
             )
         if visual_anchor is not None:
-            # Re-anchor to the original user task so its asset IDs and typed render
-            # data are restored instead of injecting an older, text-similar branch.
-            all_rows = [visual_anchor]
+            # Keep the full current-dialogue window. A matching visual record adds
+            # asset evidence; it must never replace the latest assistant answer or
+            # the user edits made after that artifact was created.
+            visual_anchor_id = _text(visual_anchor.get("message_id"))
+            latest_pair = max(all_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ), default=None)
+            latest_id = _text((latest_pair or {}).get("message_id"))
+            ordered_rows = []
+            if latest_pair is not None:
+                ordered_rows.append(latest_pair)
+            if visual_anchor_id and visual_anchor_id != latest_id:
+                ordered_rows.append(visual_anchor)
+            ordered_rows.extend(
+                row for row in all_rows
+                if _text(row.get("message_id")) not in {latest_id, visual_anchor_id}
+            )
+            all_rows = ordered_rows[:16]
             _apr_timing_log(
                 "active_visual_branch_reanchored", None,
                 user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -9128,17 +9336,21 @@ def search_dialogue_context(
         r"i\s+(?:already\s+)?asked|continue|resume|try\s+again|again)\b",
         query, re.IGNORECASE,
     ))
+    # The last assistant answer is the first continuation candidate even when
+    # the user does not say "continue" or use a pronoun. A strong subject match
+    # is enough to resume the current branch (for example, asking for the full
+    # periodic table after April has just explained Mendeleev). Explicit topic
+    # switches and history/time lookups still bypass this immediate branch.
     same_subject_active_revisit = bool(
         latest_route_row
         and route_query_subjects
         and latest_route_subjects
-        and route_subject_overlap >= 0.44
+        and route_subject_overlap >= 0.40
         and not route_subject_conflict
-        and same_subject_revisit_marker
         and not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
         and not history_request
         and not time_filter.get("applied")
-        and not query_modalities
     )
     prefer_hot_branch = bool(
         not hot_branch_probe_missed
@@ -9146,10 +9358,11 @@ def search_dialogue_context(
         and latest_route_row
         and (
             not query_modalities
+            or same_subject_active_revisit
             or (
-                # A previously saved image/file is not itself evidence of a new visual
-                # task. A strongly grounded textual antecedent (e.g. "этот формуле")
-                # keeps the current topic active even if an old asset is present.
+                # Multimodal evidence does not cancel a semantic continuation.
+                # A compatible latest-answer match remains the first retrieval lane;
+                # otherwise anaphoric/contextual language can keep the branch active.
                 contextual_antecedent
                 and route_is_contextual
                 and not new_work_root_request
@@ -9195,14 +9408,26 @@ def search_dialogue_context(
             # preserve the branch when that fallback appears to disagree.
             latest_origin = _text(latest_route_row.get("topic_origin_message_id") or latest_route_row.get("message_id"))
             if active_origin and latest_origin and active_origin != latest_origin:
-                if same_subject_active_revisit:
+                active_branch_subjects = _subject_tokens(" ".join(
+                    _text(active_work_branch.get(key))
+                    for key in ("topic", "goal", "state_summary", "last_action", "last_user_text", "last_assistant_answer")
+                    if _text(active_work_branch.get(key))
+                ))
+                active_branch_matches_latest = bool(
+                    active_branch_subjects and latest_route_subjects
+                    and _subject_overlap(active_branch_subjects, latest_route_subjects) >= 0.30
+                    and not _subject_conflicts(active_branch_subjects, latest_route_subjects)
+                )
+                if active_branch_matches_latest:
                     _apr_timing_log(
-                        "active_work_branch_preserved_on_same_subject_revisit", None,
+                        "active_work_branch_preserved_on_latest_subject_match", None,
                         active_origin=_apr_diag_ref(active_origin),
                         latest_origin=_apr_diag_ref(latest_origin),
-                        subject_overlap=round(float(route_subject_overlap or 0.0), 4),
+                        branch_latest_overlap=round(_subject_overlap(active_branch_subjects, latest_route_subjects), 4),
                     )
                 else:
+                    # A recent assistant message that matches the current request
+                    # outranks a detached active-work marker from an older subject.
                     active_work_branch = {}
                     active_work_pair = None
                     active_work_row_index = -1
@@ -9213,7 +9438,6 @@ def search_dialogue_context(
     elif (
         not route_blocked
         and (route_query_subjects or (hot_branch_probe_missed and route_history_subjects))
-        and not query_modalities
     ):
         # The active-branch test above has already failed. Search the user's full
         # retained history even if the query subject does not mathematically conflict
@@ -9400,12 +9624,17 @@ def search_dialogue_context(
                 row_origin_id = _text(row.get("topic_origin_message_id"))
                 same_topic_id = bool(seed_topic_id and row_topic_id and seed_topic_id == row_topic_id)
                 same_origin = bool(seed_origin_id and (row_origin_id == seed_origin_id or row_id == seed_origin_id))
-                if row_id == branch_seed_id or same_topic_id or same_origin:
+                row_subjects = _row_subject_tokens(row)
+                if row_id == branch_seed_id:
+                    exact_branch_rows.append(row)
+                    continue
+                if same_topic_id or same_origin:
+                    if seed_subjects and row_subjects and _subject_conflicts(seed_subjects, row_subjects):
+                        continue
                     exact_branch_rows.append(row)
                     continue
                 # Legacy rows may not have topic_id/origin metadata. Use conservative
                 # semantic similarity only when the subjects don't contradict each other.
-                row_subjects = _row_subject_tokens(row)
                 subject_similarity = _subject_overlap(seed_subjects, row_subjects) if seed_subjects and row_subjects else 0.0
                 subject_conflict = _subject_conflicts(seed_subjects, row_subjects)
                 row_topic_text = " ".join((_row_subject_text_lightweight(row), _topic_label_lightweight(row)))
@@ -9477,10 +9706,10 @@ def search_dialogue_context(
                 chosen_ids = {_text(item[1].get("message_id")) for item in chosen}
                 for item in scored_branch:
                     item_id = _text(item[1].get("message_id"))
-                    if item_id not in chosen_ids and len(chosen) < 6:
+                    if item_id not in chosen_ids and len(chosen) < 12:
                         chosen.append(item)
                         chosen_ids.add(item_id)
-                chosen = chosen[:6]
+                chosen = chosen[:12]
                 chosen.sort(key=lambda item: (float(item[1].get("created_at") or 0.0), int(item[1].get("turn_index") or 0)))
                 expanded_pairs = [_compact_pair(item[2]) for item in chosen]
                 if expanded_pairs:
@@ -9869,8 +10098,9 @@ def search_dialogue_context(
         "time_filter": time_filter,
         "active_topic": active_topic,
         "anchor": anchor_payload,
+        "latest_assistant_anchor": (_compact_pair(latest_route_row) if latest_route_row else {}),
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:6 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row) or branch_context_expanded) else 2],
+        "selected": selected_for_context[:12 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row) or branch_context_expanded) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
@@ -10030,6 +10260,7 @@ def prepare_dialogue_context(
         "time_filter": deepcopy(context.get("time_filter") or {}),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
+        "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
         "selected_section": deepcopy(context.get("selected_section") or {}),
         "clarification_needed": bool(context.get("clarification_needed")),
         "clarification_prompt": _text(context.get("clarification_prompt")),
