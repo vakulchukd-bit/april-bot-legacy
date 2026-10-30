@@ -553,7 +553,24 @@ _CONTEXT_REFERENCE_TERMS = {
 }
 
 def _subject_family(token: Any) -> str:
+    """Normalize common Russian case/number endings before comparing subjects.
+
+    Prefix truncation alone treated «груши», «груше» and «грушах» as different
+    entities. A conservative suffix pass makes these inflections share one stem,
+    while English and non-Russian tokens retain the established prefix behavior.
+    """
     value = _text(token).lower().replace("ё", "е")
+    if re.search(r"[а-я]", value):
+        endings = (
+            "иями", "ями", "ами", "иях", "ях", "ах", "ого", "ему", "ому",
+            "ыми", "ими", "ией", "ов", "ев", "ей", "ам", "ям", "ой",
+            "ом", "ем", "а", "я", "ы", "и", "е", "у", "ю", "о",
+        )
+        for ending in endings:
+            if value.endswith(ending) and len(value) - len(ending) >= 4:
+                value = value[:-len(ending)]
+                break
+        return value
     return value[:5] if len(value) >= 5 else value
 
 _CONTEXT_NON_TOPICAL_ROOTS = (
@@ -564,7 +581,8 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "перечисл", "продолж", "дальш", "должн", "каки", "был",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
-    "доказал", "обосновал", "считал", "называл",
+    "доказал", "обосновал", "считал", "называл", "дава", "обща", "поговор",
+    "имел", "имела", "ввиду", "быва", "поподроб", "пообщ",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -578,9 +596,14 @@ _PARTICIPANT_INTERLOCUTOR_WORDS = {
 
 
 def _is_non_topical_subject_term(token: str) -> bool:
-    if token in _CONTEXT_GENERIC_TERMS:
+    if token in _CONTEXT_GENERIC_TERMS or token in {
+        "сорт", "сорта", "сортов", "сорту", "сортам", "сортами",
+    }:
         return True
-    return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
+    # Several important Russian conversational stems are four characters long
+    # ("дава", "имел", "быва"). Requiring five silently let them become fake
+    # subject entities and caused false topic-switch decisions.
+    return any(len(root) >= 4 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
 
 
 def _contains_named_value(text: Any) -> bool:
@@ -2783,7 +2806,14 @@ def _looks_like_topic_correction(query: str) -> bool:
         "я говорил о", "я говорила о", "я имел в виду именно", "я про ",
         "я имел в виду тему", "i meant", "i mean", "what i meant was",
     )
-    return any(marker in low for marker in markers)
+    if any(marker in low for marker in markers):
+        return True
+    # Also accept the common conversational order «нет, о грушах я имел ввиду»:
+    # the corrected subject may appear before the phrase «я имел(а) в виду».
+    return bool(re.search(
+        r"\b(?:нет[, ]*)?(?:о|об|про)\s+.{2,90}?\s+я\s+имел(?:а)?\s+(?:в\s+)?ввиду\b",
+        low,
+    ))
 
 
 def _is_section_request(query: str) -> bool:
@@ -3107,15 +3137,30 @@ def search_dialogue_context(
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
-    reference_followup = _looks_like_referential_followup(query)
     query_interpretation = dict(query_interpretation or {})
+    pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    correction_turn = bool(_looks_like_topic_correction(query) or pragmatic_features.get("correction"))
+    retrieval_query = _clarification_target_text(query) if correction_turn else _text(query)
+    reference_followup = _looks_like_referential_followup(query) or correction_turn
     history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
     new_topic_request = _looks_like_new_topic(query)
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
-    context_signature = _query_context_signature(query, query_interpretation)
-    query_subjects = set(context_signature.get("subject_terms") or _subject_tokens(query))
+    if correction_turn:
+        # The interpreter's raw signature may contain correction words («имел»,
+        # «ввиду») as fake entities. Rebuild only the retrieval signature from the
+        # corrected subject; CURRENT_REQUEST itself remains untouched for April.
+        context_signature = _query_context_signature(retrieval_query)
+        query_subjects = _subject_tokens(retrieval_query)
+    else:
+        context_signature = _query_context_signature(query, query_interpretation)
+        # Use normalized source-text entities for retrieval. The interpretation
+        # signature can contain clipped stems ("конф", "виль") and discourse
+        # fillers ("давай", "поподроб"), which are unsafe as subject identities.
+        # Keep the richer signature for diagnostics, but do not let it manufacture
+        # a topic switch or block a match to names in April's immediately prior answer.
+        query_subjects = _subject_tokens(retrieval_query)
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -3143,7 +3188,7 @@ def search_dialogue_context(
 
     # Search the whole user's 12-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
-    topic_bearing = _semantic_tokens(query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    topic_bearing = _semantic_tokens(retrieval_query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
     named_rows: list[tuple[float, dict[str, Any]]] = []
     if not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
@@ -3158,7 +3203,7 @@ def search_dialogue_context(
             if _subject_conflicts(query_subjects, row_subjects):
                 continue
             searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
-            overlap = _topic_query_overlap(query, searchable_topic)
+            overlap = _topic_query_overlap(retrieval_query, searchable_topic)
             if overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60):
                 # Subject alignment is useful only when there is also meaningful
                 # task/topic overlap; it must not pull a different old task solely
@@ -3200,7 +3245,7 @@ def search_dialogue_context(
         # original request rather than becoming the new active topic.
 
     candidate_started = time.perf_counter()
-    matches = [_candidate_score(query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
+    matches = [_candidate_score(retrieval_query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
                for row in rows]
     # For participant-centered, subjectless questions, first rank factual evidence
     # written from the relevant speaker perspective; use the existing relevance and
@@ -3254,6 +3299,7 @@ def search_dialogue_context(
         and interpreted_intent == "NEW_INFORMATION"
         and not history_request
         and not new_topic_request
+        and not correction_turn
     )
     semantic_subject_switch = bool(
         active_subject_conflict
@@ -3264,6 +3310,7 @@ def search_dialogue_context(
         ))
         and not history_request
         and not new_topic_request
+        and not correction_turn
     )
     candidate_match_by_id = {
         _text(item.get("message_id")): item for item in matches if _text(item.get("message_id"))
@@ -3277,8 +3324,8 @@ def search_dialogue_context(
         subject_overlap = _subject_overlap(query_subjects, row_subjects)
         if _subject_conflicts(query_subjects, row_subjects):
             continue
-        searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
-        overlap = _topic_query_overlap(query, searchable_topic)
+        searchable_topic = " ".join((_topic_label(row), _row_subject_text(row), _text(row.get("april_text") or row.get("april"))))
+        overlap = _topic_query_overlap(retrieval_query, searchable_topic)
         topic_hit = overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
         mid = _text(row.get("message_id")) or f"{row.get('created_at')}|{row.get('turn_index')}"
         if topic_hit and mid not in seen_topic_hit_ids:
@@ -3334,11 +3381,71 @@ def search_dialogue_context(
         ) is not None
     )
     hot_branch_candidate = _hot_branch_followup_candidate(
-        query, query_interpretation, latest_same_dialog,
+        retrieval_query, query_interpretation, latest_same_dialog,
         query_subjects=query_subjects, reference_followup=reference_followup,
         marker=marker, conversation_id=str(conversation_id or ""), has_attachment=has_new_user_asset,
         history_request=history_request, new_topic_request=new_topic_request,
     )
+    latest_april_text = _text((latest_same_dialog or {}).get("april") or (latest_same_dialog or {}).get("april_text"))
+    query_answer_terms = _semantic_tokens(retrieval_query) - _CONTEXT_GENERIC_TERMS - _SECTION_QUERY_NOISE
+    answer_terms = _semantic_tokens(latest_april_text) - _CONTEXT_GENERIC_TERMS - _SECTION_QUERY_NOISE
+    answer_to_april_question = bool(
+        latest_same_dialog
+        and ("?" in latest_april_text or "？" in latest_april_text)
+        and query_answer_terms
+        and _concept_overlap(query_answer_terms, answer_terms) >= 0.20
+        and not new_topic_request
+        and not history_request
+        and not has_new_user_asset
+    )
+    # April may have introduced named options in a declarative answer, not only
+    # in a sentence ending with a question mark. A request to expand one of those
+    # exact names is still a continuation of April's own answer.
+    latest_answer_subjects = _subject_tokens(latest_april_text)
+    query_named_overlap = _subject_overlap(query_subjects, latest_answer_subjects)
+    asks_to_expand_named_item = bool(re.search(
+        r"(?:подроб|деталь|расскаж|объясн|поясн|разбер|раскрой|expand|explain|\bmore\b|in\s+detail)",
+        retrieval_query.lower().replace("ё", "е"),
+    ))
+    april_named_answer_followup = bool(
+        latest_same_dialog
+        and query_subjects
+        and latest_answer_subjects
+        and query_named_overlap >= 0.50
+        and asks_to_expand_named_item
+        and not new_topic_request
+        and not history_request
+        and not has_new_user_asset
+    )
+    answer_to_april_question = answer_to_april_question or april_named_answer_followup
+    # A brief named phrase can return to an earlier branch within this same chat.
+    # Require a recent same-dialog match; a remote topic elsewhere in the 12h window
+    # is not enough to hijack an otherwise independent request.
+    short_named_topic = len(_tokens(retrieval_query)) <= 4 and len(query_subjects) <= 2 and bool(query_subjects)
+    recent_same_dialog_rows = sorted(
+        [row for row in rows if isinstance(row, dict) and (
+            (dialog_id and _text(row.get("dialog_id")) == str(dialog_id))
+            or (conversation_id and _text(row.get("conversation_id")) == str(conversation_id))
+        )],
+        key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+    )[-6:]
+    recent_named_topic_reentry = bool(
+        short_named_topic
+        and not new_topic_request
+        and not history_request
+        and any(
+            _subject_overlap(query_subjects, _row_subject_tokens(row)) >= 0.60
+            or _topic_query_overlap(retrieval_query, " ".join((
+                _topic_label(row), _row_subject_text(row), _text(row.get("april_text") or row.get("april"))
+            ))) >= 0.55
+            for row in recent_same_dialog_rows
+        )
+    )
+    # These three signals are grounded in the current exchange or a recent named
+    # branch. They outrank a lexical subject-conflict signal produced by words
+    # such as "Conference" / "Williams" that April itself just introduced.
+    if correction_turn or answer_to_april_question or recent_named_topic_reentry:
+        semantic_subject_switch = False
     continuation = False
     has_new_attachment = has_new_user_asset
     explicit_attachment_followup = has_new_attachment and (reference_followup or assistant_requested_user_asset)
@@ -3359,6 +3466,12 @@ def search_dialogue_context(
         and bool(query_interpretation.get("requires_memory"))
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
+        continuation = True
+    elif correction_turn and explicit_topic_hits:
+        continuation = True
+    elif answer_to_april_question and not semantic_subject_switch:
+        continuation = True
+    elif recent_named_topic_reentry and not semantic_subject_switch:
         continuation = True
     elif hot_branch_candidate and not semantic_subject_switch:
         # Only ambiguous turns that pass the hot-branch relevance check may continue
@@ -3426,11 +3539,12 @@ def search_dialogue_context(
             interpreted_intent == "TOPIC_CONTINUATION"
             or interpreted_direction == "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
             or reference_followup
+            or correction_turn
             or explicit_prior_pointer
             or marker
         )
     )
-    topic_vector_query = query
+    topic_vector_query = retrieval_query
     topic_vector_query_source = "current_request"
     if wants_topic_resume:
         # Short continuations such as “and then?” have no topic nouns. Ground their
@@ -3753,6 +3867,35 @@ def search_dialogue_context(
                 float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
             ))
             recent_same_dialog = recent_same_dialog[-10:]
+            # A dialog can contain several independent topics. Keep the chosen
+            # anchor's subject branch, plus the immediately adjacent turns only
+            # when they do not explicitly belong to a conflicting subject. This
+            # preserves short replies and April's just-issued correction while
+            # preventing an old cherry/apple branch from leaking into a pear turn.
+            anchor_subjects_for_window = set((anchor or {}).get("subject_terms") or [])
+            query_anchor_subjects = anchor_subjects_for_window & set(query_subjects)
+            # Prefer the exact subject named in this turn when it is also present
+            # in the anchor. This removes incidental verbs from the anchor signature
+            # (for example "пообщаемся") without losing an April answer branch when
+            # the user names one of its listed examples rather than its parent topic.
+            branch_subjects_for_window = query_anchor_subjects or anchor_subjects_for_window
+            if branch_subjects_for_window:
+                branch_rows = []
+                for item in recent_same_dialog:
+                    item_subjects = set(item.get("subject_terms") or [])
+                    if item_subjects and _subject_overlap(branch_subjects_for_window, item_subjects) < 0.45:
+                        continue
+                    branch_rows.append(item)
+                # Preserve at most two adjacent context pairs (latest user/April
+                # exchange) when the row itself carries no independent subject.
+                for item in recent_same_dialog[-2:]:
+                    item_subjects = set(item.get("subject_terms") or [])
+                    if not item_subjects or _subject_overlap(branch_subjects_for_window, item_subjects) >= 0.45:
+                        if all(_text(existing.get("message_id")) != _text(item.get("message_id")) for existing in branch_rows):
+                            branch_rows.append(item)
+                recent_same_dialog = sorted(branch_rows, key=lambda value: (
+                    float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
+                ))[-10:]
             if anchor_message_id and all(_text(item.get("message_id")) != anchor_message_id for item in recent_same_dialog):
                 anchor_row = next((row for row in all_rows if _text(row.get("message_id")) == anchor_message_id), None)
                 if anchor_row is not None:
@@ -4162,6 +4305,9 @@ def search_dialogue_context(
             else "named_topic_vector_match" if history_selection_method == "named_topic_section_vector"
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
+            else "correction_reanchored_to_named_topic" if relation == "CONTINUE" and correction_turn and explicit_topic_hits
+            else "answer_to_april_question" if relation == "CONTINUE" and answer_to_april_question
+            else "recent_named_topic_reentry" if relation == "CONTINUE" and recent_named_topic_reentry
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
