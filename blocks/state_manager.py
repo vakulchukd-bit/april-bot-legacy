@@ -1137,6 +1137,22 @@ def _row_modalities(row: dict[str, Any]) -> set[str]:
                     result.add("file")
                 elif kind == "image":
                     result.add("image")
+
+    # April-generated render assets belong to the same dialogue pair too.
+    # Keep their modality searchable, even though they are not user uploads.
+    response = _parse_json(row.get("structured_response"))
+    asset_refs = response.get("asset_refs") if isinstance(response.get("asset_refs"), dict) else {}
+    scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
+    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    dialogue_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
+    for item in (asset_refs.get("april_outputs") or dialogue_assets.get("april_outputs") or []):
+        if not isinstance(item, dict):
+            continue
+        kind = _text(item.get("kind") or item.get("output_type")).lower()
+        if kind in {"image", "gallery"}:
+            result.add("image")
+        elif kind in {"file", "text_file", "code", "document"}:
+            result.add("file")
     return result
 
 
@@ -1337,9 +1353,16 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
             continue
         chunks.extend([_text(block.get("filename")), _text(block.get("language")), _text(block.get("code") or block.get("content"))[:3500]])
     asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
-    for item in asset_refs.get("april_outputs") or []:
+    scene = resp.get("scene_contract") if isinstance(resp.get("scene_contract"), dict) else {}
+    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    dialogue_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
+    for item in (asset_refs.get("april_outputs") or dialogue_assets.get("april_outputs") or []):
         if isinstance(item, dict):
-            chunks.extend([_text(item.get("filename")), _text(item.get("output_type")), _text(item.get("language"))])
+            chunks.extend([
+                _text(item.get("filename")), _text(item.get("output_type") or item.get("kind")),
+                _text(item.get("language")), _text(item.get("asset_role")),
+                _text(item.get("analysis_summary")), _text(item.get("prompt"))[:900],
+            ])
     for key in ("entities", "visual_observations", "code_symbols", "file_purpose"):
         value = record.get(key)
         if isinstance(value, list):
@@ -1857,13 +1880,127 @@ def _compact_memory_summary(row: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", summary)[:220]
 
 
+def _compact_dialogue_assets(item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Return bounded, message-scoped asset references without binary payloads."""
+    req = _parse_json(item.get("structured_request"))
+    resp = _parse_json(item.get("structured_response"))
+    req_index = req.get("attachment_index") if isinstance(req.get("attachment_index"), list) else []
+    asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
+    scene = resp.get("scene_contract") if isinstance(resp.get("scene_contract"), dict) else {}
+    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    scene_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
+    message_id = _text(item.get("message_id"))
+
+    def compact(items: Any, role: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        if not isinstance(items, list):
+            return result
+        for raw in items[:4]:
+            if not isinstance(raw, dict):
+                continue
+            entry = {
+                "filename": _text(raw.get("filename"))[:140],
+                "kind": _text(raw.get("kind") or raw.get("output_type")).lower()[:24],
+                "mime_type": _text(raw.get("mime_type"))[:80],
+                "asset_role": _text(raw.get("asset_role") or role)[:24],
+                "message_id": _text(raw.get("asset_message_id") or raw.get("message_id") or message_id)[:120],
+                "output_type": _text(raw.get("output_type"))[:32],
+                "sha256": _text(raw.get("sha256"))[:64],
+            }
+            if entry["filename"] or entry["kind"] or entry["message_id"]:
+                result.append(entry)
+        return result
+
+    user_inputs = compact(asset_refs.get("source_inputs") or scene_assets.get("user_inputs"), "user_input")
+    if not user_inputs:
+        user_inputs = compact(req_index, "user_input")
+    april_outputs = compact(asset_refs.get("april_outputs") or scene_assets.get("april_outputs"), "april_output")
+
+    # Render-only artifacts (graphs, tables, diagrams and formulas) do not always
+    # have a binary asset_ref. Their canonical SceneContract blocks are already
+    # stored with this dialogue pair, so expose a bounded semantic/data preview
+    # that can be continued without asking the user to recreate the artifact.
+    render_blocks = resp.get("render_blocks") if isinstance(resp.get("render_blocks"), list) else scene.get("render_blocks")
+    if isinstance(render_blocks, list):
+        known = {(entry.get("kind"), entry.get("filename")) for entry in april_outputs if isinstance(entry, dict)}
+        for block in render_blocks[:8]:
+            if not isinstance(block, dict):
+                continue
+            kind = _text(block.get("type") or block.get("representation") or block.get("renderer")).lower()[:24]
+            if not kind:
+                continue
+            filename = _text(block.get("filename") or block.get("name"))[:140]
+            signature = (kind, filename)
+            if signature in known:
+                continue
+            def safe_preview_value(value: Any, depth: int = 0) -> Any:
+                if depth > 4:
+                    return ""
+                if isinstance(value, str):
+                    candidate = value.strip()
+                    if re.match(r"(?is)^data:[^;]+;base64,", candidate):
+                        return ""
+                    if len(candidate) > 1000 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", candidate):
+                        return ""
+                    return candidate[:1800]
+                if isinstance(value, dict):
+                    clean: dict[str, Any] = {}
+                    for key, child in list(value.items())[:32]:
+                        normalized_key = str(key).lower()
+                        if any(secret in normalized_key for secret in (
+                            "base64", "data_uri", "image_url", "file_data", "content_base64",
+                        )):
+                            continue
+                        safe_child = safe_preview_value(child, depth + 1)
+                        if safe_child not in (None, "", [], {}):
+                            clean[str(key)[:80]] = safe_child
+                    return clean
+                if isinstance(value, list):
+                    return [safe for child in value[:32]
+                            if (safe := safe_preview_value(child, depth + 1)) not in (None, "", [], {})]
+                if isinstance(value, (int, float, bool)) or value is None:
+                    return value
+                return _text(value)[:180]
+
+            preview_source = (
+                block.get("description") or block.get("summary") or block.get("explanation")
+                or block.get("content") or block.get("code") or block.get("text") or ""
+            )
+            safe_preview = safe_preview_value(preview_source)
+            if isinstance(safe_preview, (dict, list)):
+                preview = json.dumps(safe_preview, ensure_ascii=False, default=str)
+            else:
+                preview = _text(safe_preview)
+            structured = block.get("payload") if isinstance(block.get("payload"), dict) else block.get("data")
+            safe_structured = safe_preview_value(structured) if isinstance(structured, (dict, list)) else None
+            if isinstance(safe_structured, (dict, list)) and safe_structured:
+                structured_text = json.dumps(safe_structured, ensure_ascii=False, default=str)
+                preview = (preview + " | data: " + structured_text).strip(" |")
+            entry = {
+                "filename": filename,
+                "kind": kind,
+                "asset_role": "april_output",
+                "message_id": message_id,
+                "output_type": kind,
+                "title": _text(block.get("title") or block.get("name"))[:120],
+                "language": _text(block.get("language") or block.get("lang"))[:32],
+                "structured_preview": preview[:1800],
+            }
+            if entry["kind"] or entry["structured_preview"]:
+                april_outputs.append(entry)
+                known.add(signature)
+    return {"user_inputs": user_inputs, "april_outputs": april_outputs[:8]}
+
+
 def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     sections = _dialogue_section_map(item)
-    # Do not feed the previous long explanation back into the next prompt. Retain
-    # a compact summary plus McDowell's ordered section index instead.
+    # Keep both the assistant's actual last reply (including a question/action
+    # requested from the user) and its compact summary. The pair is the unit of
+    # dialogue continuity; neither speaker is discarded.
     outline = _compact_memory_summary(item)
+    assistant_reply = _text(item.get("april") or item.get("april_text"))
     if not outline:
-        outline = _text(item.get("april") or item.get("april_text"))[:180]
+        outline = assistant_reply[:220]
     modalities = set(item.get("row_modalities") or [])
     has_asset = bool(modalities & {"image", "file", "text_file", "voice"})
     evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:900] if has_asset else ""
@@ -1874,14 +2011,16 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "history_time_label": _text(item.get("history_time_label"))[:140],
         "history_age_minutes": item.get("history_age_minutes"),
         "history_gap_minutes": item.get("history_gap_minutes"),
-        "user": _text(item.get("user") or item.get("user_text"))[:180],
-        "april": outline[:220],
+        "user": _text(item.get("user") or item.get("user_text"))[:240],
+        "april": assistant_reply[:420] if assistant_reply else outline[:220],
+        "april_summary": outline[:220],
         "topic": _text(item.get("topic"))[:100],
         "sections": sections,
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
         "attachment_evidence": evidence,
+        "dialogue_assets": _compact_dialogue_assets(item),
         "context_binding": {
             "subject_terms": list(item.get("subject_terms") or [])[:12],
             "numeric_anchor_overlap": float(item.get("numeric_anchor_overlap") or 0),
@@ -3043,9 +3182,13 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         rows_in_window=len(all_rows), rows_in_scope=len(rows), history_request=history_request, query_chars=len(str(query or "")))
 
+    # Voice is a transport modality, not a new attachment boundary: the transcript
+    # is the user's semantic text and must be classified exactly like typed input.
+    # Only a newly uploaded image/file changes the attachment-routing decision.
     query_modalities = {modality for modality, enabled in (
-        ("image", bool(has_image)), ("file", bool(has_file)), ("voice", bool(has_voice)),
+        ("image", bool(has_image)), ("file", bool(has_file)),
     ) if enabled}
+    has_new_user_asset = bool(query_modalities)
     pending_clarification = _latest_pending_clarification([row for row in rows if not dialog_id or _text(row.get("dialog_id")) == _text(dialog_id)])
     pending_option: dict[str, Any] = {}
     pending_resolved = False
@@ -3169,19 +3312,42 @@ def search_dialogue_context(
     short_contextual = len(_tokens(query)) <= 12 and _text(query).lower().startswith(("а ", "и ", "ну ", "так ")) and (
         reference_followup or marker or len(_semantic_tokens(query)) == 0
     )
+    # If April's own last answer asked the user to provide evidence, an upload in
+    # the next turn is normally the answer to that request. Treat the attachment
+    # as part of the active exchange even when the accompanying words are only
+    # "here it is" or the user dictates the explanation instead of typing it.
+    last_april_reply = _text((latest_same_dialog or {}).get("april") or (latest_same_dialog or {}).get("april_text"))
+    assistant_requested_user_asset = bool(
+        has_new_user_asset
+        and latest_same_dialog
+        and not new_topic_request
+        # A bare upload acknowledgement may contain no topic noun and can be
+        # spuriously marked as a subject switch by tokenization. April's direct
+        # request for this asset is stronger conversational evidence.
+        and re.search(
+            r"(?:пришл\w*|отправ\w*|загруз\w*|прикреп\w*|скин\w*|покаж\w*\s+(?:мне\s+)?(?:фото|фотограф|скрин|изображ|файл|документ)|"
+            r"сфотограф\w*|прилож\w*\s+(?:файл|фото|скрин)|можешь\s+(?:мне\s+)?(?:прислать|отправить|загрузить)|"
+            r"send\s+(?:me\s+)?(?:a\s+)?(?:photo|picture|image|screenshot|file|document)|"
+            r"upload\s+(?:the\s+)?(?:image|photo|screenshot|file|document)|attach\s+(?:the\s+)?(?:file|image)|"
+            r"share\s+(?:the\s+)?(?:screenshot|image|file))",
+            last_april_reply.lower().replace("ё", "е"),
+        ) is not None
+    )
     hot_branch_candidate = _hot_branch_followup_candidate(
         query, query_interpretation, latest_same_dialog,
         query_subjects=query_subjects, reference_followup=reference_followup,
-        marker=marker, conversation_id=str(conversation_id or ""), has_attachment=bool(query_modalities),
+        marker=marker, conversation_id=str(conversation_id or ""), has_attachment=has_new_user_asset,
         history_request=history_request, new_topic_request=new_topic_request,
     )
     continuation = False
-    has_new_attachment = bool(query_modalities)
-    explicit_attachment_followup = has_new_attachment and reference_followup
+    has_new_attachment = has_new_user_asset
+    explicit_attachment_followup = has_new_attachment and (reference_followup or assistant_requested_user_asset)
     if pending_clarification and not new_topic_request:
         continuation = True
     elif history_request or new_topic_request:
         continuation = False
+    elif assistant_requested_user_asset:
+        continuation = True
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
@@ -3480,36 +3646,131 @@ def search_dialogue_context(
         )
     elif relation == "CONTINUE":
         if topic_vector_hits and anchor:
-            # Keep the exact topic match first, then a small set of history rows that
-            # match the same topic vector. This is the requested "search inside the
-            # found history": a named topic may have an overview followed by sections
-            # or later subtopic turns, so one isolated latest pair is insufficient.
-            seen_vector_ids: set[str] = set()
-            for hit in topic_vector_hits:
-                hit_row = hit.get("row") if isinstance(hit, dict) else None
-                if not isinstance(hit_row, dict):
+            # The best vector hit identifies the topic branch; it is not the whole
+            # conversational context. Expand from that anchor to the latest ten
+            # USER↔APRIL pairs belonging to the same topic and dialog/conversation.
+            # This preserves intervening questions, answers and assistant requests
+            # while avoiding unrelated topics that happen to share the same chat.
+            vector_row = topic_vector_hits[0].get("row") if isinstance(topic_vector_hits[0], dict) else None
+            if not isinstance(vector_row, dict):
+                vector_row = next((
+                    hit.get("row") for hit in topic_vector_hits
+                    if isinstance(hit, dict) and isinstance(hit.get("row"), dict)
+                ), None)
+            if not isinstance(vector_row, dict):
+                vector_row = {}
+
+            branch_dialog_id = _text(vector_row.get("dialog_id")) or _text((anchor or {}).get("dialog_id"))
+            branch_conversation_id = _text(vector_row.get("conversation_id")) or _text((anchor or {}).get("conversation_id"))
+            branch_subjects = set(_row_subject_tokens(vector_row))
+            branch_subjects.update(_subject_tokens(_topic_label(vector_row)))
+            branch_subjects.update(_subject_tokens(_text(vector_row.get("april_text") or vector_row.get("april_text_en"))))
+            if not branch_subjects:
+                branch_subjects = _subject_tokens(" ".join((
+                    _text(vector_row.get("user_text")), _text(vector_row.get("april_text")),
+                    _row_attachment_evidence(vector_row),
+                )))
+
+            branch_pairs: list[dict[str, Any]] = []
+            for candidate_row in all_rows:
+                if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
                     continue
-                message_id = _text(hit_row.get("message_id"))
-                if message_id and message_id in seen_vector_ids:
+                candidate_id = _text(candidate_row.get("message_id"))
+                if not candidate_id:
                     continue
-                if message_id:
-                    seen_vector_ids.add(message_id)
-                scored_hit = _candidate_score(
-                    query, hit_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
-                    reference_followup=True, query_modalities=query_modalities,
+                same_branch_dialog = bool(branch_dialog_id and _text(candidate_row.get("dialog_id")) == branch_dialog_id)
+                same_branch_conversation = bool(
+                    branch_conversation_id and _text(candidate_row.get("conversation_id")) == branch_conversation_id
                 )
-                selected_for_context.append(_compact_pair(scored_hit))
-                if len(selected_for_context) >= 3:
-                    break
+                if not (same_branch_dialog or same_branch_conversation):
+                    continue
+
+                candidate_subjects = set(_row_subject_tokens(candidate_row))
+                candidate_subjects.update(_subject_tokens(_topic_label(candidate_row)))
+                candidate_subjects.update(_subject_tokens(_text(candidate_row.get("april_text") or candidate_row.get("april_text_en"))))
+                if not candidate_subjects:
+                    candidate_subjects = _subject_tokens(" ".join((
+                        _text(candidate_row.get("user_text")), _text(candidate_row.get("april_text")),
+                        _row_attachment_evidence(candidate_row),
+                    )))
+                if branch_subjects and candidate_subjects:
+                    branch_overlap = max(
+                        _subject_overlap(branch_subjects, candidate_subjects),
+                        _fuzzy_token_overlap(branch_subjects, candidate_subjects),
+                    )
+                    if branch_overlap < 0.34:
+                        continue
+                elif candidate_id != _text(vector_row.get("message_id")):
+                    # With no grounded subject signature, keep only the exact
+                    # vector hit rather than widening to an arbitrary same-chat span.
+                    continue
+
+                branch_pairs.append(_candidate_score(
+                    query, candidate_row, dialog_id=str(branch_dialog_id or dialog_id or ""),
+                    conversation_id=str(branch_conversation_id or conversation_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                ))
+
+            # The exact semantic anchor remains available separately as DIALOGUE_ANCHOR.
+            # The context window contains the latest ten related pairs in chronology.
+            branch_pairs.sort(key=lambda value: (
+                float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
+            ))
+            selected_for_context = [_compact_pair(value) for value in branch_pairs[-10:]]
             if not selected_for_context:
-                selected_for_context.append(_compact_pair(anchor))
-            history_selection_method = "named_topic_section_vector"
+                selected_for_context = [_compact_pair(anchor)] if anchor else []
+            history_selection_method = "named_topic_vector_branch_window"
             contextual_history_match = True
         else:
-            if anchor:
+            # A short follow-up often has almost no shared keywords with its
+            # subject ("which varieties?", "is it darker?", "show them"). When
+            # semantic preinterpretation says CONTINUE, use the recent same-dialogue
+            # exchange as the primary hot branch instead of requiring lexical
+            # overlap with every individual turn. The active anchor still identifies
+            # the branch; unrelated conversations/dialog IDs are never mixed.
+            recent_same_dialog: list[dict[str, Any]] = []
+            anchor_message_id = _text((anchor or {}).get("message_id"))
+            for candidate_row in all_rows:
+                if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
+                    continue
+                candidate_id = _text(candidate_row.get("message_id"))
+                if not candidate_id:
+                    continue
+                candidate_dialog_id = _text(candidate_row.get("dialog_id"))
+                candidate_conversation_id = _text(candidate_row.get("conversation_id"))
+                same_dialog = bool(dialog_id and candidate_dialog_id == str(dialog_id))
+                if not same_dialog and conversation_id and candidate_conversation_id == str(conversation_id):
+                    same_dialog = True
+                if not same_dialog:
+                    continue
+                scored_recent = _candidate_score(
+                    query, candidate_row, dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )
+                recent_same_dialog.append(scored_recent)
+            recent_same_dialog.sort(key=lambda value: (
+                float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
+            ))
+            recent_same_dialog = recent_same_dialog[-10:]
+            if anchor_message_id and all(_text(item.get("message_id")) != anchor_message_id for item in recent_same_dialog):
+                anchor_row = next((row for row in all_rows if _text(row.get("message_id")) == anchor_message_id), None)
+                if anchor_row is not None:
+                    recent_same_dialog = (recent_same_dialog + [_candidate_score(
+                        query, anchor_row, dialog_id=str(dialog_id or ""),
+                        conversation_id=str(conversation_id or ""),
+                        reference_followup=True, query_modalities=query_modalities,
+                    )])[-10:]
+                    recent_same_dialog.sort(key=lambda value: (
+                        float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
+                    ))
+            selected_for_context = [_compact_pair(item) for item in recent_same_dialog]
+            if not selected_for_context and anchor:
                 selected_for_context.append(_compact_pair(anchor))
-        # At most one corroborating pair in the ordinary active-turn path; the
-        # named-topic vector above is separately limited to three grounded records.
+            history_selection_method = "recent_same_dialog_hot_branch" if selected_for_context else "active_anchor_fallback"
+        # Retain up to ten complete USER↔APRIL pairs from the same active topic.
+        # Include April's reply because it may contain the question/action that the
+        # next user message is answering.
         anchor_subjects = set((anchor or {}).get("subject_terms") or [])
         anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
         related_candidates = []
@@ -3557,8 +3818,28 @@ def search_dialogue_context(
                 provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
                 related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
         if related_candidates:
-            related_candidates.sort(key=lambda pair: pair[0], reverse=True)
-            selected_for_context.append(_compact_pair(related_candidates[0][1]))
+            # Keep recency within the already matched branch; ranking is only used
+            # to decide membership. Preserve pair chronology after selection.
+            related_candidates.sort(key=lambda pair: (
+                float(pair[1].get("created_at") or 0), int(pair[1].get("turn_index") or 0)
+            ), reverse=True)
+            seen_pair_ids = {
+                _text(value.get("message_id")) for value in selected_for_context
+                if isinstance(value, dict) and _text(value.get("message_id"))
+            }
+            for _rank, candidate in related_candidates:
+                candidate_id = _text(candidate.get("message_id"))
+                if candidate_id and candidate_id in seen_pair_ids:
+                    continue
+                selected_for_context.append(_compact_pair(candidate))
+                if candidate_id:
+                    seen_pair_ids.add(candidate_id)
+                if len(selected_for_context) >= 10:
+                    break
+            selected_for_context.sort(key=lambda value: (
+                float(value.get("created_at") or 0), int(value.get("turn") or value.get("turn_index") or 0)
+            ))
+            selected_for_context = selected_for_context[-10:]
 
     # A NEW request may still name a topic retained from an earlier dialogue.
     # Keep relation=NEW (no forced continuation), but pass one grounded pair when
@@ -3825,7 +4106,7 @@ def search_dialogue_context(
         "active_topic_seed": _text(active_topic)[:240] if relation == "CONTINUE" else "",
         "prefer_active_branch": bool(relation == "CONTINUE" and not history_request and not new_topic_request and not query_interpretation.get("explicit_topic_switch")),
         "prefer_named_history": bool(history_request or contextual_history_match or (relation == "CONTINUE" and bool(selected_section))),
-        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:5] if isinstance(item, dict) and _text(item.get("message_id"))],
+        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:10 if relation == "CONTINUE" else 5] if isinstance(item, dict) and _text(item.get("message_id"))],
         "avoid_cross_topic_injection": True,
         "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
         "query_composition": topic_vector_query_source,
@@ -3894,7 +4175,7 @@ def search_dialogue_context(
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
         "history_selection_method": history_selection_method,
-        "continuation_context_limit": 3 if history_selection_method == "named_topic_section_vector" else 2,
+        "continuation_context_limit": 10 if relation == "CONTINUE" else (5 if history_request else 2),
         "topic_vector_candidate_count": len(topic_vector_hits),
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
         "requested_topic_count": history_limit,
@@ -3902,7 +4183,7 @@ def search_dialogue_context(
         "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
         "selected": selected_for_context[:5 if (history_request or resume_anchor_row) else (
-            3 if history_selection_method == "named_topic_section_vector" else 2
+            10 if relation == "CONTINUE" else (3 if history_selection_method == "named_topic_section_vector" else 2)
         )],
         "history_topics": history_topics,
         "history_time_search": history_time_search,
