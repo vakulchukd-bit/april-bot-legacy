@@ -99,6 +99,13 @@ USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
   answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
   the visible answer. `summary` is metadata only and must remain short.
 - Required visual structures belong in separate typed `render_blocks` with concrete payloads.
+CURRENT-TURN SEMANTIC CONSISTENCY:
+- Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
+- Before returning, cross-check the prose answer, every render block's title/description/explanation, and every artifact payload against the same interpreted task, requested operation, values, and constraints. They must describe the same subject and requested result.
+- When the user corrects a previous response, identify what was actually wrong and repair that mismatch; do not repeat the previous answer or replace the requested object with a familiar example.
+- Never claim that a table, graph, diagram, image, code change, or other artifact was created unless its corresponding render block contains a concrete payload or durable source. An empty renderer shell is not a completed visual.
+- If a requested structured output cannot be completed, state that limitation accurately in RETURN_LANGUAGE rather than describing a nonexistent result as finished.
+
 - PER-RENDER EXPLANATIONS (Premium): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, normally 1 short, specific sentence. For images, write a natural conversational caption that sounds like April continuing the reply (for example, “Вот что получилось” only when followed by a real description, or “Готово — добавила корабль, сохранив вид океана”). NEVER copy or paraphrase the user’s imperative as the caption (for example, do not output “Нарисуй фотку пшеничного поля”), and NEVER expose internal English prompt/instruction text such as “Edit the supplied source image…”. Mention the requested subject or actual edit and one relevant visual detail only when supported by the payload. Avoid mechanical headings such as “Что показывает изображение”, “Изображение связано с разделом”, status-report wording, generic claims about the renderer, and repetitive caveats that an ordinary generated picture is not an archival photograph. If the canonical answer already says the same thing, make the caption add a useful, distinct detail; never repeat the same sentence. A user’s first name may be used occasionally only if the authenticated user profile explicitly provides it and the wording sounds natural; do not insert a name mechanically or invent one. Do not invent feelings or image details; warmth belongs in the phrasing, not in unsupported claims. For diagrams, identify the nodes/relationships or action sequence; do not restate the full numbered steps. For tables/graphs/formulas, name the columns/axes/variables and the visual takeaway without repeating the whole answer. For code, name the real file/functions and the concrete change. Use the actual payload, not generic filler. SceneContract displays this field immediately after the renderer, so keep it complementary and do not create a duplicate standalone explanation block.
 - SINGLE-OWNER PRESENTATION: keep `answer` and ordinary text blocks as the coherent overall narrative. Give each renderer a brief introduction/context there, but do not repeat its `explanation`, variable-by-variable interpretation, table takeaway, code walkthrough, image description, or graph trend elsewhere in the narrative. The detailed interpretation belongs immediately after its own renderer in that renderer's `explanation` field. Do not duplicate the same concrete render block or create multiple explanations for one renderer; retain the prose needed to explain the overall topic. Every mathematical expression that remains in prose must use explicit KaTeX-compatible delimiters (`\(...\)` inline or `\[...\]` display); never leave raw, unwrapped LaTeX commands in ordinary text.
 - RENDER COVERAGE: honor each explicitly requested output type and emit a concrete payload when it materially helps. There is no fixed prose/render allocation and no renderer quota. Keep the complete explanation in text; diagrams show only relationships, structure or action order that is not already obvious from the prose. Interleave useful renderers with their related text by step_index. Concept explanations may use a grounded network graph (representation="network", nodes+edges) only when the relations are real and visually useful; numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
@@ -305,7 +312,15 @@ SYSTEM_PROMPT_COMPACT = r"""
 You are April's single Provider in the existing canonical route. The processor owns identity,
 24-hour memory search, NEW/CONTINUE, interpretation, rooms and renderers. Never create another
 route/memory/identity or expose hidden reasoning.
-`answer` is the complete answer in RETURN_LANGUAGE; `content` may be empty because the normalizer fills it from `answer`; the normal text renderer must remain complete after normalization. `internal_answer_en` is at most one concise sentence, never the hidden place for the
+`answer` is the complete answer in RETURN_LANGUAGE; `content` may be empty because the normalizer fills it from `answer`; the normal text renderer must remain complete after normalization.
+CURRENT-TURN SEMANTIC CONSISTENCY:
+- Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
+- Before returning, cross-check the prose answer, every render block's title/description/explanation, and every artifact payload against the same interpreted task, requested operation, values, and constraints. They must describe the same subject and requested result.
+- When the user corrects a previous response, identify what was actually wrong and repair that mismatch; do not repeat the previous answer or replace the requested object with a familiar example.
+- Never claim that a table, graph, diagram, image, code change, or other artifact was created unless its corresponding render block contains a concrete payload or durable source. An empty renderer shell is not a completed visual.
+- If a requested structured output cannot be completed, state that limitation accurately in RETURN_LANGUAGE rather than describing a nonexistent result as finished.
+
+ `internal_answer_en` is at most one concise sentence, never the hidden place for the
 full explanation. Keep `summary` short and emit required visual structures as typed render blocks. Every non-text render block MUST include a specific `explanation` field in RETURN_LANGUAGE (1–3 sentences) explaining its meaning, relevance and how to interpret/use it: formula and variables; link destination and purpose; image subject/relation and only supported edits; code file/functions and changes; table comparison/takeaway; graph axes/data/trend; diagram parts/relationships. Premium SceneContract displays that explanation in a separate text block immediately after the renderer. Do not duplicate the same explanation in a second text block.
 Premium output ceiling: exactly 12000 tokens per complete answer attempt. Do not fill the cap for its
 own sake; finish valid JSON with headroom. `content` may be empty because the normalizer copies `answer`.
@@ -364,7 +379,15 @@ REFERENCE/CLOSURE GUARD: If CURRENT_REQUEST only clarifies the referent (for exa
 
 SYSTEM_PROMPT_MINIMAL = r"""
 April Provider: one canonical call; processor owns authenticated identity, memory and NEW/CONTINUE.
-`answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` may be empty because the normalizer fills it from `answer`; keep the answer complete, but avoid duplicating it in the JSON. `internal_answer_en` is only a one-sentence internal translation, never the
+`answer` is the complete user-facing answer in RETURN_LANGUAGE. `content` may be empty because the normalizer fills it from `answer`; keep the answer complete, but avoid duplicating it in the JSON.
+CURRENT-TURN SEMANTIC CONSISTENCY:
+- Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
+- Before returning, cross-check the prose answer, every render block's title/description/explanation, and every artifact payload against the same interpreted task, requested operation, values, and constraints. They must describe the same subject and requested result.
+- When the user corrects a previous response, identify what was actually wrong and repair that mismatch; do not repeat the previous answer or replace the requested object with a familiar example.
+- Never claim that a table, graph, diagram, image, code change, or other artifact was created unless its corresponding render block contains a concrete payload or durable source. An empty renderer shell is not a completed visual.
+- If a requested structured output cannot be completed, state that limitation accurately in RETURN_LANGUAGE rather than describing a nonexistent result as finished.
+
+ `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
 concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. For a renderer that belongs inside a longer explanation, include `anchor_text`: an exact, unique sentence or short paragraph (max 260 characters) copied verbatim from `answer`; the renderer will be inserted immediately after that anchor. Do not use anchor_text for final_output=true items, and do not place every renderer at the end by default. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
@@ -4581,7 +4604,7 @@ def normalize_render_blocks(
             graph_keys = {
                 "title", "description", "summary", "content", "representation", "chart_type", "visualization", "graph_type", "plot_type", "kind", "type",
                 "dimensions", "three_d", "x", "y", "z", "x_values", "y_values", "z_values", "x_axis", "y_axis", "z_axis", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "axes", "axis_labels",
-                "points", "coordinates", "data_points", "series", "datasets", "data", "traces", "curves", "objects_3d", "spheres", "objects", "shapes", "primitives", "meshes", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "isosurfaces", "volumes", "slices", "faces", "vertices", "triangles", "indices", "normals",
+                "points", "coordinates", "data_points", "series", "datasets", "data", "traces", "curves", "objects_3d", "spheres", "objects", "shapes", "primitives", "meshes", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "isosurfaces", "volumes", "slices", "faces", "vertices", "triangles", "indices", "normals", "shape", "figure_type", "geometry_type", "object_type", "primitive_type", "mesh", "scene_type", "surface_equation", "surface_formula", "math_expression", "mathematical_expression",
                 "scene", "geometry", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "matrix", "grid_resolution", "resolution", "show_curved_grid", "curved_grid", "show_zero_plane", "zero_plane",
                 "orbits", "orbit_paths", "orbital_motion", "trajectories", "paths", "lines", "curves_3d", "vectors", "gravity_vectors", "field_vectors", "field_lines", "gravity_field_lines", "arrows", "forces", "velocity_vectors", "normals", "field", "wave", "wave_effect", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "surface_mode", "color_scale", "color_map", "colormap", "temperature_field", "thermal_field", "heat_field", "color_domain", "style", "metadata", "animation", "time", "duration", "keyframes", "labels", "annotations", "rings", "april_premium_3d", "premium_3d_profile",
             }
@@ -5134,27 +5157,105 @@ def _provider_render_block_is_concrete(block: dict[str, Any]) -> bool:
         rows = payload.get("rows") or payload.get("data")
         return isinstance(columns, (list, tuple)) and bool(columns) and isinstance(rows, (list, tuple, dict)) and bool(rows)
     if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
-        series = payload.get("series") or payload.get("datasets") or payload.get("traces")
-        if isinstance(series, list) and any(isinstance(item, dict) and any(item.get(key) not in (None, "", [], {}) for key in ("points", "data", "values", "x", "y")) for item in series):
+        series = payload.get("series") or payload.get("datasets") or payload.get("traces") or payload.get("curves")
+        nested = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
+        geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
+        mesh = payload.get("mesh") if isinstance(payload.get("mesh"), dict) else {}
+        representation = _text(
+            payload.get("representation") or payload.get("graph_type")
+            or payload.get("chart_type") or payload.get("visualization")
+        ).lower().replace("-", "_").replace(" ", "_")
+        declares_3d = (
+            representation in {
+                "3d", "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d",
+                "graph_3d", "plot3d", "plot_3d", "scatter3d", "scatter_3d",
+                "3d_scatter", "surface3d", "surface_3d", "3d_surface", "surface",
+                "mesh3d", "mesh_3d", "wireframe", "3d_wireframe", "bar3d",
+                "solid3d", "solid_3d", "spacetime_curvature",
+            }
+            or payload.get("dimensions") == 3 or payload.get("three_d") is True
+            or nested.get("dimensions") == 3 or nested.get("three_d") is True
+            or geometry.get("dimensions") == 3 or mesh.get("dimensions") == 3
+        )
+
+        def _present(value: Any) -> bool:
+            return value is not None and value != "" and value != [] and value != {}
+
+        def _finite(value: Any) -> bool:
+            try:
+                if value is None or value == "" or isinstance(value, bool):
+                    return False
+                float(value)
+                return True
+            except (TypeError, ValueError, OverflowError):
+                return False
+
+        def _has_z(vertex: Any) -> bool:
+            if isinstance(vertex, (list, tuple)):
+                return len(vertex) >= 3 and _finite(vertex[2])
+            if isinstance(vertex, dict):
+                position = vertex.get("position") if isinstance(vertex.get("position"), dict) else {}
+                return _finite(vertex.get("z", position.get("z")))
+            return False
+
+        sources = [payload, nested, geometry, mesh]
+        vertices = [source.get("vertices") for source in sources]
+        has_3d_vertices = any(
+            isinstance(items, (list, tuple)) and len(items) >= 3
+            and sum(1 for item in items if _has_z(item)) >= 3
+            for items in vertices
+        )
+        has_xyz_arrays = any(
+            isinstance(source.get("x"), (list, tuple))
+            and isinstance(source.get("y"), (list, tuple))
+            and isinstance(source.get("z"), (list, tuple))
+            and min(len(source["x"]), len(source["y"]), len(source["z"])) >= 1
+            and any(_finite(value) for value in source["z"])
+            for source in sources
+        )
+        points = payload.get("points") or payload.get("data_points") or payload.get("coordinates")
+        has_xyz_points = isinstance(points, (list, tuple)) and any(_has_z(point) for point in points)
+        object_keys = ("objects_3d", "objects3d", "objects", "shapes", "meshes", "spheres", "primitives")
+        has_spatial_objects = any(
+            isinstance(source.get(key), (list, tuple, dict)) and bool(source.get(key))
+            for source in sources for key in object_keys
+        )
+        has_explicit_shape = any(
+            _present(source.get(key))
+            for source in sources for key in ("shape", "figure_type", "geometry_type", "object_type", "primitive_type")
+        )
+        has_surface = any(
+            _present(source.get(key))
+            for source in sources
+            for key in ("surface_grid", "z_values", "matrix", "surface_function", "surface_equation", "surface_formula", "z_function", "z_expression")
+        )
+        if declares_3d and (
+            has_3d_vertices or has_xyz_arrays or has_xyz_points
+            or has_spatial_objects or has_explicit_shape or has_surface
+        ):
+            return True
+        if any(
+            isinstance(source.get(key), (list, tuple, dict)) and bool(source.get(key))
+            for source in sources for key in ("objects_3d", "objects3d", "spheres", "meshes")
+        ):
+            return True
+
+        if isinstance(series, (list, tuple)) and any(
+            isinstance(item, dict) and any(_present(item.get(key)) for key in ("points", "data", "values", "x", "y"))
+            for item in series
+        ):
             return True
         for x_key, y_key in (("x", "y"), ("x_values", "y_values")):
             x_values, y_values = payload.get(x_key), payload.get(y_key)
             if isinstance(x_values, (list, tuple)) and isinstance(y_values, (list, tuple)) and min(len(x_values), len(y_values)) >= 2:
                 return True
-        for key in ("points", "data_points", "objects_3d", "objects", "shapes", "meshes", "spheres", "primitives", "surface_grid", "matrix", "z_values", "trajectories", "orbits", "vectors", "field_lines"):
-            if isinstance(payload.get(key), (list, tuple)) and bool(payload[key]):
-                return True
-        expression_keys = ("surface_function", "z_function", "z_expression", "equation", "expression", "fn", "function")
-        if any(payload.get(key) not in (None, "", [], {}) for key in expression_keys):
-            representation = _text(payload.get("representation") or payload.get("graph_type") or payload.get("chart_type")).lower()
-            if representation in {"function", "function2d", "function_2d", "line", "line_chart", "surface3d", "surface_3d", "3d_surface", "surface", "scene3d", "mesh3d", "mesh_3d"} or any(payload.get(key) for key in ("surface_function", "z_function", "z_expression", "fn", "function")):
-                return True
-        nested = payload.get("scene") if isinstance(payload.get("scene"), dict) else {}
-        geometry = payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {}
-        return bool(
-            (isinstance(nested.get("objects"), list) and nested["objects"])
-            or (isinstance(geometry.get("objects"), list) and geometry["objects"])
-            or (isinstance(payload.get("nodes"), list) and payload.get("nodes") and isinstance(payload.get("edges"), list) and payload.get("edges"))
+        if isinstance(points, (list, tuple)) and len(points) >= 2:
+            return True
+        if isinstance(payload.get("nodes"), (list, tuple)) and payload.get("nodes") and isinstance(payload.get("edges"), (list, tuple)) and payload.get("edges"):
+            return True
+        return any(
+            _present(payload.get(key))
+            for key in ("surface_grid", "matrix", "z_values", "data_table", "surface_function", "z_function", "z_expression")
         )
     if block_type == "diagram":
         return _premium_diagram_has_concrete_payload(block)
@@ -5624,6 +5725,256 @@ async def _repair_requested_diagram(
     return repaired, usage, meta
 
 
+async def _repair_requested_graph(
+    client: Any,
+    request: MachineRequest,
+    *,
+    current_request: str,
+    answer: str,
+    display_language: str,
+    graph_policy: dict[str, Any] | None = None,
+    max_output_tokens: int = PREMIUM_OUTPUT_TOKEN_LIMIT,
+) -> tuple[dict[str, Any] | None, dict[str, int], dict[str, Any]]:
+    """Recover a missing GraphBlock payload from the semantic task and public answer.
+
+    The provider creates the geometry from the meaning of the request and answer.
+    This function contains no subject-name templates and never fabricates measured
+    values. Conceptual primitives may use explicitly labelled normalized geometry.
+    """
+    language = _text(display_language or "ru")
+    intent_data = request.intent if isinstance(request.intent, dict) else {}
+    request_structure = intent_data.get("request_structure") if isinstance(intent_data.get("request_structure"), dict) else {}
+    semantic_intent = (
+        request_structure.get("semantic_interpretation")
+        if isinstance(request_structure.get("semantic_interpretation"), dict)
+        else intent_data.get("semantic_interpretation")
+        if isinstance(intent_data.get("semantic_interpretation"), dict)
+        else {}
+    )
+    relation = _text((request.memory or {}).get("relation") if isinstance(request.memory, dict) else "").upper()
+    memory_authorized = bool(
+        semantic_intent.get("requires_memory")
+        or semantic_intent.get("history_request")
+        or semantic_intent.get("previous_answer_reference")
+        or semantic_intent.get("active_branch_repair")
+        or semantic_intent.get("dialogue_profile_request")
+        or _text(semantic_intent.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "HISTORY_RECALL"}
+    )
+    context = _selected_diagram_context(request) if memory_authorized and relation == "CONTINUE" else []
+    answer_context = str(answer or "")
+    if _estimate_tokens(answer_context) > 1400:
+        answer_context = _semantic_compress(answer_context, 1400)
+
+    remaining_output_budget = max(0, min(
+        PREMIUM_OUTPUT_TOKEN_LIMIT,
+        int(max_output_tokens or 0),
+    ))
+    empty_usage = {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+        "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0,
+    }
+    if remaining_output_budget <= 0:
+        return None, empty_usage, {
+            "status": "skipped_output_budget_exhausted", "output_chars": 0,
+            "model": "not_called", "usage": empty_usage,
+            "recovery": "shared_premium_output_budget",
+        }
+
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    repair_system = (
+        "You are April's semantic graph-scene completion renderer. Interpretation has already "
+        "requested a graph, so do not reconsider whether a graph is appropriate. Do not write "
+        "a second prose answer. Return one JSON object only, using this envelope: "
+        "{\"graph\": {\"title\": string, \"description\": string, \"representation\": string, "
+        "\"dimensions\": number, \"chart_type\": string, \"axes\": {}, \"series\": [], "
+        "\"points\": [], \"coordinates\": [], \"x\": [], \"y\": [], \"z\": [], "
+        "\"objects_3d\": [], \"vertices\": [], \"edges\": [], \"faces\": [], "
+        "\"triangles\": [], \"indices\": [], \"mesh\": {}, \"geometry\": {}, \"scene\": {}, "
+        "\"surface_grid\": [], \"surface_function\": string, \"equation\": string, "
+        "\"expression\": string, \"labels\": [], \"annotations\": [], \"materials\": {}, "
+        "\"animation\": {}, \"anchor_text\": string}}. Omit unused optional fields. "
+        "Build the graph from the meaning of CURRENT_REQUEST together with EXISTING_ANSWER. "
+        "Use SELECTED_DIALOGUE_CONTEXT only when the semantic interpretation explicitly says "
+        "the current turn continues a prior topic. Never let an unrelated historical branch "
+        "replace a clearly named current subject. "
+        "For an explicitly requested spatial/3D scene, return GraphBlock-ready structured data: "
+        "representation='scene3d' and dimensions=3, plus drawable geometry. Prefer vertices "
+        "with x/y/z and faces/triangles/edges for meshes, or objects_3d with shape/type, "
+        "position and dimensions for primitives. For sampled spatial data, use aligned x/y/z "
+        "arrays or XYZ points; for mathematical surfaces, provide a numeric surface_grid or "
+        "a meaningful surface equation/function. Do not return only a title, caption or "
+        "sentence claiming that a 3D scene exists. "
+        "When the user asks for a conceptual primitive but supplies no measurements, you may "
+        "use normalized illustrative geometry and explicitly label it conceptual; do not "
+        "present normalized coordinates as measured dimensions. Preserve all supplied values, "
+        "units, signs, labels, relationships and constraints exactly. Do not invent measured "
+        "data, experimental results, physical constants, or missing parameters. For a 2D graph, "
+        "use the corresponding x/y series, points, equations or inequalities instead. "
+        "The graph must faithfully visualize the subject of EXISTING_ANSWER and CURRENT_REQUEST, "
+        "not a generic sample. Cross-check the answer's described subject against the user's "
+        "current task. If the answer materially contradicts the explicit task or claims that "
+        "a graph exists when the described visual is different, set answer_alignment.status='corrected' "
+        "and provide corrected_answer in RETURN_LANGUAGE; otherwise set status='aligned'. "
+        "Do not rewrite a merely stylistic or shorter answer. Treat the "
+        "user's current request as authoritative when a real contradiction exists. Labels and "
+        "descriptions must be in RETURN_LANGUAGE: " + language + ". "
+        "anchor_text, when provided, must be copied verbatim from EXISTING_ANSWER and be a "
+        "unique sentence after which the graph belongs. Return no unrelated artifacts."
+    )
+    repair_payload = {
+        "RETURN_LANGUAGE": language,
+        "CURRENT_REQUEST": str(current_request or ""),
+        "EXISTING_ANSWER": answer_context,
+        "SELECTED_DIALOGUE_CONTEXT": context,
+        "GRAPH_POLICY": policy,
+        "REQUIRED_RENDERER": "GraphBlock",
+        "SCENE_CONTRACT": {
+            "renderer": "GraphBlock",
+            "preserve_original_geometry": True,
+            "3d_fields": [
+                "representation", "dimensions", "objects_3d", "vertices", "edges",
+                "faces", "triangles", "indices", "mesh", "geometry", "scene",
+                "surface_grid", "x", "y", "z", "points", "coordinates",
+            ],
+            "output_ceiling": PREMIUM_OUTPUT_TOKEN_LIMIT,
+        },
+    }
+    response = await asyncio.to_thread(
+        client.responses.create,
+        model=MODEL,
+        input=[
+            {"role": "system", "content": repair_system},
+            {"role": "user", "content": json.dumps(repair_payload, ensure_ascii=False, separators=(",", ":"))},
+        ],
+        max_output_tokens=remaining_output_budget,
+    )
+    raw = _text(getattr(response, "output_text", ""))
+    usage_obj = getattr(response, "usage", None)
+    usage = {
+        "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+        "cached_input_tokens": int(getattr(usage_obj, "cached_input_tokens", 0) or 0),
+        "cache_write_tokens": int(getattr(usage_obj, "cache_write_tokens", 0) or 0),
+        "reasoning_tokens": int(getattr(usage_obj, "reasoning_tokens", 0) or 0),
+    }
+    meta = {
+        "status": _text(getattr(response, "status", "unknown")).lower(),
+        "output_chars": len(raw), "model": MODEL, "usage": usage,
+    }
+    if not raw:
+        meta["failure"] = "empty_provider_output"
+        return None, usage, meta
+    try:
+        decoded = _json_load(raw)
+    except Exception:
+        meta["failure"] = "invalid_json"
+        return None, usage, meta
+
+    if isinstance(decoded, dict):
+        alignment = decoded.get("answer_alignment") if isinstance(decoded.get("answer_alignment"), dict) else {}
+        corrected_answer = _text(alignment.get("corrected_answer"))
+        if _text(alignment.get("status")).lower() == "corrected" and len(corrected_answer) >= 20:
+            meta["_corrected_answer"] = corrected_answer
+
+    candidate: Any = decoded.get("graph") if isinstance(decoded, dict) else None
+    if not isinstance(candidate, dict) and isinstance(decoded, dict):
+        raw_blocks = decoded.get("render_blocks")
+        if isinstance(raw_blocks, list):
+            candidate = next(
+                (
+                    item for item in raw_blocks
+                    if isinstance(item, dict)
+                    and _text(item.get("type") or item.get("artifact_type") or item.get("kind")).lower().replace("-", "_")
+                    in {"graph", "chart", "plot", "graph_data", "3d_graph", "3d_scene", "scene3d", "scene_3d", "graph3d", "graph_3d", "mesh3d", "mesh_3d", "surface3d", "surface_3d", "wireframe"}
+                ),
+                None,
+            )
+    if not isinstance(candidate, dict) and isinstance(decoded, dict) and any(
+        key in decoded for key in (
+            "vertices", "faces", "triangles", "indices", "objects_3d", "mesh",
+            "geometry", "scene", "surface_grid", "series", "points", "coordinates",
+            "x", "y", "z", "equation", "expression", "surface_function",
+        )
+    ):
+        candidate = decoded
+    if not isinstance(candidate, dict):
+        meta["failure"] = "graph_payload_missing"
+        return None, usage, meta
+
+    candidate_block = dict(candidate)
+    nested_payload = candidate_block.get("payload")
+    graph_payload = dict(nested_payload) if isinstance(nested_payload, dict) else dict(candidate_block)
+    for field_name in (
+        "title", "description", "representation", "chart_type", "visualization",
+        "graph_type", "plot_type", "dimensions", "three_d", "axes", "axis_labels",
+        "x_axis", "y_axis", "z_axis", "x", "y", "z", "x_values", "y_values",
+        "z_values", "points", "coordinates", "data_points", "series", "datasets",
+        "traces", "curves", "objects_3d", "objects3d", "objects", "shapes",
+        "primitives", "meshes", "mesh", "geometry", "scene", "vertices", "edges",
+        "faces", "triangles", "indices", "normals", "shape", "figure_type",
+        "geometry_type", "object_type", "surface", "surface_grid",
+        "surface_function", "surface_equation", "surface_formula", "z_function",
+        "z_expression", "matrix", "grid_resolution", "labels", "annotations",
+        "materials", "animation", "time", "duration", "keyframes",
+    ):
+        if field_name in candidate_block and field_name not in graph_payload:
+            graph_payload[field_name] = candidate_block[field_name]
+    graph_payload.setdefault("title", "График" if language.lower().startswith(("ru", "uk")) else "Graph")
+    raw_representation = _text(graph_payload.get("representation") or graph_payload.get("graph_type") or graph_payload.get("chart_type")).lower().replace("-", "_")
+    if raw_representation in {"3d_scene", "scene_3d", "3d_graph", "graph3d", "graph_3d", "mesh3d", "mesh_3d", "wireframe"}:
+        graph_payload["representation"] = "scene3d"
+        graph_payload.setdefault("dimensions", 3)
+    elif graph_payload.get("dimensions") == 3 or graph_payload.get("three_d") is True:
+        graph_payload.setdefault("representation", "scene3d")
+
+    block = {
+        "type": "graph",
+        "artifact_type": "graph",
+        "renderer": "GraphBlock",
+        "viewer": "GraphBlock",
+        "title": _text(candidate_block.get("title") or graph_payload.get("title")),
+        "representation": _text(graph_payload.get("representation")),
+        "payload": graph_payload,
+        "explanation": _text(candidate_block.get("explanation") or graph_payload.get("description")),
+        "source": "semantic_graph_repair",
+        "integrity_repaired": True,
+    }
+    anchor = _text(candidate_block.get("anchor_text") or graph_payload.get("anchor_text"))
+    if not anchor or len(anchor) > 260 or str(answer or "").count(anchor) != 1:
+        anchor = _diagram_anchor_sentence(answer)
+    if anchor:
+        block["anchor_text"] = anchor
+
+    normalized = normalize_render_blocks([block], answer)
+    repaired = next(
+        (
+            item for item in normalized
+            if isinstance(item, dict)
+            and _text(item.get("type") or item.get("artifact_type")).lower() == "graph"
+            and _provider_render_block_is_concrete(item)
+        ),
+        None,
+    )
+    if not repaired:
+        meta["failure"] = "graph_payload_not_drawable_after_normalization"
+        return None, usage, meta
+    repaired.setdefault("source", "semantic_graph_repair")
+    repaired.setdefault("integrity_repaired", True)
+    repaired_payload = repaired.get("payload") if isinstance(repaired.get("payload"), dict) else {}
+    meta.update({
+        "status": "concrete_graph_payload_repaired",
+        "renderer": _text(repaired.get("renderer")),
+        "representation": _text(repaired_payload.get("representation")),
+        "dimensions": repaired_payload.get("dimensions"),
+        "vertex_count": len(repaired_payload.get("vertices") or []) if isinstance(repaired_payload.get("vertices"), list) else 0,
+        "object_count": len(repaired_payload.get("objects_3d") or []) if isinstance(repaired_payload.get("objects_3d"), list) else 0,
+        "series_count": len(repaired_payload.get("series") or []) if isinstance(repaired_payload.get("series"), list) else 0,
+        "anchor_found": bool(anchor),
+    })
+    return repaired, usage, meta
+
+
 async def generate_text(
     request: MachineRequest | dict[str, Any],
 ) -> dict[str, Any]:
@@ -5932,6 +6283,105 @@ async def generate_text(
                             response_summary["usage"] = usage_data
                             response_summary["cost"] = _calculate_cost(usage_data)
                         out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
+                    # GraphBlock uses the same SceneContract path as every other artifact.
+                    # If Interpretation requested a graph but the primary answer omitted
+                    # drawable geometry, ask the same provider to complete the structure
+                    # using only the remaining shared Premium output-token budget.
+                    graph_output_aliases = {
+                        "graph", "chart", "plot", "graph_data", "graph3d", "graph_3d",
+                        "3d_graph", "3d_scene", "scene3d", "scene_3d", "surface3d",
+                        "surface_3d", "mesh3d", "mesh_3d", "scatter3d", "scatter_3d",
+                        "wireframe",
+                    }
+                    graph_requested = any(
+                        _text(item).lower().replace("-", "_").replace(" ", "_") in graph_output_aliases
+                        for item in normalized_requested_outputs
+                    ) or bool(request_structured_intent.get("wants_graph"))
+                    graph_exists = any(
+                        isinstance(item, dict)
+                        and _text(item.get("type") or item.get("artifact_type")).lower() == "graph"
+                        and _provider_render_block_is_concrete(item)
+                        for item in out_blocks
+                    )
+                    graph_repair_usage: dict[str, int] = {}
+                    graph_repair_meta: dict[str, Any] = {"status": "not_needed" if graph_exists or not graph_requested else "pending"}
+                    if graph_requested and not graph_exists:
+                        graph_repair_started = time.perf_counter()
+                        remaining_graph_output = max(
+                            0,
+                            PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
+                        )
+                        graph_policy = (
+                            request_structured_intent.get("graph_policy")
+                            if isinstance(request_structured_intent.get("graph_policy"), dict)
+                            else request_interpretation.get("graph_policy")
+                            if isinstance(request_interpretation.get("graph_policy"), dict)
+                            else {}
+                        )
+                        _log_json("SEMANTIC_GRAPH_REPAIR", {
+                            "status": "started",
+                            "request_fingerprint": key[:16],
+                            "reason": "requested_graph_missing_drawable_payload",
+                            "output_token_cap": remaining_graph_output,
+                            "shared_output_budget_remaining": remaining_graph_output,
+                        })
+                        try:
+                            repaired_graph, graph_repair_usage, graph_repair_meta = await _repair_requested_graph(
+                                client, request,
+                                current_request=normalized_current_request,
+                                answer=_text(machine.get("answer") or answer),
+                                display_language=display_language,
+                                graph_policy=graph_policy,
+                                max_output_tokens=remaining_graph_output,
+                            )
+                            corrected_answer = _text(graph_repair_meta.pop("_corrected_answer", ""))
+                            if corrected_answer:
+                                # Apply only an explicit semantic correction returned by
+                                # the provider's alignment check; otherwise keep prose intact.
+                                machine["answer"] = corrected_answer
+                                machine["content"] = corrected_answer
+                                answer = corrected_answer
+                                for text_block in out_blocks:
+                                    if isinstance(text_block, dict) and _text(text_block.get("type")).lower() in {"text", "markdown"}:
+                                        text_block["content"] = corrected_answer
+                                        text_block["text"] = corrected_answer
+                                        break
+                            if repaired_graph:
+                                out_blocks = list(out_blocks)
+                                out_blocks.append(repaired_graph)
+                                machine["render_blocks"] = out_blocks
+                            _log_json("SEMANTIC_GRAPH_REPAIR_RESULT", {
+                                "request_fingerprint": key[:16],
+                                "elapsed_ms": round((time.perf_counter() - graph_repair_started) * 1000, 1),
+                                "answer_corrected": bool(corrected_answer),
+                                **graph_repair_meta,
+                                "cost": _calculate_cost(graph_repair_usage) if graph_repair_usage else {"estimated_cost_usd": None, "pricing_configured": False},
+                            })
+                        except Exception as graph_repair_error:
+                            _log_json("SEMANTIC_GRAPH_REPAIR_RESULT", {
+                                "request_fingerprint": key[:16],
+                                "elapsed_ms": round((time.perf_counter() - graph_repair_started) * 1000, 1),
+                                "status": "failed_without_replacing_answer",
+                                "error_type": type(graph_repair_error).__name__,
+                            })
+                        if graph_repair_usage:
+                            usage_data = {
+                                field: int(usage_data.get(field, 0) or 0) + int(graph_repair_usage.get(field, 0) or 0)
+                                for field in set(usage_data) | set(graph_repair_usage)
+                            }
+                            response_summary["usage"] = usage_data
+                            response_summary["cost"] = _calculate_cost(usage_data)
+                        out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
+                    # Never send an empty GraphBlock shell to the Web contract.
+                    out_blocks = [
+                        item for item in out_blocks
+                        if not (
+                            isinstance(item, dict)
+                            and _text(item.get("type") or item.get("artifact_type")).lower() == "graph"
+                            and not _provider_render_block_is_concrete(item)
+                        )
+                    ]
+                    machine["render_blocks"] = out_blocks
                     out_artifacts = machine.get("artifacts") if isinstance(machine.get("artifacts"), list) else []
                     # Diagnostics must describe the normalized public answer. Models
                     # sometimes use the valid `text` field instead of `answer`; the
