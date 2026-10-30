@@ -306,16 +306,29 @@ def _detect_contextual_image_edit(text: str) -> bool:
     action = re.search(
         r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
         r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|поправ\w*|перерис\w*|"
+        r"измени\w*|поменя\w*|отредактир\w*|редактир\w*|обработ\w*|ретуш\w*|улучш\w*|"
+        r"сдела\w*|убер\w*|замен\w*|встав\w*|сотри\w*|скрой\w*|"
         r"хочу\w*|хотел\w*|хотела|мне\s+нужно|мне\s+надо|пусть|чтобы|"
         r"add|draw|mark|point|annotate|highlight|redo|revise|change|edit|modify|i\s+want|i(?:'d|\s+would)\s+like)", low, re.IGNORECASE)
     target = re.search(
         r"(?:стрелк\w*|указател\w*|маркер\w*|кнопк\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|"
-        r"галоч\w*|цвет\w*|красн\w*|зелен\w*|фон\w*|надпис\w*|текст\w*|arrow|pointer|marker|button|click|red|green|highlight|circle|outline)",
+        r"галочк\w*|цвет\w*|красн\w*|зелен\w*|фон\w*|надпис\w*|текст\w*|"
+        r"шляп\w*|шапк\w*|очк\w*|одежд\w*|предмет\w*|объект\w*|детал\w*|элемент\w*|"
+        r"фот\w*|картинк\w*|изображени\w*|син\w*|темн\w*|светл\w*|"
+        r"шарф\w*|галстук\w*|сумк\w*|обув\w*|прическ\w*|волос\w*|бород\w*|крыл\w*|"
+        r"кот\w*|собак\w*|arrow|pointer|marker|button|click|red|green|highlight|circle|outline|"
+        r"hat|cap|glasses|clothes|scarf|tie|bag|shoes|hair|beard|wings|object|person)",
         low, re.IGNORECASE)
-    return bool(action and target)
+    visual_reference = re.search(
+        r"(?:на\s+(?:ней|нем|него|нее|неё|этом|этой|эту|фото|фотографии|картинке|изображении)|"
+        r"в\s+(?:ней|нем|него|нее|неё|этой|этом)|к\s+(?:ней|нему|этой\s+фотографии|этой\s+картинке|картинке|фото|изображению)|"
+        r"(?:ее|её|его|нее|неё|этот\s+объект|эта\s+картинка)|"
+        r"on\s+(?:it|there|the\s+image|the\s+photo)|in\s+(?:it|there)|to\s+(?:it|the\s+image|the\s+photo))",
+        low, re.IGNORECASE)
+    return bool(action and (target or visual_reference))
 
 
-def _detect_image_modification(text: str) -> bool:
+def _detect_image_modification(text: str, *, has_existing_image_reference: bool = False) -> bool:
     """Detect a request to alter an existing image or diagram.
 
     In Free, detected edits are restricted instead of being silently converted
@@ -357,7 +370,7 @@ def _detect_image_modification(text: str) -> bool:
         low, re.IGNORECASE,
     ))
     composite_detector = globals().get("_detect_image_compositing_request")
-    if explicit_existing_source and callable(composite_detector) and composite_detector(low):
+    if has_existing_image_reference and explicit_existing_source and callable(composite_detector) and composite_detector(low):
         return True
 
     if any(_contains_marker(low, marker.replace("ё", "е")) for marker in _IMAGE_MODIFICATION_MARKERS):
@@ -2385,6 +2398,8 @@ def build_interpretation(
     memory: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
     visual_context: list[dict[str, Any]] | None = None,
+    source_image_reference_available: bool = False,
+    restrict_image_edits: bool = True,
     identity: dict[str, str] | None = None,
     semantic_interpretation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2426,6 +2441,23 @@ def build_interpretation(
         for item in [*attachments, *restored_assets, *visual_context]
         if isinstance(item, dict)
     )
+    # A referenced image may be a user upload OR a picture April generated in
+    # the active dialogue. Keep user-source identity separate for re-analysis,
+    # but allow contextual edit intent to resolve against either image origin.
+    def _is_existing_image(item: dict[str, Any]) -> bool:
+        kind = _text(item.get("kind") or item.get("mime_type") or item.get("content_type")).lower()
+        item_type = _text(item.get("type")).lower()
+        return bool(
+            kind == "image" or kind.startswith("image/")
+            or item_type in {"input_image", "image", "generated_image"}
+            or item.get("image_url") or item.get("src") or item.get("image_data_uri")
+        )
+
+    has_existing_image_reference = bool(source_image_reference_available) or any(
+        _is_existing_image(item)
+        for item in [*attachments, *restored_assets, *visual_context]
+        if isinstance(item, dict)
+    )
     has_voice = "voice" in kinds
     has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
     # Distinguish an asset's presence in dialogue memory from actual source bytes
@@ -2450,7 +2482,9 @@ def build_interpretation(
     # described in the current dialogue remains a normal Free generation; a
     # request to alter an existing photo/diagram is Premium-only and must not
     # be rerouted into a replacement generation.
-    image_modification_requested = _detect_image_modification(request_text)
+    image_modification_requested = _detect_image_modification(
+        request_text, has_existing_image_reference=has_existing_image_reference
+    )
     compositing_requested = _detect_image_compositing_request(request_text)
     # A geometry/technical drawing stays a structured diagram even if the
     # wording says "on the picture" or the dialogue contains an earlier image.
@@ -2463,11 +2497,14 @@ def build_interpretation(
         r"размер\w*\s+(?:кажд\w*\s+)?сторон\w*|размер\w*|измерен\w*)",
         request_text.lower().replace("ё", "е"),
     ))
-    contextual_source_edit = bool(has_user_source_image and _detect_contextual_image_edit(request_text))
+    contextual_source_edit = bool(has_existing_image_reference and _detect_contextual_image_edit(request_text))
     image_edit_restricted = bool(
-        image_modification_requested
-        or contextual_source_edit
-        or (has_user_source_image and compositing_requested and not structured_diagram_noun)
+        restrict_image_edits
+        and (
+            image_modification_requested
+            or contextual_source_edit
+            or (has_user_source_image and compositing_requested and not structured_diagram_noun)
+        )
     )
     # Kept as an explicit false compatibility field for older prompt and
     # executor code. Free never converts an edit request into a new image.
