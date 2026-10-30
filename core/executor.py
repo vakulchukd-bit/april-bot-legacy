@@ -119,6 +119,58 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _localized_free_image_edit_notice(language: Any) -> str:
+    key = _text(language).lower().replace("_", "-").split("-", 1)[0]
+    messages = {
+        "ru": "Редактирование уже существующих изображений доступно в Premium. В Free можно создавать новые изображения и анализировать вложения в рамках общего лимита.",
+        "ua": "Редагування вже наявних зображень доступне в Premium. У Free можна створювати нові зображення й аналізувати вкладення в межах спільного ліміту.",
+        "en": "Editing existing images is available in Premium. Free can still create new images and analyze attachments within the shared media limit.",
+        "es": "La edición de imágenes existentes está disponible en Premium. En Free puedes crear imágenes nuevas y analizar archivos dentro del límite compartido.",
+        "de": "Das Bearbeiten vorhandener Bilder ist in Premium verfügbar. Mit Free kannst du weiterhin neue Bilder erstellen und Anhänge innerhalb des gemeinsamen Limits analysieren.",
+        "fr": "La modification des images existantes est disponible avec Premium. En Free, vous pouvez toujours créer de nouvelles images et analyser des pièces jointes dans la limite commune.",
+        "it": "La modifica delle immagini esistenti è disponibile con Premium. Con Free puoi comunque creare nuove immagini e analizzare allegati entro il limite condiviso.",
+        "pl": "Edycja istniejących obrazów jest dostępna w Premium. W Free nadal możesz tworzyć nowe obrazy i analizować załączniki w ramach wspólnego limitu.",
+        "pt": "A edição de imagens existentes está disponível no Premium. No Free, ainda podes criar novas imagens e analisar anexos dentro do limite partilhado.",
+        "nl": "Het bewerken van bestaande afbeeldingen is beschikbaar in Premium. Met Free kun je nog nieuwe afbeeldingen maken en bijlagen analyseren binnen de gedeelde limiet.",
+    }
+    return messages.get(key, messages["en"])
+
+
+def _localized_free_media_limit_notice(language: Any) -> str:
+    key = _text(language).lower().replace("_", "-").split("-", 1)[0]
+    messages = {
+        "ru": "Бесплатные операции с изображениями и вложениями закончились. Открой окно лимита, чтобы поделиться ссылкой или дождаться восстановления доступа. Текстовое общение остаётся доступным.",
+        "ua": "Безкоштовні операції із зображеннями та вкладеннями вичерпано. Відкрий вікно ліміту, щоб поділитися посиланням або дочекатися відновлення доступу. Текстове спілкування залишається доступним.",
+        "en": "Your free image and attachment operations are used up. Open the limit window to share an invite link or wait for access to reset. Text chat remains available.",
+        "es": "Has agotado las operaciones gratuitas de imágenes y archivos. Abre la ventana del límite para compartir una invitación o esperar a que se restablezca el acceso. El chat de texto sigue disponible.",
+        "de": "Deine kostenlosen Bild- und Dateiaktionen sind aufgebraucht. Öffne das Limitfenster, um einen Einladungslink zu teilen oder auf die Freigabe zu warten. Der Textchat bleibt verfügbar.",
+        "fr": "Vos opérations gratuites sur les images et pièces jointes sont épuisées. Ouvrez la fenêtre de limite pour partager une invitation ou attendre le rétablissement de l’accès. Le chat texte reste disponible.",
+        "it": "Hai esaurito le operazioni gratuite per immagini e allegati. Apri la finestra del limite per condividere un invito o attendere il ripristino dell’accesso. La chat testuale resta disponibile.",
+        "pl": "Wykorzystano bezpłatne operacje obrazów i załączników. Otwórz okno limitu, aby udostępnić zaproszenie lub poczekać na przywrócenie dostępu. Czat tekstowy pozostaje dostępny.",
+        "pt": "Esgotaste as operações gratuitas de imagens e anexos. Abre a janela do limite para partilhar um convite ou aguardar a reposição do acesso. O chat de texto continua disponível.",
+        "nl": "Je gratis bewerkingen voor afbeeldingen en bijlagen zijn op. Open het limietvenster om een uitnodiging te delen of te wachten tot de toegang wordt hersteld. Tekstchat blijft beschikbaar.",
+    }
+    return messages.get(key, messages["en"])
+
+
+def _local_text_provider_packet(answer: str, identity: dict[str, Any], *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    registration = get_web_renderer_registration("text")
+    return {"machine_response": {
+        "answer": answer,
+        "content": answer,
+        "summary": answer[:180],
+        "render_blocks": [{
+            "type": "text",
+            "renderer": registration.get("renderer", "MessageTextBlock"),
+            "viewer": registration.get("viewer", "MessageTextBlock"),
+            "content": answer,
+        }],
+        "artifacts": [],
+        "metadata": {"identity": identity, "provider_calls": 0, **(metadata or {})},
+        "internal_answer_en": answer,
+    }}
+
+
 
 
 def _has_concrete_image_source(block: Any) -> bool:
@@ -813,7 +865,10 @@ def _build_scene(
         },
         result_event={
             "status": "complete",
-            "provider_calls": 0 if bool((response.metadata or {}).get("local_clarification")) else 1,
+            "provider_calls": 0 if bool(
+                (response.metadata or {}).get("local_clarification")
+                or (response.metadata or {}).get("local_policy_response")
+            ) else 1,
             "provider_retries": 0,
             "provider_output_limit": "model_native_no_application_cap",
             "canonical_route": CANONICAL_ROUTE,
@@ -1879,6 +1934,8 @@ async def execute(
     )
 
     interpretation_started = time.perf_counter()
+    active_plan_for_request = str(kwargs.get("active_plan") or "free").strip().lower()
+    enforce_free_image_edit_policy = active_plan_for_request == "free"
     interpretation = build_interpretation(
         current_request=current_text,
         original_request=original,
@@ -1886,6 +1943,8 @@ async def execute(
         memory=dialogue_context,
         attachments=attachments or [],
         visual_context=visual_context or [],
+        source_image_reference_available=bool(kwargs.get("source_image_reference_available")),
+        restrict_image_edits=enforce_free_image_edit_policy,
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
@@ -1933,6 +1992,14 @@ async def execute(
         search_direction=semantic_interpretation.get("direction"),
         history_request=bool(semantic_interpretation.get("history_request")),
     )
+
+    intent_policy_pre_provider = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    image_edit_restricted_pre_provider = bool(
+        enforce_free_image_edit_policy and intent_policy_pre_provider.get("image_edit_restricted")
+    )
+    free_media_edit_restricted = bool(image_edit_restricted_pre_provider)
+    free_media_limit_reached = False
+    image_generation_reserved = False
 
     selected_rooms = _select_rooms(interpretation)
     render_plan = _renderer_plan(interpretation, selected_rooms)
@@ -2239,8 +2306,56 @@ async def execute(
         file_inputs_count=len(file_inputs or []), file_contents_count=len(file_contents or []),
         file_content_chars=sum(len(_text(x.get("content"))) for x in (file_contents or []) if isinstance(x, dict)))
 
+    # Reserve the Free image-generation unit only after the request/scene has
+    # been assembled, but strictly BEFORE any Provider call. This keeps failures
+    # during local request construction from stranding a quota reservation.
+    if bool(intent_policy_pre_provider.get("wants_image")) and not image_edit_restricted_pre_provider:
+        active_plan_for_quota = str(get_user_plan(uid) or "free").strip().lower()
+        if active_plan_for_quota == "free":
+            quota_reservation = reserve_free_media_units(uid, identity["message_id"], 1, "generation")
+            if not quota_reservation.get("allowed"):
+                free_media_limit_reached = True
+                _apr_timing_log(
+                    "image_generation_blocked_before_provider", None,
+                    reason=str(quota_reservation.get("error_code") or "FREE_MEDIA_LIMIT_REACHED"),
+                    user_key=_apr_diag_ref(uid),
+                    message_key=_apr_diag_ref(identity.get("message_id")),
+                )
+            else:
+                image_generation_reserved = bool(
+                    quota_reservation.get("tracked") and not quota_reservation.get("already_reserved")
+                )
+
     provider_started = time.perf_counter()
-    if bool(dialogue_context.get("clarification_needed")):
+    if image_edit_restricted_pre_provider:
+        local_notice = _localized_free_image_edit_notice(display_language)
+        provider_packet = _local_text_provider_packet(
+            local_notice,
+            identity,
+            metadata={"free_media_edit_restricted": True, "local_policy_response": True},
+        )
+        provider_ms = 0.0
+        _apr_timing_log(
+            "image_edit_restriction_response_local", provider_started,
+            provider_calls=0,
+            user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+        )
+    elif free_media_limit_reached:
+        local_notice = _localized_free_media_limit_notice(display_language)
+        provider_packet = _local_text_provider_packet(
+            local_notice,
+            identity,
+            metadata={"free_media_limit_reached": True, "local_policy_response": True},
+        )
+        provider_ms = 0.0
+        _apr_timing_log(
+            "image_generation_limit_response_local", provider_started,
+            provider_calls=0,
+            user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+        )
+    elif bool(dialogue_context.get("clarification_needed")):
         # This is a deterministic UI-facing clarification, not a provider fallback.
         # The original request and options are persisted in dialogue_memory_record,
         # so the user's next reply resolves this exact question without losing intent.
@@ -2280,7 +2395,12 @@ async def execute(
             options=len(pending.get("options") or []), active_topic=topic_name,
             original_request_chars=len(_text(pending.get("original_request"))))
     else:
-        provider_packet = await generate_text(request)
+        try:
+            provider_packet = await generate_text(request)
+        except Exception:
+            if image_generation_reserved:
+                release_free_media_reservation(uid, identity["message_id"], "generation")
+            raise
         provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
     provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
@@ -2333,38 +2453,12 @@ async def execute(
     intent_policy = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     image_edit_restricted = bool(intent_policy.get("image_edit_restricted"))
     if image_edit_restricted:
-        # Enforce the Free edit limit after the provider call as well. The model
-        # must not turn a referenced prior diagram/photo into an upload request
-        # or a replacement generation. This leaves ordinary new image and
-        # diagram generation untouched.
-        language = _text((interpretation.get("input") or {}).get("display_language")).lower()
-        prior_attempts = int(intent_policy.get("image_edit_prior_attempts") or 0)
-        display_name = _text((interpretation.get("identity") or {}).get("display_name")).strip()
-        repeated = prior_attempts > 0
-        if language.startswith(("uk", "ua")):
-            if repeated:
-                prefix = f"{display_name}, " if display_name else ""
-                notice = f"{prefix}у Free я не можу змінити вже створене фото чи діаграму. Це доступно в Premium."
-            else:
-                notice = "У Free я можу створювати нові зображення та схеми, але не змінювати вже створені. Редагування доступне в Premium."
-        elif language.startswith("fr"):
-            if repeated:
-                prefix = f"{display_name}, " if display_name else ""
-                notice = f"{prefix}en Free, je ne peux pas modifier une image ou un diagramme déjà créé. Cette fonction est disponible avec Premium."
-            else:
-                notice = "En Free, je peux créer de nouvelles images et de nouveaux schémas, mais pas modifier une image existante. La modification est disponible avec Premium."
-        elif language.startswith("en"):
-            if repeated:
-                prefix = f"{display_name}, " if display_name else ""
-                notice = f"{prefix}in Free, I can’t modify an existing photo or diagram. Editing is available in Premium."
-            else:
-                notice = "In Free, I can create new images and diagrams, but I can’t modify an existing photo or diagram. Editing is available in Premium."
-        else:
-            if repeated:
-                prefix = f"{display_name}, " if display_name else ""
-                notice = f"{prefix}в Free я не могу изменить уже созданную картинку или диаграмму. Эта возможность доступна в Premium."
-            else:
-                notice = "В Free я могу создавать новые картинки и схемы, но не могу изменять уже созданные фото или диаграммы. Редактирование доступно в Premium."
+        # The local policy response was selected before Provider. Keep this
+        # second guard so a malformed future packet cannot leak a replacement
+        # image or image artifact through the SceneContract.
+        notice = _localized_free_image_edit_notice(
+            _text((interpretation.get("input") or {}).get("display_language"))
+        )
         answer = notice
         raw["answer"] = notice
         raw["content"] = notice
@@ -2377,8 +2471,6 @@ async def execute(
             "content": notice,
         }]
         raw_artifacts = []
-        # Defense in depth: never invoke the image generator for a restricted
-        # edit, even if a provider accidentally re-adds an image output.
         intent_policy["wants_image"] = False
         intent_policy["explicit_generation_request"] = False
 
@@ -2419,28 +2511,9 @@ async def execute(
         packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
 
     image_result = None
-    free_media_limit_reached = False
-    image_generation_reserved = False
     if (interpretation.get("intent") or {}).get("wants_image"):
-        # The shared Free quota counts one successful image-generation operation
-        # as one unit, regardless of the number of thumbnails in its gallery.
-        # Lite and Premium are explicitly excluded even though Lite uses this
-        # shared Free executor in the existing routing architecture.
-        active_plan_for_quota = str(get_user_plan(uid) or "free").strip().lower()
-        if active_plan_for_quota == "free":
-            quota_reservation = reserve_free_media_units(
-                uid, identity["message_id"], 1, "generation"
-            )
-            if not quota_reservation.get("allowed"):
-                free_media_limit_reached = True
-                # Keep the model's ordinary text answer. The Web opens the
-                # localized quota modal from free_media_limit_reached; the
-                # media generator is skipped, but text chat is not replaced or
-                # blocked by the Free media allowance.
-            else:
-                image_generation_reserved = bool(
-                    quota_reservation.get("tracked") and not quota_reservation.get("already_reserved")
-                )
+        # Quota was reserved before Provider above. This branch only performs the
+        # actual image generation and commits/refunds the same reservation.
         if not free_media_limit_reached:
             image_started = time.perf_counter()
             try:
@@ -2465,7 +2538,7 @@ async def execute(
         else:
             _apr_timing_log(
                 "image_generation_skipped", None,
-                reason="free_media_limit_reached",
+                reason="free_media_limit_reached_before_provider",
                 user_key=_apr_diag_ref(uid),
                 message_key=_apr_diag_ref(identity.get("message_id")),
             )
@@ -2520,6 +2593,7 @@ async def execute(
             "render_plan": render_plan,
             "image_generated": bool(image_result),
             "local_clarification": bool(provider_metadata.get("local_clarification")),
+            "local_policy_response": bool(provider_metadata.get("local_policy_response")),
             "dialogue_memory_record": (
                 raw.get("metadata", {}).get("dialogue_memory_record", {})
                 if isinstance(raw.get("metadata"), dict) else {}
@@ -2898,6 +2972,7 @@ async def execute(
             "dialogue_assets_restored": restored_assets,
             "generated_asset_saved": generated_asset_saved,
             "free_media_limit_reached": bool(free_media_limit_reached),
+            "free_media_edit_restricted": bool(free_media_edit_restricted),
             "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
             "interpretation": interpretation,
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
