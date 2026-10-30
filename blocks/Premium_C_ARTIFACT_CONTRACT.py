@@ -581,7 +581,7 @@ WEB_RENDERER_REGISTRY = {
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
-    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
+    "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "column_headers", "header", "labels", "data", "body", "values", "records", "items", "row_labels", "caption", "context", "column_roles", "column_types", "cell_roles", "cell_types", "units", "footnotes", "notes", "annotations", "dimensions", "measurements", "views", "sheets", "layout", "signals", "signal", "wrap", "width_policy", "download", "title", "description", "source", "schema", "format"]},
     "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "drawing_elements", "drawingElements", "visual_elements", "visualElements", "primitives", "nodes", "edges", "components", "vertices", "connections", "relations", "segments", "elements", "shapes", "points", "coordinates", "geometry", "parameters", "dimensions", "annotations", "labels", "legend", "objects", "objects_3d", "objects3d", "atoms", "bonds", "molecule", "molecular_structure", "reaction", "reactants", "products", "axes", "equations", "formulas", "vectors", "forces", "measurements", "constraints", "coordinate_system", "camera", "viewport", "style", "title", "description", "caption", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
     "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
@@ -3594,6 +3594,20 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
         # Copy them into the canonical payload before nested payloads are merged.
         merged.update({key: deepcopy(value) for key, value in block.items()
                        if key in diagram_direct_keys and value not in (None, "", [], {})})
+    elif block_type == "table":
+        # A typed table may carry its columns and rows directly on the scene block.
+        # Promote those values before nested envelopes are merged so TableBlock
+        # receives the complete schema/cells instead of an empty visual shell.
+        table_direct_keys = {
+            "title", "description", "summary", "caption", "context", "headers", "columns",
+            "column_headers", "header", "labels", "rows", "data", "body", "values", "records",
+            "items", "row_labels", "column_roles", "column_types", "cell_roles", "cell_types",
+            "units", "footnotes", "notes", "metadata", "layout", "signals", "signal", "wrap",
+            "width_policy", "download", "annotations", "dimensions", "measurements", "views",
+            "sheets", "source", "source_title", "schema", "format", "renderer", "representation",
+        }
+        merged.update({key: deepcopy(value) for key, value in block.items()
+                       if key in table_direct_keys and value not in (None, "", [], {})})
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
