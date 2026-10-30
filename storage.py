@@ -259,6 +259,7 @@ def init_db() -> None:
                         subscription_until DOUBLE PRECISION NOT NULL DEFAULT 0,
                         premium_id TEXT,
                         warned BOOLEAN NOT NULL DEFAULT FALSE,
+                        language TEXT,
                         messages_today INTEGER NOT NULL DEFAULT 0,
                         images_today INTEGER NOT NULL DEFAULT 0,
                         last_reset TEXT NOT NULL DEFAULT CURRENT_DATE::TEXT,
@@ -278,6 +279,9 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until DOUBLE PRECISION DEFAULT 0")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_id TEXT")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warned BOOLEAN DEFAULT FALSE")
+                # NULL means the account has not migrated a language preference yet.
+                # April Web copies the user's existing per-account local preference on first load.
+                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_today INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
                 cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset TEXT DEFAULT CURRENT_DATE::TEXT")
@@ -1592,6 +1596,72 @@ def update_last_login(user_id):
         conn.close()
 
 
+_SUPPORTED_USER_LANGUAGES = {"en", "ru", "ua", "es", "de", "fr", "it", "pl", "pt", "nl"}
+
+
+def normalize_user_language(language: Any) -> str | None:
+    raw = str(language or "").strip().lower().replace("_", "-").split("-", 1)[0]
+    if raw == "uk":
+        raw = "ua"
+    return raw if raw in _SUPPORTED_USER_LANGUAGES else None
+
+
+def get_user_language(user_id: Any) -> str | None:
+    """Return a saved UI/policy language for one canonical authenticated account."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, email, provider, language FROM users WHERE user_id = %s LIMIT 1",
+                (uid,),
+            )
+            row = cur.fetchone() or {}
+            if not _is_authenticated_row(row):
+                return None
+            return normalize_user_language(row.get("language"))
+    except Exception as exc:
+        print(f"[APRIL_USER_LANGUAGE] read_failed type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+def set_user_language(user_id: Any, language: Any) -> str | None:
+    """Persist the language preference only for the authenticated canonical user row."""
+    uid = str(user_id or "").strip()
+    normalized = normalize_user_language(language)
+    if not uid or not normalized:
+        return None
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
+                    (uid,),
+                )
+                row = cur.fetchone()
+                if not _is_authenticated_row(row):
+                    return None
+                cur.execute(
+                    "UPDATE users SET language = %s WHERE user_id = %s",
+                    (normalized, uid),
+                )
+                return normalized if cur.rowcount == 1 else None
+    except Exception as exc:
+        print(f"[APRIL_USER_LANGUAGE] write_failed type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
 def backfill_april_ids():
     conn = get_conn()
     if not conn:
@@ -2029,7 +2099,7 @@ def get_user_subscription_status(user_id):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
+                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id, language
                     FROM users
                     WHERE user_id = %s OR april_id = %s
                     ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
@@ -2063,6 +2133,7 @@ def get_user_subscription_status(user_id):
                     "user_id": uid,
                     "april_id": str(user.get("april_id") or uid),
                     "premium_id": str(user.get("premium_id") or "") or None,
+                    "language": normalize_user_language(user.get("language")) or "en",
                     "plan": plan,
                     "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
