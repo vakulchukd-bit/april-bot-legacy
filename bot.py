@@ -62,6 +62,9 @@ from storage import (
     remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
     get_community_direct_file, delete_community_direct_message,
     COMMUNITY_MAX_ATTACHMENT_BYTES, COMMUNITY_MAX_MESSAGE_CHARS,
+    get_free_media_quota_status, reserve_free_media_units,
+    commit_free_media_reservation, release_free_media_reservation,
+    claim_april_referral, confirm_april_referral_on_first_use,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -745,6 +748,9 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "message_id": result.get("message_id"),
         "interpretation_id": result.get("interpretation_id"),
         "flow_id": result.get("flow_id"),
+        "free_media": result.get("free_media"),
+        "free_media_limit_reached": bool(result.get("free_media_limit_reached")),
+        "free_media_attachments_skipped": bool(result.get("free_media_attachments_skipped")),
         "web_delivery": {
             "transport": "SceneContract",
             "renderer": "RenderMessage",
@@ -795,6 +801,11 @@ def _handle_payload(
     )
 
     attachments = attachments or []
+    free_media_attachment_reservation = False
+    free_media_units = 0
+    free_media_limit_reached = False
+    free_media_attachments_skipped = False
+    free_media_limit_reached = False
     input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
@@ -842,6 +853,60 @@ def _handle_payload(
             if attachment_meta:
                 return _error("file is not readable by the Provider", 400)
             return _error("text, voice, image or file required", 400)
+
+        # One analysed uploaded image/document equals one shared Free media unit.
+        # Voice transcription itself is free; attached media in the same voice
+        # message is counted normally. Plan and identity come only from PostgreSQL.
+        if active_plan == "free":
+            free_media_units = sum(
+                1 for item in (attachments or [])
+                if _text(getattr(item, "kind", "")).lower() in {"image", "file", "text_file"}
+            )
+            if free_media_units:
+                quota = reserve_free_media_units(uid, message_id, free_media_units, "attachment")
+                if not quota.get("allowed"):
+                    quota_error = _text(quota.get("error_code") or "FREE_MEDIA_LIMIT_REACHED")
+                    if quota_error != "FREE_MEDIA_LIMIT_REACHED":
+                        return 503, {
+                            "success": False,
+                            "error_code": quota_error,
+                            "free_media": quota,
+                            "canonical_route": CANONICAL_CHAT_ROUTE,
+                        }
+                    # A media limit must not turn off text chat. When the same
+                    # message contains typed text or a voice transcript, process
+                    # that text-only request and omit media from provider context.
+                    # An attachment-only request still receives the quota modal.
+                    plain_text_fallback = "\n\n".join(
+                        part for part in (user_authored_text, _text(voice_transcript)) if part
+                    ).strip()
+                    if not plain_text_fallback:
+                        return 429, {
+                            "success": False,
+                            "error_code": "FREE_MEDIA_LIMIT_REACHED",
+                            "free_media": quota,
+                            "canonical_route": CANONICAL_CHAT_ROUTE,
+                        }
+                    dropped_media_count = free_media_units
+                    original = plain_text_fallback
+                    attachments = []
+                    visual_context = []
+                    attachment_meta = []
+                    file_inputs = []
+                    text_file_contents = []
+                    free_media_units = 0
+                    free_media_limit_reached = True
+                    free_media_attachments_skipped = True
+                    _apr_timing_log(
+                        "free_media_limit_text_fallback",
+                        user_key=_apr_diag_ref(uid),
+                        message_key=_apr_diag_ref(message_id),
+                        dropped_media_units=dropped_media_count,
+                        preserved_typed_text=bool(user_authored_text),
+                        preserved_voice_transcript=bool(_text(voice_transcript)),
+                    )
+                else:
+                    free_media_attachment_reservation = bool(quota.get("tracked") and not quota.get("already_reserved"))
 
         # An attachment-only message is a valid user request.  Give Interpretation
         # an explicit neutral analysis task without mixing in the attachment bytes.
@@ -974,6 +1039,11 @@ def _handle_payload(
         try:
             result = asyncio.run(selected_executor(uid, **execution_kwargs))
         except Exception as exc:
+            if free_media_attachment_reservation:
+                try:
+                    release_free_media_reservation(uid, message_id, "attachment")
+                except Exception:
+                    pass
             # A provider/image-edit exception must never leave the Web client with
             # an indefinitely pending/blank assistant bubble. Keep Free's legacy
             # failure behavior unchanged; Premium gets one localized text result
@@ -1037,6 +1107,34 @@ def _handle_payload(
                     error_type=type(persist_exc).__name__,
                 )
             result["persistence"] = {"saved": persisted, "reason": "executor_exception_fallback"}
+        if free_media_attachment_reservation:
+            media_analysis_succeeded = (
+                isinstance(result, dict)
+                and result.get("success") is not False
+                and not result.get("degraded")
+                and not result.get("error_code")
+            )
+            if media_analysis_succeeded:
+                commit_free_media_reservation(uid, message_id, "attachment")
+            else:
+                release_free_media_reservation(uid, message_id, "attachment")
+        if isinstance(result, dict) and active_plan == "free":
+            result["free_media"] = get_free_media_quota_status(uid)
+        if isinstance(result, dict) and free_media_limit_reached:
+            result["free_media_limit_reached"] = True
+        if isinstance(result, dict) and free_media_attachments_skipped:
+            result["free_media_attachments_skipped"] = True
+        # Referral rewards are only finalized after the invited account has made
+        # its first successful authenticated April request. A share or account
+        # registration alone never grants the inviter a bonus.
+        if isinstance(result, dict) and result.get("success") is not False and not result.get("degraded") and not result.get("error_code"):
+            referral_confirmation = confirm_april_referral_on_first_use(uid)
+            if referral_confirmation.get("rewarded"):
+                _apr_timing_log(
+                    "referral_reward_confirmed_on_first_use",
+                    user_key=_apr_diag_ref(uid),
+                    reward_units=int(referral_confirmation.get("reward_units") or 0),
+                )
         _apr_timing_log("executor_returned", executor_started, user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(message_id), result_type=type(result).__name__,
             answer_chars=len(_text(result.get("answer") or result.get("content"))) if isinstance(result, dict) else 0)
@@ -2356,6 +2454,42 @@ class AprilHandler(BaseHTTPRequestHandler):
             status_code = 503 if error in {"DATABASE_UNAVAILABLE", "ACCOUNT_DELETE_FAILED", "ACCOUNT_ASSETS_DELETE_FAILED"} else 404 if error == "ACCOUNT_NOT_FOUND" else 401 if error == "AUTHENTICATED_USER_REQUIRED" else 400
             _apr_timing_log("account_delete_failed", user_key=_apr_diag_ref(user_id), error=error)
             self._send_json(status_code, {"success": False, "error": error})
+            return
+
+        # Referral claims are authenticated by the same Web-to-Bot service
+        # boundary as account registration. The inviter is resolved from the
+        # server-owned referral code; no inviter/user ID is accepted from Web.
+        if self.path == "/api/referrals/claim":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error_code": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 16 * 1024:
+                    self._send_json(413, {"success": False, "error_code": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length)
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
+                    return
+                result = claim_april_referral(canonical_user_id, body.get("referral_code"))
+                status = 200 if result.get("success") else (
+                    409 if result.get("error_code") in {"REFERRAL_ALREADY_USED", "REFERRAL_SELF_INVITE"} else
+                    400 if result.get("error_code") in {"REFERRAL_INVALID", "REFERRAL_REGISTRATION_WINDOW_EXPIRED"} else 503
+                )
+                self._send_json(status, result)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json(400, {"success": False, "error_code": "INVALID_JSON"})
+            except Exception as exc:
+                print(f"[APRIL_REFERRAL] claim_route_failed type={type(exc).__name__}", flush=True)
+                self._send_json(503, {"success": False, "error_code": "REFERRAL_UNAVAILABLE"})
             return
 
         # Existing April Web authentication bridge. Keep account identity in the
