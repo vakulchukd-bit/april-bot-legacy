@@ -83,6 +83,11 @@ from storage import (
     is_authenticated_user,
     load_dialogue_asset_payloads,
     save_dialogue_pair,
+    get_user_plan,
+    get_free_media_quota_status,
+    reserve_free_media_units,
+    commit_free_media_reservation,
+    release_free_media_reservation,
 )
 
 
@@ -2414,14 +2419,56 @@ async def execute(
         packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
 
     image_result = None
+    free_media_limit_reached = False
+    image_generation_reserved = False
     if (interpretation.get("intent") or {}).get("wants_image"):
-        image_started = time.perf_counter()
-        image_result = await _generate_image_artifact(
-            interpretation,
-            raw,
-            identity,
-        )
-        _apr_timing_log("image_generation", image_started, succeeded=bool(image_result))
+        # The shared Free quota counts one successful image-generation operation
+        # as one unit, regardless of the number of thumbnails in its gallery.
+        # Lite and Premium are explicitly excluded even though Lite uses this
+        # shared Free executor in the existing routing architecture.
+        active_plan_for_quota = str(get_user_plan(uid) or "free").strip().lower()
+        if active_plan_for_quota == "free":
+            quota_reservation = reserve_free_media_units(
+                uid, identity["message_id"], 1, "generation"
+            )
+            if not quota_reservation.get("allowed"):
+                free_media_limit_reached = True
+                # Keep the model's ordinary text answer. The Web opens the
+                # localized quota modal from free_media_limit_reached; the
+                # media generator is skipped, but text chat is not replaced or
+                # blocked by the Free media allowance.
+            else:
+                image_generation_reserved = bool(
+                    quota_reservation.get("tracked") and not quota_reservation.get("already_reserved")
+                )
+        if not free_media_limit_reached:
+            image_started = time.perf_counter()
+            try:
+                image_result = await _generate_image_artifact(
+                    interpretation,
+                    raw,
+                    identity,
+                )
+                if image_generation_reserved:
+                    if image_result:
+                        commit_free_media_reservation(uid, identity["message_id"], "generation")
+                    else:
+                        release_free_media_reservation(uid, identity["message_id"], "generation")
+            except Exception:
+                if image_generation_reserved:
+                    release_free_media_reservation(uid, identity["message_id"], "generation")
+                raise
+            _apr_timing_log(
+                "image_generation", image_started, succeeded=bool(image_result),
+                free_media_limit_reached=False,
+            )
+        else:
+            _apr_timing_log(
+                "image_generation_skipped", None,
+                reason="free_media_limit_reached",
+                user_key=_apr_diag_ref(uid),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+            )
         if image_result:
             image_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
             packaged["artifacts"].append(image_artifact)
@@ -2850,6 +2897,7 @@ async def execute(
             "memory_saved": saved,
             "dialogue_assets_restored": restored_assets,
             "generated_asset_saved": generated_asset_saved,
+            "free_media_limit_reached": bool(free_media_limit_reached),
             "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
             "interpretation": interpretation,
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
