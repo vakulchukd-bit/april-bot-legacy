@@ -1425,6 +1425,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     """Fit system prompt + dynamic JSON card + attachment labels to the token budget."""
     data = json.loads(json.dumps(structured, ensure_ascii=False))
     is_history = bool(data.get("HISTORY_REQUEST"))
+    is_hot_continuation = str(data.get("DIALOGUE_RELATION") or "NEW").upper() == "CONTINUE" and not is_history
 
     # Each explicitly requested topic/step and the top-level task are capped at
     # 30% of the global prompt budget. For multi-topic requests, the summary copy
@@ -1589,32 +1590,50 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # Reduce dialogue pairs progressively while retaining the semantic anchor and
     # the most useful pair(s). Remove evidence excerpts before pair identities.
     pairs = data.get("CONTINUATION_CONTEXT") if isinstance(data.get("CONTINUATION_CONTEXT"), list) else []
-    pair_keep_levels = (3, 2, 1) if is_history and pairs else (3, 2, 1, 0)
+    pair_keep_levels = (10, 8, 6, 4, 2, 1, 0) if is_hot_continuation and pairs else ((3, 2, 1) if is_history and pairs else (3, 2, 1, 0))
     for keep_n in pair_keep_levels:
         compact_pairs = []
-        for item in pairs[:keep_n]:
+        selected_pair_slice = pairs[-keep_n:] if is_hot_continuation and keep_n else pairs[:keep_n]
+        for pair_index, item in enumerate(selected_pair_slice):
             if not isinstance(item, dict):
                 continue
-            compact_pairs.append({
+            is_recent_pair = pair_index >= max(0, len(selected_pair_slice) - 2)
+            asset_manifest = item.get("dialogue_assets") if isinstance(item.get("dialogue_assets"), dict) else {}
+            compact_assets = {}
+            for asset_group in ("user_inputs", "april_outputs"):
+                compact_group = []
+                for asset in (asset_manifest.get(asset_group) or [])[:2]:
+                    if not isinstance(asset, dict):
+                        continue
+                    asset_row = {
+                        key: asset.get(key) for key in ("filename", "kind", "mime_type", "asset_role", "message_id", "output_type", "sha256", "title", "language")
+                        if asset.get(key) not in (None, "", [], {})
+                    }
+                    if asset.get("structured_preview"):
+                        asset_row["structured_preview"] = _semantic_compress(asset.get("structured_preview"), 28 if is_recent_pair else 10)
+                    if asset_row:
+                        compact_group.append(asset_row)
+                if compact_group:
+                    compact_assets[asset_group] = compact_group
+            pair_row = {
                 "turn": item.get("turn"),
-                "user": _semantic_compress(item.get("user"), 55),
-                "april": _semantic_compress(item.get("april"), 65),
-                "topic": _semantic_compress(item.get("topic"), 24),
+                "user": _semantic_compress(item.get("user"), 44 if is_recent_pair else 18),
+                "april": _semantic_compress(item.get("april"), 62 if is_recent_pair else 24),
+                "topic": _semantic_compress(item.get("topic"), 20 if is_recent_pair else 10),
                 "sections": [
                     {"heading": _semantic_compress(sec.get("heading"), 12),
-                     "summary": _semantic_compress(sec.get("summary"), 22),
+                     "summary": _semantic_compress(sec.get("summary"), 20),
                      "order": sec.get("order")}
-                    for sec in (item.get("sections") or [])[:8] if isinstance(sec, dict)
+                    for sec in (item.get("sections") or [])[:2 if is_recent_pair else 1] if isinstance(sec, dict)
                 ],
                 "score": item.get("score"),
                 "same_dialog": item.get("same_dialog"),
                 "message_id": item.get("message_id"),
                 "created_at": item.get("created_at"),
-                "history_time_relation": item.get("history_time_relation"),
-                "history_time_label": item.get("history_time_label"),
-                "history_age_minutes": item.get("history_age_minutes"),
-                "history_gap_minutes": item.get("history_gap_minutes"),
-            })
+            }
+            if compact_assets:
+                pair_row["dialogue_assets"] = compact_assets
+            compact_pairs.append(pair_row)
         data["CONTINUATION_CONTEXT"] = compact_pairs
         data["DIALOGUE_ANCHOR"]["attachment_evidence"] = "" if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else ""
         card, total = count(system, data)
@@ -1643,7 +1662,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     original_files = data.get("ATTACHED_TEXT_FILES") if isinstance(data.get("ATTACHED_TEXT_FILES"), list) else []
     original_map = data.get("ATTACHMENT_TASK_MAP") if isinstance(data.get("ATTACHMENT_TASK_MAP"), list) else []
     original_topics = data.get("DIALOGUE_HISTORY_TOPICS") if isinstance(data.get("DIALOGUE_HISTORY_TOPICS"), list) else []
-    original_pairs = data.get("CONTINUATION_CONTEXT") if isinstance(data.get("CONTINUATION_CONTEXT"), list) else []
+    # `data[CONTINUATION_CONTEXT]` is progressively overwritten above; preserve
+    # the original candidate list for the final hard-budget fallback.
+    original_pairs = pairs if isinstance(pairs, list) else []
 
     # Keep at least the identifying metadata for each supplied attachment/image.
     asset_rows = []
@@ -1857,13 +1878,29 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "same_dialog": bool(dialogue_anchor.get("same_dialog")),
         }
         pairs_min = []
-        for item in original_pairs[:pair_limit]:
+        minimal_pair_source = original_pairs[-pair_limit:] if is_hot_continuation and pair_limit else original_pairs[:pair_limit]
+        for pair_index, item in enumerate(minimal_pair_source):
             if not isinstance(item, dict):
                 continue
-            pairs_min.append({
+            is_recent_pair = pair_index >= max(0, len(minimal_pair_source) - 2)
+            asset_manifest = item.get("dialogue_assets") if isinstance(item.get("dialogue_assets"), dict) else {}
+            compact_assets = {}
+            for asset_group in ("user_inputs", "april_outputs"):
+                compact_group = []
+                for asset in (asset_manifest.get(asset_group) or [])[:1]:
+                    if not isinstance(asset, dict):
+                        continue
+                    asset_row = {key: asset.get(key) for key in ("filename", "kind", "asset_role", "message_id", "title", "language") if asset.get(key) not in (None, "", [], {})}
+                    if asset.get("structured_preview"):
+                        asset_row["structured_preview"] = _semantic_compress(asset.get("structured_preview"), max(6, summary_budget // 2))
+                    if asset_row:
+                        compact_group.append(asset_row)
+                if compact_group:
+                    compact_assets[asset_group] = compact_group
+            pair_min = {
                 "turn": item.get("turn"),
-                "user": _semantic_compress(item.get("user"), max(12, summary_budget // 2)),
-                "april": _semantic_compress(item.get("april"), max(12, summary_budget)),
+                "user": _semantic_compress(item.get("user"), max(10, summary_budget // (2 if is_recent_pair else 5))),
+                "april": _semantic_compress(item.get("april"), max(12, summary_budget // (1 if is_recent_pair else 3))),
                 "topic": _semantic_compress(item.get("topic"), max(8, summary_budget // 3)),
                 "history_time_relation": item.get("history_time_relation"),
                 "history_time_label": item.get("history_time_label"),
@@ -1873,11 +1910,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     {"h": _semantic_compress(sec.get("heading"), max(8, summary_budget // 3)),
                      "s": _semantic_compress(sec.get("summary"), max(12, summary_budget // 2)),
                      "n": sec.get("order", section_index + 1)}
-                    for section_index, sec in enumerate((item.get("sections") or [])[:8])
+                    for section_index, sec in enumerate((item.get("sections") or [])[:1 if is_recent_pair else 0])
                     if isinstance(sec, dict)
                 ],
                 "message_id": item.get("message_id"),
-            })
+            }
+            if compact_assets:
+                pair_min["dialogue_assets"] = compact_assets
+            pairs_min.append(pair_min)
         topics_min = []
         if is_history:
             for item in original_topics[:history_item_limit]:
@@ -2062,15 +2102,28 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Try progressively smaller allocations. Topic requests are always <= 30% of
     # 1800 estimated tokens, and each step remains represented in REQUEST_SEQUENCE.
-    minimum_history_pair = 1 if is_history and original_pairs else 0
-    candidates = [
-        (420, min(516, MAX_TOPIC_PROMPT_TOKENS - 24), 70, min(2, len(original_pairs))),
-        (300, 210, 45, min(2, len(original_pairs))),
-        (220, 130, 28, min(1, len(original_pairs))),
-        (150, 85, 18, minimum_history_pair),
-        (100, 55, 12, minimum_history_pair),
-        (70, 36, 8, minimum_history_pair),
-    ]
+    minimum_history_pair = min(3, len(original_pairs)) if is_history and original_pairs else 0
+    if is_hot_continuation and original_pairs:
+        # Prefer ten compact user↔April turns, then reduce detail before reducing
+        # coverage. This avoids the old emergency path silently dropping the hot
+        # branch and making April claim that the topic/artifact is not visible.
+        candidates = [
+            (420, min(420, MAX_TOPIC_PROMPT_TOKENS - 24), 42, min(10, len(original_pairs))),
+            (300, 180, 30, min(8, len(original_pairs))),
+            (220, 125, 20, min(6, len(original_pairs))),
+            (150, 85, 14, min(4, len(original_pairs))),
+            (100, 55, 10, min(2, len(original_pairs))),
+            (70, 36, 7, min(1, len(original_pairs))),
+        ]
+    else:
+        candidates = [
+            (420, min(516, MAX_TOPIC_PROMPT_TOKENS - 24), 70, min(2, len(original_pairs))),
+            (300, 210, 45, min(2, len(original_pairs))),
+            (220, 130, 28, min(1, len(original_pairs))),
+            (150, 85, 18, minimum_history_pair),
+            (100, 55, 12, minimum_history_pair),
+            (70, 36, 8, minimum_history_pair),
+        ]
     system = SYSTEM_PROMPT_MINIMAL
     for current_budget, topic_budget, summary_budget, pair_limit in candidates:
         minimal = build_minimal(current_budget, topic_budget, summary_budget, pair_limit)
@@ -2107,9 +2160,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         return result
 
     # Last-resort hard budget: keep every step and every attachment identity,
-    # progressively lowering text per topic instead of dropping topics.
+    # progressively lowering text per topic instead of dropping topics. Preserve
+    # the ten-turn hot branch (or up to three ranked history pairs) even here.
+    minimum_context_pairs = (
+        min(10, len(original_pairs)) if is_hot_continuation
+        else (min(3, len(original_pairs)) if is_history else 0)
+    )
     for tiny_topic_budget in (24, 18, 14, 10, 8, 6, 4, 3, 2, 1):
-        minimal = build_minimal(48, tiny_topic_budget, 6, minimum_history_pair)
+        minimal = build_minimal(48, tiny_topic_budget, 6, minimum_context_pairs)
         minimal["CURRENT_REQUEST"] = data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), 48)
         if len(original_sequence) > 35:
             compact_lines = []
@@ -2224,13 +2282,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
 
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("CONTINUATION_CONTEXT"), list):
-        # Preserve the strongest selected pair and the exact protected structures;
-        # remove verbose prose/history details from the non-protected context.
+        # Preserve the newest hot-branch turns compactly. For history lookups retain
+        # the original top-ranked pair behavior; never keep only the oldest pair.
         compact_pairs = []
-        for pair in minimal["CONTINUATION_CONTEXT"][:1]:
+        source_pairs = (
+            minimal["CONTINUATION_CONTEXT"][-10:] if is_hot_continuation
+            else (minimal["CONTINUATION_CONTEXT"][:3] if is_history else minimal["CONTINUATION_CONTEXT"][:1])
+        )
+        for pair in source_pairs:
             if isinstance(pair, dict):
-                compact_pairs.append({k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
-                                      for k in ("topic", "user", "april") if pair.get(k)})
+                compact_pair = {k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
+                                for k in ("topic", "user", "april") if pair.get(k)}
+                compact_pair["message_id"] = pair.get("message_id")
+                if pair.get("dialogue_assets"):
+                    compact_pair["dialogue_assets"] = pair.get("dialogue_assets")
+                compact_pairs.append(compact_pair)
         minimal["CONTINUATION_CONTEXT"] = compact_pairs
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
@@ -2668,10 +2734,24 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         for item in rows[:limit]:
             if not isinstance(item, dict):
                 continue
+            asset_manifest = item.get("dialogue_assets") if isinstance(item.get("dialogue_assets"), dict) else {}
+            compact_assets = {}
+            for asset_group in ("user_inputs", "april_outputs"):
+                compact_group = []
+                for asset in (asset_manifest.get(asset_group) or [])[:2]:
+                    if not isinstance(asset, dict):
+                        continue
+                    asset_row = {key: asset.get(key) for key in ("filename", "kind", "mime_type", "asset_role", "message_id", "output_type", "sha256", "title", "language") if asset.get(key) not in (None, "", [], {})}
+                    if asset.get("structured_preview"):
+                        asset_row["structured_preview"] = _clip(asset.get("structured_preview"), 1200)
+                    if asset_row:
+                        compact_group.append(asset_row)
+                if compact_group:
+                    compact_assets[asset_group] = compact_group
             result.append({
                 "turn": item.get("turn_index") or item.get("turn"),
                 "user": _clip(item.get("user") or item.get("user_text"), 240),
-                "april": _clip(item.get("april") or item.get("april_text"), 180),
+                "april": _clip(item.get("april") or item.get("april_text"), 420),
                 "topic": _clip(item.get("topic"), 100),
                 "sections": [
                     {"heading": _clip(sec.get("heading") or sec.get("h"), 90),
@@ -2689,6 +2769,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "history_age_minutes": item.get("history_age_minutes"),
                 "history_gap_minutes": item.get("history_gap_minutes"),
                 "attachment_evidence": _clip(item.get("attachment_evidence"), 1800),
+                "dialogue_assets": compact_assets,
             })
         return result
 
@@ -2844,7 +2925,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "CONTINUATION_CONTEXT": _pairs(
             selected_pairs,
-            min(5, requested_topic_count) if history_request else (1 if selected_section else 2),
+            min(5, requested_topic_count) if history_request else (10 if relation == "CONTINUE" else (1 if selected_section else 2)),
         ) if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
         "PROTECTED_STRUCTURED_DATA": protected_structured_data,
         "SELECTED_SECTION": {
