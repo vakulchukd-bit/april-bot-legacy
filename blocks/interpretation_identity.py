@@ -1880,12 +1880,24 @@ def _select_continuation_pairs(memory: dict[str, Any]) -> list[dict[str, Any]]:
     if (relation != "CONTINUE" and not history_request) or not isinstance(pairs, list):
         return []
     if history_request:
-        limit = 5
-    elif _text(memory.get("history_selection_method")) == "named_topic_section_vector":
-        limit = max(2, min(3, int(memory.get("continuation_context_limit") or 3)))
+        if _text(memory.get("history_selection_method")) == "named_topic_section_vector":
+            limit = max(2, min(3, int(memory.get("continuation_context_limit") or 3)))
+        else:
+            limit = 5
+        newest_first = False  # History search is ranked evidence, not a live thread.
     else:
-        limit = 2
-    return [dict(item) for item in pairs if isinstance(item, dict)][:limit]
+        # State Manager returns a live branch in chronological order. Preserve the
+        # whole selected branch (up to ten pairs) and, most importantly, take its
+        # newest tail. Taking pairs[:2] here silently forwarded the oldest turns of
+        # the branch and discarded the latest USER↔APRIL exchange.
+        try:
+            requested_limit = int(memory.get("continuation_context_limit") or 10)
+        except (TypeError, ValueError):
+            requested_limit = 10
+        limit = max(2, min(10, requested_limit))
+        newest_first = True
+    valid_pairs = [dict(item) for item in pairs if isinstance(item, dict)]
+    return valid_pairs[-limit:] if newest_first else valid_pairs[:limit]
 
 
 _TASK_START_VERBS = (
