@@ -577,7 +577,7 @@ WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
     "formula": {"renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "fallback_renderer": "", "payload_keys": ["formula", "formulas", "latex", "latex_formulas", "equation", "expression", "math", "markdown", "content"], "mode": "force_math"},
-    "graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "x", "y", "x_values", "y_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects", "shapes", "meshes", "geometry", "scene", "dimensions", "three_d", "show_curved_grid", "curved_grid", "surface_mode", "wave_effect", "wave", "waves", "wave_type", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "color_scale", "color_map", "colormap", "colour_scale", "colour_map", "temperature_field", "thermal_field", "heat_field", "field_type", "visualization_mode", "surface_style", "show_zero_plane", "zero_plane", "color_domain", "axis_labels", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "primitives", "orbits", "orbit_paths", "orbital_motion", "trajectories", "paths", "lines", "curves", "vectors", "gravity_vectors", "field_vectors", "field_lines", "arrows", "forces", "velocity_vectors", "normals", "rings", "labels", "annotations", "materials", "animation", "time", "duration", "keyframes"]},
+"graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["series", "datasets", "traces", "curves", "points", "data_points", "coordinates", "x", "y", "z", "x_values", "y_values", "z_values", "categories", "labels", "data_table", "matrix", "x_axis", "y_axis", "z_axis", "axes", "representation", "chart_type", "visualization", "graph_type", "plot_type", "fn", "function", "expression", "equation", "formula", "math_expression", "mathematical_expression", "x_domain", "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "surface", "surface_grid", "surface_function", "surface_equation", "surface_formula", "z_function", "z_expression", "grid_resolution", "spheres", "objects_3d", "objects3d", "objects", "shapes", "shape", "figure_type", "geometry_type", "object_type", "meshes", "mesh", "geometry", "scene", "scene_type", "dimensions", "three_d", "vertices", "edges", "faces", "triangles", "indices", "polygons", "normals", "isosurfaces", "volumes", "slices", "show_curved_grid", "curved_grid", "surface_mode", "wave_effect", "wave", "waves", "wave_type", "wave_function", "wave_amplitude", "wave_frequency", "wave_phase", "color_scale", "color_map", "colormap", "colour_scale", "colour_map", "temperature_field", "thermal_field", "heat_field", "field_type", "visualization_mode", "surface_style", "show_zero_plane", "zero_plane", "color_domain", "axis_labels", "bodies", "celestial_bodies", "planets", "satellites", "moons", "comets", "primitives", "orbits", "orbit_paths", "orbital_motion", "trajectories", "paths", "lines", "vectors", "gravity_vectors", "field_vectors", "field_lines", "arrows", "forces", "velocity_vectors", "rings", "annotations", "materials", "animation", "time", "duration", "keyframes"]},
     "knowledge_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
@@ -2248,6 +2248,13 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
 
     aliases = {
         "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph",
+        "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph",
+        "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph",
+        "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph",
+        "3d_surface": "graph", "surface_plot": "graph", "surface_graph": "graph",
+        "mesh3d": "graph", "mesh_3d": "graph", "wireframe": "graph",
+        "3d_wireframe": "graph", "solid3d": "graph", "solid_3d": "graph",
         "table_data": "table", "math": "formula", "latex": "formula",
         "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
@@ -3707,46 +3714,134 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         rows = p.get("rows") or p.get("data")
         return isinstance(cols, list) and bool(cols) and isinstance(rows, list) and bool(rows)
     if block_type in {"graph", "knowledge_graph", "relation_graph", "relations"}:
-        series = p.get("series") or p.get("datasets") or p.get("traces")
+        series = p.get("series") or p.get("datasets") or p.get("traces") or p.get("curves")
         nested_scene = p.get("scene") if isinstance(p.get("scene"), dict) else {}
         nested_geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
+        nested_mesh = p.get("mesh") if isinstance(p.get("mesh"), dict) else {}
         nested_surface = p.get("surface") if isinstance(p.get("surface"), dict) else {}
-        has_nested_surface_expression = any(
-            str(candidate or "").strip()
-            for candidate in (
-                nested_surface.get("surface_function"), nested_surface.get("z_function"),
-                nested_surface.get("expression"), nested_surface.get("formula"),
-                nested_surface.get("function"),
-            )
+        representation = str(
+            p.get("representation") or p.get("graph_type") or p.get("chart_type")
+            or p.get("visualization") or nested_scene.get("representation")
+            or nested_geometry.get("representation") or nested_mesh.get("representation") or ""
+        ).strip().lower().replace("-", "_").replace(" ", "_")
+        declares_3d = (
+            representation in {
+                "3d", "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d",
+                "graph_3d", "plot3d", "plot_3d", "scatter3d", "scatter_3d",
+                "3d_scatter", "surface3d", "surface_3d", "3d_surface", "surface",
+                "mesh3d", "mesh_3d", "wireframe", "bar3d", "spacetime_curvature",
+            }
+            or p.get("dimensions") == 3 or p.get("three_d") is True
+            or nested_scene.get("dimensions") == 3 or nested_scene.get("three_d") is True
+            or nested_geometry.get("dimensions") == 3 or nested_mesh.get("dimensions") == 3
         )
-        has_nested_3d_objects = any(
-            isinstance(candidate, list) and bool(candidate)
-            for candidate in (
-                nested_scene.get("objects"), nested_geometry.get("objects"),
-                nested_geometry.get("spheres"),
-            )
+
+        def _nonempty(value: Any) -> bool:
+            return value is not None and value != "" and value != [] and value != {}
+
+        def _finite_coordinate(value: Any) -> bool:
+            try:
+                if isinstance(value, bool) or value is None or value == "":
+                    return False
+                float(value)
+                return True
+            except (TypeError, ValueError, OverflowError):
+                return False
+
+        def _vertex_has_z(vertex: Any) -> bool:
+            if isinstance(vertex, (list, tuple)):
+                return len(vertex) >= 3 and _finite_coordinate(vertex[2])
+            if isinstance(vertex, dict):
+                position = vertex.get("position") if isinstance(vertex.get("position"), dict) else {}
+                return _finite_coordinate(vertex.get("z", position.get("z")))
+            return False
+
+        geometry_sources = [p, nested_scene, nested_geometry, nested_mesh]
+        vertex_collections = [source.get("vertices") for source in geometry_sources]
+        has_3d_vertices = any(
+            isinstance(vertices, (list, tuple)) and len(vertices) >= 3
+            and sum(1 for vertex in vertices if _vertex_has_z(vertex)) >= 3
+            for vertices in vertex_collections
         )
-        representation = str(p.get("representation") or p.get("graph_type") or p.get("chart_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
-        explicit_surface_expression = representation in {"surface3d", "surface_3d", "3d_surface", "surface", "mesh3d", "mesh_3d", "3d"} and bool(
-            p.get("equation") or p.get("expression") or p.get("formula") or p.get("fn")
+        # A mesh is drawable when actual 3D vertices are present. Faces/indices
+        # enrich its topology but are not fabricated when the provider omitted them.
+        has_mesh_topology = any(
+            isinstance(source.get(key), (list, tuple)) and bool(source.get(key))
+            for source in geometry_sources for key in ("faces", "triangles", "indices", "polygons", "edges")
         )
-        return bool(
-            (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
-            or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
-            or (isinstance(p.get("x"), list) and isinstance(p.get("y"), list) and min(len(p["x"]), len(p["y"])) >= 2)
-            or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
-            or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
-            or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
-            or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
-            or explicit_surface_expression
-            or (
-                representation in {"function", "function2d", "function_2d", "line", "line_chart", "scatter", "2d"}
-                and bool(p.get("equation") or p.get("expression") or p.get("fn") or p.get("function") or p.get("function_expression"))
-            )
-            or has_nested_surface_expression
-            or has_nested_3d_objects
-            or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
+        has_xyz_arrays = any(
+            isinstance(source.get("x"), (list, tuple))
+            and isinstance(source.get("y"), (list, tuple))
+            and isinstance(source.get("z"), (list, tuple))
+            and min(len(source["x"]), len(source["y"]), len(source["z"])) >= 1
+            and any(_finite_coordinate(value) for value in source["z"])
+            for source in geometry_sources
         )
+        direct_points = p.get("points") or p.get("data_points") or p.get("coordinates")
+        has_xyz_points = (
+            isinstance(direct_points, (list, tuple))
+            and any(_vertex_has_z(point) for point in direct_points)
+        )
+        object_collections = [
+            source.get(key)
+            for source in geometry_sources
+            for key in ("objects_3d", "objects3d", "objects", "shapes", "meshes", "spheres", "primitives")
+        ]
+        has_3d_objects = any(
+            isinstance(items, (list, tuple, dict)) and bool(items)
+            for items in object_collections
+        )
+        explicit_shape = any(
+            _nonempty(source.get(key))
+            for source in geometry_sources
+            for key in ("shape", "figure_type", "geometry_type", "object_type", "primitive_type")
+        )
+        has_surface_grid = any(
+            _nonempty(source.get(key))
+            for source in geometry_sources
+            for key in ("surface_grid", "z_values", "matrix", "grid")
+        ) or (
+            isinstance(p.get("surface"), (list, tuple)) and bool(p.get("surface"))
+        )
+        has_surface_expression = any(
+            _nonempty(source.get(key))
+            for source in geometry_sources + [nested_surface]
+            for key in ("surface_function", "surface_equation", "surface_formula", "z_function", "z_expression", "expression", "formula", "function", "fn")
+        )
+
+        if declares_3d and (has_3d_vertices or has_xyz_arrays or has_xyz_points or has_3d_objects or explicit_shape or has_surface_grid or has_surface_expression):
+            return True
+        if any(
+            isinstance(source.get(key), (list, tuple, dict)) and bool(source.get(key))
+            for source in geometry_sources
+            for key in ("objects_3d", "objects3d", "spheres", "meshes")
+        ):
+            return True
+        if has_3d_vertices and has_mesh_topology:
+            return True
+
+        if isinstance(series, (list, tuple)) and any(
+            isinstance(item, dict) and any(_nonempty(item.get(key)) for key in ("points", "x", "y", "data", "values"))
+            for item in series
+        ):
+            return True
+        if isinstance(p.get("x_values"), (list, tuple)) and isinstance(p.get("y_values"), (list, tuple)) and min(len(p["x_values"]), len(p["y_values"])) >= 2:
+            return True
+        if isinstance(p.get("x"), (list, tuple)) and isinstance(p.get("y"), (list, tuple)) and min(len(p["x"]), len(p["y"])) >= 2:
+            return True
+        if isinstance(direct_points, (list, tuple)) and len(direct_points) >= 2:
+            return True
+        if isinstance(p.get("nodes"), (list, tuple)) and bool(p["nodes"]) and isinstance(p.get("edges"), (list, tuple)) and bool(p.get("edges")):
+            return True
+        if _nonempty(p.get("matrix")) or _nonempty(p.get("data_table")) or _nonempty(p.get("surface_grid")) or _nonempty(p.get("z_values")):
+            return True
+        if any(_nonempty(p.get(key)) for key in ("surface_function", "z_function", "z_expression")):
+            return True
+        if representation in {"function", "function2d", "function_2d", "line", "line_chart", "scatter", "2d"} and any(
+            _nonempty(p.get(key)) for key in ("equation", "expression", "fn", "function", "function_expression")
+        ):
+            return True
+        return False
     if block_type == "diagram":
         molecule = p.get("molecule") if isinstance(p.get("molecule"), dict) else {}
         molecular_structure = p.get("molecular_structure") if isinstance(p.get("molecular_structure"), dict) else {}
@@ -3814,19 +3909,79 @@ def _canonicalize_premium_3d_payload(payload: Dict[str, Any], *, explicit_3d_typ
     p = dict(payload)
     scene = p.get("scene") if isinstance(p.get("scene"), dict) else {}
     geometry = p.get("geometry") if isinstance(p.get("geometry"), dict) else {}
+    mesh = (
+        p.get("mesh") if isinstance(p.get("mesh"), dict)
+        else geometry.get("mesh") if isinstance(geometry.get("mesh"), dict)
+        else scene.get("mesh") if isinstance(scene.get("mesh"), dict)
+        else {}
+    )
+    if mesh and not isinstance(p.get("mesh"), dict):
+        p["mesh"] = mesh
+    if not p.get("representation"):
+        for source in (scene, geometry, mesh):
+            candidate_representation = source.get("representation") or source.get("graph_type") or source.get("chart_type")
+            if candidate_representation:
+                p["representation"] = candidate_representation
+                break
+    if p.get("dimensions") is None:
+        for source in (scene, geometry, mesh):
+            if source.get("dimensions") is not None:
+                p["dimensions"] = source.get("dimensions")
+                break
+    if p.get("three_d") is None:
+        for source in (scene, geometry, mesh):
+            if source.get("three_d") is not None:
+                p["three_d"] = source.get("three_d")
+                break
+
+    # Preserve mesh topology in the top-level GraphBlock contract. The original
+    # nested scene/geometry/mesh objects remain untouched for history and edits.
+    for canonical, sources in {
+        "vertices": (p.get("vertices"), geometry.get("vertices"), mesh.get("vertices"), scene.get("vertices")),
+        "edges": (p.get("edges"), geometry.get("edges"), mesh.get("edges"), scene.get("edges")),
+        "faces": (p.get("faces"), geometry.get("faces"), mesh.get("faces"), scene.get("faces")),
+        "triangles": (p.get("triangles"), geometry.get("triangles"), mesh.get("triangles"), scene.get("triangles")),
+        "indices": (p.get("indices"), geometry.get("indices"), mesh.get("indices"), scene.get("indices")),
+        "normals": (p.get("normals"), geometry.get("normals"), mesh.get("normals"), scene.get("normals")),
+        "shape": (p.get("shape"), geometry.get("shape"), mesh.get("shape"), scene.get("shape")),
+        "figure_type": (p.get("figure_type"), geometry.get("figure_type"), mesh.get("figure_type"), scene.get("figure_type")),
+        "geometry_type": (p.get("geometry_type"), geometry.get("geometry_type"), mesh.get("geometry_type"), scene.get("geometry_type")),
+        "object_type": (p.get("object_type"), geometry.get("object_type"), mesh.get("object_type"), scene.get("object_type")),
+    }.items():
+        if p.get(canonical) not in (None, "", [], {}):
+            continue
+        for candidate in sources:
+            if candidate not in (None, "", [], {}):
+                p[canonical] = candidate
+                break
 
     raw_representation = str(p.get("representation") or p.get("graph_type") or p.get("chart_type") or "").strip().lower().replace("-", "_").replace(" ", "_")
     known_3d = {
         "3d", "3d_scene", "scene3d", "scene_3d", "3d_graph", "graph3d", "graph_3d",
         "surface3d", "surface_3d", "3d_surface", "surface", "scatter3d", "scatter_3d",
         "3d_scatter", "mesh3d", "mesh_3d", "bar3d", "plot3d", "plot_3d", "spacetime_curvature",
+        "wireframe", "3d_wireframe", "mesh", "solid3d", "solid_3d",
     }
     if explicit_3d_type and raw_representation not in known_3d:
         p["representation"] = "scene3d"
         p.setdefault("dimensions", 3)
-    elif raw_representation in {"3d_scene", "scene_3d", "3d_graph", "graph3d", "graph_3d", "plot3d", "plot_3d"}:
+    elif raw_representation in {"3d_scene", "scene_3d", "3d_graph", "graph3d", "graph_3d", "plot3d", "plot_3d", "wireframe", "3d_wireframe", "solid3d", "solid_3d"}:
         p["representation"] = "scene3d"
         p.setdefault("dimensions", 3)
+    elif raw_representation in known_3d:
+        p.setdefault("dimensions", 3)
+
+    if any(p.get(key) not in (None, "", [], {}) for key in ("vertices", "faces", "triangles", "indices", "mesh")):
+        # Mesh geometry declares an actual spatial scene when its coordinates
+        # contain z values; do not infer 3D from prose alone.
+        vertices = p.get("vertices")
+        if isinstance(vertices, list) and any(
+            (isinstance(vertex, (list, tuple)) and len(vertex) >= 3)
+            or (isinstance(vertex, dict) and (vertex.get("z") is not None or isinstance(vertex.get("position"), dict) and vertex["position"].get("z") is not None))
+            for vertex in vertices
+        ):
+            p.setdefault("representation", "scene3d")
+            p.setdefault("dimensions", 3)
 
     # A scene may expose all bodies in a single list, or separate planet/moon
     # lists. Merge those known spatial collections and remove only exact duplicates.
