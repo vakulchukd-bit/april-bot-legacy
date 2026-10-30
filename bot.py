@@ -65,6 +65,7 @@ from storage import (
     get_free_media_quota_status, reserve_free_media_units,
     commit_free_media_reservation, release_free_media_reservation,
     claim_april_referral, confirm_april_referral_on_first_use,
+    get_user_language, set_user_language, normalize_user_language,
 )
 
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -729,6 +730,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         "content": result.get("content") or answer,
         "summary": result.get("summary", ""),
         "display_language": result.get("display_language", "en"),
+        "policy_language": result.get("policy_language"),
         "internal_language": "en",
         "translation": result.get("translation", {}),
         "blocks": blocks,
@@ -799,6 +801,13 @@ def _handle_payload(
         user_key=_apr_diag_ref(uid),
         active_plan=active_plan,
         processor="premium" if is_premium else "free",
+    )
+    # Restriction language is a saved account preference. Resolve it before any
+    # quota early-return so even HTTP 429 attachment blocks carry the same locale.
+    account_language = (
+        get_user_language(uid)
+        or _normalize_language_code(data.get("language") or data.get("display_language"))
+        or "en"
     )
 
     attachments = attachments or []
@@ -875,6 +884,7 @@ def _handle_payload(
                             "success": False,
                             "error_code": quota_error,
                             "free_media": quota,
+                            "policy_language": account_language,
                             "canonical_route": CANONICAL_CHAT_ROUTE,
                         }
                     # A media limit must not turn off text chat. When the same
@@ -890,6 +900,7 @@ def _handle_payload(
                             "error_code": "FREE_MEDIA_LIMIT_REACHED",
                             "free_media": quota,
                             "free_media_attachments_skipped": True,
+                            "policy_language": account_language,
                             "canonical_route": CANONICAL_CHAT_ROUTE,
                         }
                     dropped_media_count = free_media_units
@@ -1018,10 +1029,13 @@ def _handle_payload(
             processor=selected_executor_name,
             canonical_route=CANONICAL_CHAT_ROUTE,
         )
+        # Restrictions and account-level notices follow the saved Settings language,
+        # even when the user writes or speaks in a different language this turn.
         execution_kwargs = {
             "text": original,
             "internal_text": internal_text,
             "display_language": language,
+            "account_language": account_language,
             "flow_id": _text(data.get("flow_id")),
             "conversation_id": conversation_id or dialog_id,
             "dialog_id": dialog_id,
@@ -1114,6 +1128,8 @@ def _handle_payload(
                     error_type=type(persist_exc).__name__,
                 )
             result["persistence"] = {"saved": persisted, "reason": "executor_exception_fallback"}
+        if isinstance(result, dict):
+            result["policy_language"] = account_language
         if free_media_attachment_reservation:
             media_analysis_succeeded = (
                 isinstance(result, dict)
@@ -1870,6 +1886,18 @@ class AprilHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/api/users/language":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            self._send_json(200, {"success": True, "language": get_user_language(canonical_user_id)})
+            return
         if parsed.path == "/api/subscription/status":
             if not self._service_authorized():
                 self.close_connection = True
@@ -2087,6 +2115,41 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
+        if parsed_path == "/api/users/language":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 4_096:
+                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error": "INVALID_REQUEST"})
+                    return
+                language = normalize_user_language(body.get("language"))
+                if not language:
+                    self._send_json(400, {"success": False, "error": "INVALID_LANGUAGE"})
+                    return
+                saved = set_user_language(canonical_user_id, language)
+                if not saved:
+                    self._send_json(503, {"success": False, "error": "LANGUAGE_SAVE_FAILED"})
+                    return
+                self._send_json(200, {"success": True, "language": saved})
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+            except Exception as exc:
+                print(f"[APRIL_USER_LANGUAGE] route_failed type={type(exc).__name__}", flush=True)
+                self._send_json(503, {"success": False, "error": "LANGUAGE_SAVE_FAILED"})
+            return
         if parsed_path == "/api/v1/content-report":
             if not self._service_authorized():
                 self.close_connection = True
