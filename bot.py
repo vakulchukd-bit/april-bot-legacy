@@ -800,6 +800,33 @@ def _handle_payload(
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
             data, attachments, voice_transcript=voice_transcript
         )
+        # Free-only bounded source retention: keep small user screenshots/files
+        # paired to this message for the existing 12-hour dialogue window. Voice
+        # itself is transient; its transcript is stored as the message text.
+        if not is_premium:
+            retained_input_bytes = 0
+            for attachment in attachments:
+                kind = _text(getattr(attachment, "kind", "file")).lower()
+                raw_bytes = getattr(attachment, "data", b"") or b""
+                if kind not in {"image", "file", "text_file"} or not isinstance(raw_bytes, (bytes, bytearray)):
+                    continue
+                if not raw_bytes or len(raw_bytes) > 8 * 1024 * 1024:
+                    continue
+                # Keep the total Free source-asset sidecar bounded per turn; the
+                # current request is still processed normally even when retention
+                # skips an oversized/multiple-upload tail.
+                if retained_input_bytes + len(raw_bytes) > 8 * 1024 * 1024:
+                    continue
+                metadata = getattr(attachment, "metadata", {}) or {}
+                sequence_index = int(metadata.get("sequence_index", -1) or 0)
+                target = next((item for item in attachment_meta if (
+                    isinstance(item, dict)
+                    and int(item.get("sequence_index", -2) or 0) == sequence_index
+                    and _text(item.get("filename")) == _text(getattr(attachment, "filename", "file"))
+                )), None)
+                if target is not None:
+                    target["persistence_content_base64"] = base64.b64encode(bytes(raw_bytes)).decode("ascii")
+                    retained_input_bytes += len(raw_bytes)
         if semantic_text:
             original = (original + "\n\n" + semantic_text).strip()
         _apr_timing_log("input_normalization", input_normalization_started, user_key=_apr_diag_ref(uid),
