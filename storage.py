@@ -16,6 +16,7 @@ The old feedback/knowledge/memory_states stores are intentionally removed.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
 import os
 import random
@@ -70,6 +71,7 @@ _USERS_COLUMNS = (
     "subscription_until",
     "premium_id",
     "warned",
+    "language",
     "messages_today",
     "images_today",
     "last_reset",
@@ -395,6 +397,36 @@ def init_db() -> None:
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
                     ON april_referral_invites(inviter_user_id, created_at DESC)
+                """)
+                # A referral share is reserved against one verified Google email
+                # before opening Android's share sheet. Only an HMAC digest is stored;
+                # the raw recipient address is never persisted in this table.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS april_referral_share_targets (
+                        id BIGSERIAL PRIMARY KEY,
+                        inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        recipient_email_hash TEXT NOT NULL,
+                        invite_token TEXT NOT NULL UNIQUE,
+                        referral_code TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'reserved',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        sent_at TIMESTAMPTZ,
+                        claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
+                        claimed_at TIMESTAMPTZ,
+                        CHECK (status IN ('reserved', 'sent', 'claimed', 'cancelled', 'expired'))
+                    )
+                """)
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ")
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_april_referral_target_unique_active
+                    ON april_referral_share_targets(inviter_user_id, recipient_email_hash)
+                    WHERE status IN ('reserved', 'sent', 'claimed')
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_april_referral_target_inviter_created
+                    ON april_referral_share_targets(inviter_user_id, created_at DESC)
                 """)
 
                 # Settle legacy pending referrals under row locks. This migration is
@@ -2154,6 +2186,35 @@ def _free_media_make_referral_code() -> str:
     return secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12].upper()
 
 
+def _normalize_referral_recipient_email(value: Any) -> str | None:
+    email = str(value or "").strip().lower()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+", email):
+        return None
+
+    # Gmail treats dots and the +tag suffix as aliases for the same mailbox.
+    # Normalize those aliases so a sender cannot bypass the one-invite rule by
+    # entering variants such as name+work@gmail.com or n.a.m.e@gmail.com.
+    local_part, domain = email.rsplit("@", 1)
+    if domain in {"gmail.com", "googlemail.com"}:
+        local_part = local_part.split("+", 1)[0].replace(".", "")
+        if not local_part:
+            return None
+        domain = "gmail.com"
+    return f"{local_part}@{domain}"
+
+
+def _referral_recipient_email_hash(value: Any) -> str | None:
+    email = _normalize_referral_recipient_email(value)
+    secret = str(
+        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
+        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
+        or ""
+    ).strip()
+    if not email or len(secret) < 32:
+        return None
+    return hmac.new(secret.encode("utf-8"), email.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
     """Create the one quota row for a canonical authenticated user."""
     code = _free_media_make_referral_code()
@@ -2554,7 +2615,140 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
         conn.close()
 
 
-def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, Any]:
+def prepare_april_referral_share(inviter_user_id: Any, recipient_email: Any) -> dict[str, Any]:
+    """Reserve one invitation for the Google email entered by the inviter."""
+    inviter = str(inviter_user_id or "").strip()
+    email = _normalize_referral_recipient_email(recipient_email)
+    recipient_hash = _referral_recipient_email_hash(email)
+    if not inviter or not email:
+        return {"success": False, "error_code": "REFERRAL_RECIPIENT_INVALID"}
+    if not recipient_hash:
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, email, name, provider FROM users WHERE user_id = %s FOR UPDATE",
+                    (inviter,),
+                )
+                inviter_row = cur.fetchone()
+                if not _is_authenticated_row(inviter_row):
+                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                inviter_email = _normalize_referral_recipient_email(inviter_row.get("email"))
+                if inviter_email and hmac.compare_digest(inviter_email, email):
+                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
+
+                quota_row = _free_media_ensure_row(cur, inviter)
+                current = now()
+                # A share sheet can be dismissed without returning a recipient.
+                # Expire abandoned reservations after 20 minutes, but keep sent and
+                # claimed targets permanently reserved for this inviter.
+                cur.execute(
+                    """UPDATE april_referral_share_targets
+                       SET status = 'expired'
+                       WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
+                    (inviter, current - timedelta(minutes=20)),
+                )
+                cur.execute(
+                    """SELECT status FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s AND recipient_email_hash = %s
+                         AND status IN ('reserved', 'sent', 'claimed')
+                       LIMIT 1 FOR UPDATE""",
+                    (inviter, recipient_hash),
+                )
+                if cur.fetchone():
+                    return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
+
+                invite_token = secrets.token_urlsafe(24)
+                referral_code = str(quota_row.get("referral_code") or "").strip().upper()
+                if not referral_code:
+                    return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+                cur.execute(
+                    """INSERT INTO april_referral_share_targets
+                       (inviter_user_id, recipient_email_hash, invite_token, referral_code, status)
+                       VALUES (%s, %s, %s, %s, 'reserved')""",
+                    (inviter, recipient_hash, invite_token, referral_code),
+                )
+                return {
+                    "success": True,
+                    "referral_code": referral_code,
+                    "invite_token": invite_token,
+                    "inviter_name": str(inviter_row.get("name") or "")[:80],
+                }
+    except Exception as exc:
+        print(f"[APRIL_REFERRAL] share_prepare_failed type={type(exc).__name__}", flush=True)
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def finish_april_referral_share(inviter_user_id: Any, invite_token: Any, sent: Any) -> dict[str, Any]:
+    """Mark a prepared share as sent, or release it when the user cancels."""
+    inviter = str(inviter_user_id or "").strip()
+    token = str(invite_token or "").strip()
+    if not inviter or not token or len(token) > 128:
+        return {"success": False, "error_code": "REFERRAL_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
+                    (inviter,),
+                )
+                if not _is_authenticated_row(cur.fetchone()):
+                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                cur.execute(
+                    """SELECT id, status FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s AND invite_token = %s FOR UPDATE""",
+                    (inviter, token),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"success": False, "error_code": "REFERRAL_INVALID"}
+                status = str(row.get("status") or "")
+                if status == "claimed":
+                    return {"success": True, "status": "claimed"}
+                if status in {"cancelled", "expired"}:
+                    # Cancellation is idempotent: closing the UI twice or retrying
+                    # after a lost acknowledgement must not trap the dialog open.
+                    if sent is not True:
+                        return {"success": True, "status": status}
+                    return {"success": False, "error_code": "REFERRAL_INVALID"}
+                if sent is True:
+                    cur.execute(
+                        """UPDATE april_referral_share_targets
+                           SET status = 'sent', sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP)
+                           WHERE id = %s AND status IN ('reserved', 'sent')""",
+                        (int(row.get("id") or 0),),
+                    )
+                    return {"success": cur.rowcount == 1, "status": "sent"}
+                if status == "sent":
+                    return {"success": True, "status": "sent"}
+                cur.execute(
+                    """UPDATE april_referral_share_targets SET status = 'cancelled'
+                       WHERE id = %s AND status = 'reserved'""",
+                    (int(row.get("id") or 0),),
+                )
+                return {"success": cur.rowcount == 1, "status": "cancelled"}
+    except Exception as exc:
+        print(f"[APRIL_REFERRAL] share_finish_failed type={type(exc).__name__}", flush=True)
+        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def claim_april_referral(
+    invitee_user_id: Any,
+    referral_code: Any,
+    invite_token: Any = None,
+) -> dict[str, Any]:
     """Reward the inviter immediately when a new authenticated invitee claims a link."""
     # The HTTP bridge resolves the authenticated public April ID before calling
     # this function; all referral records use the canonical internal user key.
@@ -2594,6 +2788,38 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
                 inviter = str(inviter_row.get("user_id") or "")
                 if not inviter or inviter == invitee:
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
+
+                share_target = None
+                token = str(invite_token or "").strip()
+                if token:
+                    if len(token) > 128:
+                        return {"success": False, "error_code": "REFERRAL_INVALID"}
+                    cur.execute(
+                        """SELECT id, inviter_user_id, recipient_email_hash, referral_code, status
+                           FROM april_referral_share_targets
+                           WHERE invite_token = %s FOR UPDATE""",
+                        (token,),
+                    )
+                    share_target = cur.fetchone()
+                    if not share_target:
+                        return {"success": False, "error_code": "REFERRAL_INVALID"}
+                    share_target_status = str(share_target.get("status") or "")
+                    if share_target_status == "claimed":
+                        return {"success": False, "error_code": "REFERRAL_ALREADY_USED"}
+                    if (
+                        str(share_target.get("inviter_user_id") or "") != inviter
+                        or str(share_target.get("referral_code") or "").upper() != code
+                        or share_target_status in {"cancelled", "expired"}
+                    ):
+                        return {"success": False, "error_code": "REFERRAL_INVALID"}
+                    invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
+                    stored_email_hash = str(share_target.get("recipient_email_hash") or "")
+                    if (
+                        not invitee_email_hash
+                        or not stored_email_hash
+                        or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
+                    ):
+                        return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
 
                 # A canonical authenticated account can claim at most one referral
                 # reward. Check this before the new-registration window so a repeat
@@ -2658,6 +2884,15 @@ def claim_april_referral(invitee_user_id: Any, referral_code: Any) -> dict[str, 
                     """,
                     (inviter, invitee, code, reward_units, current),
                 )
+                if share_target:
+                    cur.execute(
+                        """UPDATE april_referral_share_targets
+                           SET status = 'claimed', claimed_by_user_id = %s, claimed_at = %s
+                           WHERE id = %s AND status IN ('reserved', 'sent')""",
+                        (invitee, current, int(share_target.get("id") or 0)),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("REFERRAL_SHARE_TARGET_ALREADY_CLAIMED")
                 return {
                     "success": True,
                     "error_code": None,
