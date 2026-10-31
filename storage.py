@@ -398,14 +398,15 @@ def init_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
                     ON april_referral_invites(inviter_user_id, created_at DESC)
                 """)
-                # A referral share is reserved against one verified Google email
-                # before opening Android's share sheet. Only an HMAC digest is stored;
-                # the raw recipient address is never persisted in this table.
+                # Share targets support legacy email-bound links and the current
+                # contact-picker flow. New rows store only a keyed HMAC of the
+                # selected contact phone set; raw contact details are not persisted.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS april_referral_share_targets (
                         id BIGSERIAL PRIMARY KEY,
                         inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        recipient_email_hash TEXT NOT NULL,
+                        recipient_email_hash TEXT,
+                        recipient_contact_hash TEXT,
                         invite_token TEXT NOT NULL UNIQUE,
                         referral_code TEXT NOT NULL,
                         status TEXT NOT NULL DEFAULT 'reserved',
@@ -419,10 +420,20 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ")
+                # New invitations identify a recipient through an explicitly selected
+                # device contact. Only its HMAC digest is stored; legacy email-bound
+                # rows remain readable and keep their old verification behavior.
+                cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_email_hash DROP NOT NULL")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS recipient_contact_hash TEXT")
                 cur.execute("""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_april_referral_target_unique_active
                     ON april_referral_share_targets(inviter_user_id, recipient_email_hash)
                     WHERE status IN ('reserved', 'sent', 'claimed')
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_april_referral_target_contact_recent
+                    ON april_referral_share_targets(inviter_user_id, recipient_contact_hash, created_at DESC)
+                    WHERE recipient_contact_hash IS NOT NULL
                 """)
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_april_referral_target_inviter_created
@@ -2215,6 +2226,35 @@ def _referral_recipient_email_hash(value: Any) -> str | None:
     return hmac.new(secret.encode("utf-8"), email.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _normalize_referral_recipient_phone(value: Any) -> str | None:
+    """Normalize all phone values returned for one selected device contact."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    normalized: set[str] = set()
+    for item in values[:10]:
+        raw = str(item or "").strip()
+        if not raw or len(raw) > 80:
+            continue
+        # Formatting characters are irrelevant for a repeated selection of the
+        # same contact. Keep digits only and sort the set so contact field order
+        # does not change its fingerprint. No country code is guessed.
+        digits = re.sub(r"\D", "", raw)
+        if 7 <= len(digits) <= 15:
+            normalized.add(digits)
+    return "|".join(sorted(normalized)) if normalized else None
+
+
+def _referral_recipient_contact_hash(value: Any) -> str | None:
+    phone = _normalize_referral_recipient_phone(value)
+    secret = str(
+        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
+        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
+        or ""
+    ).strip()
+    if not phone or len(secret) < 32:
+        return None
+    return hmac.new(secret.encode("utf-8"), f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
     """Create the one quota row for a canonical authenticated user."""
     code = _free_media_make_referral_code()
@@ -2615,15 +2655,17 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
         conn.close()
 
 
-def prepare_april_referral_share(inviter_user_id: Any, recipient_email: Any) -> dict[str, Any]:
-    """Reserve one invitation for the Google email entered by the inviter."""
+def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> dict[str, Any]:
+    """Reserve one invitation for a contact explicitly selected on the device.
+
+    The raw telephone number is used only to calculate an HMAC digest. It is not
+    written to PostgreSQL, returned to the browser, or included in application logs.
+    Re-sending to the same selected contact is blocked for five hours.
+    """
     inviter = str(inviter_user_id or "").strip()
-    email = _normalize_referral_recipient_email(recipient_email)
-    recipient_hash = _referral_recipient_email_hash(email)
-    if not inviter or not email:
-        return {"success": False, "error_code": "REFERRAL_RECIPIENT_INVALID"}
-    if not recipient_hash:
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    contact_hash = _referral_recipient_contact_hash(recipient_phone)
+    if not inviter or not contact_hash:
+        return {"success": False, "error_code": "REFERRAL_CONTACT_INVALID"}
 
     conn = get_conn()
     if not conn:
@@ -2631,6 +2673,8 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_email: Any) -> 
     try:
         with conn:
             with conn.cursor() as cur:
+                # Serialize invite creation per sender so two quick taps cannot
+                # create duplicate reservations for the same contact.
                 cur.execute(
                     "SELECT user_id, email, name, provider FROM users WHERE user_id = %s FOR UPDATE",
                     (inviter,),
@@ -2638,27 +2682,25 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_email: Any) -> 
                 inviter_row = cur.fetchone()
                 if not _is_authenticated_row(inviter_row):
                     return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-                inviter_email = _normalize_referral_recipient_email(inviter_row.get("email"))
-                if inviter_email and hmac.compare_digest(inviter_email, email):
-                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
                 quota_row = _free_media_ensure_row(cur, inviter)
                 current = now()
-                # A share sheet can be dismissed without returning a recipient.
-                # Expire abandoned reservations after 20 minutes, but keep sent and
-                # claimed targets permanently reserved for this inviter.
+                # A share sheet can be dismissed without returning a reliable
+                # delivery receipt. Expire stale reservations, then check only
+                # sent/reserved/claimed attempts from the last five hours.
                 cur.execute(
                     """UPDATE april_referral_share_targets
                        SET status = 'expired'
                        WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
-                    (inviter, current - timedelta(minutes=20)),
+                    (inviter, current - timedelta(hours=5)),
                 )
                 cur.execute(
                     """SELECT status FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s AND recipient_email_hash = %s
+                       WHERE inviter_user_id = %s AND recipient_contact_hash = %s
                          AND status IN ('reserved', 'sent', 'claimed')
+                         AND COALESCE(sent_at, created_at) >= %s
                        LIMIT 1 FOR UPDATE""",
-                    (inviter, recipient_hash),
+                    (inviter, contact_hash, current - timedelta(hours=5)),
                 )
                 if cur.fetchone():
                     return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
@@ -2669,9 +2711,10 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_email: Any) -> 
                     return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
                 cur.execute(
                     """INSERT INTO april_referral_share_targets
-                       (inviter_user_id, recipient_email_hash, invite_token, referral_code, status)
-                       VALUES (%s, %s, %s, %s, 'reserved')""",
-                    (inviter, recipient_hash, invite_token, referral_code),
+                       (inviter_user_id, recipient_email_hash, recipient_contact_hash,
+                        invite_token, referral_code, status)
+                       VALUES (%s, NULL, %s, %s, %s, 'reserved')""",
+                    (inviter, contact_hash, invite_token, referral_code),
                 )
                 return {
                     "success": True,
@@ -2795,7 +2838,8 @@ def claim_april_referral(
                     if len(token) > 128:
                         return {"success": False, "error_code": "REFERRAL_INVALID"}
                     cur.execute(
-                        """SELECT id, inviter_user_id, recipient_email_hash, referral_code, status
+                        """SELECT id, inviter_user_id, recipient_email_hash, recipient_contact_hash,
+                                  referral_code, status
                            FROM april_referral_share_targets
                            WHERE invite_token = %s FOR UPDATE""",
                         (token,),
@@ -2812,14 +2856,21 @@ def claim_april_referral(
                         or share_target_status in {"cancelled", "expired"}
                     ):
                         return {"success": False, "error_code": "REFERRAL_INVALID"}
-                    invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
                     stored_email_hash = str(share_target.get("recipient_email_hash") or "")
-                    if (
-                        not invitee_email_hash
-                        or not stored_email_hash
-                        or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
-                    ):
-                        return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
+                    stored_contact_hash = str(share_target.get("recipient_contact_hash") or "")
+                    # Legacy email-bound links still require the matching account.
+                    # Contact-bound links are intentionally not tied to a Google
+                    # identity: the sender selected a phone contact, while the
+                    # receiving person may open/register through any provider.
+                    if stored_email_hash:
+                        invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
+                        if (
+                            not invitee_email_hash
+                            or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
+                        ):
+                            return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
+                    elif not stored_contact_hash:
+                        return {"success": False, "error_code": "REFERRAL_INVALID"}
 
                 # A canonical authenticated account can claim at most one referral
                 # reward. Check this before the new-registration window so a repeat
