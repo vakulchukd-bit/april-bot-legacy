@@ -65,6 +65,7 @@ from storage import (
     get_free_media_quota_status, reserve_free_media_units,
     commit_free_media_reservation, release_free_media_reservation,
     claim_april_referral, confirm_april_referral_on_first_use,
+    prepare_april_referral_share, finish_april_referral_share,
     get_user_language, set_user_language, normalize_user_language,
 )
 
@@ -2527,6 +2528,49 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status_code, {"success": False, "error": error})
             return
 
+        # A share target is reserved against the intended recipient email before
+        # the native share sheet opens; claim later verifies the authenticated account.
+        if self.path in {"/api/referrals/prepare", "/api/referrals/finish"}:
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error_code": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 16 * 1024:
+                    self._send_json(413, {"success": False, "error_code": "REQUEST_BODY_TOO_LARGE"})
+                    return
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
+                    return
+                if self.path == "/api/referrals/prepare":
+                    result = prepare_april_referral_share(canonical_user_id, body.get("recipient_email"))
+                else:
+                    result = finish_april_referral_share(
+                        canonical_user_id,
+                        body.get("invite_token"),
+                        body.get("sent") is True,
+                    )
+                error_code = _text(result.get("error_code"))
+                status = 200 if result.get("success") else (
+                    409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE"} else
+                    400 if error_code in {"REFERRAL_INVALID", "REFERRAL_RECIPIENT_INVALID"} else 503
+                )
+                self._send_json(status, result)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error_code": "INVALID_JSON"})
+            except Exception as exc:
+                print(f"[APRIL_REFERRAL] share_route_failed type={type(exc).__name__}", flush=True)
+                self._send_json(503, {"success": False, "error_code": "REFERRAL_UNAVAILABLE"})
+            return
+
         # Referral claims are authenticated by the same Web-to-Bot service
         # boundary as account registration. The inviter is resolved from the
         # server-owned referral code; no inviter/user ID is accepted from Web.
@@ -2550,10 +2594,18 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if not isinstance(body, dict):
                     self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
                     return
-                result = claim_april_referral(canonical_user_id, body.get("referral_code"))
+                result = claim_april_referral(
+                    canonical_user_id,
+                    body.get("referral_code"),
+                    body.get("invite_token"),
+                )
                 status = 200 if result.get("success") else (
                     409 if result.get("error_code") in {"REFERRAL_ALREADY_USED", "REFERRAL_SELF_INVITE"} else
-                    400 if result.get("error_code") in {"REFERRAL_INVALID", "REFERRAL_REGISTRATION_WINDOW_EXPIRED"} else 503
+                    400 if result.get("error_code") in {
+                        "REFERRAL_INVALID",
+                        "REFERRAL_REGISTRATION_WINDOW_EXPIRED",
+                        "REFERRAL_RECIPIENT_MISMATCH",
+                    } else 503
                 )
                 self._send_json(status, result)
             except (UnicodeDecodeError, json.JSONDecodeError):
