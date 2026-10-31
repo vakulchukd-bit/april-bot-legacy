@@ -2528,8 +2528,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status_code, {"success": False, "error": error})
             return
 
-        # A share target is reserved against the intended recipient email before
-        # the native share sheet opens; claim later verifies the authenticated account.
+        # A share target is reserved against a contact explicitly selected by the
+        # sender before the native share sheet opens. Only an HMAC of the contact
+        # phone is persisted; no recipient email or Google identity is required.
         if self.path in {"/api/referrals/prepare", "/api/referrals/finish"}:
             if not self._service_authorized():
                 self.close_connection = True
@@ -2551,7 +2552,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
                     return
                 if self.path == "/api/referrals/prepare":
-                    result = prepare_april_referral_share(canonical_user_id, body.get("recipient_email"))
+                    result = prepare_april_referral_share(canonical_user_id, body.get("recipient_phones"))
                 else:
                     result = finish_april_referral_share(
                         canonical_user_id,
@@ -2561,7 +2562,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
                     409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE"} else
-                    400 if error_code in {"REFERRAL_INVALID", "REFERRAL_RECIPIENT_INVALID"} else 503
+                    400 if error_code in {"REFERRAL_INVALID", "REFERRAL_CONTACT_INVALID"} else 503
                 )
                 self._send_json(status, result)
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
