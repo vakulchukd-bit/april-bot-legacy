@@ -1499,6 +1499,9 @@ async def execute(
     uid = _text(user_id)
     original = _text(text)
     current_text = _text(internal_text or original)
+    # User-visible Free/Premium policy notices follow the authenticated account's
+    # saved Settings language, not the language used in the latest chat message.
+    restriction_language = _text(kwargs.get("account_language") or display_language or "en")
     try:
         user_utc_offset_minutes = kwargs.get("user_utc_offset_minutes")
         user_utc_offset_minutes = int(float(user_utc_offset_minutes)) if user_utc_offset_minutes is not None else None
@@ -2328,7 +2331,7 @@ async def execute(
 
     provider_started = time.perf_counter()
     if image_edit_restricted_pre_provider:
-        local_notice = _localized_free_image_edit_notice(display_language)
+        local_notice = _localized_free_image_edit_notice(restriction_language)
         provider_packet = _local_text_provider_packet(
             local_notice,
             identity,
@@ -2342,7 +2345,7 @@ async def execute(
             message_key=_apr_diag_ref(identity.get("message_id")),
         )
     elif free_media_limit_reached:
-        local_notice = _localized_free_media_limit_notice(display_language)
+        local_notice = _localized_free_media_limit_notice(restriction_language)
         provider_packet = _local_text_provider_packet(
             local_notice,
             identity,
@@ -2456,9 +2459,7 @@ async def execute(
         # The local policy response was selected before Provider. Keep this
         # second guard so a malformed future packet cannot leak a replacement
         # image or image artifact through the SceneContract.
-        notice = _localized_free_image_edit_notice(
-            _text((interpretation.get("input") or {}).get("display_language"))
-        )
+        notice = _localized_free_image_edit_notice(restriction_language)
         answer = notice
         raw["answer"] = notice
         raw["content"] = notice
