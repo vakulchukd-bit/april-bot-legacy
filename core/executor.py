@@ -839,6 +839,96 @@ async def _generate_image_artifact(
     return await generate_from_spec(spec, variant="processor_route")
 
 
+
+async def _edit_free_image_artifact(
+    interpretation: dict[str, Any],
+    visual_context: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Edit a source image after the caller has reserved one Free referral unit."""
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    if not bool(intent.get("free_image_edit_bonus_authorized")) or intent.get("image_operation") != "edit":
+        return None
+    # Reuse the exact, source-aware edit implementation used by Premium. The
+    # entitlement check and one-unit reservation remain exclusively in Free.
+    from core.Premium_executor import _edit_image_artifact as edit_source_image
+
+    image_context = visual_context or []
+    data_uri_sources = sum(
+        1 for item in image_context
+        if isinstance(item, dict) and any(
+            isinstance(item.get(key), str) and item.get(key, "").startswith("data:image/")
+            for key in ("image_url", "data_uri", "src", "image_data_uri")
+        )
+    )
+    _apr_timing_log(
+        "free_image_edit_source_check", None,
+        visual_items=len(image_context),
+        data_uri_sources=data_uri_sources,
+        instruction_present=bool(_text(intent.get("image_edit_instruction"))),
+    )
+    result = await edit_source_image(interpretation, image_context)
+    if not isinstance(result, dict) or not result.get("success") or not result.get("image_bytes"):
+        _apr_timing_log(
+            "free_image_edit_source_result_missing", None,
+            result_type=type(result).__name__,
+            result_success=bool(result.get("success")) if isinstance(result, dict) else False,
+            image_bytes_present=bool(result.get("image_bytes")) if isinstance(result, dict) else False,
+            visual_items=len(image_context),
+            data_uri_sources=data_uri_sources,
+        )
+        return None
+
+    image_bytes = bytes(result["image_bytes"])
+    mime_type = _text(result.get("mime_type") or "image/png")
+    image_data_uri = _mime_data_uri(image_bytes, mime_type)
+    width = int(result.get("width") or 0)
+    height = int(result.get("height") or 0)
+    display_language = str((interpretation.get("input") or {}).get("display_language") or "").strip().lower().replace("_", "-")
+    if display_language.startswith(("ua", "uk")):
+        image_alt = "Відредаговане зображення"
+        image_caption = "Результат редагування вихідного зображення"
+    elif display_language.startswith("en"):
+        image_alt = "Edited image"
+        image_caption = "Edited result from the original image"
+    else:
+        image_alt = "Отредактированное изображение"
+        image_caption = "Результат редактирования исходного изображения"
+    image_item = {
+        "src": image_data_uri,
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "alt": image_alt,
+        "caption": image_caption,
+    }
+    result["artifact"] = {
+        "artifact_type": "image",
+        "type": "image",
+        "operation": "edit",
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "images": [image_item],
+        "payload": {
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "operation": "edit",
+            "mime_type": mime_type,
+            "width": width,
+            "height": height,
+            "images": [image_item],
+        },
+    }
+    _apr_timing_log(
+        "free_image_edit_artifact_ready", None,
+        image_bytes=len(image_bytes),
+        mime_type=mime_type,
+        width=width,
+        height=height,
+        has_render_source=bool(image_item.get("src")),
+    )
+    return result
+
 def _build_scene(
     response: MachineResponse,
     identity: dict[str, str],
@@ -2013,7 +2103,7 @@ async def execute(
     # The normal Free pack remains reserved for analysis and new-image generation.
     if image_edit_restricted_pre_provider and visual_context:
         edit_reservation = reserve_free_media_units(
-            uid, identity["message_id"], 1, "image_edit", bonus_only=True
+            uid, identity["message_id"], 1, "image_edit"
         )
         if edit_reservation.get("allowed"):
             free_image_edit_reserved = bool(edit_reservation.get("tracked", False))
@@ -2022,6 +2112,14 @@ async def execute(
             intent_policy_pre_provider["wants_image"] = True
             intent_policy_pre_provider["explicit_generation_request"] = False
             intent_policy_pre_provider["image_edit_instruction"] = original or current_text
+            intent_policy_pre_provider["image_edit_requested"] = True
+            intent_policy_pre_provider["image_operation"] = "edit"
+            intent_policy_pre_provider["source_image_available"] = True
+            intent_policy_pre_provider["image_output_permission"] = True
+            intent_policy_pre_provider["image_generation_blocked"] = False
+            intent_policy_pre_provider["free_image_edit_bonus_authorized"] = True
+            intent_policy_pre_provider["free_image_edit_bonus_units"] = 1
+            intent_policy_pre_provider["free_image_edit_bonus_operation"] = "image_edit"
             intent_policy_pre_provider["requested_outputs"] = list(dict.fromkeys(
                 list(intent_policy_pre_provider.get("requested_outputs") or ["text"]) + ["image"]
             ))
@@ -2585,8 +2683,7 @@ async def execute(
         image_started = time.perf_counter()
         if free_image_edit_reserved:
             try:
-                from core.Premium_executor import _edit_image_artifact
-                image_result = await _edit_image_artifact(interpretation, visual_context or [])
+                image_result = await _edit_free_image_artifact(interpretation, visual_context or [])
                 if image_result:
                     commit_free_media_reservation(uid, identity["message_id"], "image_edit")
                     _apr_timing_log(
