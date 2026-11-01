@@ -1232,6 +1232,19 @@ def _persist_asset_analysis_summaries(
     return changed
 
 
+def _bounded_text_file_excerpt(value: Any, limit: int) -> tuple[str, bool]:
+    """Bound recalled document text while retaining both its opening and ending."""
+    source = _text(value)
+    maximum = max(256, int(limit or 0))
+    if len(source) <= maximum:
+        return source, False
+    marker = "\n\n[… middle omitted to fit this plan's single-request context …]\n\n"
+    available = max(1, maximum - len(marker))
+    head = int(available * 0.68)
+    tail = available - head
+    return source[:head] + marker + (source[-tail:] if tail else ""), True
+
+
 def _restore_selected_assets(
     uid: str,
     identity: dict[str, str],
@@ -1480,6 +1493,23 @@ def _restore_selected_assets(
                 "analysis_key_details": analysis_key_details,
                 "requires_original_analysis": True,
             })
+    if file_contents:
+        # Match the Free ingress cap on recalled assets as well. Without this,
+        # a later follow-up could restore the original 48k-character sidecar and
+        # bypass the 1,800-token request budget even though the first upload fit.
+        total_budget = 2200
+        per_file_budget = max(256, total_budget // max(1, len(file_contents)))
+        for file_item in file_contents:
+            if not isinstance(file_item, dict):
+                continue
+            original_text = _text(file_item.get("persistence_content") or file_item.get("content"))
+            file_item.setdefault("persistence_content", original_text)
+            source_chars = int(file_item.get("source_chars") or len(original_text))
+            file_item["source_chars"] = source_chars
+            excerpt, was_excerpted = _bounded_text_file_excerpt(original_text, per_file_budget)
+            file_item["content"] = excerpt
+            file_item["reader_truncated"] = bool(file_item.get("reader_truncated")) or was_excerpted
+
     if restored_meta:
         # Do not place OCR or semantic details from documents into operational
         # logs. The returned metadata still carries the sidecar into Provider.
