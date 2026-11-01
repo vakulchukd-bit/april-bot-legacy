@@ -398,9 +398,9 @@ def init_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
                     ON april_referral_invites(inviter_user_id, created_at DESC)
                 """)
-                # Share targets support legacy email-bound links and the current
-                # contact-picker flow. New rows store only a keyed HMAC of the
-                # selected contact phone set; raw contact details are not persisted.
+                # Share targets retain nullable legacy email/contact hashes for
+                # old invitation URLs. New messenger-first links deliberately leave
+                # both fields empty and are claimed once by a new authenticated April ID.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS april_referral_share_targets (
                         id BIGSERIAL PRIMARY KEY,
@@ -427,9 +427,8 @@ def init_db() -> None:
                 # the later invitee claim from granting the same bonus a second time.
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_rewarded_at TIMESTAMPTZ")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_reward_units INTEGER NOT NULL DEFAULT 0")
-                # New invitations identify a recipient through an explicitly selected
-                # device contact. Only its HMAC digest is stored; legacy email-bound
-                # rows remain readable and keep their old verification behavior.
+                # Legacy invitation hashes remain nullable for backwards compatibility.
+                # New messenger-first links store no contact data at all.
                 cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_email_hash DROP NOT NULL")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS recipient_contact_hash TEXT")
                 cur.execute("""
@@ -2233,53 +2232,6 @@ def _referral_recipient_email_hash(value: Any) -> str | None:
     return hmac.new(secret.encode("utf-8"), email.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _normalize_referral_recipient_phone(value: Any) -> str | None:
-    """Normalize all phone values returned for one selected device contact."""
-    values = value if isinstance(value, (list, tuple)) else [value]
-    normalized: set[str] = set()
-    for item in values[:10]:
-        raw = str(item or "").strip()
-        if not raw or len(raw) > 80:
-            continue
-        # Formatting characters are irrelevant for a repeated selection of the
-        # same contact. Keep digits only and sort the set so contact field order
-        # does not change its fingerprint. No country code is guessed.
-        digits = re.sub(r"\D", "", raw)
-        if 7 <= len(digits) <= 15:
-            normalized.add(digits)
-    return "|".join(sorted(normalized)) if normalized else None
-
-
-def _referral_recipient_contact_hash(value: Any) -> str | None:
-    """Return keyed hashes for each valid phone of one selected contact.
-
-    Multiple digests are stored joined in the existing text column. That lets a
-    later entry of any one of a contact's phone numbers match the original
-    selection, without storing raw numbers or adding a new table.
-    """
-    normalized = _normalize_referral_recipient_phone(value)
-    secret = str(
-        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
-        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
-        or ""
-    ).strip()
-    if not normalized or len(secret) < 32:
-        return None
-    key = secret.encode("utf-8")
-    phones = [phone for phone in normalized.split("|") if phone]
-    digests = {
-        hmac.new(key, f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
-        for phone in phones
-    }
-    # Keep the old combined-set digest as well, so invitations created by the
-    # earlier implementation remain detectable after this migration.
-    if phones:
-        digests.add(
-            hmac.new(key, f"contact:{'|'.join(phones)}".encode("utf-8"), hashlib.sha256).hexdigest()
-        )
-    return "|".join(sorted(digests)) if digests else None
-
-
 def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
     """Create the one quota row for a canonical authenticated user."""
     code = _free_media_make_referral_code()
@@ -2474,7 +2426,7 @@ def reserve_free_media_units(
         unit_count = int(units)
     except (TypeError, ValueError):
         unit_count = 0
-    if not uid or not message_key or operation_key not in {"attachment", "generation"} or unit_count < 1 or unit_count > 6:
+    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"} or unit_count < 1 or unit_count > 6:
         return {"allowed": False, "error_code": "FREE_MEDIA_REQUEST_INVALID"}
     conn = get_conn()
     if not conn:
@@ -2536,8 +2488,21 @@ def reserve_free_media_units(
                         **status,
                     }
 
-                base_units = min(unit_count, base_remaining)
-                bonus_units = unit_count - base_units
+                if operation_key == "image_edit":
+                    # Free image editing is unlocked only by an unused referral
+                    # bonus. The ordinary six-unit Free pack must never pay for edits.
+                    if bonus < unit_count:
+                        status = _free_media_status_payload(row, current)
+                        return {
+                            "allowed": False,
+                            "error_code": "FREE_IMAGE_EDIT_PREMIUM_REQUIRED",
+                            **status,
+                        }
+                    base_units = 0
+                    bonus_units = unit_count
+                else:
+                    base_units = min(unit_count, base_remaining)
+                    bonus_units = unit_count - base_units
                 new_used = used + base_units
                 new_bonus = bonus - bonus_units
                 new_cooldown = cooldown_until
@@ -2593,7 +2558,7 @@ def commit_free_media_reservation(user_id: Any, message_id: Any, operation: str)
     uid = str(user_id or "").strip()
     message_key = str(message_id or "").strip()[:180]
     operation_key = str(operation or "").strip().lower()
-    if not uid or not message_key or operation_key not in {"attachment", "generation"}:
+    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"}:
         return False
     conn = get_conn()
     if not conn:
@@ -2620,7 +2585,7 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
     uid = str(user_id or "").strip()
     message_key = str(message_id or "").strip()[:180]
     operation_key = str(operation or "").strip().lower()
-    if not uid or not message_key or operation_key not in {"attachment", "generation"}:
+    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"}:
         return False
     conn = get_conn()
     if not conn:
@@ -2680,20 +2645,17 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
         conn.close()
 
 
-def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> dict[str, Any]:
-    """Reserve one invitation for a recipient number explicitly supplied by the user.
+def prepare_april_referral_share(inviter_user_id: Any, share_channel: Any = "system_share") -> dict[str, Any]:
+    """Reserve a one-time messenger invitation without reading phone contacts.
 
-    The raw telephone number is used only to calculate HMAC digests. It is not
-    written to PostgreSQL, returned to the browser, or included in application logs.
-    A successfully shared or claimed invitation is permanently blocked for the
-    same sender/contact pair. A stale unfinished reservation is released after
-    five hours so a cancelled or interrupted preparation can be retried.
+    Recipient identity is established only when a new authenticated April account
+    claims the token. This keeps the address book out of the Web and Bot entirely.
     """
     inviter = str(inviter_user_id or "").strip()
-    contact_hash_set = _referral_recipient_contact_hash(recipient_phone)
-    contact_hashes = set(contact_hash_set.split("|")) if contact_hash_set else set()
-    if not inviter or not contact_hashes:
-        return {"success": False, "error_code": "REFERRAL_CONTACT_INVALID"}
+    channel = str(share_channel or "system_share").strip().lower()
+    allowed_channels = {"telegram", "whatsapp", "viber", "email", "other", "copy", "system_share"}
+    if not inviter or channel not in allowed_channels:
+        return {"success": False, "error_code": "REFERRAL_INVALID"}
 
     conn = get_conn()
     if not conn:
@@ -2701,8 +2663,6 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
     try:
         with conn:
             with conn.cursor() as cur:
-                # Serialize invite creation per sender so two quick taps cannot
-                # create duplicate reservations for the same contact.
                 cur.execute(
                     "SELECT user_id, email, name, provider FROM users WHERE user_id = %s FOR UPDATE",
                     (inviter,),
@@ -2713,31 +2673,29 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
 
                 quota_row = _free_media_ensure_row(cur, inviter)
                 current = now()
-                # A share sheet can be dismissed without returning a reliable
-                # delivery receipt. Only unfinished reservations expire. Once a
-                # share is confirmed (sent) or the invite is claimed, the same
-                # sender/contact pair is blocked permanently.
+                # Retire unfinished legacy phone/contact reservations so they do
+                # not block the new messenger-first flow for up to two hours.
+                cur.execute(
+                    """UPDATE april_referral_share_targets
+                       SET status = 'expired'
+                       WHERE inviter_user_id = %s AND status = 'reserved'
+                         AND (recipient_email_hash IS NOT NULL OR recipient_contact_hash IS NOT NULL)""",
+                    (inviter,),
+                )
                 cur.execute(
                     """UPDATE april_referral_share_targets
                        SET status = 'expired'
                        WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
-                    (inviter, current - timedelta(hours=5)),
+                    (inviter, current - timedelta(hours=2)),
                 )
                 cur.execute(
-                    """SELECT recipient_contact_hash FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s
-                         AND (
-                             status IN ('sent', 'claimed')
-                             OR (status = 'reserved' AND created_at >= %s)
-                         )
-                       FOR UPDATE""",
-                    (inviter, current - timedelta(hours=5)),
+                    """SELECT id FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s AND status = 'reserved'
+                       ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
+                    (inviter,),
                 )
-                for existing_row in cur.fetchall() or []:
-                    existing_hashes = set(str(existing_row.get("recipient_contact_hash") or "").split("|"))
-                    existing_hashes.discard("")
-                    if contact_hashes.intersection(existing_hashes):
-                        return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
+                if cur.fetchone():
+                    return {"success": False, "error_code": "REFERRAL_SHARE_PENDING"}
 
                 invite_token = secrets.token_urlsafe(24)
                 referral_code = str(quota_row.get("referral_code") or "").strip().upper()
@@ -2746,9 +2704,9 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
                 cur.execute(
                     """INSERT INTO april_referral_share_targets
                        (inviter_user_id, recipient_email_hash, recipient_contact_hash,
-                        invite_token, referral_code, status)
-                       VALUES (%s, NULL, %s, %s, %s, 'reserved')""",
-                    (inviter, contact_hash_set, invite_token, referral_code),
+                        invite_token, referral_code, status, share_channel)
+                       VALUES (%s, NULL, NULL, %s, %s, 'reserved', %s)""",
+                    (inviter, invite_token, referral_code, channel),
                 )
                 return {
                     "success": True,
@@ -2966,9 +2924,10 @@ def claim_april_referral(
                     stored_email_hash = str(share_target.get("recipient_email_hash") or "")
                     stored_contact_hash = str(share_target.get("recipient_contact_hash") or "")
                     # Legacy email-bound links still require the matching account.
-                    # Contact-bound links are intentionally not tied to a Google
-                    # identity: the sender selected a phone contact, while the
-                    # receiving person may open/register through any provider.
+                    # Legacy contact-bound links and new messenger-first links are
+                    # intentionally not bound to Google identity. New links leave
+                    # both hashes NULL because Android's share sheet does not reveal
+                    # the chosen recipient to the Web application.
                     if stored_email_hash:
                         invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
                         if (
@@ -2976,8 +2935,6 @@ def claim_april_referral(
                             or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
                         ):
                             return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
-                    elif not stored_contact_hash:
-                        return {"success": False, "error_code": "REFERRAL_INVALID"}
 
                 # A canonical authenticated account can claim at most one referral
                 # reward. Check this before the new-registration window so a repeat
