@@ -277,6 +277,10 @@ In attachment_summaries, create one record per supplied USER_INPUT asset when po
 
 When code is explicitly requested, include a render block like {"type":"code","renderer":"CodeBlock","viewer":"CodeBlock","language":"python","filename":"module.py","code":"<complete source>","content":"<same complete source>"}. The explanatory text remains a separate text block.
 
+When INTERPRETATION.intent.wants_copy is true, create one separate plain-text copy block using the already-composed user-facing text: {"type":"copy","renderer":"CopyBlock","viewer":"CopyBlock","payload":{"title":"","content":"<plain text to copy>"}}. Prefer copying the relevant text block content; do not duplicate the entire answer in extra prose. A request to copy code is NOT a CopyBlock request: actual source code remains type="code" with CodeBlock, which keeps its normal copy action.
+
+When INTERPRETATION.intent.wants_file is true, provide a concrete file deliverable in the same render_blocks array as type="file", renderer="FileDeliveryBlock", viewer="FileDeliveryBlock", with filename, mime_type, and a concise description. For code, keep the real source in the normal CodeBlock so the executor can persist its exact bytes and attach a secure file reference. For tables, keep the TableBlock payload; the common file-delivery adapter will create its XLSX download card from the same headers/rows. When file_delivery_mode="file_only", the executor removes the large inline code/table block only after the bytes or table export payload are secured; do not replace it with a second chat route. For "table/code plus file", preserve both representations. Never convert images or graphs into FileDeliveryBlock.
+
 For an image generation request, artifacts must contain:
 {
   "type": "image",
@@ -2419,7 +2423,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
+            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -3837,6 +3841,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "wants_image": bool(structured_intent.get("wants_image")),
             "adaptive_visual_policy": bool(structured_intent.get("adaptive_visual_policy")),
             "wants_file": bool(structured_intent.get("wants_file")),
+            "wants_copy": bool(structured_intent.get("wants_copy")),
+            "file_delivery_mode": _text(structured_intent.get("file_delivery_mode") or "with_inline"),
             "wants_code": bool(structured_intent.get("wants_code")),
             "wants_links": bool(structured_intent.get("wants_links")),
             "wants_graph": bool(structured_intent.get("wants_graph")),
@@ -4561,10 +4567,10 @@ def normalize_render_blocks(
         "text": ("MessageTextBlock", "MessageTextBlock"),
         "markdown": ("MessageTextBlock", "MessageTextBlock"),
         "code": ("CodeBlock", "CodeBlock"), "source_code": ("CodeBlock", "CodeBlock"), "code_block": ("CodeBlock", "CodeBlock"), "script": ("CodeBlock", "CodeBlock"),
-        "link": ("LinkCard", "LinkCard"), "file": ("LinkCard", "LinkCard"), "document": ("LinkCard", "LinkCard"), "file_card": ("LinkCard", "LinkCard"),
+        "link": ("LinkCard", "LinkCard"), "file": ("FileDeliveryBlock", "FileDeliveryBlock"), "document": ("FileDeliveryBlock", "FileDeliveryBlock"), "file_card": ("FileDeliveryBlock", "FileDeliveryBlock"), "copy": ("CopyBlock", "CopyBlock"), "copy_block": ("CopyBlock", "CopyBlock"), "copyable_text": ("CopyBlock", "CopyBlock"),
         "formula": ("FormulaRenderer", "FormulaRenderer"), "equation": ("FormulaRenderer", "FormulaRenderer"), "math": ("FormulaRenderer", "FormulaRenderer"), "latex": ("FormulaRenderer", "FormulaRenderer"),
         "graph": ("GraphBlock", "GraphBlock"), "graph_data": ("GraphBlock", "GraphBlock"), "chart": ("GraphBlock", "GraphBlock"), "plot": ("GraphBlock", "GraphBlock"), "graph3d": ("GraphBlock", "GraphBlock"), "graph_3d": ("GraphBlock", "GraphBlock"), "3d_graph": ("GraphBlock", "GraphBlock"), "3d_scene": ("GraphBlock", "GraphBlock"), "scene3d": ("GraphBlock", "GraphBlock"), "scene_3d": ("GraphBlock", "GraphBlock"), "plot3d": ("GraphBlock", "GraphBlock"), "plot_3d": ("GraphBlock", "GraphBlock"), "scatter3d": ("GraphBlock", "GraphBlock"), "scatter_3d": ("GraphBlock", "GraphBlock"), "surface3d": ("GraphBlock", "GraphBlock"), "surface_3d": ("GraphBlock", "GraphBlock"), "3d_surface": ("GraphBlock", "GraphBlock"), "mesh3d": ("GraphBlock", "GraphBlock"), "mesh_3d": ("GraphBlock", "GraphBlock"), "surface_plot": ("GraphBlock", "GraphBlock"), "surface_graph": ("GraphBlock", "GraphBlock"), "wireframe": ("GraphBlock", "GraphBlock"), "knowledge_graph": ("GraphBlock", "GraphBlock"), "relation_graph": ("GraphBlock", "GraphBlock"), "relations": ("GraphBlock", "GraphBlock"),
-        "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("LinkCard", "LinkCard"), "text_file": ("LinkCard", "LinkCard"), "code_file": ("LinkCard", "LinkCard"), "pdf": ("LinkCard", "LinkCard"),
+        "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "text_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "code_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "pdf": ("FileDeliveryBlock", "FileDeliveryBlock"), "spreadsheet": ("FileDeliveryBlock", "FileDeliveryBlock"), "presentation": ("FileDeliveryBlock", "FileDeliveryBlock"),
         "diagram": ("DiagramRenderer", "DiagramRenderer"), "mermaid": ("DiagramRenderer", "DiagramRenderer"), "svg": ("DiagramRenderer", "DiagramRenderer"), "scene": ("DiagramRenderer", "DiagramRenderer"), "layout": ("DiagramRenderer", "DiagramRenderer"),
         "image": ("GalleryBlock", "GalleryBlock"), "gallery": ("GalleryBlock", "GalleryBlock"), "generated_image": ("GalleryBlock", "GalleryBlock"), "screenshot": ("GalleryBlock", "GalleryBlock"), "image_gallery": ("GalleryBlock", "GalleryBlock"),
         "audio": ("MessageTextBlock", "MessageTextBlock"), "video": ("MessageTextBlock", "MessageTextBlock"),
@@ -4581,7 +4587,7 @@ def normalize_render_blocks(
             "graph_data": "graph", "chart": "graph", "plot": "graph", "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph", "3d_surface": "graph", "mesh3d": "graph", "mesh_3d": "graph", "surface_plot": "graph", "surface_graph": "graph", "wireframe": "graph",
             "table_data": "table", "equation": "formula", "math": "formula", "latex": "formula", "math_equation": "formula",
             "source_code": "code", "code_block": "code", "script": "code",
-            "file_card": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file",
+            "file_card": "file", "document_file": "file", "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy", "text_file": "file", "code_file": "file", "pdf": "file",
             "generated_image": "image", "image_gallery": "gallery", "screenshot": "image",
             "svg": "diagram", "svgblock": "diagram", "svg_block": "diagram", "mermaid": "diagram", "diagramrenderer": "diagram", "diagram_renderer": "diagram", "flowchart": "diagram", "scene": "diagram", "layout": "diagram",
         }
@@ -4628,6 +4634,14 @@ def normalize_render_blocks(
                 "source", "source_title", "schema", "format", "renderer", "representation",
             }
             direct_payload = {key: value for key, value in item.items() if key in table_keys and value not in (None, "", [], {})}
+            payload = {**direct_payload, **payload}
+        elif block_type == "copy":
+            copy_keys = {"title", "content", "text", "language", "description", "copy_action"}
+            direct_payload = {key: value for key, value in item.items() if key in copy_keys and value not in (None, "", [], {})}
+            payload = {**direct_payload, **payload}
+        elif block_type == "file":
+            file_keys = {"title", "description", "filename", "name", "mime_type", "content_type", "size_bytes", "content", "text", "code", "asset_ref", "export_payload", "source"}
+            direct_payload = {key: value for key, value in item.items() if key in file_keys and value not in (None, "", [], {})}
             payload = {**direct_payload, **payload}
         elif block_type == "diagram":
             diagram_keys = {
@@ -5634,7 +5648,7 @@ async def _repair_requested_diagram(
         PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
         int(max_output_tokens or 0),
     ))
-    if remaining_output_budget <= 0:
+    if remaining_output_budget < 256:
         return None, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
                       "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, {
             "status": "skipped_output_budget_exhausted", "output_chars": 0,
@@ -5811,7 +5825,7 @@ async def _repair_requested_graph(
         "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
         "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0,
     }
-    if remaining_output_budget <= 0:
+    if remaining_output_budget < 256:
         return None, empty_usage, {
             "status": "skipped_output_budget_exhausted", "output_chars": 0,
             "model": "not_called", "usage": empty_usage,
