@@ -72,7 +72,12 @@ def _parse_serialized_graph_answer(value: Any) -> dict[str, Any] | None:
     text = str(value or "").strip()
     if not text or len(text) > 30000 or not (text.startswith("{") and text.endswith("}")):
         return None
-    if not re.search(r"(?i)(?:['\"]graph['\"]\s*:|['\"]source_endpoints['\"]\s*:|['\"]assumption['\"]\s*:)", text):
+    if not re.search(
+        r"(?i)(?:['\"]graph['\"]\s*:|['\"]graph_payload['\"]\s*:|"
+        r"['\"]source_endpoints['\"]\s*:|['\"]assumption['\"]\s*:|"
+        r"['\"]series['\"]\s*:|['\"]points['\"]\s*:)",
+        text,
+    ):
         return None
     parsed: Any = None
     try:
@@ -87,8 +92,33 @@ def _parse_serialized_graph_answer(value: Any) -> dict[str, Any] | None:
     graph = parsed.get("graph") or parsed.get("graph_payload")
     if isinstance(graph, dict) and any(key in graph for key in ("series", "points", "values", "x_values", "x_axis")):
         return parsed
-    # Some older responses put graph data at the root but still include an
-    # assumption/source_endpoints envelope. Require clear machine-data signals.
+
+    # Current model output can put a valid graph payload directly into `content`
+    # as a Python dictionary: {title, units, series:[{label, points:[{x,y}]}]}.
+    # Accept it only when it contains drawable point/value data, not just a title.
+    series = parsed.get("series") or parsed.get("datasets") or parsed.get("traces")
+    if isinstance(series, dict):
+        series = list(series.values())
+    has_series_data = False
+    if isinstance(series, list):
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            points = item.get("points") or item.get("data_points") or item.get("data")
+            values = item.get("values") or item.get("y") or item.get("y_values")
+            if (isinstance(points, list) and len(points) >= 2) or (isinstance(values, list) and len(values) >= 2):
+                has_series_data = True
+                break
+    root_points = parsed.get("points") or parsed.get("data_points")
+    root_values = parsed.get("values") or parsed.get("y_values") or parsed.get("y")
+    has_root_data = (isinstance(root_points, list) and len(root_points) >= 2) or (isinstance(root_values, list) and len(root_values) >= 2)
+    if has_series_data or has_root_data:
+        return {
+            "graph": parsed,
+            "assumption": parsed.get("assumption") or parsed.get("description") or "",
+            "source_endpoints": parsed.get("source_endpoints") if isinstance(parsed.get("source_endpoints"), dict) else {},
+        }
+    # Older responses may put graph data at the root with an explicit envelope.
     if any(key in parsed for key in ("source_endpoints", "assumption")) and any(key in parsed for key in ("series", "points", "values", "x_axis")):
         return {"graph": parsed, "assumption": parsed.get("assumption", ""), "source_endpoints": parsed.get("source_endpoints", {})}
     return None
@@ -122,7 +152,8 @@ def _serialized_graph_to_user_markdown(parsed: dict[str, Any]) -> str:
     y_axis = graph.get("y_axis") if isinstance(graph.get("y_axis"), dict) else graph.get("yAxis") if isinstance(graph.get("yAxis"), dict) else {}
     x_labels = _graph_object_value(x_axis, "values", "labels", "categories")
     x_labels = x_labels if isinstance(x_labels, list) else []
-    y_label = str(_graph_object_value(y_axis, "label", "title", "unit") or "Значение").strip()
+    graph_unit = str(graph.get("units") or graph.get("unit") or "").strip()
+    y_label = str(_graph_object_value(y_axis, "label", "title", "unit") or graph_unit or "Значение").strip()
     if y_axis.get("unit") and str(y_axis.get("unit")) not in y_label:
         y_label = f"{y_label}, {y_axis['unit']}" if y_label != "Значение" else str(y_axis["unit"])
 
@@ -132,6 +163,16 @@ def _serialized_graph_to_user_markdown(parsed: dict[str, Any]) -> str:
     first_series = next((item for item in series if isinstance(item, dict)), {}) if isinstance(series, list) else {}
     values = _graph_object_value(first_series, "values", "y", "y_values")
     points = first_series.get("points") or first_series.get("data_points") or []
+    if isinstance(points, list) and not x_labels:
+        point_labels = [
+            point.get("x", point.get("label", point.get("name", f"Точка {index + 1}")))
+            for index, point in enumerate(points)
+            if isinstance(point, dict)
+        ]
+        if point_labels:
+            x_labels = point_labels
+        else:
+            x_labels = [point[0] for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
     if not isinstance(values, list) and isinstance(points, list):
         values = [point.get("y", point.get("value")) for point in points if isinstance(point, dict)]
         if not values:
@@ -253,14 +294,21 @@ def _repair_graph_text_answer(answer: str, current_request: str, render_blocks: 
 
 
 def _sanitize_graph_dump_in_answer(answer: str, render_blocks: Any) -> tuple[str, bool]:
-    """Hide accidental serialized graph dictionaries from the user without discarding their data."""
+    """Hide serialized graph dictionaries and keep their data in GraphBlock."""
     blocks = render_blocks if isinstance(render_blocks, list) else []
     parsed = _parse_serialized_graph_answer(answer)
+    graph_data: dict[str, Any] | None = None
     clean_text = _serialized_graph_to_user_markdown(parsed) if parsed else str(answer or "").strip()
     changed = bool(parsed and clean_text != str(answer or "").strip())
+    if parsed:
+        candidate_graph = parsed.get("graph") or parsed.get("graph_payload")
+        if isinstance(candidate_graph, dict):
+            nested = candidate_graph.get("payload")
+            graph_data = dict(nested) if isinstance(nested, dict) else dict(candidate_graph)
+
     if not changed:
-        # A malformed answer field can coexist with a clean canonical answer; repair
-        # only text blocks which independently contain the serialized graph wrapper.
+        # A malformed answer field can coexist with a serialized graph in a text
+        # render block. Recover the graph data and replace that text block too.
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -272,7 +320,12 @@ def _sanitize_graph_dump_in_answer(answer: str, render_blocks: Any) -> tuple[str
             if parsed_block:
                 clean_text = _serialized_graph_to_user_markdown(parsed_block)
                 changed = True
+                candidate_graph = parsed_block.get("graph") or parsed_block.get("graph_payload")
+                if isinstance(candidate_graph, dict):
+                    nested = candidate_graph.get("payload")
+                    graph_data = dict(nested) if isinstance(nested, dict) else dict(candidate_graph)
                 break
+
     if changed:
         for block in blocks:
             if not isinstance(block, dict):
@@ -289,17 +342,50 @@ def _sanitize_graph_dump_in_answer(answer: str, render_blocks: Any) -> tuple[str
                             if key in block["payload"]:
                                 block["payload"][key] = clean_text
             elif kind in {"graph", "chart", "plot", "graphblock"}:
-                # An explanation copied from the machine wrapper would re-leak the
-                # same dictionary beneath the actual graph. Drop only that bad field.
+                # Attach machine data only if the model returned an empty renderer
+                # shell. Never overwrite an already populated GraphBlock payload.
+                payload = block.get("payload")
+                payload = dict(payload) if isinstance(payload, dict) else {}
+                graph_registration = get_web_renderer_registration("graph") or {}
+                graph_payload_keys = graph_registration.get("payload_keys", [])
+                if not isinstance(graph_payload_keys, (list, tuple, set)):
+                    graph_payload_keys = []
+                graph_payload_keys = tuple(graph_payload_keys) + (
+                    "series", "datasets", "traces", "curves", "points", "data_points",
+                    "coordinates", "x", "y", "z", "x_values", "y_values", "z_values",
+                    "categories", "labels", "data_table", "matrix", "axes", "representation",
+                    "chart_type", "visualization", "graph_type", "plot_type", "fn", "function",
+                    "expression", "equation", "formula", "math_expression", "mathematical_expression",
+                    "surface", "surface_grid", "surface_function", "surface_equation", "surface_formula",
+                    "z_function", "z_expression", "spheres", "objects_3d", "objects3d", "objects",
+                    "shapes", "shape", "meshes", "mesh", "geometry", "scene", "vertices", "edges",
+                    "faces", "triangles", "indices", "polygons", "normals", "isosurfaces", "volumes",
+                    "slices", "paths", "lines", "vectors", "orbits", "trajectories", "animation",
+                )
+                has_payload_data = any(
+                    key in payload and payload.get(key) not in (None, "", [], {})
+                    for key in graph_payload_keys
+                )
+                if graph_data and not has_payload_data:
+                    merged = dict(graph_data)
+                    merged.update({key: value for key, value in payload.items() if key not in merged})
+                    block["payload"] = merged
+                    block.setdefault("title", str(merged.get("title") or "График"))
+                    block.setdefault("renderer", "GraphBlock")
+                    block.setdefault("viewer", "GraphBlock")
+                elif payload:
+                    block["payload"] = payload
+                # Drop an explanation/caption only when it is itself a serialized
+                # graph object; preserve ordinary explanatory text.
                 for key in ("explanation", "render_explanation", "what_it_shows", "caption"):
                     field_value = block.get(key)
-                    if isinstance(field_value, str) and ( _parse_serialized_graph_answer(field_value) or re.search(r"(?i)\{\s*['\"]?(?:assumption|source_endpoints)['\"]?\s*:", field_value)):
+                    if isinstance(field_value, str) and _parse_serialized_graph_answer(field_value):
                         block.pop(key, None)
                 payload = block.get("payload")
                 if isinstance(payload, dict):
                     for key in ("explanation", "render_explanation", "what_it_shows", "caption"):
                         field_value = payload.get(key)
-                        if isinstance(field_value, str) and (_parse_serialized_graph_answer(field_value) or re.search(r"(?i)\{\s*['\"]?(?:assumption|source_endpoints)['\"]?\s*:", field_value)):
+                        if isinstance(field_value, str) and _parse_serialized_graph_answer(field_value):
                             payload.pop(key, None)
     return clean_text, changed
 
