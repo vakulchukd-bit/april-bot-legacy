@@ -2660,7 +2660,9 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
 
     The raw telephone number is used only to calculate an HMAC digest. It is not
     written to PostgreSQL, returned to the browser, or included in application logs.
-    Re-sending to the same selected contact is blocked for five hours.
+    A successfully shared or claimed invitation is permanently blocked for the
+    same sender/contact pair. A stale unfinished reservation is released after
+    five hours so a cancelled or interrupted preparation can be retried.
     """
     inviter = str(inviter_user_id or "").strip()
     contact_hash = _referral_recipient_contact_hash(recipient_phone)
@@ -2686,8 +2688,9 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
                 quota_row = _free_media_ensure_row(cur, inviter)
                 current = now()
                 # A share sheet can be dismissed without returning a reliable
-                # delivery receipt. Expire stale reservations, then check only
-                # sent/reserved/claimed attempts from the last five hours.
+                # delivery receipt. Only unfinished reservations expire. Once a
+                # share is confirmed (sent) or the invite is claimed, the same
+                # sender/contact pair is blocked permanently.
                 cur.execute(
                     """UPDATE april_referral_share_targets
                        SET status = 'expired'
@@ -2697,8 +2700,10 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
                 cur.execute(
                     """SELECT status FROM april_referral_share_targets
                        WHERE inviter_user_id = %s AND recipient_contact_hash = %s
-                         AND status IN ('reserved', 'sent', 'claimed')
-                         AND COALESCE(sent_at, created_at) >= %s
+                         AND (
+                             status IN ('sent', 'claimed')
+                             OR (status = 'reserved' AND created_at >= %s)
+                         )
                        LIMIT 1 FOR UPDATE""",
                     (inviter, contact_hash, current - timedelta(hours=5)),
                 )
