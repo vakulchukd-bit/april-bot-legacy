@@ -3062,7 +3062,6 @@ async def execute(
             source_hash = hashlib.sha256(code_bytes).hexdigest()
             if source_hash in seen_source_hashes:
                 continue
-            seen_source_hashes.add(source_hash)
             filename = _text(block.get("filename")) or f"april-output-{identity['message_id'][-10:]}-{block_index}.{extension}"
             # Keep a bounded exact copy in this same 12-hour dialogue row. The
             # visible CodeBlock is unchanged; the source payload allows later
@@ -3084,7 +3083,112 @@ async def execute(
                     "message_id": identity["message_id"], "sha256": source_hash,
                     "size_bytes": len(code_bytes), "language": language,
                 })
+                seen_source_hashes.add(source_hash)
                 retained_generated_file_bytes += len(code_bytes)
+
+        # Persist content-bearing FileDeliveryBlocks as real turn-scoped assets.
+        # Some provider replies emit a typed `file` render block without adding
+        # a parallel entry to `artifacts`; relying only on raw_artifacts leaves
+        # the visible file card without an authenticated download reference.
+        file_render_blocks = [
+            block for block in normalized_blocks
+            if isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or "").lower()
+            in {"file", "document", "text_file", "code_file"}
+        ]
+
+        def _file_block_payload(block: dict[str, Any]) -> dict[str, Any]:
+            merged: dict[str, Any] = {}
+            candidates: list[Any] = []
+            artifact = block.get("artifact") if isinstance(block.get("artifact"), dict) else {}
+            candidates.extend((artifact.get("payload"), artifact.get("artifact_payload")))
+            presentation = block.get("presentation") if isinstance(block.get("presentation"), dict) else {}
+            for key in ("payload", "payload_contract", "artifact_payload"):
+                envelope = presentation.get(key)
+                if isinstance(envelope, dict):
+                    candidates.extend((envelope.get("payload"), envelope))
+            for key in ("render_signal", "signal", "room_signal", "presentation_signal"):
+                envelope = block.get(key)
+                if isinstance(envelope, dict):
+                    candidates.extend((envelope.get("payload"), envelope.get("payload_contract"), envelope.get("artifact_payload")))
+            data = block.get("data")
+            if isinstance(data, dict):
+                candidates.extend((data.get("payload"), data))
+            candidates.extend((block.get("payload_contract"), block.get("payload"), block))
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                nested = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else None
+                if nested:
+                    merged.update(candidate)
+                    merged.update(nested)
+                else:
+                    merged.update(candidate)
+            return merged
+
+        for file_index, file_block in enumerate(file_render_blocks[:6], 1):
+            file_payload = _file_block_payload(file_block)
+            filename = _text(file_payload.get("filename") or file_payload.get("name") or file_payload.get("title") or file_block.get("filename"))
+            if not filename:
+                filename = f"april-output-{identity['message_id'][-10:]}-{file_index}.txt"
+            mime = _text(file_payload.get("mime_type") or file_payload.get("content_type") or "text/plain; charset=utf-8")
+            file_bytes = b""
+            text_content = ""
+            body_value = file_payload.get("content") or file_payload.get("text") or file_payload.get("code")
+            if isinstance(body_value, str) and body_value.strip():
+                text_content = body_value
+                file_bytes = body_value.encode("utf-8")
+            data_uri = file_payload.get("data_uri") or file_payload.get("file_data_uri")
+            encoded = file_payload.get("file_base64") or file_payload.get("base64") or file_payload.get("b64_json")
+            try:
+                if isinstance(data_uri, str) and data_uri.startswith("data:") and ";base64," in data_uri:
+                    header, b64 = data_uri.split(",", 1)
+                    file_bytes = base64.b64decode(b64, validate=True)
+                    mime = header[5:].split(";", 1)[0] or mime
+                    if mime.startswith("text/"):
+                        text_content = file_bytes.decode("utf-8", errors="replace")
+                elif isinstance(encoded, str) and encoded:
+                    file_bytes = base64.b64decode(encoded, validate=True)
+                    if mime.startswith("text/"):
+                        text_content = file_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                file_bytes = b""
+            if not file_bytes or len(file_bytes) > 10 * 1024 * 1024:
+                continue
+            source_hash = hashlib.sha256(file_bytes).hexdigest()
+            # A matching CodeBlock is already persisted under output_type=code;
+            # C_FILE_DELIVERY_ROOM will bind that exact hash to the file card.
+            if source_hash in seen_source_hashes:
+                continue
+            extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+            text_extensions = {"txt", "py", "js", "ts", "tsx", "jsx", "json", "sql", "sh", "html", "css", "yml", "yaml", "toml", "md", "xml", "csv"}
+            is_text_file = mime.startswith("text/") or mime in {"application/json", "application/xml"} or extension in text_extensions
+            if is_text_file and not text_content:
+                try:
+                    decoded = file_bytes.decode("utf-8")
+                    if "\x00" not in decoded:
+                        text_content = decoded
+                except UnicodeDecodeError:
+                    pass
+            if len(file_bytes) <= 2 * 1024 * 1024 and retained_generated_file_bytes + len(file_bytes) <= generated_file_retention_budget:
+                kind = "text_file" if is_text_file else "file"
+                durable_asset_payloads.append({
+                    "kind": kind, "mime_type": mime,
+                    "asset_role": "april_output", "output_type": "file",
+                    "filename": filename[:240], "message_id": identity["message_id"],
+                    "size_bytes": len(file_bytes), "sha256": source_hash,
+                    "source_type": "april_generated",
+                    "analysis_summary": f"April-generated file render artifact: {filename}"[:1200],
+                    "text_content": text_content[:48000] if kind == "text_file" else "",
+                    "content_base64": base64.b64encode(file_bytes).decode("ascii"),
+                })
+                output_asset_refs.append({
+                    "filename": filename[:240], "kind": kind, "mime_type": mime,
+                    "asset_role": "april_output", "output_type": "file",
+                    "message_id": identity["message_id"], "sha256": source_hash,
+                    "size_bytes": len(file_bytes),
+                })
+                seen_source_hashes.add(source_hash)
+                retained_generated_file_bytes += len(file_bytes)
 
         # Persist explicit file artifacts as actual bytes/text, not only as a
         # caption in JSONB. Do not duplicate an already-saved CodeBlock.
