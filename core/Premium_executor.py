@@ -39,6 +39,8 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
     list_registered_rooms,
 )
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
+from blocks.C_COPY_ROOM import attach_copy_block
+from blocks.C_FILE_DELIVERY_ROOM import attach_file_delivery_blocks
 from blocks.Premium_interpretation_identity import (
     build_interpretation_identity,
     build_interpretation,
@@ -6087,6 +6089,37 @@ async def execute(
     # Make the current Scene carry asset pointers and retrieval evidence as well
     # as the renderer blocks; no data URI or private file bytes enter the Scene.
     scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
+    plan_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    requested_for_delivery = list(plan_intent.get("requested_outputs") or request.requested_outputs or [])
+    if plan_intent.get("wants_copy") and "copy" not in requested_for_delivery:
+        requested_for_delivery.append("copy")
+    if plan_intent.get("wants_file") and "file" not in requested_for_delivery:
+        requested_for_delivery.append("file")
+    source_render_blocks = scene_contract.get("render_blocks") or result.get("render_blocks") or response.render_blocks or []
+    source_render_blocks = attach_copy_block(source_render_blocks, requested_for_delivery, answer)
+    delivery_blocks, attached_file_blocks = attach_file_delivery_blocks(
+        source_render_blocks,
+        output_asset_refs,
+        requested_for_delivery,
+        file_delivery_mode=str(plan_intent.get("file_delivery_mode") or "with_inline"),
+        language=str(display_language or "en"),
+        message_id=str(identity.get("message_id") or ""),
+    )
+    if delivery_blocks:
+        scene_contract["render_blocks"] = delivery_blocks
+        result["render_blocks"] = delivery_blocks
+        response.render_blocks = delivery_blocks
+        if attached_file_blocks and str(plan_intent.get("file_delivery_mode") or "").lower() == "file_only":
+            notice_block = next((b for b in delivery_blocks if str(b.get("type") or "").lower() == "text"), {})
+            notice = str(notice_block.get("content") or "The file is ready.")
+            answer = notice
+            response.answer = notice
+            response.content = notice
+            response.summary = notice
+            response.response = notice
+            result["answer"] = notice
+            result["content"] = notice
+            result["summary"] = notice
     scene_meta = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
     scene_meta["dialogue_assets"] = {
         "user_inputs": attachment_refs,
