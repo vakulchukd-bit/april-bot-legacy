@@ -580,21 +580,60 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
         return aliases.get(raw, raw)
 
     def block_payload(block: dict[str, Any]) -> dict[str, Any]:
-        candidates = [
-            block.get("artifact", {}).get("payload") if isinstance(block.get("artifact"), dict) else None,
-            block.get("render_signal", {}).get("payload") if isinstance(block.get("render_signal"), dict) else None,
-            block.get("signal", {}).get("payload") if isinstance(block.get("signal"), dict) else None,
-            block.get("payload"),
-        ]
+        candidates: list[Any] = []
+        artifact = block.get("artifact") if isinstance(block.get("artifact"), dict) else {}
+        candidates.extend((artifact.get("payload"), artifact.get("artifact_payload")))
+        presentation = block.get("presentation") if isinstance(block.get("presentation"), dict) else {}
+        for envelope_key in ("artifact_payload", "payload_contract"):
+            envelope = presentation.get(envelope_key)
+            if isinstance(envelope, dict):
+                candidates.extend((envelope.get("payload"), envelope))
+        for key in ("render_signal", "signal", "room_signal", "presentation_signal"):
+            envelope = block.get(key)
+            if not isinstance(envelope, dict):
+                continue
+            candidates.extend((envelope.get("payload"), envelope.get("artifact_payload"), envelope.get("payload_contract")))
+            nested_presentation = envelope.get("presentation")
+            if isinstance(nested_presentation, dict):
+                for envelope_key in ("artifact_payload", "payload_contract"):
+                    nested = nested_presentation.get(envelope_key)
+                    if isinstance(nested, dict):
+                        candidates.extend((nested.get("payload"), nested))
+        data = block.get("data")
+        if isinstance(data, dict):
+            candidates.extend((data.get("payload"), data))
+        candidates.extend((block.get("artifact_payload"), block.get("payload_contract"), block.get("graph"), block.get("chart"), block.get("payload")))
         merged: dict[str, Any] = {}
         for candidate in candidates:
             if isinstance(candidate, dict):
-                merged.update(candidate)
+                nested_payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else None
+                if nested_payload:
+                    merged.update(candidate)
+                    merged.update(nested_payload)
+                else:
+                    merged.update(candidate)
+        # Unwrap only known transport envelopes; preserve the outer typed payload
+        # over nested aliases so an explicit canonical value always wins.
+        for _ in range(3):
+            changed = False
+            for key in ("graph", "chart", "visual", "render_payload", "quantum_payload", "artifact_payload", "payload_contract", "payload"):
+                nested = merged.get(key)
+                if not isinstance(nested, dict):
+                    continue
+                source = nested.get("payload") if isinstance(nested.get("payload"), dict) else nested
+                updated = {**source, **merged}
+                if updated != merged:
+                    merged = updated
+                    changed = True
+            if not changed:
+                break
         # Compatibility: older providers put the typed payload directly on the block.
         for key in (
-            "columns", "headers", "rows", "data", "series", "datasets", "traces",
-            "points", "x", "y", "x_values", "y_values", "surface_function",
-            "z_function", "equation", "expression", "formula", "latex", "formulas",
+            "columns", "headers", "rows", "data", "series", "datasets", "traces", "curves",
+            "points", "coordinates", "geometry", "x", "y", "z", "x_values", "y_values", "z_values",
+            "x_axis", "y_axis", "z_axis", "axes", "values", "categories", "labels", "matrix", "data_table",
+            "surface_grid", "surface_function", "z_function", "z_expression", "objects_3d", "objects", "shapes", "meshes", "vertices", "faces",
+            "equation", "expression", "function", "fn", "formula", "latex", "formulas",
             "code", "source", "content", "text_content", "url", "href", "links", "markdown",
             "svg", "svg_payload", "drawing", "mermaid", "elements", "shapes", "nodes", "edges",
             "src", "image_base64", "image_data_uri", "base64", "images", "items", "filename",
@@ -619,18 +658,70 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
                 return True
             return bool(re.search(r"(?m)^\s*\|?.+\|.+\n\s*\|?\s*[-:| ]{3,}\s*\|?", content))
         if kind == "graph":
-            series = payload.get("series") or payload.get("datasets") or payload.get("traces")
-            has_series = isinstance(series, list) and any(
-                isinstance(item, dict) and any(item.get(k) not in (None, "", [], {}) for k in ("points", "x", "y", "data", "values", "fn", "equation", "expression", "formula"))
-                for item in series
+            series = payload.get("series") or payload.get("datasets") or payload.get("traces") or payload.get("curves")
+
+            def valid_x(value: Any) -> bool:
+                if isinstance(value, str):
+                    return bool(value.strip())
+                try:
+                    number = float(value)
+                    return not isinstance(value, bool) and number == number and abs(number) != float("inf")
+                except (TypeError, ValueError, OverflowError):
+                    return False
+
+            def valid_y(value: Any) -> bool:
+                try:
+                    number = float(value)
+                    return not isinstance(value, bool) and number == number and abs(number) != float("inf")
+                except (TypeError, ValueError, OverflowError):
+                    return False
+
+            def valid_point(point: Any) -> bool:
+                if isinstance(point, dict):
+                    x_value = point.get("x", point.get("xValue", point.get("category")))
+                    y_value = point.get("y", point.get("yValue", point.get("value")))
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    x_value, y_value = point[0], point[1]
+                else:
+                    return False
+                return valid_x(x_value) and valid_y(y_value)
+
+            def valid_series(item: Any) -> bool:
+                if not isinstance(item, dict):
+                    return valid_point(item)
+                for key in ("points", "data_points", "data"):
+                    points = item.get(key)
+                    if isinstance(points, (list, tuple)) and any(valid_point(point) for point in points):
+                        return True
+                xs = item.get("x", item.get("x_values"))
+                ys = item.get("y", item.get("y_values", item.get("values")))
+                if isinstance(xs, (list, tuple)) and isinstance(ys, (list, tuple)) and any(valid_x(x) and valid_y(y) for x, y in zip(xs, ys)):
+                    return True
+                if isinstance(ys, (list, tuple)) and any(valid_y(y) for y in ys):
+                    return True
+                representation = str(item.get("type") or item.get("representation") or "").lower()
+                return representation in {"function", "function2d", "function_2d", "line_function"} and any(
+                    isinstance(item.get(key), str) and item.get(key).strip()
+                    for key in ("fn", "equation", "expression", "formula", "function")
+                )
+
+            has_series = isinstance(series, (list, tuple)) and any(valid_series(item) for item in series)
+            has_xy = any(
+                isinstance(payload.get(xk), (list, tuple)) and isinstance(payload.get(yk), (list, tuple))
+                and any(valid_x(x) and valid_y(y) for x, y in zip(payload[xk], payload[yk]))
+                for xk, yk in (("x_values", "y_values"), ("x", "y"))
             )
-            has_xy = any(isinstance(payload.get(xk), list) and isinstance(payload.get(yk), list) and min(len(payload[xk]), len(payload[yk])) >= 2
-                         for xk, yk in (("x_values", "y_values"), ("x", "y")))
-            has_points = isinstance(payload.get("points"), list) and len(payload["points"]) >= 2
-            has_surface = any(str(payload.get(k) or "").strip() for k in ("surface_function", "z_function", "z_expression"))
+            has_points = isinstance(payload.get("points"), (list, tuple)) and any(valid_point(point) for point in payload["points"])
+            has_surface = any(
+                str(payload.get(k) or "").strip() for k in ("surface_function", "z_function", "z_expression")
+            ) or any(
+                isinstance(payload.get(k), (list, tuple)) and bool(payload.get(k))
+                for k in ("matrix", "data_table", "surface_grid", "z_values")
+            )
             has_expression = str(payload.get("equation") or payload.get("expression") or payload.get("fn") or "").strip() and str(payload.get("representation") or payload.get("graph_type") or "").lower() in {"function", "function2d", "function_2d", "surface3d", "surface_3d", "scene3d", "3d"}
-            has_3d_objects = any(isinstance(payload.get(k), list) and payload.get(k) for k in ("objects_3d", "objects", "shapes", "meshes", "spheres", "surface_grid", "z_values"))
-            return bool(has_series or has_xy or has_points or has_surface or has_expression or has_3d_objects)
+            has_3d_objects = any(isinstance(payload.get(k), (list, tuple, dict)) and payload.get(k) for k in ("objects_3d", "objects", "shapes", "meshes", "spheres", "surface_grid", "z_values"))
+            has_nodes_edges = isinstance(payload.get("nodes"), (list, tuple)) and bool(payload.get("nodes")) and isinstance(payload.get("edges"), (list, tuple)) and bool(payload.get("edges"))
+            return bool(has_series or has_xy or has_points or has_surface or has_expression or has_3d_objects or has_nodes_edges)
         if kind == "diagram":
             has_svg = any(str(payload.get(k) or "").strip() for k in ("svg", "svg_payload", "drawing"))
             has_nodes = isinstance(payload.get("nodes"), list) and len(payload["nodes"]) >= 2 and isinstance(payload.get("edges"), list) and bool(payload["edges"])
@@ -2531,9 +2622,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status_code, {"success": False, "error": error})
             return
 
-        # A share target is reserved against a phone number explicitly entered or
-        # selected by the sender before the native share sheet opens. Only keyed
-        # HMAC digests are persisted; no raw phone, email, or Google identity is stored.
+        # A share target is reserved against a contact explicitly selected by the
+        # sender before the native share sheet opens. Only an HMAC of the contact
+        # phone is persisted; no recipient email or Google identity is required.
         if self.path in {"/api/referrals/prepare", "/api/referrals/finish"}:
             if not self._service_authorized():
                 self.close_connection = True
@@ -2561,7 +2652,6 @@ class AprilHandler(BaseHTTPRequestHandler):
                         canonical_user_id,
                         body.get("invite_token"),
                         body.get("sent") is True,
-                        body.get("share_channel") or "system_share",
                     )
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
