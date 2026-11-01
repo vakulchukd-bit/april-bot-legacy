@@ -31,15 +31,19 @@ PREMIUM_RENDER_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
 PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
 PREMIUM_RECOVERY_RETRIES = 1
 PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX = PREMIUM_OUTPUT_TOKEN_LIMIT
-INPUT_TOKEN_TARGET = 3600
-MAX_PROMPT_TOKENS = min(3600, max(256, int(os.getenv("APRIL_PREMIUM_OPENAI_PROMPT_TOKEN_BUDGET", "3600") or 3600)))
+# This router is used only by the Free executor. Keep its input ceiling
+# independent from Premium's environment variable so a Premium setting can
+# never silently raise the Free budget.
+INPUT_TOKEN_TARGET = 1800
+MAX_PROMPT_TOKENS = min(
+    1800,
+    max(256, int(os.getenv("APRIL_FREE_OPENAI_PROMPT_TOKEN_BUDGET", "1800") or 1800)),
+)
 MAX_TOPIC_PROMPT_TOKENS = max(1, int(MAX_PROMPT_TOKENS * 0.30))
-# Fixed compaction allocations originate from the 1800-token Free policy. Scale
-# those allocations with Premium's configured prompt budget, capped at 3600.
-PREMIUM_PROMPT_SCALE = MAX_PROMPT_TOKENS / 1800.0
+FREE_PROMPT_SCALE = MAX_PROMPT_TOKENS / 1800.0
 
 def _scaled_prompt_tokens(base_tokens: int) -> int:
-    return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
+    return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
 PROVIDER_ROUTER_VERSION = "premium_provider_router_v7_last_answer_branch_grounding"
@@ -4375,7 +4379,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "input_text_parts": sum(1 for part in content if part.get("type") == "input_text"),
             "input_image_parts": sum(1 for part in content if part.get("type") == "input_image"),
             "input_file_parts": sum(1 for part in content if part.get("type") == "input_file"),
-            "note": "The Premium text-input preflight includes the selected system prompt, structured card, exact protected source text, attached text contents, labels, and recovery headroom. Binary image/file tokenization is not exactly knowable from this text preflight and is reported separately by provider usage.",
+            "note": "The Free text-input preflight includes the selected system prompt, structured card, exact protected source text, attached text contents, labels, and recovery headroom. Binary image/file tokenization is not exactly knowable from this text preflight and is reported separately by provider usage.",
         })
         preflight_text_tokens = full_text_input_token_estimate + recovery_headroom_tokens
         if preflight_text_tokens > MAX_PROMPT_TOKENS:
