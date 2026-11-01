@@ -78,6 +78,12 @@ MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", str(25 * 1024 * 1024
 MAX_CHAT_ATTACHMENTS = 10
 MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_TEXT_FILE_CHARS = 120_000
+# The provider prompt is deliberately bounded independently from upload bytes.
+# Free keeps its 1,800-token input ceiling; Premium keeps its 3,600-token ceiling.
+# These are per-request context caps, not upload-size caps. They leave room for
+# the system prompt, current request, and selected dialogue context.
+FREE_PROVIDER_TEXT_FILE_CHARS = 2_200
+PREMIUM_PROVIDER_TEXT_FILE_CHARS = 6_000
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v2_message_language"
 INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v3_language_resolution"
@@ -448,11 +454,26 @@ def _decode_inline_file(value: Any) -> bytes:
     return base64.b64decode(raw) if raw else b""
 
 
+def _text_file_excerpt(full_text: str, budget: int) -> tuple[str, bool]:
+    """Keep a bounded beginning/end excerpt without pretending the source is complete."""
+    source = _text(full_text)
+    limit = max(256, int(budget or 0))
+    if len(source) <= limit:
+        return source, False
+    marker = "\n\n[… middle of source omitted to fit the current plan's single-request context …]\n\n"
+    available = max(1, limit - len(marker))
+    head = int(available * 0.68)
+    tail = available - head
+    excerpt = source[:head] + marker + (source[-tail:] if tail else "")
+    return excerpt, True
+
+
 def _prepare_attachments(
     data: dict[str, Any],
     attachments: list[Any],
     *,
     voice_transcript: str = "",
+    is_premium: bool = False,
 ) -> tuple[
     str,
     list[dict[str, Any]],
@@ -468,7 +489,8 @@ def _prepare_attachments(
     text_file_contents: list[dict[str, Any]] = []
 
     text_file_count = sum(1 for att in attachments if str(getattr(att, "kind", "file") or "file") == "text_file")
-    per_text_file_char_budget = min(48_000, max(12_000, MAX_TOTAL_TEXT_FILE_CHARS // max(1, text_file_count)))
+    plan_text_budget = PREMIUM_PROVIDER_TEXT_FILE_CHARS if is_premium else FREE_PROVIDER_TEXT_FILE_CHARS
+    per_text_file_char_budget = min(plan_text_budget, max(256, plan_text_budget // max(1, text_file_count)))
 
     for attachment_index, att in enumerate(attachments):
         item = getattr(att, "metadata", {}) or {}
@@ -505,12 +527,11 @@ def _prepare_attachments(
         elif kind == "text_file":
             full_text = _text(item.get("text"))
             source_chars = int(item.get("source_chars") or len(full_text))
-            truncated = bool(item.get("truncated")) or len(full_text) > per_text_file_char_budget
-            # Preserve useful input from every text document without allowing
-            # ten large logs/source files to overwhelm the Premium context.
-            # The complete normalized text is saved in its sidecar; only `content`
-            # is bounded for the current model call.
-            text = full_text[:per_text_file_char_budget]
+            # Keep a representative beginning/end excerpt. The full source remains
+            # in the existing sidecar; the provider receives only what fits the
+            # plan's prompt ceiling and is explicitly told when it is incomplete.
+            text, excerpted = _text_file_excerpt(full_text, per_text_file_char_budget)
+            truncated = bool(item.get("truncated")) or excerpted or len(full_text) > per_text_file_char_budget
             if text:
                 # File contents are evidence for the Provider, never part of
                 # CURRENT_REQUEST. This prevents words such as "image",
@@ -919,8 +940,19 @@ def _handle_payload(
     input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
-            data, attachments, voice_transcript=voice_transcript
+            data, attachments, voice_transcript=voice_transcript, is_premium=is_premium
         )
+        if text_file_contents:
+            _apr_timing_log(
+                "text_file_context_bounded",
+                user_key=_apr_diag_ref(uid),
+                plan="premium" if is_premium else "free",
+                file_count=len(text_file_contents),
+                source_chars=sum(int(item.get("source_chars") or 0) for item in text_file_contents),
+                sent_chars=sum(len(_text(item.get("content"))) for item in text_file_contents),
+                per_file_char_budget=(PREMIUM_PROVIDER_TEXT_FILE_CHARS if is_premium else FREE_PROVIDER_TEXT_FILE_CHARS),
+                truncated_count=sum(1 for item in text_file_contents if item.get("reader_truncated")),
+            )
         # Free-only bounded source retention: keep small user screenshots/files
         # paired to this message for the existing 12-hour dialogue window. Voice
         # itself is transient; its transcript is stored as the message text.
@@ -2650,7 +2682,11 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
                     return
                 if self.path == "/api/referrals/prepare":
-                    result = prepare_april_referral_share(canonical_user_id, None)
+                    result = prepare_april_referral_share(
+                        canonical_user_id,
+                        None,
+                        reveal_warnings=body.get("user_initiated") is True,
+                    )
                     print(
                         "[APRIL_REFERRAL] route=prepare outcome="
                         + ("success" if result.get("success") else "failed")
@@ -2673,7 +2709,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     )
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
-                    409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE"} else
+                    409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE", "REFERRAL_PREVIOUS_INVITE_CLAIMED"} else
                     400 if error_code in {"REFERRAL_INVALID", "REFERRAL_CONTACT_INVALID"} else 503
                 )
                 self._send_json(status, result)
@@ -2711,6 +2747,12 @@ class AprilHandler(BaseHTTPRequestHandler):
                     canonical_user_id,
                     body.get("referral_code"),
                     body.get("invite_token"),
+                )
+                print(
+                    "[APRIL_REFERRAL] route=claim outcome="
+                    + ("success" if result.get("success") else "rejected")
+                    + " error_code=" + (_text(result.get("error_code")) or "none"),
+                    flush=True,
                 )
                 status = 200 if result.get("success") else (
                     409 if result.get("error_code") in {"REFERRAL_ALREADY_USED", "REFERRAL_SELF_INVITE"} else
