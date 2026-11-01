@@ -1119,6 +1119,74 @@ def _row_subject_text_lightweight(row: dict[str, Any]) -> str:
 def _row_subject_tokens(row: dict[str, Any]) -> set[str]:
     return _subject_tokens(_row_subject_text(row))
 
+
+def _row_dialogue_content_subject_tokens(row: dict[str, Any]) -> set[str]:
+    """Subject evidence from the actual USER↔APRIL text, excluding render metadata.
+
+    Image filenames, gallery labels and renderer descriptions are useful when the
+    user explicitly revisits an artifact, but they must not silently redefine the
+    subject of the last conversational answer.
+    """
+    if not isinstance(row, dict):
+        return set()
+    user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("assistant_last_message"))
+    return _subject_tokens(" ".join(part for part in (user_text[:1800], answer_text[:5200]) if part))
+
+
+def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> dict[str, Any]:
+    """Compare the new turn separately with the immediately preceding user ask and APRIL answer.
+
+    This is a routing vector, not a semantic-model confidence claim. It keeps the
+    last answer's exact identity so continuation can be tied to the same topic/branch.
+    """
+    if not isinstance(row, dict):
+        return {
+            "matched": False, "answer_overlap": 0.0, "user_request_overlap": 0.0,
+            "answer_subject_overlap": 0.0, "user_subject_overlap": 0.0,
+            "answer_subject_conflict": False, "expects_user_input": False,
+            "message_id": "", "topic_id": "", "branch_id": "",
+        }
+    user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("assistant_last_message"))
+    query_tokens = _semantic_tokens(query)
+    answer_tokens = _semantic_tokens(answer_text[:5200])
+    user_tokens = _semantic_tokens(user_text[:1800])
+    query_subjects = _subject_tokens(query)
+    answer_subjects = _subject_tokens(answer_text[:5200])
+    user_subjects = _subject_tokens(user_text[:1800])
+    answer_subject_overlap = _subject_overlap(query_subjects, answer_subjects)
+    user_subject_overlap = _subject_overlap(query_subjects, user_subjects)
+    answer_subject_conflict = _subject_conflicts(query_subjects, answer_subjects)
+    answer_overlap = _concept_overlap(query_tokens, answer_tokens)
+    user_overlap = _concept_overlap(query_tokens, user_tokens)
+    # A topical match must be grounded in the actual answer, not a sidecar image or
+    # filename. The stricter subject threshold prevents generic words ("table",
+    # "answer", "image") from becoming branch identity.
+    matched = bool(
+        query_subjects and answer_subjects and not answer_subject_conflict
+        and (
+            answer_subject_overlap >= 0.34
+            or (answer_overlap >= 0.42 and answer_subject_overlap >= 0.20)
+        )
+    )
+    answer = answer_text[:5200]
+    return {
+        "matched": matched,
+        "answer_overlap": round(float(answer_overlap), 4),
+        "user_request_overlap": round(float(user_overlap), 4),
+        "answer_subject_overlap": round(float(answer_subject_overlap), 4),
+        "user_subject_overlap": round(float(user_subject_overlap), 4),
+        "answer_subject_conflict": bool(answer_subject_conflict),
+        "expects_user_input": bool(_assistant_expects_user_input(answer)),
+        "message_id": _text(row.get("message_id"))[:120],
+        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id"))[:120],
+        "topic_origin_message_id": _text(row.get("topic_origin_message_id") or row.get("origin_message_id"))[:120],
+        "answer_chars": len(answer_text),
+    }
+
+
 def _subject_overlap(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
@@ -9261,7 +9329,8 @@ def search_dialogue_context(
     if visual_edit_revision:
         route_is_repair = True
         route_is_contextual = True
-    latest_route_subjects = _row_subject_tokens(latest_route_row) if latest_route_row else set()
+    latest_route_subjects = _row_dialogue_content_subject_tokens(latest_route_row) if latest_route_row else set()
+    latest_answer_relation = _latest_answer_relation_vector(query, latest_route_row)
     # If the user refers to the current subject by pronoun/deixis and does not
     # introduce another subject, nouns naming the requested output or an attribute
     # ("picture", "discoveries", "law") are not independent topic names. Keep those
@@ -9345,8 +9414,12 @@ def search_dialogue_context(
         latest_route_row
         and route_query_subjects
         and latest_route_subjects
-        and route_subject_overlap >= 0.40
+        and (
+            route_subject_overlap >= 0.40
+            or bool(latest_answer_relation.get("matched"))
+        )
         and not route_subject_conflict
+        and not bool(latest_answer_relation.get("answer_subject_conflict"))
         and not query_interpretation.get("explicit_topic_switch")
         and not query_interpretation.get("explicit_topic_introduction")
         and not history_request
@@ -9750,6 +9823,12 @@ def search_dialogue_context(
         latest_subject_count=len(latest_route_subjects),
         subject_overlap=round(route_subject_overlap, 4),
         subject_conflict=bool(route_subject_conflict),
+        latest_answer_match=bool(latest_answer_relation.get("matched")),
+        latest_answer_subject_overlap=latest_answer_relation.get("answer_subject_overlap"),
+        latest_answer_token_overlap=latest_answer_relation.get("answer_overlap"),
+        latest_user_request_overlap=latest_answer_relation.get("user_request_overlap"),
+        latest_answer_expected_user_input=bool(latest_answer_relation.get("expects_user_input")),
+        latest_answer_message_key=_apr_diag_ref(latest_answer_relation.get("message_id")),
         contextual_antecedent=bool(contextual_antecedent),
         underspecified_turn=bool(underspecified_turn),
         selected_pairs=len(selected_for_context),
@@ -9970,6 +10049,7 @@ def search_dialogue_context(
         route_decision = "NEW_TOPIC"
         latest_route_row = None
         latest_route_subjects = set()
+        latest_answer_relation = _latest_answer_relation_vector(query, None)
         route_subject_overlap = 0.0
         route_subject_conflict = False
         contextual_antecedent = False
@@ -10001,7 +10081,7 @@ def search_dialogue_context(
         "history_scan_skipped": False,
         "search_stage": "HOT_BRANCH_PROBE" if _hot_branch_only else "FULL_CONTEXT",
         "hot_branch_window_count": len(rows or []) if _hot_branch_only else 0,
-        "engine": "premium_state_manager_topic_section_search_v12_task_root_and_source_verification",
+        "engine": "premium_state_manager_topic_section_search_v13_last_answer_branch_link",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -10017,6 +10097,7 @@ def search_dialogue_context(
             "latest_subjects": sorted(latest_route_subjects)[:12],
             "subject_overlap": round(float(route_subject_overlap), 4),
             "subject_conflict": bool(route_subject_conflict),
+            "latest_answer_relation": dict(latest_answer_relation),
             "contextual_antecedent": bool(contextual_antecedent),
             "underspecified_turn": bool(underspecified_turn),
         },
@@ -10261,6 +10342,10 @@ def prepare_dialogue_context(
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
         "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
+        "latest_answer_relation": deepcopy(
+            ((context.get("routing_evidence") or {}).get("latest_answer_relation") or {})
+            if isinstance(context.get("routing_evidence"), dict) else {}
+        ),
         "selected_section": deepcopy(context.get("selected_section") or {}),
         "clarification_needed": bool(context.get("clarification_needed")),
         "clarification_prompt": _text(context.get("clarification_prompt")),
