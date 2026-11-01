@@ -547,7 +547,7 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.4"
+WEB_RENDERER_REGISTRY_VERSION = "3.5"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
@@ -568,9 +568,10 @@ WEB_RENDERER_REGISTRY = {
     "visual": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "images", "title", "description"]},
     "renderer_scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "nodes", "edges", "svg", "images", "title", "description"]},
     "visual_context": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["images", "elements", "svg", "context", "title", "description"]},
+    "copy": {"renderer": "CopyBlock", "viewer": "CopyBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "title", "language"]},
     "code": {"renderer": "CodeBlock", "viewer": "CodeBlock", "fallback_renderer": "", "payload_keys": ["code", "content", "language", "filename"]},
     "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description", "links", "markdown", "preview", "domain", "icon", "preview_image"]},
-    "file": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "path", "name"]},
+    "file": {"renderer": "FileDeliveryBlock", "viewer": "FileDeliveryBlock", "fallback_renderer": "", "payload_keys": ["filename", "name", "mime_type", "size_bytes", "asset_ref", "export_payload", "content", "text", "code", "file_url", "download_url"]},
     "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
     "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
     "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
@@ -597,7 +598,7 @@ ARTIFACT_BLOCK_MAP["function"] = "MessageTextBlock"
 # Concrete renderers that are allowed to cross the artifact/Fiber boundary.
 SUPPORTED_RENDERERS = {
     "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
-    "CodeBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
+    "CodeBlock", "CopyBlock", "FileDeliveryBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
     "DiagramRenderer",
     "SvgBlock", "ArithmeticDiagram",
 }
@@ -781,6 +782,24 @@ ROOM_REGISTRY: Dict[str, RoomRegistration] = {
         room_type="professional",
         role="social domain processing",
         capabilities=("social", "communication"),
+    ),
+    "C_COPY_ROOM": RoomRegistration(
+        room_id="C_COPY_ROOM",
+        module="blocks.C_COPY_ROOM",
+        class_name="CopyRoom",
+        artifact_type="copy",
+        room_type="text_renderer",
+        role="explicit user-requested copyable plain text",
+        capabilities=("copy", "plain_text", "clipboard"),
+    ),
+    "C_FILE_DELIVERY_ROOM": RoomRegistration(
+        room_id="C_FILE_DELIVERY_ROOM",
+        module="blocks.C_FILE_DELIVERY_ROOM",
+        class_name="FileDeliveryRoom",
+        artifact_type="file",
+        room_type="file_delivery",
+        role="authorized downloadable file delivery for text, code, tables and documents",
+        capabilities=("file_delivery", "download", "share", "text", "code", "table", "document"),
     ),
     "C_TABLE_ROOM": RoomRegistration(
         room_id="C_TABLE_ROOM",
@@ -1815,6 +1834,7 @@ SUPPORTED_PAYLOAD_TYPES = {
     "image",
     "gallery",
     "code",
+    "copy",
     "link",
     "file",
     "audio",
@@ -1933,7 +1953,7 @@ def get_web_renderer_registration(payload_type: str) -> Dict[str, Any]:
         "image_data": "image", "figure": "image", "math": "formula", "latex": "formula",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram",
-        "message": "text", "message_text": "text", "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "message": "text", "message_text": "text", "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file", "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "experimental_diagram": "diagram", "mermaid": "diagram",
         "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
@@ -2215,6 +2235,8 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
         "table_data": "table", "math": "formula", "latex": "formula",
         "generated_image": "image", "image_artifact": "image", "image_data": "image", "figure": "image",
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "document": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file", "spreadsheet": "file", "presentation": "file",
+        "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "svgblock": "diagram", "schematic": "diagram",
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
@@ -2240,7 +2262,7 @@ def _scene_block_renderer(block: Dict[str, Any]) -> str:
     canonical = ARTIFACT_BLOCK_MAP.get(block_type, "MessageTextBlock")
     generic = {"", "MessageTextBlock", "TextBlock", "MarkdownBlock"}
     # A visual artifact has exactly one specialized viewer in the SceneContract.
-    if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file"} and renderer in generic:
+    if block_type in {"formula", "graph", "table", "diagram", "image", "gallery", "link", "file", "copy"} and renderer in generic:
         return canonical
     if renderer:
         return renderer
@@ -3681,6 +3703,8 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         return bool(str(p.get("formula") or p.get("latex") or p.get("equation") or p.get("expression") or p.get("markdown") or "").strip() or (isinstance(p.get("formulas"), list) and bool(p["formulas"])) or (isinstance(p.get("latex_formulas"), list) and bool(p["latex_formulas"])))
     if block_type == "code":
         return bool(str(p.get("code") or p.get("content") or (block or {}).get("code") or "").strip())
+    if block_type == "copy":
+        return bool(str(p.get("content") or p.get("text") or (block or {}).get("content") or "").strip())
     if block_type == "link":
         links = p.get("links")
         has_link_item = isinstance(links, list) and any(
@@ -3693,10 +3717,11 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
     if block_type == "file":
         # A file renderer needs a real content/transfer reference, not just an
         # empty filename shell. Inline text files and encoded files are valid.
-        return bool(any(
-            str(p.get(key) or (block or {}).get(key) or "").strip()
-            for key in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code")
-        ))
+        return bool(
+            (isinstance(p.get("asset_ref"), dict) and str(p["asset_ref"].get("sha256") or "").strip())
+            or (isinstance(p.get("export_payload"), dict) and bool(p["export_payload"].get("headers") or p["export_payload"].get("columns")) and bool(p["export_payload"].get("rows") or p["export_payload"].get("data")))
+            or any(str(p.get(key) or (block or {}).get(key) or "").strip() for key in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code"))
+        )
     return bool(p)
 
 
@@ -3778,6 +3803,8 @@ def prepare_render_blocks_for_room_dispatch(
         "chart": "graph", "plot": "graph", "graph_data": "graph", "table_data": "table",
         "math": "formula", "latex": "formula", "generated_image": "image", "image_artifact": "image",
         "hyperlink": "link", "links": "link", "link_list": "link", "linklist": "link", "source_links": "link", "file_card": "file",
+        "document": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file", "spreadsheet": "file", "presentation": "file",
+        "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy",
         "image_gallery": "gallery", "gallery_block": "gallery", "sources_gallery": "gallery",
         "svg": "diagram", "schematic": "diagram", "experimental_diagram": "diagram",
         "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
@@ -3877,7 +3904,7 @@ def prepare_render_blocks_for_room_dispatch(
             )
         if payload:
             block["payload"] = payload
-        if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "link", "file"}:
+        if block_type in {"table", "graph", "diagram", "image", "gallery", "formula", "code", "copy", "link", "file"}:
             if not _has_render_payload(block_type, payload, block):
                 # Keep no empty visual shell; RenderMessage must never mount a fake card.
                 continue
@@ -4146,7 +4173,7 @@ def prepare_render_blocks_for_room_dispatch(
         render_aliases.get(str(item.get("type") or item.get("artifact_type") or "").strip().lower(), str(item.get("type") or item.get("artifact_type") or "").strip().lower())
         for item in result if isinstance(item, dict)
     }
-    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "file"}))
+    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "copy", "file"}))
     present_visual = sorted(set(requested_visual).intersection(rendered_types))
     missing_visual = sorted(set(requested_visual) - set(present_visual))
     coverage = round(len(present_visual) / max(1, len(requested_visual)), 3) if requested_visual else 1.0
@@ -4173,7 +4200,7 @@ def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: 
 
 
 _EXPLAINED_RENDER_TYPES = {
-    "formula", "graph", "table", "diagram", "image", "gallery", "code", "link", "file", "audio", "video"
+    "formula", "graph", "table", "diagram", "image", "gallery", "code", "copy", "link", "file", "audio", "video"
 }
 
 
