@@ -2652,6 +2652,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                         canonical_user_id,
                         body.get("invite_token"),
                         body.get("sent") is True,
+                        body.get("share_channel") or "system_share",
                     )
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
