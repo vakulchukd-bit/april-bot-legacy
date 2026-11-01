@@ -412,12 +412,14 @@ def init_db() -> None:
                         status TEXT NOT NULL DEFAULT 'reserved',
                         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         sent_at TIMESTAMPTZ,
+                        share_channel TEXT NOT NULL DEFAULT 'system_share',
                         claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
                         claimed_at TIMESTAMPTZ,
                         CHECK (status IN ('reserved', 'sent', 'claimed', 'cancelled', 'expired'))
                     )
                 """)
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_channel TEXT NOT NULL DEFAULT 'system_share'")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ")
                 # New invitations identify a recipient through an explicitly selected
@@ -2244,15 +2246,33 @@ def _normalize_referral_recipient_phone(value: Any) -> str | None:
 
 
 def _referral_recipient_contact_hash(value: Any) -> str | None:
-    phone = _normalize_referral_recipient_phone(value)
+    """Return keyed hashes for each valid phone of one selected contact.
+
+    Multiple digests are stored joined in the existing text column. That lets a
+    later entry of any one of a contact's phone numbers match the original
+    selection, without storing raw numbers or adding a new table.
+    """
+    normalized = _normalize_referral_recipient_phone(value)
     secret = str(
         os.getenv("APRIL_REFERRAL_TARGET_SECRET")
         or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
         or ""
     ).strip()
-    if not phone or len(secret) < 32:
+    if not normalized or len(secret) < 32:
         return None
-    return hmac.new(secret.encode("utf-8"), f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
+    key = secret.encode("utf-8")
+    phones = [phone for phone in normalized.split("|") if phone]
+    digests = {
+        hmac.new(key, f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
+        for phone in phones
+    }
+    # Keep the old combined-set digest as well, so invitations created by the
+    # earlier implementation remain detectable after this migration.
+    if phones:
+        digests.add(
+            hmac.new(key, f"contact:{'|'.join(phones)}".encode("utf-8"), hashlib.sha256).hexdigest()
+        )
+    return "|".join(sorted(digests)) if digests else None
 
 
 def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
@@ -2656,17 +2676,18 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
 
 
 def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> dict[str, Any]:
-    """Reserve one invitation for a contact explicitly selected on the device.
+    """Reserve one invitation for a recipient number explicitly supplied by the user.
 
-    The raw telephone number is used only to calculate an HMAC digest. It is not
+    The raw telephone number is used only to calculate HMAC digests. It is not
     written to PostgreSQL, returned to the browser, or included in application logs.
     A successfully shared or claimed invitation is permanently blocked for the
     same sender/contact pair. A stale unfinished reservation is released after
     five hours so a cancelled or interrupted preparation can be retried.
     """
     inviter = str(inviter_user_id or "").strip()
-    contact_hash = _referral_recipient_contact_hash(recipient_phone)
-    if not inviter or not contact_hash:
+    contact_hash_set = _referral_recipient_contact_hash(recipient_phone)
+    contact_hashes = set(contact_hash_set.split("|")) if contact_hash_set else set()
+    if not inviter or not contact_hashes:
         return {"success": False, "error_code": "REFERRAL_CONTACT_INVALID"}
 
     conn = get_conn()
@@ -2698,17 +2719,20 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
                     (inviter, current - timedelta(hours=5)),
                 )
                 cur.execute(
-                    """SELECT status FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s AND recipient_contact_hash = %s
+                    """SELECT recipient_contact_hash FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s
                          AND (
                              status IN ('sent', 'claimed')
                              OR (status = 'reserved' AND created_at >= %s)
                          )
-                       LIMIT 1 FOR UPDATE""",
-                    (inviter, contact_hash, current - timedelta(hours=5)),
+                       FOR UPDATE""",
+                    (inviter, current - timedelta(hours=5)),
                 )
-                if cur.fetchone():
-                    return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
+                for existing_row in cur.fetchall() or []:
+                    existing_hashes = set(str(existing_row.get("recipient_contact_hash") or "").split("|"))
+                    existing_hashes.discard("")
+                    if contact_hashes.intersection(existing_hashes):
+                        return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
 
                 invite_token = secrets.token_urlsafe(24)
                 referral_code = str(quota_row.get("referral_code") or "").strip().upper()
@@ -2719,7 +2743,7 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
                        (inviter_user_id, recipient_email_hash, recipient_contact_hash,
                         invite_token, referral_code, status)
                        VALUES (%s, NULL, %s, %s, %s, 'reserved')""",
-                    (inviter, contact_hash, invite_token, referral_code),
+                    (inviter, contact_hash_set, invite_token, referral_code),
                 )
                 return {
                     "success": True,
@@ -2734,11 +2758,22 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any) -> 
         conn.close()
 
 
-def finish_april_referral_share(inviter_user_id: Any, invite_token: Any, sent: Any) -> dict[str, Any]:
-    """Mark a prepared share as sent, or release it when the user cancels."""
+def finish_april_referral_share(
+    inviter_user_id: Any,
+    invite_token: Any,
+    sent: Any,
+    share_channel: Any = "system_share",
+) -> dict[str, Any]:
+    """Mark a prepared share as handed to the chosen app, or release on cancel.
+
+    Android's native share sheet does not return the selected target application
+    to Web, so the sender confirms the app in the April dialog after sharing.
+    """
     inviter = str(inviter_user_id or "").strip()
     token = str(invite_token or "").strip()
-    if not inviter or not token or len(token) > 128:
+    channel = str(share_channel or "system_share").strip().lower()
+    allowed_channels = {"telegram", "whatsapp", "viber", "email", "other", "copy", "system_share"}
+    if not inviter or not token or len(token) > 128 or channel not in allowed_channels:
         return {"success": False, "error_code": "REFERRAL_INVALID"}
     conn = get_conn()
     if not conn:
@@ -2753,7 +2788,7 @@ def finish_april_referral_share(inviter_user_id: Any, invite_token: Any, sent: A
                 if not _is_authenticated_row(cur.fetchone()):
                     return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
                 cur.execute(
-                    """SELECT id, status FROM april_referral_share_targets
+                    """SELECT id, status, share_channel FROM april_referral_share_targets
                        WHERE inviter_user_id = %s AND invite_token = %s FOR UPDATE""",
                     (inviter, token),
                 )
@@ -2762,7 +2797,11 @@ def finish_april_referral_share(inviter_user_id: Any, invite_token: Any, sent: A
                     return {"success": False, "error_code": "REFERRAL_INVALID"}
                 status = str(row.get("status") or "")
                 if status == "claimed":
-                    return {"success": True, "status": "claimed"}
+                    return {
+                        "success": True,
+                        "status": "claimed",
+                        "share_channel": str(row.get("share_channel") or "system_share"),
+                    }
                 if status in {"cancelled", "expired"}:
                     # Cancellation is idempotent: closing the UI twice or retrying
                     # after a lost acknowledgement must not trap the dialog open.
@@ -2772,13 +2811,19 @@ def finish_april_referral_share(inviter_user_id: Any, invite_token: Any, sent: A
                 if sent is True:
                     cur.execute(
                         """UPDATE april_referral_share_targets
-                           SET status = 'sent', sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP)
+                           SET status = 'sent',
+                               sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP),
+                               share_channel = %s
                            WHERE id = %s AND status IN ('reserved', 'sent')""",
-                        (int(row.get("id") or 0),),
+                        (channel, int(row.get("id") or 0)),
                     )
-                    return {"success": cur.rowcount == 1, "status": "sent"}
+                    return {"success": cur.rowcount == 1, "status": "sent", "share_channel": channel}
                 if status == "sent":
-                    return {"success": True, "status": "sent"}
+                    return {
+                        "success": True,
+                        "status": "sent",
+                        "share_channel": str(row.get("share_channel") or channel),
+                    }
                 cur.execute(
                     """UPDATE april_referral_share_targets SET status = 'cancelled'
                        WHERE id = %s AND status = 'reserved'""",
