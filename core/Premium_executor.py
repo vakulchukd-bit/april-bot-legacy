@@ -2960,6 +2960,19 @@ def _persist_asset_analysis_summaries(
     return changed
 
 
+def _bounded_text_file_excerpt(value: Any, limit: int) -> tuple[str, bool]:
+    """Bound recalled document text while retaining both its opening and ending."""
+    source = _text(value)
+    maximum = max(256, int(limit or 0))
+    if len(source) <= maximum:
+        return source, False
+    marker = "\n\n[… middle omitted to fit this plan's single-request context …]\n\n"
+    available = max(1, maximum - len(marker))
+    head = int(available * 0.68)
+    tail = available - head
+    return source[:head] + marker + (source[-tail:] if tail else ""), True
+
+
 def _restore_selected_assets(
     uid: str,
     identity: dict[str, str],
@@ -3302,13 +3315,21 @@ def _restore_selected_assets(
                 "requires_original_analysis": True,
             })
     if file_contents:
-        restored_text_budget = min(48_000, max(12_000, 120_000 // max(1, len(file_contents))))
+        # Premium has a 3,600-token input ceiling, not an unlimited document
+        # window. Bound restored sidecars to the same 6k-character context size
+        # used for newly uploaded Premium text files.
+        total_budget = 6000
+        restored_text_budget = max(256, total_budget // max(1, len(file_contents)))
         for file_item in file_contents:
-            original_text = _text(file_item.get("content"))
+            if not isinstance(file_item, dict):
+                continue
+            original_text = _text(file_item.get("persistence_content") or file_item.get("content"))
             file_item.setdefault("persistence_content", original_text)
-            if len(original_text) > restored_text_budget:
-                file_item["content"] = original_text[:restored_text_budget]
-                file_item["reader_truncated"] = True
+            source_chars = int(file_item.get("source_chars") or len(original_text))
+            file_item["source_chars"] = source_chars
+            excerpt, was_excerpted = _bounded_text_file_excerpt(original_text, restored_text_budget)
+            file_item["content"] = excerpt
+            file_item["reader_truncated"] = bool(file_item.get("reader_truncated")) or was_excerpted
 
     if restored_meta:
         # Do not place OCR or semantic details from documents into operational
