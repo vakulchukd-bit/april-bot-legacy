@@ -398,9 +398,9 @@ def init_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
                     ON april_referral_invites(inviter_user_id, created_at DESC)
                 """)
-                # Share targets retain nullable legacy email/contact hashes for
-                # old invitation URLs. New messenger-first links deliberately leave
-                # both fields empty and are claimed once by a new authenticated April ID.
+                # Share targets support legacy email-bound links and the current
+                # contact-picker flow. New rows store only a keyed HMAC of the
+                # selected contact phone set; raw contact details are not persisted.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS april_referral_share_targets (
                         id BIGSERIAL PRIMARY KEY,
@@ -427,10 +427,14 @@ def init_db() -> None:
                 # the later invitee claim from granting the same bonus a second time.
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_rewarded_at TIMESTAMPTZ")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_reward_units INTEGER NOT NULL DEFAULT 0")
-                # Legacy invitation hashes remain nullable for backwards compatibility.
-                # New messenger-first links store no contact data at all.
+                # New invitations are contact-free because Android's share sheet
+                # intentionally hides the selected recipient. Legacy hashed contact
+                # and email rows remain readable.
                 cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_email_hash DROP NOT NULL")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS recipient_contact_hash TEXT")
+                # Contact-free share rows must be insertable on databases that
+                # were migrated from an older NOT NULL contact-hash schema.
+                cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_contact_hash DROP NOT NULL")
                 cur.execute("""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_april_referral_target_unique_active
                     ON april_referral_share_targets(inviter_user_id, recipient_email_hash)
@@ -2232,6 +2236,53 @@ def _referral_recipient_email_hash(value: Any) -> str | None:
     return hmac.new(secret.encode("utf-8"), email.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _normalize_referral_recipient_phone(value: Any) -> str | None:
+    """Normalize all phone values returned for one selected device contact."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    normalized: set[str] = set()
+    for item in values[:10]:
+        raw = str(item or "").strip()
+        if not raw or len(raw) > 80:
+            continue
+        # Formatting characters are irrelevant for a repeated selection of the
+        # same contact. Keep digits only and sort the set so contact field order
+        # does not change its fingerprint. No country code is guessed.
+        digits = re.sub(r"\D", "", raw)
+        if 7 <= len(digits) <= 15:
+            normalized.add(digits)
+    return "|".join(sorted(normalized)) if normalized else None
+
+
+def _referral_recipient_contact_hash(value: Any) -> str | None:
+    """Return keyed hashes for each valid phone of one selected contact.
+
+    Multiple digests are stored joined in the existing text column. That lets a
+    later entry of any one of a contact's phone numbers match the original
+    selection, without storing raw numbers or adding a new table.
+    """
+    normalized = _normalize_referral_recipient_phone(value)
+    secret = str(
+        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
+        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
+        or ""
+    ).strip()
+    if not normalized or len(secret) < 32:
+        return None
+    key = secret.encode("utf-8")
+    phones = [phone for phone in normalized.split("|") if phone]
+    digests = {
+        hmac.new(key, f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
+        for phone in phones
+    }
+    # Keep the old combined-set digest as well, so invitations created by the
+    # earlier implementation remain detectable after this migration.
+    if phones:
+        digests.add(
+            hmac.new(key, f"contact:{'|'.join(phones)}".encode("utf-8"), hashlib.sha256).hexdigest()
+        )
+    return "|".join(sorted(digests)) if digests else None
+
+
 def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
     """Create the one quota row for a canonical authenticated user."""
     code = _free_media_make_referral_code()
@@ -2414,8 +2465,13 @@ def reserve_free_media_units(
     message_id: Any,
     units: int,
     operation: str,
+    *,
+    bonus_only: bool = False,
 ) -> dict[str, Any]:
-    """Atomically reserve media units. Retries of the same message are idempotent."""
+    """Atomically reserve media units. Retries of the same message are idempotent.
+
+    image_edit is bonus-only: it never consumes the ordinary six-hourly Free pack.
+    """
     # Every caller is already behind the canonical chat/auth boundary and passes
     # users.user_id. Resolve and re-open no alias lookup connection here: validate
     # that exact row under lock in the transaction below.
@@ -2477,32 +2533,19 @@ def reserve_free_media_units(
                 bonus = max(0, int(row.get("bonus_units") or 0))
                 cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
                 cooling = bool(cooldown_until and cooldown_until > current)
-                base_remaining = 0 if cooling else max(0, FREE_MEDIA_PACK_UNITS - used)
-                available = base_remaining + bonus
+                base_remaining = 0 if (cooling or bonus_only or operation_key == "image_edit") else max(0, FREE_MEDIA_PACK_UNITS - used)
+                available = bonus if (bonus_only or operation_key == "image_edit") else base_remaining + bonus
                 if unit_count > available:
                     status = _free_media_status_payload(row, current)
                     return {
                         "allowed": False,
-                        "error_code": "FREE_MEDIA_LIMIT_REACHED",
+                        "error_code": "FREE_IMAGE_EDIT_BONUS_REQUIRED" if operation_key == "image_edit" else "FREE_MEDIA_LIMIT_REACHED",
                         "limit": FREE_MEDIA_PACK_UNITS,
                         **status,
                     }
 
-                if operation_key == "image_edit":
-                    # Free image editing is unlocked only by an unused referral
-                    # bonus. The ordinary six-unit Free pack must never pay for edits.
-                    if bonus < unit_count:
-                        status = _free_media_status_payload(row, current)
-                        return {
-                            "allowed": False,
-                            "error_code": "FREE_IMAGE_EDIT_PREMIUM_REQUIRED",
-                            **status,
-                        }
-                    base_units = 0
-                    bonus_units = unit_count
-                else:
-                    base_units = min(unit_count, base_remaining)
-                    bonus_units = unit_count - base_units
+                base_units = 0 if (bonus_only or operation_key == "image_edit") else min(unit_count, base_remaining)
+                bonus_units = unit_count - base_units
                 new_used = used + base_units
                 new_bonus = bonus - bonus_units
                 new_cooldown = cooldown_until
@@ -2645,20 +2688,26 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
         conn.close()
 
 
-def prepare_april_referral_share(inviter_user_id: Any, share_channel: Any = "system_share") -> dict[str, Any]:
-    """Reserve a one-time messenger invitation without reading phone contacts.
+def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any = None) -> dict[str, Any]:
+    """Prepare one account-bound invitation link without accessing contacts.
 
-    Recipient identity is established only when a new authenticated April account
-    claims the token. This keeps the address book out of the Web and Bot entirely.
+    Android's native share sheet intentionally hides the recipient from WebView.
+    The token is therefore single-claim, tied to the inviter, and prepared once
+    before the user opens the system share sheet. Legacy phone-bound rows remain
+    readable; new rows have both recipient hashes NULL.
     """
     inviter = str(inviter_user_id or "").strip()
-    channel = str(share_channel or "system_share").strip().lower()
-    allowed_channels = {"telegram", "whatsapp", "viber", "email", "other", "copy", "system_share"}
-    if not inviter or channel not in allowed_channels:
+    if not inviter:
         return {"success": False, "error_code": "REFERRAL_INVALID"}
+
+    # For compatibility, an old caller may still send one phone. New callers do not.
+    contact_hash_set = _referral_recipient_contact_hash(recipient_phone) if recipient_phone else None
+    if recipient_phone and not contact_hash_set:
+        return {"success": False, "error_code": "REFERRAL_CONTACT_INVALID"}
 
     conn = get_conn()
     if not conn:
+        print("[APRIL_REFERRAL] event=prepare outcome=unavailable reason=database_connection", flush=True)
         return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
     try:
         with conn:
@@ -2669,53 +2718,76 @@ def prepare_april_referral_share(inviter_user_id: Any, share_channel: Any = "sys
                 )
                 inviter_row = cur.fetchone()
                 if not _is_authenticated_row(inviter_row):
+                    print("[APRIL_REFERRAL] event=prepare outcome=rejected reason=authenticated_user_required", flush=True)
                     return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
 
                 quota_row = _free_media_ensure_row(cur, inviter)
                 current = now()
-                # Retire unfinished legacy phone/contact reservations so they do
-                # not block the new messenger-first flow for up to two hours.
-                cur.execute(
-                    """UPDATE april_referral_share_targets
-                       SET status = 'expired'
-                       WHERE inviter_user_id = %s AND status = 'reserved'
-                         AND (recipient_email_hash IS NOT NULL OR recipient_contact_hash IS NOT NULL)""",
-                    (inviter,),
-                )
                 cur.execute(
                     """UPDATE april_referral_share_targets
                        SET status = 'expired'
                        WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
-                    (inviter, current - timedelta(hours=2)),
+                    (inviter, current - timedelta(hours=5)),
                 )
-                cur.execute(
-                    """SELECT id FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s AND status = 'reserved'
-                       ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
-                    (inviter,),
-                )
-                if cur.fetchone():
-                    return {"success": False, "error_code": "REFERRAL_SHARE_PENDING"}
 
-                invite_token = secrets.token_urlsafe(24)
+                # Reuse the same current contact-free reservation across quick taps,
+                # reloads and React StrictMode effect replay. It avoids orphan tokens.
+                if not contact_hash_set:
+                    cur.execute(
+                        """SELECT invite_token, referral_code
+                           FROM april_referral_share_targets
+                           WHERE inviter_user_id = %s AND recipient_contact_hash IS NULL
+                             AND recipient_email_hash IS NULL AND status = 'reserved'
+                             AND created_at >= %s
+                           ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
+                        (inviter, current - timedelta(hours=5)),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        print("[APRIL_REFERRAL] event=prepare outcome=reserved reused=true", flush=True)
+                        return {
+                            "success": True,
+                            "referral_code": str(existing.get("referral_code") or "").upper(),
+                            "invite_token": str(existing.get("invite_token") or ""),
+                            "inviter_name": str(inviter_row.get("name") or "")[:80],
+                            "reused_reservation": True,
+                        }
+                else:
+                    cur.execute(
+                        """SELECT recipient_contact_hash FROM april_referral_share_targets
+                           WHERE inviter_user_id = %s
+                             AND (status IN ('sent', 'claimed') OR
+                                  (status = 'reserved' AND created_at >= %s))
+                           FOR UPDATE""",
+                        (inviter, current - timedelta(hours=5)),
+                    )
+                    for existing_row in cur.fetchall() or []:
+                        existing_hashes = set(str(existing_row.get("recipient_contact_hash") or "").split("|"))
+                        existing_hashes.discard("")
+                        if set(contact_hash_set.split("|")) & existing_hashes:
+                            return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
+
                 referral_code = str(quota_row.get("referral_code") or "").strip().upper()
                 if not referral_code:
                     return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+                invite_token = secrets.token_urlsafe(24)
                 cur.execute(
                     """INSERT INTO april_referral_share_targets
                        (inviter_user_id, recipient_email_hash, recipient_contact_hash,
-                        invite_token, referral_code, status, share_channel)
-                       VALUES (%s, NULL, NULL, %s, %s, 'reserved', %s)""",
-                    (inviter, invite_token, referral_code, channel),
+                        invite_token, referral_code, status)
+                       VALUES (%s, NULL, %s, %s, %s, 'reserved')""",
+                    (inviter, contact_hash_set, invite_token, referral_code),
                 )
+                print("[APRIL_REFERRAL] event=prepare outcome=reserved reused=false", flush=True)
                 return {
                     "success": True,
                     "referral_code": referral_code,
                     "invite_token": invite_token,
                     "inviter_name": str(inviter_row.get("name") or "")[:80],
+                    "reused_reservation": False,
                 }
     except Exception as exc:
-        print(f"[APRIL_REFERRAL] share_prepare_failed type={type(exc).__name__}", flush=True)
+        print(f"[APRIL_REFERRAL] event=prepare outcome=error type={type(exc).__name__}", flush=True)
         return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
     finally:
         conn.close()
@@ -2924,10 +2996,9 @@ def claim_april_referral(
                     stored_email_hash = str(share_target.get("recipient_email_hash") or "")
                     stored_contact_hash = str(share_target.get("recipient_contact_hash") or "")
                     # Legacy email-bound links still require the matching account.
-                    # Legacy contact-bound links and new messenger-first links are
-                    # intentionally not bound to Google identity. New links leave
-                    # both hashes NULL because Android's share sheet does not reveal
-                    # the chosen recipient to the Web application.
+                    # Contact-bound links are intentionally not tied to a Google
+                    # identity: the sender selected a phone contact, while the
+                    # receiving person may open/register through any provider.
                     if stored_email_hash:
                         invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
                         if (
@@ -2935,6 +3006,16 @@ def claim_april_referral(
                             or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
                         ):
                             return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
+                    elif stored_contact_hash:
+                        # Legacy contact-bound invite. The HMAC cannot be compared
+                        # against a new account because the native share sheet hides
+                        # recipient identity; the one-time token + one-claim rule
+                        # remains the authoritative guard.
+                        pass
+                    else:
+                        # New contact-free link: any genuinely new authenticated
+                        # account may claim this token once. No phone/email required.
+                        pass
 
                 # A canonical authenticated account can claim at most one referral
                 # reward. Check this before the new-registration window so a repeat
