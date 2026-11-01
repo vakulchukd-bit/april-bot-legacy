@@ -6,6 +6,7 @@ Bot.ru resolves the response language from the current user-authored message and
 from __future__ import annotations
 
 from typing import Any
+import ast
 import asyncio
 import hashlib
 import json
@@ -4778,6 +4779,36 @@ def normalize_render_blocks(
     return result
 
 
+def _looks_like_serialized_graph_payload(value: Any) -> bool:
+    """Recognize graph-shaped Python/JSON literals without rejecting ordinary prose."""
+    if not isinstance(value, dict):
+        return False
+    graph_keys = {"series", "datasets", "traces", "points", "data_points", "x_values", "y_values"}
+    if not (set(value) & graph_keys):
+        return False
+    series = value.get("series") or value.get("datasets") or value.get("traces")
+    if isinstance(series, dict):
+        series = list(series.values())
+    if isinstance(series, list):
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            points = item.get("points") or item.get("data_points") or item.get("data")
+            values = item.get("values") or item.get("y") or item.get("y_values")
+            if isinstance(points, list) and len(points) >= 2:
+                return True
+            if isinstance(values, list) and len(values) >= 2:
+                return True
+    points = value.get("points") or value.get("data_points")
+    if isinstance(points, list) and len(points) >= 2:
+        return True
+    for key in ("values", "y_values", "y"):
+        values = value.get(key)
+        if isinstance(values, list) and len(values) >= 2:
+            return True
+    return False
+
+
 def _plain_public_text(value: Any) -> str:
     """Accept visible text fields, but never stringify a serialized object."""
     candidate = _text(value)
@@ -4786,10 +4817,17 @@ def _plain_public_text(value: Any) -> str:
     if candidate[:1] in {"{", "["}:
         try:
             decoded = json.loads(candidate)
-            if isinstance(decoded, (dict, list)):
-                return ""
         except Exception:
-            pass
+            # Some model responses use Python single-quoted dictionaries rather
+            # than JSON. Suppress only those that are clearly graph payloads.
+            try:
+                decoded = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                return candidate
+            return "" if _looks_like_serialized_graph_payload(decoded) else candidate
+        if isinstance(decoded, (dict, list)):
+            # Preserve the existing rule for valid JSON containers.
+            return ""
     return candidate
 
 
