@@ -395,6 +395,24 @@ def _detect_image_modification(text: str, *, has_existing_image_reference: bool 
     ):
         return True
 
+    # Natural object-first phrasing must also count as an edit: "изменить тон на
+    # картинке", "поменяй яркость на фото", "change the colour in this image".
+    # This shared detector is used by both the interpreter and the Free quota
+    # preflight, preventing the same source image from being charged twice.
+    edit_object = r"(?:тон|цвет\w*|оттен\w*|яркост\w*|контраст\w*|фон\w*|свет\w*|насыщенн\w*|резкост\w*|качество|детал\w*|tone|colour|color|brightness|contrast|background|lighting|saturation|sharpness)"
+    change_verbs = r"(?:измени\w*|поменя\w*|скорректиру\w*|отредактиру\w*|улучши\w*|обработа\w*|change\w*|adjust\w*|modify\w*|edit\w*|improve\w*)"
+    image_surface = r"(?:картинк\w*|фот\w*|изображени\w*|снимк\w*|image\w*|picture\w*|photo\w*)"
+    if has_existing_image_reference and re.search(
+        rf"\b{change_verbs}\b.{{0,55}}\b{edit_object}\b.{{0,35}}\b(?:на|в|of|in|on)\s+(?:эт\w*\s+|this\s+|the\s+)?{image_surface}\b",
+        low, re.IGNORECASE | re.DOTALL,
+    ):
+        return True
+    if has_existing_image_reference and re.search(
+        rf"\b(?:make|сделай|сделать)\b.{{0,45}}\b{image_surface}\b.{{0,35}}\b(?:тепл\w*|холодн\w*|ярче|темнее|светлее|warmer|cooler|brighter|darker|lighter)\b",
+        low, re.IGNORECASE | re.DOTALL,
+    ):
+        return True
+
     # Also catch object-level changes explicitly tied to a source supplied by
     # the user, e.g. "добавь мячик к той фотографии, что я тебе прислал".
     # Requiring both a sent/uploaded-source reference and an edit action avoids
@@ -2479,9 +2497,9 @@ def build_interpretation(
     routing_capabilities = _infer_routing_capabilities(request_text)
 
     # Keep edit restrictions separate from permitted creation. A new picture
-    # described in the current dialogue remains a normal Free generation; a
-    # request to alter an existing photo/diagram is Premium-only and must not
-    # be rerouted into a replacement generation.
+    # described in the current dialogue remains a normal Free generation. An edit
+    # request is restricted by default; the executor may authorize this exact edit
+    # only after reserving one referral-bonus unit from the Free bonus bucket.
     image_modification_requested = _detect_image_modification(
         request_text, has_existing_image_reference=has_existing_image_reference
     )
@@ -2747,7 +2765,7 @@ def build_interpretation(
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
                 "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. New images requested from the current dialogue are allowed in Free and must not receive an unsolicited package/plan disclaimer. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
-                "In Free, an explicit request to alter an existing image, photo, diagram, chart, or drawing is Premium-only: return a concise, soft localized limitation, do not ask the user to upload the image again, and do not generate a replacement image or diagram. Never set free_image_recreation to enable a generation for an edit request. Ordinary new image generation and ordinary new diagrams remain enabled.",
+                "In Free, an explicit request to alter an existing image, photo, diagram, chart, or drawing is restricted unless the executor has explicitly authorized and reserved one referral bonus operation for this exact request. When no such authorization is present, return a concise, soft localized limitation, do not ask the user to upload the image again, and do not generate a replacement image or diagram. Never set free_image_recreation to bypass this restriction. An executor-authorized referral bonus permits this one edit and consumes one bonus operation; ordinary new image generation and ordinary new diagrams remain enabled.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
