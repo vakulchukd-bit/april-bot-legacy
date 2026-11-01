@@ -63,7 +63,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v6_hot_work_branch_priority"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v7_last_answer_branch_link"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -562,6 +562,7 @@ def _build_dialogue_thread_context(
     topic_context = context.get("topic_context") if isinstance(context.get("topic_context"), dict) else {}
     relation = _text(context.get("relation") or "NEW").upper()
     latest_assistant_anchor = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    latest_answer_relation = context.get("latest_answer_relation") if isinstance(context.get("latest_answer_relation"), dict) else {}
     current_dialog_continuation = relation == "CONTINUE" and not context.get("contextual_history_match") and bool(latest_assistant_anchor)
     if current_dialog_continuation:
         # Re-anchor thread construction to the last assistant message in the
@@ -731,6 +732,21 @@ def _build_dialogue_thread_context(
         "topic": topic,
         "branch_summary": _text(branch.get("branch_summary") or anchor.get("branch_summary") or topic)[:640],
         "relation": relation,
+        "last_turn_link": {
+            "decision": (
+                "CURRENT_BRANCH_CONTINUATION" if current_dialog_continuation
+                else "HISTORICAL_BRANCH_REACTIVATION" if context.get("contextual_history_match") and relation == "CONTINUE"
+                else "NEW_TOPIC" if relation != "CONTINUE"
+                else "CONTEXT_CONTINUATION"
+            ),
+            "current_request": _text(user_text)[:320],
+            "anchor_message_id": _text(latest_answer_relation.get("message_id") or latest_assistant_anchor.get("message_id"))[:120],
+            "anchor_topic_id": _text(latest_answer_relation.get("topic_id") or topic_id)[:120],
+            "anchor_branch_id": _text(latest_answer_relation.get("branch_id") or branch_id)[:120],
+            "latest_answer_match": bool(latest_answer_relation.get("matched")) if current_dialog_continuation else False,
+            "answer_subject_overlap": float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
+            "previous_answer_expects_user_input": bool(latest_answer_relation.get("expects_user_input")),
+        },
         "topic_origin_message_id": root_message_id[:120],
         "origin_message_id": root_message_id[:120],
         "parent_message_id": parent_message_id[:120],
@@ -3987,9 +4003,9 @@ async def execute(
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
-    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_active_repair"
+    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v4_last_answer_branch_link"
     request_structure["semantic_interpretation"] = semantic_interpretation
-    request_structure["semantic_interpretation_version"] = "april_request_semantics_v4_active_branch_repair"
+    request_structure["semantic_interpretation_version"] = "april_request_semantics_v5_last_answer_branch_link"
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
@@ -4040,6 +4056,7 @@ async def execute(
             "relation_confidence": dialogue_context["relation_confidence"],
             "dialogue_thread_context": dict(dialogue_thread_context),
             "latest_assistant_anchor": dict(dialogue_context.get("latest_assistant_anchor") or {}),
+            "latest_answer_relation": dict(dialogue_context.get("latest_answer_relation") or {}),
             "topic_context": dict(dialogue_context.get("topic_context") or {}),
             "topic_context_expansion": dict(dialogue_context.get("topic_context_expansion") or {}),
             "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
@@ -4911,13 +4928,19 @@ async def execute(
     raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
     wants_image = bool((interpretation.get("intent") or {}).get("wants_image"))
     if not wants_image:
+        _unrequested_image_types = {
+            "image", "images", "gallery", "generated_image", "generated_image_gallery",
+            "image_artifact", "image_data", "image_gallery", "image_collection",
+            "image_spec", "image_generation", "image_generated", "generate_image",
+            "preview_image", "photo", "picture",
+        }
         raw_blocks = [
             block for block in raw_blocks
-            if str(block.get("type") or "").lower() not in {"image", "gallery"}
+            if str(block.get("type") or block.get("artifact_type") or "").lower() not in _unrequested_image_types
         ]
         raw_artifacts = [
             artifact for artifact in raw_artifacts
-            if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in {"image", "generated_image"}
+            if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() not in _unrequested_image_types
         ]
     else:
         # Image specs remain available in raw provider data for the generator,
@@ -4955,6 +4978,7 @@ async def execute(
     _visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
     image_pending = bool(
         _early_image_intent.get("wants_image")
+        and bool(_early_image_intent.get("image_output_permission", True))
         and not bool(_early_image_intent.get("image_generation_blocked"))
         and not _source_missing_only
         and not _visual_declined_without_plan
@@ -5047,6 +5071,7 @@ async def execute(
     visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
     image_generation_allowed = bool(
         image_intent.get("wants_image")
+        and bool(image_intent.get("image_output_permission", True))
         and not bool(image_intent.get("image_generation_blocked"))
         and not image_task_is_missing_source
         and not bool(image_intent.get("image_status_request"))
