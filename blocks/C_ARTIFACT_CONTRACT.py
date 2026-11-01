@@ -3405,26 +3405,28 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     if isinstance(artifact, dict):
         artifact_data = artifact.get("data")
         if isinstance(artifact_data, dict):
-            candidates.append(artifact_data.get("payload"))
-        candidates.extend((artifact.get("payload"), artifact_data))
+            candidates.extend((artifact_data.get("payload"), artifact_data.get("payload_contract")))
+        candidates.extend((artifact.get("payload"), artifact.get("artifact_payload"), artifact_data))
     presentation = block.get("presentation")
     if isinstance(presentation, dict):
-        payload_contract = presentation.get("payload_contract")
-        if isinstance(payload_contract, dict):
-            candidates.append(payload_contract.get("payload"))
+        for envelope_key in ("artifact_payload", "payload_contract"):
+            envelope = presentation.get(envelope_key)
+            if isinstance(envelope, dict):
+                candidates.extend((envelope.get("payload"), envelope))
     for key in ("signal", "room_signal", "render_signal", "presentation_signal"):
         envelope = block.get(key)
         if isinstance(envelope, dict):
-            candidates.append(envelope.get("payload"))
+            candidates.extend((envelope.get("payload"), envelope.get("artifact_payload"), envelope.get("payload_contract")))
             nested_presentation = envelope.get("presentation")
             if isinstance(nested_presentation, dict):
-                nested_contract = nested_presentation.get("payload_contract")
-                if isinstance(nested_contract, dict):
-                    candidates.append(nested_contract.get("payload"))
+                for envelope_key in ("artifact_payload", "payload_contract"):
+                    nested_contract = nested_presentation.get(envelope_key)
+                    if isinstance(nested_contract, dict):
+                        candidates.extend((nested_contract.get("payload"), nested_contract))
     candidates.extend((
-        block.get("data"), block.get("artifact_payload"), block.get("table"),
-        block.get("graph"), block.get("diagram"), block.get("link"),
-        block.get("content") if isinstance(block.get("content"), dict) else None,
+        block.get("data"), block.get("artifact_payload"), block.get("payload_contract"),
+        block.get("table"), block.get("graph"), block.get("chart"), block.get("diagram"),
+        block.get("link"), block.get("content") if isinstance(block.get("content"), dict) else None,
         block.get("payload"),
     ))
     diagram_direct_keys = {
@@ -3440,9 +3442,22 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
         # Copy them into the canonical payload before nested payloads are merged.
         merged.update({key: deepcopy(value) for key, value in block.items()
                        if key in diagram_direct_keys and value not in (None, "", [], {})})
+    if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
+        graph_direct_keys = {
+            "title", "description", "caption", "representation", "graph_type", "chart_type", "visualization",
+            "dimensions", "three_d", "series", "datasets", "traces", "curves", "points", "data_points",
+            "coordinates", "x", "y", "z", "x_values", "y_values", "z_values", "values", "categories", "labels",
+            "x_axis", "y_axis", "z_axis", "axes", "x_domain", "y_domain", "domain", "matrix", "data_table",
+            "surface_grid", "surface_function", "z_function", "z_expression", "equation", "expression", "fn",
+            "objects_3d", "objects", "shapes", "meshes", "vertices", "faces", "nodes", "edges", "graph_policy",
+        }
+        merged.update({key: deepcopy(value) for key, value in block.items()
+                       if key in graph_direct_keys and value not in (None, "", [], {})})
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
+    if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
+        merged = _unwrap_render_payload_envelopes(merged)
 
     if block_type == "diagram" and not str(merged.get("svg") or merged.get("svg_payload") or merged.get("drawing") or "").strip():
         # Provider responses sometimes put a concrete SVG directly in `content`
@@ -3505,6 +3520,105 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     return fallback
 
 
+def _graph_has_drawable_2d_data(payload: Dict[str, Any], series: Any = None) -> bool:
+    """Return True only when a 2D graph contains actual paired drawable data.
+
+    Labels, empty point shells and one-sided axes are not graph data. X values may
+    be numeric or categorical text; Y values must be finite numeric values.
+    """
+    def _valid_x(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        return _number_for_render(value) is not None
+
+    def _valid_point(point: Any) -> bool:
+        if isinstance(point, dict):
+            x_value = point.get("x", point.get("xValue", point.get("category")))
+            y_value = point.get("y", point.get("yValue", point.get("value")))
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            x_value, y_value = point[0], point[1]
+        else:
+            return False
+        return _valid_x(x_value) and _number_for_render(y_value) is not None
+
+    def _valid_pairs(xs: Any, ys: Any) -> bool:
+        if not isinstance(xs, (list, tuple)) or not isinstance(ys, (list, tuple)):
+            return False
+        return any(_valid_x(x_value) and _number_for_render(y_value) is not None
+                   for x_value, y_value in zip(xs, ys))
+
+    raw_series = series
+    if isinstance(raw_series, dict):
+        raw_series = list(raw_series.values())
+    if isinstance(raw_series, (list, tuple)):
+        for item in raw_series:
+            if not isinstance(item, dict):
+                if _valid_point(item):
+                    return True
+                continue
+            for points_key in ("points", "data_points", "data"):
+                raw_points = item.get(points_key)
+                if isinstance(raw_points, (list, tuple)) and any(_valid_point(point) for point in raw_points):
+                    return True
+            item_x = item.get("x", item.get("x_values"))
+            item_y = item.get("y", item.get("y_values", item.get("values")))
+            if _valid_pairs(item_x, item_y):
+                return True
+            # Values-only series are supported by GraphBlock: it assigns index
+            # positions to the Y values without inferring anything from prose.
+            if isinstance(item_y, (list, tuple)) and any(_number_for_render(value) is not None for value in item_y):
+                return True
+            function_type = str(item.get("type") or item.get("representation") or "").strip().lower()
+            if function_type in {"function", "function2d", "function_2d", "line_function"} and any(
+                isinstance(item.get(key), str) and item.get(key).strip()
+                for key in ("fn", "equation", "expression", "formula", "function")
+            ):
+                return True
+
+    for x_key, y_key in (("x", "y"), ("x_values", "y_values")):
+        if _valid_pairs(payload.get(x_key), payload.get(y_key)):
+            return True
+
+    direct_points = payload.get("points") or payload.get("data_points") or payload.get("coordinates")
+    if isinstance(direct_points, (list, tuple)) and any(_valid_point(point) for point in direct_points):
+        return True
+
+    # GraphBlock also supports a canonical values array with categorical/numeric
+    # x-axis labels; a values-only payload is therefore drawable.
+    values = payload.get("values")
+    if isinstance(values, (list, tuple)) and any(_number_for_render(value) is not None for value in values):
+        return True
+    return False
+
+
+def _unwrap_render_payload_envelopes(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Unwrap known artifact/scene transport envelopes without dropping fields."""
+    merged = dict(payload) if isinstance(payload, dict) else {}
+    wrapper_keys = (
+        "graph", "chart", "visual", "render_payload", "quantum_payload",
+        "artifact_payload", "payload_contract", "presentation_signal", "payload",
+        "room_signal", "render_signal", "signal",
+    )
+    for _ in range(3):
+        changed = False
+        for key in wrapper_keys:
+            nested = merged.get(key)
+            if not isinstance(nested, dict):
+                continue
+            nested_payload = nested.get("payload")
+            source = nested_payload if isinstance(nested_payload, dict) else nested
+            if not source:
+                continue
+            # Existing canonical/top-level values have priority; the envelope
+            # contributes only fields that were not present at this level.
+            next_merged = {**source, **merged}
+            if next_merged != merged:
+                merged = next_merged
+                changed = True
+        if not changed:
+            break
+    return merged
+
 def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
     p = payload if isinstance(payload, dict) else {}
     if block_type == "table":
@@ -3536,10 +3650,7 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             p.get("equation") or p.get("expression") or p.get("formula") or p.get("fn")
         )
         return bool(
-            (isinstance(series, list) and any(isinstance(item, dict) and (item.get("points") or item.get("x") or item.get("y") or item.get("data") or item.get("values")) for item in series))
-            or (isinstance(p.get("x_values"), list) and isinstance(p.get("y_values"), list) and min(len(p["x_values"]), len(p["y_values"])) >= 2)
-            or (isinstance(p.get("x"), list) and isinstance(p.get("y"), list) and min(len(p["x"]), len(p["y"])) >= 2)
-            or (isinstance(p.get("points"), list) and len(p["points"]) >= 2)
+            _graph_has_drawable_2d_data(p, series)
             or (isinstance(p.get("nodes"), list) and bool(p["nodes"]) and isinstance(p.get("edges"), list) and bool(p.get("edges")))
             or bool(p.get("matrix") or p.get("data_table") or p.get("surface_grid") or p.get("z_values"))
             or bool(p.get("surface_function") or p.get("z_function") or p.get("z_expression"))
