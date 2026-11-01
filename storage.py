@@ -427,6 +427,12 @@ def init_db() -> None:
                 # the later invitee claim from granting the same bonus a second time.
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_rewarded_at TIMESTAMPTZ")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_reward_units INTEGER NOT NULL DEFAULT 0")
+                # Remember rejected self-claims so the sender is warned on the next
+                # invitation attempt, before Android's share sheet opens. Also show
+                # one reminder after a previously shared link has been claimed.
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS self_claim_attempted_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS self_warning_shown_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS repeat_warning_shown_at TIMESTAMPTZ")
                 # New invitations are contact-free because Android's share sheet
                 # intentionally hides the selected recipient. Legacy hashed contact
                 # and email rows remain readable.
@@ -2688,7 +2694,12 @@ def release_free_media_reservation(user_id: Any, message_id: Any, operation: str
         conn.close()
 
 
-def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any = None) -> dict[str, Any]:
+def prepare_april_referral_share(
+    inviter_user_id: Any,
+    recipient_phone: Any = None,
+    *,
+    reveal_warnings: bool = True,
+) -> dict[str, Any]:
     """Prepare one account-bound invitation link without accessing contacts.
 
     Android's native share sheet intentionally hides the recipient from WebView.
@@ -2729,6 +2740,64 @@ def prepare_april_referral_share(inviter_user_id: Any, recipient_phone: Any = No
                        WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
                     (inviter, current - timedelta(hours=5)),
                 )
+
+                # A self-link can only be identified after its owner opens it: the
+                # Android share sheet deliberately does not expose the recipient.
+                # Persist that observation and surface one early warning on the
+                # sender's next attempt, before generating/opening another link.
+                cur.execute(
+                    """SELECT id FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s
+                         AND self_claim_attempted_at IS NOT NULL
+                         AND self_warning_shown_at IS NULL
+                       ORDER BY self_claim_attempted_at DESC, id DESC
+                       LIMIT 1 FOR UPDATE""",
+                    (inviter,),
+                )
+                self_warning = cur.fetchone()
+                if self_warning:
+                    if reveal_warnings:
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET self_warning_shown_at = %s
+                               WHERE id = %s AND self_warning_shown_at IS NULL""",
+                            (current, int(self_warning.get("id") or 0)),
+                        )
+                    print(
+                        "[APRIL_REFERRAL] event=prepare outcome=blocked reason=previous_self_claim "
+                        + ("warning=shown" if reveal_warnings else "warning=pending"),
+                        flush=True,
+                    )
+                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE", "warning_once": True, "warning_pending": not reveal_warnings}
+
+                # A claimed token has already been activated by one new account.
+                # Warn once before preparing a fresh link. The intended next
+                # recipient cannot be identified without reintroducing contacts.
+                cur.execute(
+                    """SELECT id FROM april_referral_share_targets
+                       WHERE inviter_user_id = %s AND status = 'claimed'
+                         AND claimed_by_user_id IS NOT NULL
+                         AND claimed_by_user_id <> inviter_user_id
+                         AND repeat_warning_shown_at IS NULL
+                       ORDER BY claimed_at DESC NULLS LAST, id DESC
+                       LIMIT 1 FOR UPDATE""",
+                    (inviter,),
+                )
+                repeat_warning = cur.fetchone()
+                if repeat_warning:
+                    if reveal_warnings:
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET repeat_warning_shown_at = %s
+                               WHERE id = %s AND repeat_warning_shown_at IS NULL""",
+                            (current, int(repeat_warning.get("id") or 0)),
+                        )
+                    print(
+                        "[APRIL_REFERRAL] event=prepare outcome=blocked reason=previous_invite_claimed "
+                        + ("warning=shown" if reveal_warnings else "warning=pending"),
+                        flush=True,
+                    )
+                    return {"success": False, "error_code": "REFERRAL_PREVIOUS_INVITE_CLAIMED", "warning_once": True, "warning_pending": not reveal_warnings}
 
                 # Reuse the same current contact-free reservation across quick taps,
                 # reloads and React StrictMode effect replay. It avoids orphan tokens.
@@ -2963,6 +3032,17 @@ def claim_april_referral(
                     return {"success": False, "error_code": "REFERRAL_INVALID"}
                 inviter = str(inviter_row.get("user_id") or "")
                 if not inviter or inviter == invitee:
+                    token = str(invite_token or "").strip()
+                    if inviter and token and len(token) <= 128:
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET self_claim_attempted_at = COALESCE(self_claim_attempted_at, %s)
+                               WHERE inviter_user_id = %s AND invite_token = %s
+                                 AND UPPER(referral_code) = %s
+                                 AND status IN ('reserved', 'sent', 'claimed')""",
+                            (now(), inviter, token, code),
+                        )
+                    print("[APRIL_REFERRAL] event=claim outcome=rejected reason=self_invite", flush=True)
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
                 # Lock in the same account -> quota -> share-target order as the
@@ -3056,6 +3136,14 @@ def claim_april_referral(
                     and str(inviter_row.get("provider_user_id") or "").strip()
                     == str(invitee_row.get("provider_user_id") or "").strip()
                 ):
+                    if share_target:
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET self_claim_attempted_at = COALESCE(self_claim_attempted_at, %s)
+                               WHERE id = %s AND inviter_user_id = %s""",
+                            (now(), int(share_target.get("id") or 0), inviter),
+                        )
+                    print("[APRIL_REFERRAL] event=claim outcome=rejected reason=same_provider_identity", flush=True)
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
                 # If the sender has already received the immediate share reward,
