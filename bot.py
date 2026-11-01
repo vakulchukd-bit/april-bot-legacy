@@ -899,9 +899,12 @@ def _handle_payload(
     )
     # Restriction language is a saved account preference. Resolve it before any
     # quota early-return so even HTTP 429 attachment blocks carry the same locale.
+    # The selected language sent by the authenticated Web UI is the current
+    # preference for this request. Use it before the saved DB locale, which may
+    # be stale after the user switches language in April Web.
     account_language = (
-        get_user_language(uid)
-        or _normalize_language_code(data.get("language") or data.get("display_language"))
+        normalize_user_language(data.get("language") or data.get("display_language"))
+        or get_user_language(uid)
         or "en"
     )
 
@@ -970,6 +973,27 @@ def _handle_payload(
                 1 for item in (attachments or [])
                 if _text(getattr(item, "kind", "")).lower() in {"image", "file", "text_file"}
             )
+            # When the uploaded image is the source of an explicit edit, the
+            # edit itself is the billable operation. Do not charge the same
+            # source image once as an attachment and again as image_edit; the
+            # executor will reserve exactly one referral-bonus unit for the edit.
+            if source_image_reference_available and free_media_units:
+                try:
+                    from blocks.interpretation_identity import _detect_image_modification
+                    edit_source_request = bool(_detect_image_modification(
+                        user_authored_text or _text(voice_transcript),
+                        has_existing_image_reference=True,
+                    ))
+                except Exception:
+                    edit_source_request = False
+                if edit_source_request:
+                    free_media_units = max(0, free_media_units - 1)
+                    _apr_timing_log(
+                        "free_media_edit_source_excluded_from_attachment_charge",
+                        user_key=_apr_diag_ref(uid),
+                        message_key=_apr_diag_ref(message_id),
+                        reason="source_image_edit_is_one_bonus_operation",
+                    )
             if free_media_units:
                 quota = reserve_free_media_units(uid, message_id, free_media_units, "attachment")
                 if not quota.get("allowed"):
@@ -2622,9 +2646,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status_code, {"success": False, "error": error})
             return
 
-        # A share target is reserved against a contact explicitly selected by the
-        # sender before the native share sheet opens. Only an HMAC of the contact
-        # phone is persisted; no recipient email or Google identity is required.
+        # Reserve one unbound, single-use token before opening the native share
+        # sheet. Android does not disclose the selected messenger recipient, so
+        # new links never read or store phone numbers, contacts, or recipient email.
         if self.path in {"/api/referrals/prepare", "/api/referrals/finish"}:
             if not self._service_authorized():
                 self.close_connection = True
@@ -2646,7 +2670,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"success": False, "error_code": "INVALID_REQUEST"})
                     return
                 if self.path == "/api/referrals/prepare":
-                    result = prepare_april_referral_share(canonical_user_id, body.get("recipient_phones"))
+                    result = prepare_april_referral_share(canonical_user_id, body.get("share_channel") or "system_share")
                 else:
                     result = finish_april_referral_share(
                         canonical_user_id,
@@ -2656,7 +2680,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                     )
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
-                    409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE"} else
+                    409 if error_code in {"REFERRAL_TARGET_ALREADY_SHARED", "REFERRAL_SELF_INVITE", "REFERRAL_SHARE_PENDING"} else
                     400 if error_code in {"REFERRAL_INVALID", "REFERRAL_CONTACT_INVALID"} else 503
                 )
                 self._send_json(status, result)
