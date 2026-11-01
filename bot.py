@@ -2531,9 +2531,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status_code, {"success": False, "error": error})
             return
 
-        # A share target is reserved against a contact explicitly selected by the
-        # sender before the native share sheet opens. Only an HMAC of the contact
-        # phone is persisted; no recipient email or Google identity is required.
+        # A share target is reserved against a phone number explicitly entered or
+        # selected by the sender before the native share sheet opens. Only keyed
+        # HMAC digests are persisted; no raw phone, email, or Google identity is stored.
         if self.path in {"/api/referrals/prepare", "/api/referrals/finish"}:
             if not self._service_authorized():
                 self.close_connection = True
@@ -2561,6 +2561,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                         canonical_user_id,
                         body.get("invite_token"),
                         body.get("sent") is True,
+                        body.get("share_channel") or "system_share",
                     )
                 error_code = _text(result.get("error_code"))
                 status = 200 if result.get("success") else (
