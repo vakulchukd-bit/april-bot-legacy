@@ -569,9 +569,9 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Explicit requests to receive or export a deliverable as a file. A bare
     # mention of a file remains context; an action plus a file format/noun is required.
     file_delivery_request = bool(re.search(
-        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|приложи|приложите|прикрепи|прикрепите|сохрани|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать|сделай|создай|сгенерируй|напиши)\b.{0,100}\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b|"
-        r"\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b.{0,80}\b(?:для\s+скачиван\w*|скачать|скачиван\w*)\b|"
-        r"\b(?:send|give|export|download|save|deliver|create|generate|write)\b.{0,100}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
+        r"(?:\b(?:пришл\w*|присла\w*|дай\w*|выдай\w*|прилож\w*|прикреп\w*|сохран\w*|экспортир\w*|скача\w*|отправ\w*|сформир\w*|сдела\w*|созда\w*|сгенерир\w*|напиш\w*|подготов\w*)\b.{0,120}\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b|"
+        r"\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b.{0,100}\b(?:для\s+скачиван\w*|скача\w*|скачиван\w*)\b|"
+        r"\b(?:send|give|export|download|save|deliver|create|generate|write|attach)\w*\b.{0,120}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,80}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bфайлом\b|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
         low, re.I | re.S,
     ))
     if file_delivery_request and "file" not in result:
@@ -660,7 +660,12 @@ def _file_delivery_mode(text: Any, requested_outputs: Any = None) -> str:
         r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|сохрани|сохранить|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать)\b.{0,90}(?:\bв\s+файл\w*|\bфайлом\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|\b(?:send|give|export|download|save|deliver)\b.{0,90}(?:\bas\s+(?:a\s+)?file|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bas\s+(?:a\s+)?file\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
         low, re.I | re.S,
     ))
-    file_only = explicit_only or (file_as_primary and not explicit_both)
+    # When a user asks for source code AND a file, keep both representations:
+    # CodeBlock is the inline copyable source and FileDeliveryBlock is the saved
+    # download. Only an unambiguous "file only / do not show code in chat" request
+    # may hide the inline CodeBlock.
+    code_plus_file = {"code", "file"}.issubset(requested)
+    file_only = explicit_only or (file_as_primary and not explicit_both and not code_plus_file)
     return "file_only" if file_only else "with_inline"
 
 def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
@@ -2445,6 +2450,37 @@ def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
     return min(count, 5)
 
 
+def _active_branch_has_code_request(memory: dict[str, Any]) -> bool:
+    """Return True only when selected same-dialogue evidence contains a code task."""
+    if _text(memory.get("relation")).upper() != "CONTINUE":
+        return False
+    pairs = _select_continuation_pairs(memory)
+    for pair in reversed(pairs):
+        if not isinstance(pair, dict):
+            continue
+        prior_user_text = _text(
+            pair.get("source_user_text") or pair.get("user_text") or pair.get("user_message")
+            or pair.get("user") or pair.get("request") or pair.get("question")
+        )
+        if prior_user_text and "code" in _detect_requested_outputs(prior_user_text):
+            return True
+    return False
+
+
+def _is_file_delivery_followup(text: str) -> bool:
+    """Identify a correction/ellipsis that asks for the file from the active task."""
+    low = _text(text).lower().replace("ё", "е")
+    return bool(
+        "file" in _detect_requested_outputs(low)
+        and re.search(
+            r"(?:\bя\s+же\b|\bведь\b|\bуже\b|\bповторн\w*\b|\bеще\s+раз\b|"
+            r"\bв\s+файл\w*\b|\bфайлом\b|\bсам\s+файл\w*\b|"
+            r"\bпришл\w*\b.{0,55}\bфайл\w*\b|\bприсла\w*\b.{0,55}\bфайл\w*\b)",
+            low, re.I | re.S,
+        )
+    )
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -2531,6 +2567,16 @@ def build_interpretation(
     request_text = original or text
     detected_outputs = _detect_requested_outputs(request_text)
     requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
+    # A correction such as "I asked you to send it as a file" is elliptical.
+    # Recover the code output only from the matched active branch selected by
+    # State Manager; never scan unrelated history or infer a new code task.
+    if (
+        "file" in requested_outputs
+        and "code" not in requested_outputs
+        and _is_file_delivery_followup(request_text)
+        and _active_branch_has_code_request(memory)
+    ):
+        requested_outputs.append("code")
     routing_capabilities = _infer_routing_capabilities(request_text)
 
     # Keep edit restrictions separate from permitted creation. A new picture
