@@ -4680,7 +4680,11 @@ def normalize_render_blocks(
             direct_payload = {key: value for key, value in item.items() if key in copy_keys and value not in (None, "", [], {})}
             payload = {**direct_payload, **payload}
         elif block_type == "file":
-            file_keys = {"title", "description", "filename", "name", "mime_type", "content_type", "size_bytes", "content", "text", "code", "asset_ref", "export_payload", "source"}
+            file_keys = {
+                "title", "description", "filename", "name", "mime_type", "content_type", "size_bytes",
+                "content", "text", "code", "asset_ref", "export_payload", "source",
+                "data_uri", "file_data_uri", "file_base64", "base64", "b64_json", "download_url", "file_url",
+            }
             direct_payload = {key: value for key, value in item.items() if key in file_keys and value not in (None, "", [], {})}
             payload = {**direct_payload, **payload}
         elif block_type == "diagram":
@@ -4715,7 +4719,10 @@ def normalize_render_blocks(
             if any(isinstance(_diagram_payload.get(key), str) and _diagram_payload.get(key).strip().lower().startswith("<svg") for key in ("svg", "svg_payload", "drawing")):
                 item["renderer"] = "SvgBlock"
                 item["viewer"] = "SvgBlock"
-        if block_type in {"graph", "diagram", "table"} and payload:
+        if block_type in {"graph", "diagram", "table", "file", "copy"} and payload:
+            # FileDeliveryBlock and CopyBlock consume the same canonical payload
+            # envelope as the other SceneContract renderers. Do not leave these
+            # two render types with only top-level provider-specific fields.
             item["payload"] = payload
             if block_type in {"graph", "diagram"}:
                 item.setdefault("representation", payload.get("representation", ""))
