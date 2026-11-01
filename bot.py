@@ -51,7 +51,7 @@ from blocks.Premium_state_manager import (
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
-    delete_april_account, load_dialogue_history_index, load_dialogue_history_details,
+    delete_april_account, load_dialogue_history_index, load_dialogue_history_details, load_dialogue_asset_payloads,
     dialogue_message_saved, get_admin_user_telemetry, touch_user_activity,
     get_premium_support_status, get_premium_support_message_detail,
     mark_premium_support_message_read, send_premium_support_message,
@@ -2187,6 +2187,79 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(503, {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"})
                     return
                 self._send_json(200, status)
+                return
+            if mode == "artifact":
+                # Binary output recovery is scoped to the authenticated owner,
+                # exact message ID, persisted output role and verified SHA-256.
+                if not self._service_authorized():
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
+                supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+                canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+                if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                    self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                    return
+                message_id = _text(query.get("message_id", [""])[0])
+                expected_hash = _text(query.get("sha256", [""])[0]).lower()
+                if not message_id or len(message_id) > 160 or not re.fullmatch(r"[a-f0-9]{64}", expected_hash):
+                    self._send_json(400, {"success": False, "error": "INVALID_ARTIFACT_REFERENCE"})
+                    return
+                if not _text(os.getenv("DATABASE_URL")):
+                    self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                    return
+                rows = load_dialogue_asset_payloads(canonical_user_id, [message_id])
+                selected = None
+                for row in rows or []:
+                    if not isinstance(row, dict) or _text(row.get("message_id")) != message_id:
+                        continue
+                    payloads = row.get("asset_payloads")
+                    if isinstance(payloads, str):
+                        try:
+                            payloads = json.loads(payloads)
+                        except Exception:
+                            payloads = []
+                    if isinstance(payloads, dict):
+                        payloads = payloads.get("assets") or payloads.get("items") or [payloads]
+                    if not isinstance(payloads, list):
+                        continue
+                    for item in payloads:
+                        if not isinstance(item, dict):
+                            continue
+                        if _text(item.get("asset_role") or "april_output") != "april_output":
+                            continue
+                        if _text(item.get("output_type")).lower() not in {"code", "file"}:
+                            continue
+                        if _text(item.get("sha256")).lower() != expected_hash:
+                            continue
+                        encoded = _text(item.get("content_base64") or item.get("base64"))
+                        try:
+                            content = base64.b64decode(encoded, validate=True)
+                        except Exception:
+                            continue
+                        if not content or not hmac.compare_digest(hashlib.sha256(content).hexdigest(), expected_hash):
+                            continue
+                        selected = (item, content)
+                        break
+                    if selected:
+                        break
+                if not selected:
+                    self._send_json(404, {"success": False, "error": "ARTIFACT_NOT_FOUND_OR_EXPIRED"})
+                    return
+                item, content = selected
+                filename = _text(item.get("filename") or "april-file.txt").replace("\\", "/").split("/")[-1]
+                filename = "".join(ch for ch in filename if ch.isprintable() and ch not in "\r\n\x00")[:180] or "april-file.txt"
+                fallback = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "april-file.txt"
+                mime = _text(item.get("mime_type") or "application/octet-stream")
+                if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime.split(";", 1)[0].lower()):
+                    mime = "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Content-Disposition", f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(content)
                 return
             if mode == "history":
                 # Both layers authenticate: Web verifies NextAuth, Bot verifies
