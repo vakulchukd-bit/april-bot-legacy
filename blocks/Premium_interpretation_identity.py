@@ -765,6 +765,22 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
     ))
     if not re.search(image_noun, low, re.IGNORECASE) and not (visual_overlay_noun and visual_feedback_marker):
         return False
+
+    # Questions that challenge the relevance of an already displayed picture are
+    # discussion/repair turns, not image-generation requests. This deliberately
+    # covers natural wording such as "при чём тут картинки и котики?" and
+    # "почему ты их добавила?", which does not contain the old narrow retrospective
+    # verbs (создала/нарисовала/сгенерировала). A positive visual command later in
+    # the same message still wins through the affirmative-instruction guard above.
+    contextual_image_question = bool(re.search(
+        r"(?:при\s+ч[её]м\s+тут|какое\s+отношение|зачем|почему|как\s+это\s+связано)"
+        r".{0,120}" + image_noun + r"|"
+        + image_noun + r".{0,120}(?:зачем|почему|ты\s+(?:их\s+)?(?:добавил\w*|создал\w*|нарисовал\w*|сгенерировал\w*))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if contextual_image_question and not _has_affirmative_visual_instruction(low):
+        return True
+
     # A voice recap can contain the same edit verbs as a live command:
     # "I asked you to change the photo from 8800 to 8803, and you did it".
     # Remove only the retrospective clause before checking for a *new* action.
@@ -5075,7 +5091,27 @@ def build_interpretation(
             "reuse_saved_image": bool(reuse_saved_image),
             "image_status_request": bool(image_status_request),
             "has_saved_output_image": bool(has_saved_output_image),
-            "explicit_generation_request": bool(wants_image and not reuse_saved_image and not image_edit_requested and not image_status_request),
+            "explicit_generation_request": bool(
+                wants_image and not reuse_saved_image and not image_edit_requested
+                and not image_status_request and not image_generation_blocked
+                and (
+                    explicit_new_image
+                    or _detect_image_generation_request(original or text)
+                    or _detect_portrait_request(original or text)
+                )
+            ),
+            # Raster images are not an unsolicited explanatory renderer. Unlike
+            # diagrams/tables, a generated image must be requested in the current
+            # turn or be a confirmed continuation of an explicit pending image task.
+            "image_output_permission": bool(
+                wants_image and not image_generation_blocked
+                and (
+                    explicit_new_image or explicit_image_edit
+                    or _detect_image_generation_request(original or text)
+                    or _detect_portrait_request(original or text)
+                    or dialogue_profile_request or image_followup
+                )
+            ),
             "adaptive_visual_policy": True,
             "wants_file": wants_file,
             "wants_links": wants_links,
@@ -5119,6 +5155,10 @@ def build_interpretation(
                 # anchor. The selected branch is only expanded after this message
                 # has matched; unrelated 24-hour history must not replace it.
                 "latest_assistant_anchor": dict(memory.get("latest_assistant_anchor") or {}) if isinstance(memory.get("latest_assistant_anchor"), dict) else {},
+                "last_turn_link": (
+                    dict((memory.get("dialogue_thread_context") or {}).get("last_turn_link") or {})
+                    if isinstance(memory.get("dialogue_thread_context"), dict) else {}
+                ),
                 "selected_section": dict(memory.get("selected_section") or {}),
                 "clarification_needed": bool(memory.get("clarification_needed")),
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
@@ -5175,6 +5215,10 @@ def build_interpretation(
             "new_dialogue_request": original or text,
             "new_dialogue_active": (relation != "CONTINUE" and not history_request) or dialogue_profile_request,
             "continuation_context": selected_pairs if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
+            "last_turn_link": (
+                dict((memory.get("dialogue_thread_context") or {}).get("last_turn_link") or {})
+                if isinstance(memory.get("dialogue_thread_context"), dict) else {}
+            ),
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
             "pending_clarification": dict(memory.get("pending_clarification") or {}),
@@ -5209,8 +5253,8 @@ def build_interpretation(
                 "Interleave each request step's explanatory text with its own formula/table/diagram/graph/image render blocks using step_index; do not group all visuals at the end.",
                 "Use a structured table for a clear comparison when the answer has comparable attributes. A table payload must contain real headers/columns and at least one populated row; do not emit empty TableBlock shells or put a whole list of values into one cell when each item can be a row/cell.",
                 "For composite requests, preserve every requested output independently (for example, table AND photograph/image); never treat one renderer as replacing another.",
-                "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, grounded link, or image when it materially improves understanding; never invent data or label a generated illustration as an authentic photograph.",
-                "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0), unless the request explicitly asks for a diagram, blueprint, technical drawing, or graph. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
+                "For substantial explanations, choose a useful additional table, diagram, graph, formula, code block, or grounded link only when it materially improves understanding; never invent data. Raster-image generation is not an adaptive explanatory renderer and is allowed only when CURRENT_REQUEST explicitly asks for a new image or the matched active branch contains an explicit pending image deliverable that this turn asks to complete.",
+                "Use a diagram only for explicit schema/diagram/blueprint/technical-drawing intent or workflows/architecture/sequences. Ordinary requests to draw/create/show a picture or illustration must use C_APRIL_IMAGES_GENERATOR (Images 2.0) only when the current request actually asks for a picture/illustration. A screenshot or image supplied for analysis, a mention of a prior picture, a complaint about an irrelevant image, a long answer, or the model's preference is never permission to generate a new raster image. Emit a concrete payload.svg, drawing elements, geometry, or nodes/edges; do not only describe the intended drawing.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 'For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D. For a requested day/week/month/custom range, preserve every available date/value from CURRENT_REQUEST, CONTINUATION_CONTEXT and PROTECTED_STRUCTURED_DATA, and render one explicit series.points item for every available measurement instead of asking the user to repeat data already stored. For a multi-day time series, fill missing dates between two or more known measurements by interpolation by default so intermediate points appear immediately; label each interpolated point (point-level label such as "interpolated estimate") and the series/graph description and explanatory text as estimates, never as measured/verified observations. Keep all known source points exact, do not interpolate beyond the first/last known values, and do not invent a trend from a single measurement or from no numeric source. Use actual dates if present, weekday labels if supplied, otherwise neutral day indices.',
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
