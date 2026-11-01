@@ -122,16 +122,16 @@ def _text(value: Any) -> str:
 def _localized_free_image_edit_notice(language: Any) -> str:
     key = _text(language).lower().replace("_", "-").split("-", 1)[0]
     messages = {
-        "ru": "Редактирование уже существующих изображений доступно в Premium. В Free можно создавать новые изображения и анализировать вложения в рамках общего лимита.",
-        "ua": "Редагування вже наявних зображень доступне в Premium. У Free можна створювати нові зображення й аналізувати вкладення в межах спільного ліміту.",
-        "en": "Editing existing images is available in Premium. Free can still create new images and analyze attachments within the shared media limit.",
-        "es": "La edición de imágenes existentes está disponible en Premium. En Free puedes crear imágenes nuevas y analizar archivos dentro del límite compartido.",
-        "de": "Das Bearbeiten vorhandener Bilder ist in Premium verfügbar. Mit Free kannst du weiterhin neue Bilder erstellen und Anhänge innerhalb des gemeinsamen Limits analysieren.",
-        "fr": "La modification des images existantes est disponible avec Premium. En Free, vous pouvez toujours créer de nouvelles images et analyser des pièces jointes dans la limite commune.",
-        "it": "La modifica delle immagini esistenti è disponibile con Premium. Con Free puoi comunque creare nuove immagini e analizzare allegati entro il limite condiviso.",
-        "pl": "Edycja istniejących obrazów jest dostępna w Premium. W Free nadal możesz tworzyć nowe obrazy i analizować załączniki w ramach wspólnego limitu.",
-        "pt": "A edição de imagens existentes está disponível no Premium. No Free, ainda podes criar novas imagens e analisar anexos dentro do limite partilhado.",
-        "nl": "Het bewerken van bestaande afbeeldingen is beschikbaar in Premium. Met Free kun je nog nieuwe afbeeldingen maken en bijlagen analyseren binnen de gedeelde limiet.",
+        "ru": "Редактирование существующего изображения доступно в Premium или за счёт бонусной операции, полученной после отправки приглашения. Пригласи друга, чтобы получить 6 бонусных операций; каждое редактирование расходует одну.",
+        "ua": "Редагування наявного зображення доступне в Premium або за рахунок бонусної операції після надсилання запрошення. Поділися посиланням із другом, щоб отримати 6 бонусних операцій; кожне редагування витрачає одну.",
+        "en": "Editing an existing image is available in Premium or with a referral bonus operation. Share an invitation to receive six bonus operations; each edit consumes one.",
+        "es": "Editar una imagen existente está disponible en Premium o usando una operación de bonificación por invitación. Comparte un enlace para recibir seis operaciones de bonificación; cada edición consume una.",
+        "de": "Das Bearbeiten eines vorhandenen Bildes ist mit Premium oder mit einer Empfehlungs-Bonusaktion möglich. Teile einen Einladungslink, um sechs Bonusaktionen zu erhalten; jede Bearbeitung verbraucht eine.",
+        "fr": "La modification d’une image existante est disponible avec Premium ou avec une opération bonus de parrainage. Partagez un lien d’invitation pour recevoir six opérations bonus ; chaque modification en consomme une.",
+        "it": "La modifica di un'immagine esistente è disponibile con Premium o usando un'operazione bonus referral. Condividi un invito per ricevere sei operazioni bonus; ogni modifica ne consuma una.",
+        "pl": "Edycja istniejącego obrazu jest dostępna w Premium lub za jedną operację bonusową z polecenia. Udostępnij zaproszenie, aby otrzymać sześć operacji bonusowych; każda edycja zużywa jedną.",
+        "pt": "A edição de uma imagem existente está disponível no Premium ou com uma operação bónus de convite. Partilha um convite para receber seis operações bónus; cada edição consome uma.",
+        "nl": "Een bestaande afbeelding bewerken kan met Premium of met één bonusactie uit een uitnodiging. Deel een uitnodigingslink om zes bonusacties te ontvangen; elke bewerking gebruikt er één.",
     }
     return messages.get(key, messages["en"])
 
@@ -833,6 +833,66 @@ async def _generate_image_artifact(
     from blocks.C_APRIL_IMAGES_GENERATOR import generate_from_spec
 
     return await generate_from_spec(spec, variant="processor_route")
+
+
+async def _edit_free_image_artifact(
+    interpretation: dict[str, Any],
+    visual_context: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Edit a source image after the caller has reserved one Free referral unit."""
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    if not bool(intent.get("free_image_edit_bonus_authorized")) or intent.get("image_operation") != "edit":
+        return None
+    # Reuse the exact, source-aware edit implementation used by Premium. The
+    # entitlement check and one-unit reservation remain exclusively in Free.
+    from core.Premium_executor import _edit_image_artifact as edit_source_image
+
+    result = await edit_source_image(interpretation, visual_context or [])
+    if not isinstance(result, dict) or not result.get("success") or not result.get("image_bytes"):
+        return None
+
+    image_bytes = bytes(result["image_bytes"])
+    mime_type = _text(result.get("mime_type") or "image/png")
+    image_data_uri = _mime_data_uri(image_bytes, mime_type)
+    width = int(result.get("width") or 0)
+    height = int(result.get("height") or 0)
+    display_language = str((interpretation.get("input") or {}).get("display_language") or "").strip().lower().replace("_", "-")
+    if display_language.startswith(("ua", "uk")):
+        image_alt = "Відредаговане зображення"
+        image_caption = "Результат редагування вихідного зображення"
+    elif display_language.startswith("en"):
+        image_alt = "Edited image"
+        image_caption = "Edited result from the original image"
+    else:
+        image_alt = "Отредактированное изображение"
+        image_caption = "Результат редактирования исходного изображения"
+    image_item = {
+        "src": image_data_uri,
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "alt": image_alt,
+        "caption": image_caption,
+    }
+    result["artifact"] = {
+        "artifact_type": "image",
+        "type": "image",
+        "operation": "edit",
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+        "images": [image_item],
+        "payload": {
+            "kind": "generated_image",
+            "artifact_type": "image",
+            "operation": "edit",
+            "mime_type": mime_type,
+            "width": width,
+            "height": height,
+            "images": [image_item],
+        },
+    }
+    return result
 
 
 def _build_scene(
@@ -1951,6 +2011,84 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
+    image_edit_bonus_authorized = False
+    image_edit_bonus_reserved = False
+    initial_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    has_existing_image_source = bool(kwargs.get("source_image_reference_available")) or any(
+        any(str(item.get(key) or "").strip().lower().startswith("image") for key in ("kind", "mime_type", "content_type", "type"))
+        or bool(item.get("image_url") or item.get("src") or item.get("image_data_uri") or item.get("data_uri"))
+        for item in [*(attachments or []), *(visual_context or []), *(restored_assets or [])]
+        if isinstance(item, dict)
+    )
+    image_edit_candidate = bool(
+        enforce_free_image_edit_policy
+        and initial_intent.get("image_edit_restricted")
+        and has_existing_image_source
+    )
+    if image_edit_candidate:
+        # Editing in Free can proceed only after an atomic reservation from the
+        # referral bonus bucket. Base Free units are never used for image edits.
+        edit_reservation = reserve_free_media_units(uid, identity["message_id"], 1, "image_edit")
+        if edit_reservation.get("allowed"):
+            image_edit_bonus_authorized = True
+            image_edit_bonus_reserved = bool(
+                edit_reservation.get("tracked") and not edit_reservation.get("already_reserved")
+            )
+            interpretation = build_interpretation(
+                current_request=current_text,
+                original_request=original,
+                display_language=display_language,
+                memory=dialogue_context,
+                attachments=attachments or [],
+                visual_context=visual_context or [],
+                source_image_reference_available=bool(kwargs.get("source_image_reference_available")),
+                restrict_image_edits=False,
+                identity=identity,
+                semantic_interpretation=semantic_interpretation,
+            )
+            authorized_intent = interpretation.get("intent")
+            if isinstance(authorized_intent, dict):
+                # build_interpretation normally suppresses raster output for a
+                # source-image edit when the Free restriction is enabled. Simply
+                # rebuilding with the restriction off defaults to analyze_image,
+                # not to an edit operation; restore the concrete edit contract only
+                # after the bonus unit has been reserved successfully.
+                requested_outputs = authorized_intent.get("requested_outputs")
+                requested_outputs = list(requested_outputs) if isinstance(requested_outputs, (list, tuple, set)) else []
+                if "text" not in requested_outputs:
+                    requested_outputs.insert(0, "text")
+                if "image" not in requested_outputs:
+                    requested_outputs.append("image")
+                authorized_intent.update({
+                    "task": "edit_image",
+                    "image_operation": "edit",
+                    "image_edit_requested": True,
+                    "image_edit_restricted": False,
+                    "wants_image": True,
+                    "explicit_generation_request": False,
+                    "requested_outputs": requested_outputs,
+                    "image_edit_instruction": original or current_text,
+                    "source_image_available": True,
+                    "image_output_permission": True,
+                    "image_generation_blocked": False,
+                    "free_image_edit_bonus_authorized": True,
+                    "free_image_edit_bonus_units": 1,
+                    "free_image_edit_bonus_operation": "image_edit",
+                })
+            _apr_timing_log(
+                "free_image_edit_referral_bonus_reserved", None,
+                user_key=_apr_diag_ref(uid),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+                bonus_units=int(edit_reservation.get("bonus_units") or 0),
+                already_reserved=bool(edit_reservation.get("already_reserved")),
+            )
+        else:
+            _apr_timing_log(
+                "free_image_edit_referral_bonus_unavailable", None,
+                user_key=_apr_diag_ref(uid),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+                reason=str(edit_reservation.get("error_code") or "FREE_IMAGE_EDIT_PREMIUM_REQUIRED"),
+            )
     # C_IT_ROOM is the deterministic source for April's own interface map. Do not
     # make navigation depend on the LLM's semantic classifier: force text + diagram
     # whenever the current turn asks how to find/use an April screen.
@@ -2312,7 +2450,7 @@ async def execute(
     # Reserve the Free image-generation unit only after the request/scene has
     # been assembled, but strictly BEFORE any Provider call. This keeps failures
     # during local request construction from stranding a quota reservation.
-    if bool(intent_policy_pre_provider.get("wants_image")) and not image_edit_restricted_pre_provider:
+    if bool(intent_policy_pre_provider.get("wants_image")) and not image_edit_restricted_pre_provider and not image_edit_bonus_authorized:
         active_plan_for_quota = str(get_user_plan(uid) or "free").strip().lower()
         if active_plan_for_quota == "free":
             quota_reservation = reserve_free_media_units(uid, identity["message_id"], 1, "generation")
@@ -2403,6 +2541,8 @@ async def execute(
         except Exception:
             if image_generation_reserved:
                 release_free_media_reservation(uid, identity["message_id"], "generation")
+            if image_edit_bonus_reserved:
+                release_free_media_reservation(uid, identity["message_id"], "image_edit")
             raise
         provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
@@ -2518,19 +2658,29 @@ async def execute(
         if not free_media_limit_reached:
             image_started = time.perf_counter()
             try:
-                image_result = await _generate_image_artifact(
-                    interpretation,
-                    raw,
-                    identity,
-                )
+                if image_edit_bonus_authorized:
+                    image_result = await _edit_free_image_artifact(interpretation, visual_context or [])
+                else:
+                    image_result = await _generate_image_artifact(
+                        interpretation,
+                        raw,
+                        identity,
+                    )
                 if image_generation_reserved:
                     if image_result:
                         commit_free_media_reservation(uid, identity["message_id"], "generation")
                     else:
                         release_free_media_reservation(uid, identity["message_id"], "generation")
+                if image_edit_bonus_reserved:
+                    if image_result:
+                        commit_free_media_reservation(uid, identity["message_id"], "image_edit")
+                    else:
+                        release_free_media_reservation(uid, identity["message_id"], "image_edit")
             except Exception:
                 if image_generation_reserved:
                     release_free_media_reservation(uid, identity["message_id"], "generation")
+                if image_edit_bonus_reserved:
+                    release_free_media_reservation(uid, identity["message_id"], "image_edit")
                 raise
             _apr_timing_log(
                 "image_generation", image_started, succeeded=bool(image_result),
@@ -2568,6 +2718,66 @@ async def execute(
                 "images": image_items,
             }
             packaged["render_blocks"].append(image_block)
+
+    if image_edit_bonus_authorized:
+        # Do not let stale conversation text claim that source-image editing is
+        # Premium-only after this request has reserved a Free referral unit.
+        # The status message is generated locally in the detected user language.
+        try:
+            from core.Premium_executor import _image_edit_message
+            localized_edit_status = _image_edit_message(
+                interpretation,
+                "success" if image_result else "failed",
+            )
+        except Exception:
+            fallback_language = str((interpretation.get("input") or {}).get("display_language") or "").lower()
+            if fallback_language.startswith(("ua", "uk")):
+                localized_edit_status = (
+                    "Готово — внесла запитану зміну у вихідне зображення." if image_result
+                    else "Не вдалося змінити вихідне зображення. Спробуй повторити запит."
+                )
+            elif fallback_language.startswith("en"):
+                localized_edit_status = (
+                    "Done — I applied the requested change to the source image." if image_result
+                    else "The source image could not be edited. Please try again."
+                )
+            else:
+                localized_edit_status = (
+                    "Готово — внесла запрошенное изменение в исходное изображение." if image_result
+                    else "Не удалось изменить исходное изображение. Попробуй повторить запрос."
+                )
+        packaged["answer"] = localized_edit_status
+        packaged["content"] = localized_edit_status
+        packaged["summary"] = localized_edit_status[:180]
+        raw["answer"] = localized_edit_status
+        raw["content"] = localized_edit_status
+        raw["summary"] = localized_edit_status[:180]
+        text_block_written = False
+        for block in packaged["render_blocks"]:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or block.get("artifact_type") or "").strip().lower()
+            renderer = str(block.get("renderer") or block.get("viewer") or "")
+            if block_type in {"text", "markdown", "message", "message_text"} or "messagetext" in renderer.lower():
+                block["content"] = localized_edit_status
+                block["text"] = localized_edit_status
+                text_block_written = True
+                break
+        if not text_block_written:
+            registration = get_web_renderer_registration("text")
+            packaged["render_blocks"].insert(0, {
+                "type": "text",
+                "renderer": registration.get("renderer", "MessageTextBlock"),
+                "viewer": registration.get("viewer", "MessageTextBlock"),
+                "content": localized_edit_status,
+            })
+        _apr_timing_log(
+            "free_image_edit_localized_status",
+            None,
+            succeeded=bool(image_result),
+            bonus_reserved=True,
+            language=str((interpretation.get("input") or {}).get("display_language") or "auto"),
+        )
 
     normalized_blocks = list(packaged["render_blocks"] or [])
     if not normalized_blocks:
