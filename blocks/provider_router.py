@@ -1,4 +1,4 @@
-"""APRIL Premium single provider for the canonical WebReal Web route.
+"""APRIL Free single provider for the canonical WebReal Web route.
 
 The provider receives the canonical, normalized request from bot.ru/Exkrutor.
 Bot.ru resolves the response language from the current user-authored message and uses the saved UI language only as a fallback. The multilingual provider reasons on the original input and returns user-visible content in RETURN_LANGUAGE; no separate paid translation call or second chat route is added.
@@ -13,7 +13,7 @@ import os
 import re
 import time
 
-from blocks.Premium_C_ARTIFACT_CONTRACT import (
+from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
     WEB_RENDERER_REGISTRY,
@@ -23,14 +23,14 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
-# Premium answer ceiling is 12,000 output tokens. Renderers are relevance-driven;
+# Free answer ceiling is 8,000 output tokens. Renderers are relevance-driven;
 # there is no fixed text/render ratio, and the visible text answer must stay complete.
-PREMIUM_OUTPUT_TOKEN_LIMIT = 12000
+FREE_OUTPUT_TOKEN_LIMIT = 8000
 # Text and renderer payloads share one ceiling; neither is assigned a fixed slice.
-PREMIUM_RENDER_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
-PREMIUM_TEXT_TOKEN_BUDGET = PREMIUM_OUTPUT_TOKEN_LIMIT
-PREMIUM_RECOVERY_RETRIES = 1
-PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX = PREMIUM_OUTPUT_TOKEN_LIMIT
+FREE_RENDER_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
+FREE_TEXT_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
+FREE_RECOVERY_RETRIES = 1
+FREE_DIAGRAM_REPAIR_OUTPUT_MAX = FREE_OUTPUT_TOKEN_LIMIT
 # This router is used only by the Free executor. Keep its input ceiling
 # independent from Premium's environment variable so a Premium setting can
 # never silently raise the Free budget.
@@ -46,12 +46,12 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v7_last_answer_branch_grounding"
+PROVIDER_ROUTER_VERSION = "free_provider_router_v8_shared_copy_file_rooms_8000_output"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
-PREMIUM_RESPONSE_QUALITY_CONTRACT = r"""
-PREMIUM RESPONSE QUALITY AND CONTINUITY:
+FREE_RESPONSE_QUALITY_CONTRACT = r"""
+FREE RESPONSE QUALITY AND CONTINUITY:
 NATURAL CONVERSATION AND USER INTENT:
 - Speak like a calm, attentive, capable conversation partner, not like a form letter or command-line program. Use natural transitions and the user's level of formality; warmth must not become empty praise or filler.
 - First identify the action the user actually wants. A question containing words such as "picture", "graph", "file" or "button" may ask how to use or find an existing item; it does not automatically request a new artifact. Explain an operation when the verb is about downloading, saving, copying, opening, sharing, finding or navigating.
@@ -76,12 +76,12 @@ The text answer is still the main answer. When image generation is explicitly re
 
 # Reserve the same bounded recovery instruction before fitting the first request, so
 # a malformed/empty first result cannot make the retry exceed the input text budget.
-PREMIUM_RECOVERY_RULE = (
+FREE_RECOVERY_RULE = (
     "RECOVERY PASS after an empty, incomplete, malformed, or non-public output: generate a NEW complete JSON object from the original request. "
     "Do not continue or quote cut-off JSON. Preserve every requested topic and every explicitly requested renderer. "
     "The text answer must remain complete and self-contained. Add a renderer only when requested or when it contributes concrete information "
     "that is materially easier to understand visually; there is no prose/render ratio or renderer quota. Never repeat answer paragraphs or headings "
-    "inside diagrams. Keep the completed output under 12000 tokens, set content to an empty string when answer is complete, "
+    "inside diagrams. Keep the completed output under 8000 tokens, set content to an empty string when answer is complete, "
     "keep internal_answer_en and summary short, interleave useful blocks by step_index, and close valid JSON."
 )
 
@@ -113,11 +113,11 @@ CURRENT-TURN SEMANTIC CONSISTENCY:
 - Never claim that a table, graph, diagram, image, code change, or other artifact was created unless its corresponding render block contains a concrete payload or durable source. An empty renderer shell is not a completed visual.
 - If a requested structured output cannot be completed, state that limitation accurately in RETURN_LANGUAGE rather than describing a nonexistent result as finished.
 
-- PER-RENDER EXPLANATIONS (Premium): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, normally 1 short, specific sentence. For images, write a natural conversational caption that sounds like April continuing the reply (for example, “Вот что получилось” only when followed by a real description, or “Готово — добавила корабль, сохранив вид океана”). NEVER copy or paraphrase the user’s imperative as the caption (for example, do not output “Нарисуй фотку пшеничного поля”), and NEVER expose internal English prompt/instruction text such as “Edit the supplied source image…”. Mention the requested subject or actual edit and one relevant visual detail only when supported by the payload. Avoid mechanical headings such as “Что показывает изображение”, “Изображение связано с разделом”, status-report wording, generic claims about the renderer, and repetitive caveats that an ordinary generated picture is not an archival photograph. If the canonical answer already says the same thing, make the caption add a useful, distinct detail; never repeat the same sentence. A user’s first name may be used occasionally only if the authenticated user profile explicitly provides it and the wording sounds natural; do not insert a name mechanically or invent one. Do not invent feelings or image details; warmth belongs in the phrasing, not in unsupported claims. For diagrams, identify the nodes/relationships or action sequence; do not restate the full numbered steps. For tables/graphs/formulas, name the columns/axes/variables and the visual takeaway without repeating the whole answer. For code, name the real file/functions and the concrete change. Use the actual payload, not generic filler. SceneContract displays this field immediately after the renderer, so keep it complementary and do not create a duplicate standalone explanation block.
+- PER-RENDER EXPLANATIONS (Free): every non-text render block MUST include an `explanation` field in RETURN_LANGUAGE, normally 1 short, specific sentence. For images, write a natural conversational caption that sounds like April continuing the reply (for example, “Вот что получилось” only when followed by a real description, or “Готово — добавила корабль, сохранив вид океана”). NEVER copy or paraphrase the user’s imperative as the caption (for example, do not output “Нарисуй фотку пшеничного поля”), and NEVER expose internal English prompt/instruction text such as “Edit the supplied source image…”. Mention the requested subject or actual edit and one relevant visual detail only when supported by the payload. Avoid mechanical headings such as “Что показывает изображение”, “Изображение связано с разделом”, status-report wording, generic claims about the renderer, and repetitive caveats that an ordinary generated picture is not an archival photograph. If the canonical answer already says the same thing, make the caption add a useful, distinct detail; never repeat the same sentence. A user’s first name may be used occasionally only if the authenticated user profile explicitly provides it and the wording sounds natural; do not insert a name mechanically or invent one. Do not invent feelings or image details; warmth belongs in the phrasing, not in unsupported claims. For diagrams, identify the nodes/relationships or action sequence; do not restate the full numbered steps. For tables/graphs/formulas, name the columns/axes/variables and the visual takeaway without repeating the whole answer. For code, name the real file/functions and the concrete change. Use the actual payload, not generic filler. SceneContract displays this field immediately after the renderer, so keep it complementary and do not create a duplicate standalone explanation block.
 - SINGLE-OWNER PRESENTATION: keep `answer` and ordinary text blocks as the coherent overall narrative. Give each renderer a brief introduction/context there, but do not repeat its `explanation`, variable-by-variable interpretation, table takeaway, code walkthrough, image description, or graph trend elsewhere in the narrative. The detailed interpretation belongs immediately after its own renderer in that renderer's `explanation` field. Do not duplicate the same concrete render block or create multiple explanations for one renderer; retain the prose needed to explain the overall topic. Every mathematical expression that remains in prose must use explicit KaTeX-compatible delimiters (`\(...\)` inline or `\[...\]` display); never leave raw, unwrapped LaTeX commands in ordinary text.
 - RENDER COVERAGE: honor each explicitly requested output type and emit a concrete payload when it materially helps. There is no fixed prose/render allocation and no renderer quota. Keep the complete explanation in text; diagrams show only relationships, structure or action order that is not already obvious from the prose. Interleave useful renderers with their related text by step_index. Concept explanations may use a grounded network graph (representation="network", nodes+edges) only when the relations are real and visually useful; numeric graphs require real data. Image requests require the C_APRIL_IMAGES_GENERATOR artifact signal, and links require real URLs.
 - SEMANTIC DIAGRAM CONTRACT: a diagram represents the subject the user asked to see, not an outline of April's prose. For a physical system or connection request, draw the actual parts/terminals and their real relationships; edges must show the requested connections, not merely a reading order. For geometry, draw the requested figure/coordinates and all supplied dimensions; for math, show the relevant mathematical structure; for a process, use an action flow only when process order is itself the requested visual. Show physical symbols/figures on a clear high-contrast canvas, with compact labels, units, dimensions and a short title; keep supporting explanation adjacent in the block explanation, not crowded into the drawing. When a request requires several distinct useful views or separate objects, emit multiple diagram render blocks in order with step_index; do not collapse them into one generic outline. Never manufacture a diagram from the answer's headings or numbered instructions as a fallback. A diagram render block is incomplete unless it has drawable SVG/elements or structured nodes/edges.
-- PREMIUM OUTPUT BUDGET: total generated output across the primary response, bounded retry, refusal adapter and diagram repair must not exceed 12000 tokens for one user request. Each recovery uses only the remaining headroom; when none remains, do not issue another provider call. Deterministic local rendering may still run at zero model-output cost. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
+- FREE OUTPUT BUDGET: total generated output across the primary response, bounded retry, refusal adapter and diagram repair must not exceed 8000 tokens for one user request. Each recovery uses only the remaining headroom; when none remains, do not issue another provider call. Deterministic local rendering may still run at zero model-output cost. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
 - ADAPTIVE VISUALS: even when the user did not explicitly request a renderer, a concrete table/diagram/graph/formula/code/link payload may be added only when it materially improves a substantial explanation and is grounded in the current task. Raster-image generation is different: NEVER add an image spec merely because an answer is long or an illustration seems attractive. A generated image requires an explicit image request in CURRENT_REQUEST or a clearly matched pending image deliverable in LAST_TURN_LINK. A supplied screenshot is input for analysis, not permission to generate; discussing, correcting, questioning or rejecting a previous image is text-only unless the user explicitly asks for a new image/edit. Never call a generated illustration an authentic photograph.
 - TABLE INTEGRITY: never return an empty type="table" shell. Every table block needs populated columns/headers and at least one row. Prefer one record/entity per row and one fact per cell; never pack an entire multi-item list into a single cell when it can be structured as rows/cells. Keep tables readable on mobile.
 - COMPOSITE OUTPUTS: independent outputs in one request are cumulative, not alternatives. A request for a table and a photograph requires both the TableBlock payload and the image-generator specification; answer each request-sequence item in order.
@@ -250,7 +250,7 @@ CRITICAL STRUCTURED 3D RENDER CONTRACT:
 - For an explicitly requested temperature/heat-intensity field, set payload.surface_mode="temperature", payload.temperature_field=true and payload.color_scale="thermal_cool_to_hot". Do not apply the thermal palette to unrelated graphs. Keep every existing object, orbit, axis label and numeric value requested by the user in the same graph payload.
 - Do not invent empirical measurements or claim scientific precision when values are illustrative. If the user supplied only a conceptual scene, encode the supplied visual properties and mark the scene as illustrative.
 - Keep the normal explanatory text block, but never substitute it for the required graph block. The web renderer supports structured interactive 3D scenes through the same SceneContract/render_blocks path; do not return a separate route or image-generation request for a chart.
-For multi-question requests, answer every explicit question in order and make the output type match the question; do not merge separate questions into one generic paragraph. Emit separate concise text blocks per step when needed and place each relevant renderer immediately beside its text block. Do not omit required details, but avoid unnecessary verbosity and finish valid JSON with headroom under the 12000-token ceiling. Preserve every requested topic and complete requested code/source; compress duplicated prose and metadata before substance.
+For multi-question requests, answer every explicit question in order and make the output type match the question; do not merge separate questions into one generic paragraph. Emit separate concise text blocks per step when needed and place each relevant renderer immediately beside its text block. Do not omit required details, but avoid unnecessary verbosity and finish valid JSON with headroom under the 8000-token ceiling. Preserve every requested topic and complete requested code/source; compress duplicated prose and metadata before substance.
 
 Return JSON only:
 {
@@ -282,6 +282,10 @@ Return JSON only:
 In attachment_summaries, create one record per supplied USER_INPUT asset when possible. The kind value must be exactly one of image, text_file, or file. Copy filename and asset_message_id exactly from ATTACHMENT_INDEX; never invent a reference. For a mixed image/file message, make separate summaries instead of blending two different sources into one note.
 
 When code is explicitly requested, include a render block like {"type":"code","renderer":"CodeBlock","viewer":"CodeBlock","language":"python","filename":"module.py","code":"<complete source>","content":"<same complete source>"}. The explanatory text remains a separate text block.
+
+When INTERPRETATION.intent.wants_copy is true, create one separate plain-text copy block using the already-composed user-facing text: {"type":"copy","renderer":"CopyBlock","viewer":"CopyBlock","payload":{"title":"","content":"<plain text to copy>"}}. Prefer copying the relevant text block content; do not duplicate the entire answer in extra prose. A request to copy code is NOT a CopyBlock request: actual source code remains type="code" with CodeBlock, which keeps its normal copy action.
+
+When INTERPRETATION.intent.wants_file is true, provide a concrete file deliverable in the same render_blocks array as type="file", renderer="FileDeliveryBlock", viewer="FileDeliveryBlock", with filename, mime_type, and a concise description. For code, keep the real source in the normal CodeBlock so the executor can persist its exact bytes and attach a secure file reference. For tables, keep the TableBlock payload; the common file-delivery adapter will create its XLSX download card from the same headers/rows. When file_delivery_mode="file_only", the executor removes the large inline code/table block only after the bytes or table export payload are secured; do not replace it with a second chat route. For "table/code plus file", preserve both representations. Never convert images or graphs into FileDeliveryBlock.
 
 For an image generation request, artifacts must contain:
 {
@@ -329,7 +333,7 @@ CURRENT-TURN SEMANTIC CONSISTENCY:
 
  `internal_answer_en` is at most one concise sentence, never the hidden place for the
 full explanation. Keep `summary` short and emit required visual structures as typed render blocks. Every non-text render block MUST include a specific `explanation` field in RETURN_LANGUAGE (1–3 sentences) explaining its meaning, relevance and how to interpret/use it: formula and variables; link destination and purpose; image subject/relation and only supported edits; code file/functions and changes; table comparison/takeaway; graph axes/data/trend; diagram parts/relationships. Premium SceneContract displays that explanation in a separate text block immediately after the renderer. Do not duplicate the same explanation in a second text block.
-Premium output ceiling: exactly 12000 tokens per complete answer attempt. Do not fill the cap for its
+Free output ceiling: exactly 8000 tokens per complete answer attempt. Do not fill the cap for its
 own sake; finish valid JSON with headroom. `content` may be empty because the normalizer copies `answer`.
 Keep internal fields concise. Interleave step-specific text and its requested/materially useful formula/table/diagram/graph/image block
 in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must carry real values.
@@ -396,7 +400,7 @@ CURRENT-TURN SEMANTIC CONSISTENCY:
 
  `internal_answer_en` is only a one-sentence internal translation, never the
 place for the full response; `summary` is short metadata. Emit requested structured renderers with
-concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Premium output is capped at 12000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
+concrete payloads and verify all numbered steps before returning. Each non-text renderer's `explanation` is its only detailed interpretation: briefly introduce the renderer in the narrative, but do not repeat its detailed explanation, table takeaway, code walkthrough, image description or graph trend in another text block. Keep only one render block and one linked explanation per concrete item. Any math expression left in prose must use explicit `\(...\)` inline or `\[...\]` display delimiters; never emit raw, unwrapped LaTeX commands. Free output is capped at 8000 tokens total. Never emit an empty table shell or use a renderer quota. Composite outputs are cumulative; use adaptive visuals only when materially useful, and label generated illustrations as generated, not authentic photos.
 When multiple visual outputs are requested, emit only the requested or materially useful renderers with concrete payloads. There is no fixed text/render ratio or renderer quota; text remains the complete explanation, and each visual must add information rather than repeat the prose. For multi-step requests, follow PRESENTATION_SEQUENCE when present; treat it as a deliverable checklist within the same turn, not separate memory lookups. Add step_index, step_title and sequence_index to each block where possible, interleave each section's text with that section's formula/table/diagram/graph/link/image, and preserve all steps. Start each prose section with a Markdown `##` heading matching the planned section title, so client rendering can keep section boundaries. For a renderer that belongs inside a longer explanation, include `anchor_text`: an exact, unique sentence or short paragraph (max 260 characters) copied verbatim from `answer`; the renderer will be inserted immediately after that anchor. Do not use anchor_text for final_output=true items, and do not place every renderer at the end by default. Keep final_output=true as the final item. Never collect all visuals at the end or let a single infographic replace separate requested outputs. An experiments diagram covers only the experiments, not the whole answer. Do not invent measured values; for a time-series graph, linear estimates strictly between at least two supplied numeric endpoints are allowed only to fill requested missing dates, and every derived value must be labeled as an estimate rather than a measurement. Never extrapolate or derive a trend from one or zero numeric source values. Images require the generator signal and links require real URLs.
 Answer CURRENT_REQUEST in RETURN_LANGUAGE. On CONTINUE, use SELECTED_SECTION as the target when present.
 If RECENT_LIMITATIONS contains prior refusal/explanation events, consider them part of this same dialogue: explain the real limitation naturally, retain the current thread, and offer a genuinely permitted alternative without bypassing the restriction. Do not repeat raw provider/system wording or mention the model provider unless explicitly asked; distinguish content restrictions from technical errors and tariff limits. Use the verified display name only when natural.
@@ -495,7 +499,7 @@ class _ResponsesCompat:
         input: Any,
         max_output_tokens: int | None = None,
     ) -> _ResponseResult:
-        output_cap = PREMIUM_OUTPUT_TOKEN_LIMIT if max_output_tokens is None else max(256, min(PREMIUM_OUTPUT_TOKEN_LIMIT, int(max_output_tokens)))
+        output_cap = FREE_OUTPUT_TOKEN_LIMIT if max_output_tokens is None else max(256, min(FREE_OUTPUT_TOKEN_LIMIT, int(max_output_tokens)))
         payload = {
             "model": model,
             "input": input,
@@ -2025,13 +2029,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(obj)
         return card, _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
 
-    system = SYSTEM_PROMPT + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
+    system = SYSTEM_PROMPT + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
     card, total = count(system, data)
     stage = "full"
     if total <= MAX_PROMPT_TOKENS:
         return system, card, total, stage
 
-    system = SYSTEM_PROMPT_COMPACT + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
+    system = SYSTEM_PROMPT_COMPACT + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
     stage = "compact_system"
     if _text(data.get("NEW_DIALOGUE_REQUEST")) == _text(data.get("CURRENT_REQUEST")):
         data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST"
@@ -2435,7 +2439,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
+            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -2630,23 +2634,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "one_clear_explanation_per_renderer": True,
             },
             "OUTPUT_BUDGET_POLICY": {
-                "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
-                "response_style": "premium_detailed_visual",
+                "application_output_token_limit": FREE_OUTPUT_TOKEN_LIMIT,
+                "response_style": "free_detailed_visual",
                 "detail_level": "expanded_structured_explanation",
                 "visual_share_target_percent": "adaptive_no_fixed_share",
                 "text_share_target_percent": "adaptive_no_fixed_share",
                 "renderer_quota": "none",
-                "allocation_policy": "all_requested_text_and_visuals_share_one_12000_token_ceiling; compress_repetition_before_requested_content",
+                "allocation_policy": "all_requested_text_and_visuals_share_one_8000_token_ceiling; compress_repetition_before_requested_content",
                 "adaptive_visuals_when_materially_useful": True,
-                "render_payload_token_budget": PREMIUM_RENDER_TOKEN_BUDGET,
-                "explanation_answer_token_budget": PREMIUM_TEXT_TOKEN_BUDGET,
+                "render_payload_token_budget": FREE_RENDER_TOKEN_BUDGET,
+                "explanation_answer_token_budget": FREE_TEXT_TOKEN_BUDGET,
                 "render_budget_included_in_total": True,
                 "requested_topic_count": requested_topic_count if is_history else max(1, len(original_sequence)),
                 "preserve_all_requested_topics": True,
                 "complete_answer_required": True,
                 "single_provider_call": False,
-                "bounded_output_recovery_retries": PREMIUM_RECOVERY_RETRIES,
-                "diagram_repair_output_max": PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+                "bounded_output_recovery_retries": FREE_RECOVERY_RETRIES,
+                "diagram_repair_output_max": FREE_DIAGRAM_REPAIR_OUTPUT_MAX,
                 "all_recovery_output_is_charged_to_shared_ceiling": True,
                 "compress_repetition_before_substance": True,
                 "protected_structured_data_lossless": True,
@@ -2660,7 +2664,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # to a few sampled keywords. The request is carried once in CURRENT_REQUEST;
     # REQUEST_SEQUENCE points back to it instead of duplicating and truncating it.
     if is_single_3d_scene_task:
-        visual_system = SYSTEM_PROMPT_MINIMAL + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
+        visual_system = SYSTEM_PROMPT_MINIMAL + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
         for scene_request_budget in tuple(_scaled_prompt_tokens(n) for n in (820, 760, 700, 640, 580, 540)):
             visual_min = build_minimal(scene_request_budget, _scaled_prompt_tokens(18), _scaled_prompt_tokens(8), min(1, len(original_pairs)))
             visual_min["CURRENT_REQUEST"] = ("Use PROTECTED_CURRENT_INPUT.content as the exact complete 3D specification; preserve all constraints." if protected_current_input else _compress_3d_scene_specification(source_current_request, scene_request_budget))
@@ -2695,7 +2699,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         (_scaled_prompt_tokens(100), _scaled_prompt_tokens(55), _scaled_prompt_tokens(12), minimum_history_pair),
         (_scaled_prompt_tokens(70), _scaled_prompt_tokens(36), _scaled_prompt_tokens(8), minimum_history_pair),
     ]
-    system = SYSTEM_PROMPT_MINIMAL + "\n\n" + PREMIUM_RESPONSE_QUALITY_CONTRACT
+    system = SYSTEM_PROMPT_MINIMAL + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
     for current_budget, topic_budget, summary_budget, pair_limit in candidates:
         minimal = build_minimal(current_budget, topic_budget, summary_budget, pair_limit)
         card = _json_card(minimal)
@@ -2986,7 +2990,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                   "Use PROTECTED_STRUCTURED_DATA exactly; if PROTECTED_STRUCTURED_DATA_EXTERNAL is present, "
                   "read PROTECTED_STRUCTURED_DATA_SOURCE as its exact payload. Preserve protected values and "
                   "valid render_blocks/artifacts; do not invent data. Return valid JSON matching OUTPUT_CONTRACT.\n\n"
-                  + PREMIUM_RESPONSE_QUALITY_CONTRACT)
+                  + FREE_RESPONSE_QUALITY_CONTRACT)
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
@@ -3834,7 +3838,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "links": "provide real destinations with a brief explanation of relevance",
         },
         "preserve_each_explicitly_requested_renderer": True,
-        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Premium should include all renderers that materially improve this answer; Free follows the same relevance policy within its shared 6000-token ceiling. Never create a renderer merely to meet a quota.",
+        "adaptive_renderer_selection": "Assess the current request and selected dialogue context for every relevant existing renderer: diagram for navigation/process/relations, table for comparisons, graph for grounded numeric relations, formula for math, code for implementation, links for real destinations, image for explicit raster requests or authorized source-image edits. Free should include every renderer that materially improves this answer, within its shared 8000-token ceiling. Never create a renderer merely to meet a quota.",
         "do_not_add_unrequested_visuals_just_to_fill_a_quota": True,
     }
 
@@ -3872,6 +3876,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "wants_image": bool(structured_intent.get("wants_image")),
             "adaptive_visual_policy": bool(structured_intent.get("adaptive_visual_policy")),
             "wants_file": bool(structured_intent.get("wants_file")),
+            "wants_copy": bool(structured_intent.get("wants_copy")),
+            "file_delivery_mode": _text(structured_intent.get("file_delivery_mode") or "with_inline"),
             "wants_code": bool(structured_intent.get("wants_code")),
             "wants_links": bool(structured_intent.get("wants_links")),
             "wants_graph": bool(structured_intent.get("wants_graph")),
@@ -3998,23 +4004,23 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "one_clear_explanation_per_renderer": True,
         },
         "OUTPUT_BUDGET_POLICY": {
-            "application_output_token_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
-            "response_style": "premium_detailed_visual",
+            "application_output_token_limit": FREE_OUTPUT_TOKEN_LIMIT,
+            "response_style": "free_detailed_visual",
             "detail_level": "expanded_structured_explanation",
             "visual_share_target_percent": "adaptive_no_fixed_share",
             "text_share_target_percent": "adaptive_no_fixed_share",
             "renderer_quota": "none",
-            "allocation_policy": "all_requested_text_and_visuals_share_one_12000_token_ceiling; compress_repetition_before_requested_content",
+            "allocation_policy": "all_requested_text_and_visuals_share_one_8000_token_ceiling; compress_repetition_before_requested_content",
             "adaptive_visuals_when_materially_useful": True,
-            "render_payload_token_budget": PREMIUM_RENDER_TOKEN_BUDGET,
-            "explanation_answer_token_budget": PREMIUM_TEXT_TOKEN_BUDGET,
+            "render_payload_token_budget": FREE_RENDER_TOKEN_BUDGET,
+            "explanation_answer_token_budget": FREE_TEXT_TOKEN_BUDGET,
             "render_budget_included_in_total": True,
             "requested_topic_count": topic_count,
             "preserve_all_requested_topics": True,
             "complete_answer_required": True,
             "single_provider_call": False,
-            "bounded_output_recovery_retries": PREMIUM_RECOVERY_RETRIES,
-            "diagram_repair_output_max": PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+            "bounded_output_recovery_retries": FREE_RECOVERY_RETRIES,
+            "diagram_repair_output_max": FREE_DIAGRAM_REPAIR_OUTPUT_MAX,
             "all_recovery_output_is_charged_to_shared_ceiling": True,
             "compress_repetition_before_substance": True,
             "priority_order": [
@@ -4077,7 +4083,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         protected_source_label = _protected_current_input_label(_build_protected_current_input(current))
         reserved_labels.append(protected_source_label)
     reserved_label_tokens = _estimate_tokens("\n".join(reserved_labels))
-    recovery_headroom_tokens = _estimate_tokens(PREMIUM_RECOVERY_RULE) + 32
+    recovery_headroom_tokens = _estimate_tokens(FREE_RECOVERY_RULE) + 32
     # Reserve the token estimates for every lossless text body that will be sent
     # outside the compact card. This lets the card shrink around exact source text
     # instead of discovering an over-budget request only after compaction is done.
@@ -4597,10 +4603,10 @@ def normalize_render_blocks(
         "text": ("MessageTextBlock", "MessageTextBlock"),
         "markdown": ("MessageTextBlock", "MessageTextBlock"),
         "code": ("CodeBlock", "CodeBlock"), "source_code": ("CodeBlock", "CodeBlock"), "code_block": ("CodeBlock", "CodeBlock"), "script": ("CodeBlock", "CodeBlock"),
-        "link": ("LinkCard", "LinkCard"), "file": ("LinkCard", "LinkCard"), "document": ("LinkCard", "LinkCard"), "file_card": ("LinkCard", "LinkCard"),
+        "link": ("LinkCard", "LinkCard"), "file": ("FileDeliveryBlock", "FileDeliveryBlock"), "document": ("FileDeliveryBlock", "FileDeliveryBlock"), "file_card": ("FileDeliveryBlock", "FileDeliveryBlock"), "copy": ("CopyBlock", "CopyBlock"), "copy_block": ("CopyBlock", "CopyBlock"), "copyable_text": ("CopyBlock", "CopyBlock"),
         "formula": ("FormulaRenderer", "FormulaRenderer"), "equation": ("FormulaRenderer", "FormulaRenderer"), "math": ("FormulaRenderer", "FormulaRenderer"), "latex": ("FormulaRenderer", "FormulaRenderer"),
         "graph": ("GraphBlock", "GraphBlock"), "graph_data": ("GraphBlock", "GraphBlock"), "chart": ("GraphBlock", "GraphBlock"), "plot": ("GraphBlock", "GraphBlock"), "graph3d": ("GraphBlock", "GraphBlock"), "graph_3d": ("GraphBlock", "GraphBlock"), "3d_graph": ("GraphBlock", "GraphBlock"), "3d_scene": ("GraphBlock", "GraphBlock"), "scene3d": ("GraphBlock", "GraphBlock"), "scene_3d": ("GraphBlock", "GraphBlock"), "plot3d": ("GraphBlock", "GraphBlock"), "plot_3d": ("GraphBlock", "GraphBlock"), "scatter3d": ("GraphBlock", "GraphBlock"), "scatter_3d": ("GraphBlock", "GraphBlock"), "surface3d": ("GraphBlock", "GraphBlock"), "surface_3d": ("GraphBlock", "GraphBlock"), "3d_surface": ("GraphBlock", "GraphBlock"), "mesh3d": ("GraphBlock", "GraphBlock"), "mesh_3d": ("GraphBlock", "GraphBlock"), "surface_plot": ("GraphBlock", "GraphBlock"), "surface_graph": ("GraphBlock", "GraphBlock"), "wireframe": ("GraphBlock", "GraphBlock"), "knowledge_graph": ("GraphBlock", "GraphBlock"), "relation_graph": ("GraphBlock", "GraphBlock"), "relations": ("GraphBlock", "GraphBlock"),
-        "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("LinkCard", "LinkCard"), "text_file": ("LinkCard", "LinkCard"), "code_file": ("LinkCard", "LinkCard"), "pdf": ("LinkCard", "LinkCard"),
+        "table": ("TableBlock", "TableBlock"), "table_data": ("TableBlock", "TableBlock"), "spreadsheet": ("LinkCard", "LinkCard"), "presentation": ("LinkCard", "LinkCard"), "document_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "text_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "code_file": ("FileDeliveryBlock", "FileDeliveryBlock"), "pdf": ("FileDeliveryBlock", "FileDeliveryBlock"), "spreadsheet": ("FileDeliveryBlock", "FileDeliveryBlock"), "presentation": ("FileDeliveryBlock", "FileDeliveryBlock"),
         "diagram": ("DiagramRenderer", "DiagramRenderer"), "mermaid": ("DiagramRenderer", "DiagramRenderer"), "svg": ("DiagramRenderer", "DiagramRenderer"), "scene": ("DiagramRenderer", "DiagramRenderer"), "layout": ("DiagramRenderer", "DiagramRenderer"),
         "image": ("GalleryBlock", "GalleryBlock"), "gallery": ("GalleryBlock", "GalleryBlock"), "generated_image": ("GalleryBlock", "GalleryBlock"), "screenshot": ("GalleryBlock", "GalleryBlock"), "image_gallery": ("GalleryBlock", "GalleryBlock"),
         "audio": ("MessageTextBlock", "MessageTextBlock"), "video": ("MessageTextBlock", "MessageTextBlock"),
@@ -4617,7 +4623,7 @@ def normalize_render_blocks(
             "graph_data": "graph", "chart": "graph", "plot": "graph", "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "3d_scene": "graph", "scene3d": "graph", "scene_3d": "graph", "plot3d": "graph", "plot_3d": "graph", "scatter3d": "graph", "scatter_3d": "graph", "surface3d": "graph", "surface_3d": "graph", "3d_surface": "graph", "mesh3d": "graph", "mesh_3d": "graph", "surface_plot": "graph", "surface_graph": "graph", "wireframe": "graph",
             "table_data": "table", "equation": "formula", "math": "formula", "latex": "formula", "math_equation": "formula",
             "source_code": "code", "code_block": "code", "script": "code",
-            "file_card": "file", "document_file": "file", "text_file": "file", "code_file": "file", "pdf": "file",
+            "file_card": "file", "document_file": "file", "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy", "text_file": "file", "code_file": "file", "pdf": "file",
             "generated_image": "image", "image_gallery": "gallery", "screenshot": "image",
             "svg": "diagram", "svgblock": "diagram", "svg_block": "diagram", "mermaid": "diagram", "diagramrenderer": "diagram", "diagram_renderer": "diagram", "flowchart": "diagram", "scene": "diagram", "layout": "diagram",
         }
@@ -4664,6 +4670,14 @@ def normalize_render_blocks(
                 "source", "source_title", "schema", "format", "renderer", "representation",
             }
             direct_payload = {key: value for key, value in item.items() if key in table_keys and value not in (None, "", [], {})}
+            payload = {**direct_payload, **payload}
+        elif block_type == "copy":
+            copy_keys = {"title", "content", "text", "language", "description", "copy_action"}
+            direct_payload = {key: value for key, value in item.items() if key in copy_keys and value not in (None, "", [], {})}
+            payload = {**direct_payload, **payload}
+        elif block_type == "file":
+            file_keys = {"title", "description", "filename", "name", "mime_type", "content_type", "size_bytes", "content", "text", "code", "asset_ref", "export_payload", "source"}
+            direct_payload = {key: value for key, value in item.items() if key in file_keys and value not in (None, "", [], {})}
             payload = {**direct_payload, **payload}
         elif block_type == "diagram":
             diagram_keys = {
@@ -5593,7 +5607,7 @@ async def _repair_requested_diagram(
     current_request: str,
     answer: str,
     display_language: str,
-    max_output_tokens: int = PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+    max_output_tokens: int = FREE_DIAGRAM_REPAIR_OUTPUT_MAX,
 ) -> tuple[dict[str, Any] | None, dict[str, int], dict[str, Any]]:
     """Ask the same provider for the missing drawable payload, without rewriting prose.
 
@@ -5627,20 +5641,20 @@ async def _repair_requested_diagram(
     # If the primary model answer lacks concrete scene data, the same semantic
     # provider receives the current request, the user-facing answer, and only
     # dialogue evidence authorized by Interpretation.
-    # The optional model repair uses only the remainder of the shared 12k
-    # Premium output ceiling. No local request-word fallback is applied.
+    # The optional model repair uses only the remainder of the shared 8k
+    # Free output ceiling. No local request-word fallback is applied.
     remaining_output_budget = max(0, min(
-        PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
+        FREE_DIAGRAM_REPAIR_OUTPUT_MAX,
         int(max_output_tokens or 0),
     ))
-    if remaining_output_budget <= 0:
+    if remaining_output_budget < 256:
         return None, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
                       "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}, {
             "status": "skipped_output_budget_exhausted", "output_chars": 0,
             "model": "not_called", "usage": {"input_tokens": 0, "output_tokens": 0,
                 "total_tokens": 0, "cached_input_tokens": 0, "cache_write_tokens": 0,
                 "reasoning_tokens": 0},
-            "recovery": "shared_premium_output_budget",
+            "recovery": "shared_free_output_budget",
         }
     if _estimate_tokens(answer_context) > 900:
         answer_context = _semantic_compress(answer_context, 900)
@@ -5770,7 +5784,7 @@ async def _repair_requested_graph(
     answer: str,
     display_language: str,
     graph_policy: dict[str, Any] | None = None,
-    max_output_tokens: int = PREMIUM_OUTPUT_TOKEN_LIMIT,
+    max_output_tokens: int = FREE_OUTPUT_TOKEN_LIMIT,
 ) -> tuple[dict[str, Any] | None, dict[str, int], dict[str, Any]]:
     """Recover a missing GraphBlock payload from the semantic task and public answer.
 
@@ -5803,18 +5817,18 @@ async def _repair_requested_graph(
         answer_context = _semantic_compress(answer_context, 1400)
 
     remaining_output_budget = max(0, min(
-        PREMIUM_OUTPUT_TOKEN_LIMIT,
+        FREE_OUTPUT_TOKEN_LIMIT,
         int(max_output_tokens or 0),
     ))
     empty_usage = {
         "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
         "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0,
     }
-    if remaining_output_budget <= 0:
+    if remaining_output_budget < 256:
         return None, empty_usage, {
             "status": "skipped_output_budget_exhausted", "output_chars": 0,
             "model": "not_called", "usage": empty_usage,
-            "recovery": "shared_premium_output_budget",
+            "recovery": "shared_free_output_budget",
         }
 
     policy = graph_policy if isinstance(graph_policy, dict) else {}
@@ -5873,7 +5887,7 @@ async def _repair_requested_graph(
                 "faces", "triangles", "indices", "mesh", "geometry", "scene",
                 "surface_grid", "x", "y", "z", "points", "coordinates",
             ],
-            "output_ceiling": PREMIUM_OUTPUT_TOKEN_LIMIT,
+            "output_ceiling": FREE_OUTPUT_TOKEN_LIMIT,
         },
     }
     response = await asyncio.to_thread(
@@ -6068,8 +6082,8 @@ async def generate_text(
             "request_fingerprint": key[:16],
             "route": "canonical_responses_call_with_bounded_output_recovery",
             "provider_calls": 1,
-            "recovery_retries_allowed": PREMIUM_RECOVERY_RETRIES,
-            "output_limit_mode": "premium_explicit_12000_token_cap",
+            "recovery_retries_allowed": FREE_RECOVERY_RETRIES,
+            "output_limit_mode": "free_explicit_8000_token_cap",
             **input_diagnostics,
         })
         try:
@@ -6078,7 +6092,7 @@ async def generate_text(
                 client.responses.create,
                 model=MODEL,
                 input=base_input,
-                max_output_tokens=PREMIUM_OUTPUT_TOKEN_LIMIT,
+                max_output_tokens=FREE_OUTPUT_TOKEN_LIMIT,
             )
             provider_retries = 0
             prior_usage_data: dict[str, int] = {}
@@ -6124,16 +6138,16 @@ async def generate_text(
             retry_output_cap = max(
                 0,
                 min(
-                    PREMIUM_OUTPUT_TOKEN_LIMIT,
-                    PREMIUM_OUTPUT_TOKEN_LIMIT - int(prior_usage_data.get("output_tokens", 0) or 0),
+                    FREE_OUTPUT_TOKEN_LIMIT,
+                    FREE_OUTPUT_TOKEN_LIMIT - int(prior_usage_data.get("output_tokens", 0) or 0),
                 ),
             )
-            if first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0 and retry_output_cap >= 256:
+            if first_recovery_reason and FREE_RECOVERY_RETRIES > 0 and retry_output_cap >= 256:
                 # One bounded recovery on the same canonical route for truncated,
                 # empty, malformed, or non-public output. It consumes only the
-                # unused portion of the same 12k output ceiling.
+                # unused portion of the same 8k output ceiling.
                 retry_input = [dict(item) if isinstance(item, dict) else item for item in base_input]
-                recovery_rule = "\n\n" + PREMIUM_RECOVERY_RULE
+                recovery_rule = "\n\n" + FREE_RECOVERY_RULE
                 if retry_input and isinstance(retry_input[0], dict) and retry_input[0].get("role") == "system":
                     sys_content = retry_input[0].get("content")
                     if isinstance(sys_content, str):
@@ -6159,7 +6173,7 @@ async def generate_text(
                 provider_retries = 1
                 _apr_timing_log("openai_recovery_roundtrip", retry_started,
                     request_fingerprint=key[:16], outcome=_text(getattr(response, "status", "unknown")).lower())
-            elif first_recovery_reason and PREMIUM_RECOVERY_RETRIES > 0:
+            elif first_recovery_reason and FREE_RECOVERY_RETRIES > 0:
                 _log_json("OUTPUT_RECOVERY", {
                     "request_fingerprint": key[:16], "retry": 1,
                     "reason": first_recovery_reason,
@@ -6193,7 +6207,7 @@ async def generate_text(
             refusal_candidate = _text(getattr(response, "refusal_text", "")) or _visible_refusal_from_output(raw)
             if refusal_candidate:
                 remaining_refusal_output = max(
-                    0, PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0)
+                    0, FREE_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0)
                 )
                 rewritten_raw, refusal_adapter_status, adapter_usage = await _adapt_provider_refusal(
                     client, request, refusal_candidate, premium=True,
@@ -6207,7 +6221,7 @@ async def generate_text(
                 "status": response_status or "unknown",
                 "output_chars": len(raw),
                 "refusal_adapter": refusal_adapter_status,
-                "output_limit_mode": "premium_explicit_12000_token_cap",
+                "output_limit_mode": "free_explicit_8000_token_cap",
                 "incomplete_reason": _text(getattr(response, "incomplete_reason", "")) or None,
                 "usage": usage_data or None,
                 "cost": _calculate_cost(usage_data) if usage_data else {"estimated_cost_usd": None, "pricing_configured": False},
@@ -6224,7 +6238,7 @@ async def generate_text(
                 print(
                     f"[APRIL_PROVIDER] incomplete model output; retries={provider_retries} "
                     f"reason={re.sub(r'[^A-Za-z0-9_:-]', '_', reason)[:80]} "
-                    f"output_chars={len(raw)} output_limit_mode=premium_explicit_12000_token_cap",
+                    f"output_chars={len(raw)} output_limit_mode=free_explicit_8000_token_cap",
                     flush=True,
                 )
             elif not raw:
@@ -6278,8 +6292,8 @@ async def generate_text(
                         remaining_diagram_output = max(
                             0,
                             min(
-                                PREMIUM_DIAGRAM_REPAIR_OUTPUT_MAX,
-                                PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
+                                FREE_DIAGRAM_REPAIR_OUTPUT_MAX,
+                                FREE_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
                             ),
                         )
                         _log_json("SEMANTIC_DIAGRAM_REPAIR", {
@@ -6323,7 +6337,7 @@ async def generate_text(
                     # GraphBlock uses the same SceneContract path as every other artifact.
                     # If Interpretation requested a graph but the primary answer omitted
                     # drawable geometry, ask the same provider to complete the structure
-                    # using only the remaining shared Premium output-token budget.
+                    # using only the remaining shared Free output-token budget.
                     graph_output_aliases = {
                         "graph", "chart", "plot", "graph_data", "graph3d", "graph_3d",
                         "3d_graph", "3d_scene", "scene3d", "scene_3d", "surface3d",
@@ -6346,7 +6360,7 @@ async def generate_text(
                         graph_repair_started = time.perf_counter()
                         remaining_graph_output = max(
                             0,
-                            PREMIUM_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
+                            FREE_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
                         )
                         graph_policy = (
                             request_structured_intent.get("graph_policy")
@@ -6594,7 +6608,7 @@ async def generate_text(
                         "provider_fallback": True,
                         "provider_error_code": failure_code,
                         "provider_retries": int(locals().get("provider_retries", 0)),
-                        "provider_output_limit": PREMIUM_OUTPUT_TOKEN_LIMIT,
+                        "provider_output_limit": FREE_OUTPUT_TOKEN_LIMIT,
                     },
                     "artifacts": [],
                 }
@@ -6605,8 +6619,8 @@ async def generate_text(
         machine_response.setdefault("metadata", {})
         machine_response["metadata"]["provider_ms"] = round((time.perf_counter() - started) * 1000, 1)
         machine_response["metadata"]["provider_retries"] = int(locals().get("provider_retries", 0))
-        machine_response["metadata"]["provider_output_limit"] = PREMIUM_OUTPUT_TOKEN_LIMIT
-        machine_response["metadata"]["provider_output_limit_mode"] = "premium_explicit_12000_token_cap"
+        machine_response["metadata"]["provider_output_limit"] = FREE_OUTPUT_TOKEN_LIMIT
+        machine_response["metadata"]["provider_output_limit_mode"] = "free_explicit_8000_token_cap"
         if usage_data:
             machine_response["metadata"]["usage"] = usage_data
             machine_response["metadata"]["usage_cost"] = _calculate_cost(usage_data)
