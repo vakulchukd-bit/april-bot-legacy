@@ -561,6 +561,21 @@ def _detect_requested_outputs(text: str) -> list[str]:
     for output, markers in _OUTPUT_MARKERS.items():
         if any(_contains_marker(low, marker) for marker in markers):
             result.append(output)
+    # A copy renderer is intentional only when the user asks for a distinct
+    # plain-text block/button; ordinary code blocks already have copy support.
+    if re.search(r"(?:блок\w*\s+(?:для|под)\s+копирован\w*|блок\w*\s+с\s+кнопк\w*\s+копирован\w*|текст\w*.{0,35}блок\w*.{0,25}копирован\w*|copyable\s+(?:text\s+)?block|copy\s+block|text\s+block\s+with\s+(?:a\s+)?copy\s+button|block\s+with\s+(?:a\s+)?copy\s+button|блок\w*\s+для\s+копіюван\w*|блок\w*.{0,30}копіюван\w*)", low, re.I):
+        if "copy" not in result:
+            result.append("copy")
+    # Explicit requests to receive or export a deliverable as a file. A bare
+    # mention of a file remains context; an action plus a file format/noun is required.
+    file_delivery_request = bool(re.search(
+        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|приложи|приложите|прикрепи|прикрепите|сохрани|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать|сделай|создай|сгенерируй|напиши)\b.{0,100}\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b|"
+        r"\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b.{0,80}\b(?:для\s+скачиван\w*|скачать|скачиван\w*)\b|"
+        r"\b(?:send|give|export|download|save|deliver|create|generate|write)\b.{0,100}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
+        low, re.I | re.S,
+    ))
+    if file_delivery_request and "file" not in result:
+        result.append("file")
 
     # A plain image/photo mention is input context, not an output request.
     # The object-order-aware detector captures explicit image requests even
@@ -625,6 +640,28 @@ def _detect_requested_outputs(text: str) -> list[str]:
         result.insert(0, "text")
     return result
 
+
+
+def _file_delivery_mode(text: Any, requested_outputs: Any = None) -> str:
+    """Return file_only only for an explicit no-inline/file-only instruction."""
+    low = _text(text).lower().replace("ё", "е")
+    requested = {str(item).strip().lower() for item in (requested_outputs or []) if str(item).strip()}
+    if "file" not in requested:
+        return "with_inline"
+    explicit_both = bool(re.search(
+        r"(?:\b(?:и\s+рядом|рядом\s+с|вместе\s+с|также\s+покажи|покажи\s+и|выведи\s+и|и\s+(?:покажи|выведи|отобрази).{0,35}в\s+чат\w*|оба\s+вариант|таблиц\w*.{0,45}и.{0,35}файл)\b|\b(?:both|alongside|also\s+show|show\s+both|table\s+and\s+file|code\s+and\s+file)\b)",
+        low, re.I | re.S,
+    ))
+    explicit_only = bool(re.search(
+        r"(?:только\s+(?:в\s+)?(?:[\w-]+\s+){0,5}файл\w*|только\s+файлом|лишь\s+файл\w*|без\s+(?:большого\s+)?вывод\w*\s+(?:в\s+)?чат\w*|не\s+вывод\w*.{0,35}чат\w*|\bfile\s+only\b|\bonly\s+(?:as\s+)?a?\s*file\b|without\s+(?:showing|displaying)\s+(?:the\s+)?(?:full\s+)?(?:code|table|content)\s+in\s+chat|just\s+the\s+file)",
+        low, re.I | re.S,
+    ))
+    file_as_primary = bool(re.search(
+        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|сохрани|сохранить|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать)\b.{0,90}(?:\bв\s+файл\w*|\bфайлом\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|\b(?:send|give|export|download|save|deliver)\b.{0,90}(?:\bas\s+(?:a\s+)?file|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bas\s+(?:a\s+)?file\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
+        low, re.I | re.S,
+    ))
+    file_only = explicit_only or (file_as_primary and not explicit_both)
+    return "file_only" if file_only else "with_inline"
 
 def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
     """Add only high-confidence structured views implied by the user's task.
@@ -763,7 +800,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not explicit_diagram_intent
         and not explicit_graph_intent
         and "image" not in outputs
-        and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link"))
+        and not any(kind in outputs for kind in ("diagram", "graph", "table", "formula", "code", "file", "link", "copy"))
     ):
         outputs.append("image" if artistic_intent else "diagram")
     if explicit_image_request:
@@ -2535,6 +2572,8 @@ def build_interpretation(
         if "text" not in requested_outputs:
             requested_outputs.insert(0, "text")
     wants_file = "file" in requested_outputs
+    file_delivery_mode = _file_delivery_mode(original or text, requested_outputs)
+    wants_copy = "copy" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
     data_source_attached = any(
@@ -2671,6 +2710,8 @@ def build_interpretation(
             "free_image_recreation": free_image_recreation,
             "image_edit_prior_attempts": image_edit_prior_attempts,
             "wants_file": wants_file,
+            "wants_copy": wants_copy,
+            "file_delivery_mode": file_delivery_mode,
             "wants_links": wants_links,
             "wants_code": "code" in requested_outputs,
             "wants_formula": "formula" in requested_outputs,
@@ -2770,6 +2811,8 @@ def build_interpretation(
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
                 "Use code, link, file, image, and gallery renderers only when the response contains matching valid payloads and the request/context supports them.",
+                "Use CopyBlock only when the user explicitly asks for a separate copyable plain-text block or a block with a copy button; do not replace CodeBlock, which remains the renderer for actual source code.",
+                "When intent.file_delivery_mode is file_only, return the deliverable through FileDeliveryBlock and keep the chat response to a short localized file notice; do not repeat the full code or table inline. When the user asks for both a visual result and a file, preserve both blocks in this same SceneContract.",
                 "Never invent numeric data, URLs, files, or images just to fill a renderer.",
                 "Every structured artifact must carry an explicit renderer type and its payload through the canonical SceneContract.",
             ],
