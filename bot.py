@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import re
+import socket
 import traceback
 import time
 import uuid
@@ -69,7 +70,9 @@ from storage import (
     get_user_language, set_user_language, normalize_user_language,
 )
 
-HOST = os.getenv("HOST", "0.0.0.0")
+# Railway private DNS in legacy environments can be IPv6-only. Bind a dual-stack
+# IPv6 socket by default so both Railway ingress and private service calls can reach Bot.
+HOST = os.getenv("HOST", "::").strip() or "::"
 PORT = int(os.getenv("PORT", "10000"))
 MAX_BODY_BYTES = int(os.getenv("APRIL_MAX_HTTP_BODY_BYTES", str(25 * 1024 * 1024)))
 MAX_CHAT_ATTACHMENTS = 10
@@ -2977,8 +2980,26 @@ class AprilHandler(BaseHTTPRequestHandler):
         print(f"[APRIL] {self.address_string()} - {fmt % args}", flush=True)
 
 
+class AprilDualStackHTTPServer(ThreadingHTTPServer):
+    """IPv6 listener accepting IPv4-mapped connections where the OS supports it."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self) -> None:
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            # IPv6-only operation remains valid; Railway legacy private DNS is IPv6.
+            pass
+        super().server_bind()
+
+
 def create_server() -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((HOST, PORT), AprilHandler)
+    host = HOST
+    if host in {"0.0.0.0", ""}:
+        host = "::"
+    if ":" in host:
+        return AprilDualStackHTTPServer((host, PORT), AprilHandler)
+    return ThreadingHTTPServer((host, PORT), AprilHandler)
 
 
 def main() -> None:
