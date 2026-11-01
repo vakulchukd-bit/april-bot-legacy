@@ -146,9 +146,15 @@ def attach_file_delivery_blocks(
             if block_type not in {"file", "document", "file_card", "text_file", "code_file"}:
                 continue
             payload = block_payload(block)
-            if isinstance(payload.get("asset_ref"), dict) or isinstance(payload.get("export_payload"), dict) or any(
-                str(payload.get(key) or "").strip() for key in ("content", "text", "code", "data_uri", "file_data_uri", "download_url", "file_url")
-            ):
+            existing_ref = payload.get("asset_ref") if isinstance(payload.get("asset_ref"), dict) else {}
+            existing_ref_is_valid = bool(
+                str(existing_ref.get("message_id") or "").strip()
+                and re.fullmatch(r"[a-f0-9]{64}", str(existing_ref.get("sha256") or ""), re.I)
+            )
+            # Inline text is useful for preview/share, but it is not a durable
+            # mobile download route. Prefer the already-persisted, owner-scoped
+            # asset reference whenever one can be matched to this file.
+            if existing_ref_is_valid or isinstance(payload.get("export_payload"), dict):
                 continue
             filename = str(payload.get("filename") or payload.get("name") or "").strip().casefold()
             ref = next((item for item in saved_refs if filename and str(item.get("filename") or "").strip().casefold() == filename), None)
