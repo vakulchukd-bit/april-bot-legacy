@@ -234,9 +234,9 @@ APRIL_USER_JOURNEYS = {
     },
     "edit_image": {
         "aliases": ["добавь сумму на фото", "добавь 200 евро на фото", "фото с монетами", "измени эту фотографию", "нарисуй на фото", "удали объект с изображения"],
-        "action": "EDIT_EXISTING_IMAGE", "availability": "Premium-only per current bot provider policy; source-image editing requires an actual referenced source",
+        "action": "EDIT_EXISTING_IMAGE", "availability": "Premium, or one Free referral bonus operation per edit; source-image editing requires an actual referenced source",
         "steps": ["Укажите, какое именно фото изменить, предпочтительно в том же диалоге.", "Опишите точное изменение и место на фото.", "Если исходник не найден в текущей ветке, прикрепите оригинал снова.", "После результата откройте меню действий в правом верхнем углу карточки изображения; выберите Скачать на устройство или Поделиться."],
-        "finish": "Не создавать постороннее изображение вместо редактирования источника. Если редактирование недоступно, объяснить это и не обещать завершённую правку.",
+        "finish": "Не создавать постороннее изображение вместо редактирования источника. В Free каждое редактирование расходует одну бонусную операцию приглашения; обычный базовый пакет Free не открывает редактирование. Если бонуса нет, объяснить это и не обещать завершённую правку.",
     },
     "download_image": {
         "aliases": ["скачать картинку", "сохранить изображение", "поделиться картинкой", "download image", "share image"],
@@ -271,7 +271,7 @@ APRIL_USER_JOURNEYS = {
 }
 
 APRIL_ACCESS_MATRIX = {
-    "free": ["Основной чат и поддерживаемые вложения", "Сообщество /space", "Профиль и настройки /settings", "Справка /aprill", "Активный контекст до 12 часов по проектной политике"],
+    "free": ["Основной чат и поддерживаемые вложения", "Сообщество /space", "Профиль и настройки /settings", "Справка /aprill", "Редактирование исходного изображения за одну бонусную операцию приглашения на каждую правку", "Активный контекст до 12 часов по проектной политике"],
     "premium": ["Функции Free", "История диалогов /history — проверка Premium обязательна", "Редактирование существующих изображений согласно политике бота", "Активный контекст до 24 часов по проектной политике"],
     "not_promised": ["Автоматический платёж/продление без доступной кнопки checkout", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
     "source_note": "Матрица восстановлена по загруженным ZIP исходникам и скриншоту; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
@@ -14949,8 +14949,8 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         if is_ru_or_uk:
             answer = (
                 "**Как устроена April: Free и Premium**\n\n"
-                "**Free** — основной чат, поддерживаемые вложения, сообщество `/space`, профиль и настройки `/settings`, справка `/aprill`; по проектной политике активный контекст хранится до 12 часов.\n\n"
-                "**Premium** включает функции Free, доступ к сохранённым диалогам `/history` (с проверкой активного Premium), редактирование существующих изображений по правилам бота и активный контекст до 24 часов. В проверенных исходниках нет основания обещать, что отдельные страницы `/memory` или `/tools` работают как самостоятельные пользовательские разделы.\n\n"
+                "**Free** — основной чат, поддерживаемые вложения, сообщество `/space`, профиль и настройки `/settings`, справка `/aprill`; редактирование исходного изображения доступно за одну бонусную операцию приглашения на каждую правку. По проектной политике активный контекст хранится до 12 часов.\n\n"
+                "**Premium** включает функции Free, доступ к сохранённым диалогам `/history` (с проверкой активного Premium), расширенный доступ к поддерживаемым операциям с изображениями и активный контекст до 24 часов. В Free редактирование исходного изображения расходует одну бонусную операцию приглашения на каждую правку. В проверенных исходниках нет основания обещать, что отдельные страницы `/memory` или `/tools` работают как самостоятельные пользовательские разделы.\n\n"
                 "**Куда нажимать:**\n"
                 "1. [Основной чат April](/) — задавайте вопрос обычным текстом или голосом; прикладывайте файл только если хотите, чтобы April изучила именно этот файл.\n"
                 "2. [Настройки и профиль](/settings) — проверьте аккаунт, язык и карточку CURRENT PLAN; в ней находятся быстрые переходы к разделам.\n"
@@ -14962,8 +14962,8 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         else:
             answer = (
                 "**How April works: Free and Premium**\n\n"
-                "**Free** includes the main chat, supported attachments, Community `/space`, Profile and Settings `/settings`, Help `/aprill`, and up to 12 hours of active context under the project policy.\n\n"
-                "**Premium** includes Free features, saved-dialogue History `/history` (with an active Premium entitlement check), supported editing of existing images, and up to 24 hours of active context. The source snapshot does not support promising standalone working `/memory` or `/tools` pages.\n\n"
+                "**Free** includes the main chat, supported attachments, Community `/space`, Profile and Settings `/settings`, Help `/aprill`, image editing for one invitation-bonus operation per edit, and up to 12 hours of active context under the project policy.\n\n"
+                "**Premium** includes Free features, saved-dialogue History `/history` (with an active Premium entitlement check), expanded supported image operations, and up to 24 hours of active context. Free image editing uses one invitation-bonus operation per edit. The source snapshot does not support promising standalone working `/memory` or `/tools` pages.\n\n"
                 "**Where to click:**\n"
                 "1. [Main April chat](/) — ask in text or voice; attach a file only when you want April to inspect that file.\n"
                 "2. [Profile and Settings](/settings) — review your account, language and CURRENT PLAN card.\n"
