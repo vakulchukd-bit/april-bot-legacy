@@ -2937,6 +2937,174 @@ def _weekly_axis_labels(existing_x: Any = None) -> List[str]:
     return ["Начало недели", "День 2", "День 3", "День 4", "День 5", "День 6", "Конец недели"]
 
 
+
+def _graph_payload_from_request(
+    current_request: str,
+    answer: str = "",
+    graph_policy: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build only a graph that is grounded in the current request/answer.
+
+    Explicit equations are kept verbatim. For a stated start/end range, the
+    graph contains those two endpoints only; it never fabricates intermediate
+    measurements. Common 3D surfaces are allowed as labelled illustrative
+    defaults when the user names the surface but supplies no equation.
+    """
+    request_text = str(current_request or "").strip()
+    answer_text = str(answer or "").strip()
+    text = "\n".join(part for part in (request_text, answer_text) if part)
+    if not text:
+        return {}
+
+    policy = graph_policy if isinstance(graph_policy, dict) else {}
+    preferred = str(policy.get("preferred_representation") or "").strip().lower().replace("-", "_")
+    is_3d = preferred in {
+        "scene3d", "scene_3d", "surface3d", "surface_3d",
+        "scatter3d", "scatter_3d", "mesh3d", "mesh_3d", "3d",
+    } or bool(re.search(r"(?:\b3\s*[- ]?d\b|\b3д\b|тр[её]хмерн\w*|3-мерн\w*)", text, re.IGNORECASE))
+
+    if is_3d:
+        equation_match = re.search(
+            r"(?im)(?:^|[\s;])(?:z|f\s*\(\s*x\s*,\s*y\s*\))\s*=\s*([^\n;]+)",
+            text,
+        )
+        expression = ""
+        illustrative = False
+        if equation_match:
+            expression = equation_match.group(1).strip().strip("`$ ")
+            expression = re.sub(r"\s+(?:в|in)\s*(?:3\s*[- ]?d|3д|3d)\b.*$", "", expression, flags=re.IGNORECASE).strip()
+            expression = re.sub(r"[.!?]+$", "", expression).strip()
+        elif re.search(r"парабол|paraboloid|parabola", text, re.IGNORECASE):
+            expression = "x^2 + y^2"
+            illustrative = True
+        elif re.search(r"седлов|saddle", text, re.IGNORECASE):
+            expression = "x^2 - y^2"
+            illustrative = True
+        elif re.search(r"волнообраз|волнов|wave surface|waveform surface", text, re.IGNORECASE):
+            expression = "sin(sqrt(x^2 + y^2))"
+            illustrative = True
+        if expression:
+            return {
+                "representation": "surface3d",
+                "graph_type": "surface3d",
+                "chart_type": "surface3d",
+                "dimensions": 3,
+                "three_d": True,
+                "title": "Иллюстративная 3D-поверхность" if illustrative else "3D-график функции",
+                "description": (
+                    "Показана стандартная иллюстративная поверхность; уравнение не задавалось явно."
+                    if illustrative else "Поверхность построена по уравнению из текущего запроса."
+                ),
+                "equation": f"z = {expression}",
+                "expression": expression,
+                "surface_function": expression,
+                "z_function": expression,
+                "x_domain": [-5, 5],
+                "y_domain": [-5, 5],
+                "source": "current_request_equation" if not illustrative else "labelled_illustrative_shape_default",
+            }
+        return {}
+
+    # Require a semantically explicit endpoint relation; arbitrary numbers in
+    # prose are not enough to be treated as chart data.
+    range_pattern = re.compile(
+        r"(?i)(?:\b(?:с|от|from)\s*)"
+        r"(-?\d+(?:[.,]\d+)?)\s*(?:грн\.?|uah|usd|eur|€|\$)?\s*"
+        r"(?:до|to|по|through)\s*"
+        r"(-?\d+(?:[.,]\d+)?)\s*(грн\.?|uah|usd|eur|€|\$)?"
+    )
+    range_match = range_pattern.search(text)
+    if not range_match:
+        # Equation-only 2D function: preserve the user/model's actual expression.
+        equation_match = re.search(
+            r"(?im)(?:^|[\s;])(?:y|f\s*\(\s*x\s*\))\s*=\s*([^\n;]+)",
+            text,
+        )
+        if equation_match and re.search(r"\bx\b", equation_match.group(1), re.IGNORECASE):
+            expression = equation_match.group(1).strip().strip("`$ ")
+            expression = re.sub(r"[.!?]+$", "", expression).strip()
+            if expression:
+                return {
+                    "representation": "function2d",
+                    "graph_type": "function",
+                    "chart_type": "line",
+                    "dimensions": 2,
+                    "title": "График функции",
+                    "equation": f"y = {expression}",
+                    "expression": expression,
+                    "series": [{
+                        "label": f"y = {expression}",
+                        "type": "function",
+                        "fn": expression,
+                        "equation": f"y = {expression}",
+                        "expression": expression,
+                    }],
+                    "x_axis": {"title": "x"},
+                    "y_axis": {"title": "y"},
+                    "source": "current_request_equation",
+                }
+        return {}
+
+    start_value = _number_for_render(range_match.group(1))
+    end_value = _number_for_render(range_match.group(2))
+    if start_value is None or end_value is None:
+        return {}
+
+    combined_low = text.lower()
+    if re.search(r"недел|week", combined_low):
+        x_labels = ["Начало недели", "Конец недели"]
+        x_title = "Период недели"
+    elif re.search(r"месяц|month", combined_low):
+        x_labels = ["Начало месяца", "Конец месяца"]
+        x_title = "Период месяца"
+    elif re.search(r"год|year", combined_low):
+        x_labels = ["Начало года", "Конец года"]
+        x_title = "Период года"
+    elif re.search(r"день|дня|дней|day|daily", combined_low):
+        x_labels = ["Начало периода", "Конец периода"]
+        x_title = "Период"
+    else:
+        x_labels = ["Начальное значение", "Конечное значение"]
+        x_title = "Период"
+
+    currency = range_match.group(3) or ""
+    if not currency:
+        currency_match = re.search(r"(?i)(грн\.?|uah|usd|eur|€|\$)", text)
+        currency = currency_match.group(1) if currency_match else ""
+    y_title = f"Значение, {currency}" if currency else "Значение"
+    title_match = re.search(
+        r"(?i)(?:построй|построить|покажи|нарисуй|построить)\s+(?:мне\s+)?(?:график|диаграмму)\s+(.{3,150})",
+        request_text,
+    )
+    title = title_match.group(1).strip() if title_match else "Изменение значения за период"
+    title = re.sub(r"\s*(?:с|от)\s*-?\d+(?:[.,]\d+)?[\w\s.,]*$", "", title, flags=re.IGNORECASE).strip(" .,:;-") or "Изменение значения за период"
+    points = [
+        {"x": x_labels[0], "y": start_value},
+        {"x": x_labels[1], "y": end_value},
+    ]
+    return {
+        "representation": "line",
+        "chart_type": "line",
+        "graph_type": "line",
+        "dimensions": 2,
+        "title": title[:140],
+        "description": "Показаны только заданные начальное и конечное значения; линия соединяет их без выдумывания промежуточных измерений.",
+        "series": [{
+            "label": y_title,
+            "type": "line",
+            "points": points,
+            "x": x_labels,
+            "y": [start_value, end_value],
+        }],
+        "points": points,
+        "x_values": x_labels,
+        "y_values": [start_value, end_value],
+        "x_axis": {"title": x_title, "values": x_labels},
+        "y_axis": {"title": y_title},
+        "source": "explicit_current_request_range",
+        "data_semantics": {"kind": "endpoint_range", "interpolation": "visual_line_only"},
+    }
+
 def _interpolate_weekly_graph_payload(
     payload: Dict[str, Any],
     current_request: str = "",
@@ -3566,26 +3734,28 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     if isinstance(artifact, dict):
         artifact_data = artifact.get("data")
         if isinstance(artifact_data, dict):
-            candidates.append(artifact_data.get("payload"))
-        candidates.extend((artifact.get("payload"), artifact_data))
+            candidates.extend((artifact_data.get("payload"), artifact_data.get("payload_contract")))
+        candidates.extend((artifact.get("payload"), artifact.get("artifact_payload"), artifact_data))
     presentation = block.get("presentation")
     if isinstance(presentation, dict):
-        payload_contract = presentation.get("payload_contract")
-        if isinstance(payload_contract, dict):
-            candidates.append(payload_contract.get("payload"))
+        for envelope_key in ("artifact_payload", "payload_contract"):
+            envelope = presentation.get(envelope_key)
+            if isinstance(envelope, dict):
+                candidates.extend((envelope.get("payload"), envelope))
     for key in ("signal", "room_signal", "render_signal", "presentation_signal"):
         envelope = block.get(key)
         if isinstance(envelope, dict):
-            candidates.append(envelope.get("payload"))
+            candidates.extend((envelope.get("payload"), envelope.get("artifact_payload"), envelope.get("payload_contract")))
             nested_presentation = envelope.get("presentation")
             if isinstance(nested_presentation, dict):
-                nested_contract = nested_presentation.get("payload_contract")
-                if isinstance(nested_contract, dict):
-                    candidates.append(nested_contract.get("payload"))
+                for envelope_key in ("artifact_payload", "payload_contract"):
+                    nested_contract = nested_presentation.get(envelope_key)
+                    if isinstance(nested_contract, dict):
+                        candidates.extend((nested_contract.get("payload"), nested_contract))
     candidates.extend((
-        block.get("data"), block.get("artifact_payload"), block.get("table"),
-        block.get("graph"), block.get("diagram"), block.get("link"),
-        block.get("content") if isinstance(block.get("content"), dict) else None,
+        block.get("data"), block.get("artifact_payload"), block.get("payload_contract"),
+        block.get("table"), block.get("graph"), block.get("chart"), block.get("diagram"),
+        block.get("link"), block.get("content") if isinstance(block.get("content"), dict) else None,
         block.get("payload"),
     ))
     diagram_direct_keys = {
@@ -3615,9 +3785,22 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
         }
         merged.update({key: deepcopy(value) for key, value in block.items()
                        if key in table_direct_keys and value not in (None, "", [], {})})
+    if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
+        graph_direct_keys = {
+            "title", "description", "caption", "representation", "graph_type", "chart_type", "visualization",
+            "dimensions", "three_d", "series", "datasets", "traces", "curves", "points", "data_points",
+            "coordinates", "x", "y", "z", "x_values", "y_values", "z_values", "values", "categories", "labels",
+            "x_axis", "y_axis", "z_axis", "axes", "x_domain", "y_domain", "domain", "matrix", "data_table",
+            "surface_grid", "surface_function", "z_function", "z_expression", "equation", "expression", "fn",
+            "objects_3d", "objects", "shapes", "meshes", "vertices", "faces", "nodes", "edges", "graph_policy",
+        }
+        merged.update({key: deepcopy(value) for key, value in block.items()
+                       if key in graph_direct_keys and value not in (None, "", [], {})})
     for candidate in candidates:
         if isinstance(candidate, dict):
             merged.update({key: deepcopy(value) for key, value in candidate.items() if value not in (None, "", [], {})})
+    if block_type in {"graph", "chart", "plot", "graph_data", "3d_scene", "scene3d", "graph3d", "graph_3d"}:
+        merged = _unwrap_render_payload_envelopes(merged)
     if block_type == "diagram":
         # Responses may wrap their concrete drawing inside `diagram`, `scene`,
         # `graph`, or a nested `payload`. Unwrap those envelopes while retaining
@@ -3706,6 +3889,105 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
         fallback["code"] = block["source"]
     return fallback
 
+
+def _graph_has_drawable_2d_data(payload: Dict[str, Any], series: Any = None) -> bool:
+    """Return True only when a 2D graph contains actual paired drawable data.
+
+    Labels, empty point shells and one-sided axes are not graph data. X values may
+    be numeric or categorical text; Y values must be finite numeric values.
+    """
+    def _valid_x(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        return _number_for_render(value) is not None
+
+    def _valid_point(point: Any) -> bool:
+        if isinstance(point, dict):
+            x_value = point.get("x", point.get("xValue", point.get("category")))
+            y_value = point.get("y", point.get("yValue", point.get("value")))
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            x_value, y_value = point[0], point[1]
+        else:
+            return False
+        return _valid_x(x_value) and _number_for_render(y_value) is not None
+
+    def _valid_pairs(xs: Any, ys: Any) -> bool:
+        if not isinstance(xs, (list, tuple)) or not isinstance(ys, (list, tuple)):
+            return False
+        return any(_valid_x(x_value) and _number_for_render(y_value) is not None
+                   for x_value, y_value in zip(xs, ys))
+
+    raw_series = series
+    if isinstance(raw_series, dict):
+        raw_series = list(raw_series.values())
+    if isinstance(raw_series, (list, tuple)):
+        for item in raw_series:
+            if not isinstance(item, dict):
+                if _valid_point(item):
+                    return True
+                continue
+            for points_key in ("points", "data_points", "data"):
+                raw_points = item.get(points_key)
+                if isinstance(raw_points, (list, tuple)) and any(_valid_point(point) for point in raw_points):
+                    return True
+            item_x = item.get("x", item.get("x_values"))
+            item_y = item.get("y", item.get("y_values", item.get("values")))
+            if _valid_pairs(item_x, item_y):
+                return True
+            # Values-only series are supported by GraphBlock: it assigns index
+            # positions to the Y values without inferring anything from prose.
+            if isinstance(item_y, (list, tuple)) and any(_number_for_render(value) is not None for value in item_y):
+                return True
+            function_type = str(item.get("type") or item.get("representation") or "").strip().lower()
+            if function_type in {"function", "function2d", "function_2d", "line_function"} and any(
+                isinstance(item.get(key), str) and item.get(key).strip()
+                for key in ("fn", "equation", "expression", "formula", "function")
+            ):
+                return True
+
+    for x_key, y_key in (("x", "y"), ("x_values", "y_values")):
+        if _valid_pairs(payload.get(x_key), payload.get(y_key)):
+            return True
+
+    direct_points = payload.get("points") or payload.get("data_points") or payload.get("coordinates")
+    if isinstance(direct_points, (list, tuple)) and any(_valid_point(point) for point in direct_points):
+        return True
+
+    # GraphBlock also supports a canonical values array with categorical/numeric
+    # x-axis labels; a values-only payload is therefore drawable.
+    values = payload.get("values")
+    if isinstance(values, (list, tuple)) and any(_number_for_render(value) is not None for value in values):
+        return True
+    return False
+
+
+def _unwrap_render_payload_envelopes(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Unwrap known artifact/scene transport envelopes without dropping fields."""
+    merged = dict(payload) if isinstance(payload, dict) else {}
+    wrapper_keys = (
+        "graph", "chart", "visual", "render_payload", "quantum_payload",
+        "artifact_payload", "payload_contract", "presentation_signal", "payload",
+        "room_signal", "render_signal", "signal",
+    )
+    for _ in range(3):
+        changed = False
+        for key in wrapper_keys:
+            nested = merged.get(key)
+            if not isinstance(nested, dict):
+                continue
+            nested_payload = nested.get("payload")
+            source = nested_payload if isinstance(nested_payload, dict) else nested
+            if not source:
+                continue
+            # Existing canonical/top-level values have priority; the envelope
+            # contributes only fields that were not present at this level.
+            next_merged = {**source, **merged}
+            if next_merged != merged:
+                merged = next_merged
+                changed = True
+        if not changed:
+            break
+    return merged
 
 def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
     p = payload if isinstance(payload, dict) else {}
@@ -3820,16 +4102,7 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
         if has_3d_vertices and has_mesh_topology:
             return True
 
-        if isinstance(series, (list, tuple)) and any(
-            isinstance(item, dict) and any(_nonempty(item.get(key)) for key in ("points", "x", "y", "data", "values"))
-            for item in series
-        ):
-            return True
-        if isinstance(p.get("x_values"), (list, tuple)) and isinstance(p.get("y_values"), (list, tuple)) and min(len(p["x_values"]), len(p["y_values"])) >= 2:
-            return True
-        if isinstance(p.get("x"), (list, tuple)) and isinstance(p.get("y"), (list, tuple)) and min(len(p["x"]), len(p["y"])) >= 2:
-            return True
-        if isinstance(direct_points, (list, tuple)) and len(direct_points) >= 2:
+        if _graph_has_drawable_2d_data(p, series):
             return True
         if isinstance(p.get("nodes"), (list, tuple)) and bool(p["nodes"]) and isinstance(p.get("edges"), (list, tuple)) and bool(p.get("edges")):
             return True
@@ -4471,9 +4744,13 @@ def prepare_render_blocks_for_room_dispatch(
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
             if "graph" in requested and not _has_render_payload("graph", payload):
                 candidate_graph = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-                # Do not synthesize graph objects from request keywords. The
-                # Provider's concrete scene payload or an explicit structure in
-                # its answer is the source of truth.
+                if not candidate_graph:
+                    # Exact numeric endpoints and a period are explicit source data
+                    # in this same request. Reuse them; weekly display interpolation
+                    # marks every derived point as an estimate, never an observation.
+                    candidate_graph = _graph_payload_from_request(
+                        current_request, source_answer, interpreted_graph_policy
+                    )
                 if candidate_graph:
                     payload = candidate_graph
                     block["source_room"] = block.get("source_room") or "C_GRAPH_ROOM"
@@ -4596,8 +4873,12 @@ def prepare_render_blocks_for_room_dispatch(
             graph_payload = deepcopy(section_graph_from_answer)
         if not graph_payload:
             graph_payload = _graph_payload_from_answer(source_answer, interpreted_graph_policy)
-        # No request-word graph fallback: only model scene data, explicit answer
-        # data, or a source table may create drawable graph objects.
+        if not graph_payload:
+            # The request-range parser reads only an explicitly stated start/end
+            # value relation; it does not invent observations or use topic keywords.
+            graph_payload = _graph_payload_from_request(
+                current_request, source_answer, interpreted_graph_policy
+            )
         if graph_payload and interpreted_graph_policy:
             graph_payload_policy = graph_payload.get("graph_policy") if isinstance(graph_payload.get("graph_policy"), dict) else {}
             graph_payload["graph_policy"] = {**graph_payload_policy, **interpreted_graph_policy}
