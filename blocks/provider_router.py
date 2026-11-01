@@ -31,6 +31,7 @@ FREE_RENDER_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
 FREE_TEXT_TOKEN_BUDGET = FREE_OUTPUT_TOKEN_LIMIT
 FREE_RECOVERY_RETRIES = 1
 FREE_DIAGRAM_REPAIR_OUTPUT_MAX = FREE_OUTPUT_TOKEN_LIMIT
+FREE_CODE_REPAIR_OUTPUT_MAX = 3600
 # This router is used only by the Free executor. Keep its input ceiling
 # independent from Premium's environment variable so a Premium setting can
 # never silently raise the Free budget.
@@ -46,7 +47,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "free_provider_router_v8_shared_copy_file_rooms_8000_output"
+PROVIDER_ROUTER_VERSION = "free_provider_router_v9_code_file_contract_recovery_8000_output"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -72,6 +73,7 @@ The text answer is still the main answer. When image generation is explicitly re
 - Keep the input signal clean: prioritize CURRENT_REQUEST and lossless source values, then the strongest topic-specific context, then only background that changes the answer. Remove duplicate summaries, stale/irrelevant topics, redundant metadata and filler before compressing facts. Never silently omit a requested step, negate a constraint, alter a value, invent missing source data, or present an inference as a saved fact.
 - For explanatory, planning, troubleshooting, comparison, or multi-part requests, do not default to a short summary. Cover each requested part with the necessary rationale, concrete steps/examples, important limitations and a practical next action. Keep acknowledgements and simple factual replies short; never add padding merely to consume the token allowance.
 - Use readable Markdown hierarchy for substantive answers: `##` for main sections and `###` for their subsections, with descriptive title-case headings rather than decorative ALL-CAPS labels. Keep topic and subtopic headings concise and distinct. Use lists, tables and renderers only when they improve comprehension. A visual must add a relationship, sequence, comparison, formula, source, or depiction not already made obvious by the prose. For substantive multi-section answers, store concise ordered heading/summary entries in dialogue_memory_record.sections so the next turn can continue from uncovered material.
+- CODE AND FILE DELIVERY CONTRACT: if the current interpretation requests code, include a concrete `type="code"` render block with renderer/viewer `CodeBlock`, language, filename and the complete real source in both `code` and `content`. If it also requests a file, keep this copyable CodeBlock and allow the existing executor/file room to persist the exact bytes and attach FileDeliveryBlock. A code+file request defaults to both renderers; only an explicit no-inline/file-only instruction may suppress the CodeBlock. CodeBlock already includes copy/download actions; use CopyBlock only for a separate plain-text copy request. Never claim a file is ready from a filename-only artifact or an empty spec.
 """.strip()
 
 # Reserve the same bounded recovery instruction before fitting the first request, so
@@ -324,6 +326,7 @@ You are April's single Provider in the existing canonical route. The processor o
 24-hour memory search, NEW/CONTINUE, interpretation, rooms and renderers. Never create another
 route/memory/identity or expose hidden reasoning.
 `answer` is the complete answer in RETURN_LANGUAGE; `content` may be empty because the normalizer fills it from `answer`; the normal text renderer must remain complete after normalization.
+REQUESTED CODE/FILE OUTPUT CONTRACT (mandatory even in compact mode): when INTERPRETATION.intent.wants_code=true, include one concrete render_blocks item with type="code", renderer="CodeBlock", viewer="CodeBlock", language, filename, code and content; code/content must both contain the complete real source, never only a filename or placeholder. When wants_file=true for that code, keep the code block and let the executor persist its exact bytes and attach a FileDeliveryBlock. Code+file means BOTH by default; file_only is valid only when the user explicitly asks not to show the source inline. CodeBlock has its own copy action. CopyBlock is only for a separate plain-text copy request. Never claim a file is ready unless non-empty source bytes can be persisted.
 CURRENT-TURN SEMANTIC CONSISTENCY:
 - Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
 - Before returning, cross-check the prose answer, every render block's title/description/explanation, and every artifact payload against the same interpreted task, requested operation, values, and constraints. They must describe the same subject and requested result.
@@ -3207,8 +3210,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             + "Use Markdown headings and short nested subsections for substantive multi-part answers. Renderers must complement the text: "
             + "never create a diagram by copying prose or headings; add a diagram only when the user explicitly asks for one or a concrete "
             + "process/relationship map materially clarifies the answer. For site help, use only verified ROOM_KNOWLEDGE_CONTEXT routes "
-            + "and output clickable relative links when applicable. Return valid JSON with answer, content, render_blocks, artifacts and "
-            + "dialogue_memory_record. Never invent routes, history, values or render payloads."
+            + "and output clickable relative links when applicable. "
+            + "REQUESTED CODE/FILE CONTRACT: if INTERPRETATION.intent.wants_code=true, include a concrete render_blocks code item with type=code, renderer=CodeBlock, viewer=CodeBlock, language, filename, code and content; code and content must contain the complete source, never a filename-only artifact. If wants_file=true for code, keep CodeBlock and let the executor persist its exact source and attach FileDeliveryBlock. Code+file means both by default; file_only only for an explicit no-inline request. CodeBlock has copy action; CopyBlock is only for separate plain text. Never claim file ready without non-empty source bytes. "
+            + "Return valid JSON with answer, content, render_blocks, artifacts and dialogue_memory_record. Never invent routes, history, values or render payloads."
         )
         system = emergency_system
         minimal = emergency
@@ -5396,6 +5400,49 @@ def _normalize(
         dict(item) for item in artifacts if isinstance(item, dict)
     ]
 
+    # Some model responses label a real source payload as "unknown". Recover it
+    # only when code was explicitly requested AND source bytes actually exist.
+    # A filename or empty spec alone is never enough to create a CodeBlock.
+    if "code" in output_set:
+        for artifact in normalized_artifacts:
+            artifact_kind = _text(artifact.get("type") or artifact.get("artifact_type")).lower()
+            if artifact_kind not in {"", "unknown", "artifact", "file", "code_file"}:
+                continue
+            nested_source = next((
+                artifact.get(key) for key in ("payload", "data", "spec")
+                if isinstance(artifact.get(key), dict)
+            ), {})
+            source_code = next((
+                value for value in (
+                    artifact.get("code"), artifact.get("source_code"), artifact.get("source"),
+                    nested_source.get("code"), nested_source.get("source_code"), nested_source.get("source"),
+                    artifact.get("content"), nested_source.get("content"),
+                ) if isinstance(value, str) and value.strip()
+            ), "")
+            filename = _text(artifact.get("filename") or artifact.get("name") or nested_source.get("filename"))
+            language = _text(artifact.get("language") or nested_source.get("language")).lower()
+            code_extension = bool(re.search(r"\.(?:py|js|ts|tsx|jsx|html|css|sh|json)$", filename, re.I))
+            if len(source_code.strip()) < 20 or not (code_extension or language in {"python", "javascript", "typescript", "bash", "html", "css"}):
+                continue
+            artifact["type"] = "code"
+            artifact["artifact_type"] = "code"
+            artifact["code"] = source_code
+            artifact["content"] = source_code
+            artifact["language"] = language or ("python" if filename.lower().endswith(".py") else "text")
+            if filename:
+                artifact["filename"] = filename
+            artifact["payload"] = {
+                **(dict(nested_source) if isinstance(nested_source, dict) else {}),
+                "code": source_code, "content": source_code,
+                "language": artifact["language"], "filename": filename,
+            }
+            artifact.setdefault("renderer", "CodeBlock")
+            artifact.setdefault("viewer", "CodeBlock")
+            _log_json("UNKNOWN_ARTIFACT_CODE_RECOVERY", {
+                "status": "promoted_source_bearing_artifact",
+                "filename_present": bool(filename), "source_chars": len(source_code),
+            })
+
     # Some responses place real typed payloads in `artifacts` but omit the
     # matching render_blocks entry. Carry those payloads into the canonical
     # SceneContract rather than silently dropping a renderer at the provider
@@ -5593,11 +5640,192 @@ def _selected_diagram_context(request: MachineRequest) -> list[dict[str, str]]:
     for pair in pairs[-2:]:
         if not isinstance(pair, dict):
             continue
-        user_text = _text(pair.get("source_user_text") or pair.get("user_text") or pair.get("user_message"))
-        april_text = _text(pair.get("source_april_text") or pair.get("april_text") or pair.get("assistant_text") or pair.get("assistant_message"))
+        user_text = _text(pair.get("source_user_text") or pair.get("user_text") or pair.get("user_message") or pair.get("user") or pair.get("request"))
+        april_text = _text(pair.get("source_april_text") or pair.get("april_text") or pair.get("assistant_text") or pair.get("assistant_message") or pair.get("april") or pair.get("answer"))
         if user_text or april_text:
             result.append({"user": _clip(user_text, 900), "april": _clip(april_text, 1500)})
     return result
+
+
+async def _repair_requested_code(
+    client: Any,
+    request: MachineRequest,
+    *,
+    current_request: str,
+    answer: str,
+    display_language: str,
+    max_output_tokens: int = FREE_CODE_REPAIR_OUTPUT_MAX,
+) -> tuple[dict[str, Any] | None, dict[str, int], dict[str, Any]]:
+    """Recover a missing, explicitly requested source-code block using the same provider.
+
+    This is a bounded completion pass: it runs only after Interpretation has
+    requested code and the primary response contains no concrete CodeBlock. It
+    does not invent a file from a filename-only artifact; actual source bytes are
+    required so the executor can save them and attach the standard file room card.
+    """
+    language = _text(display_language or "ru")
+    intent_data = request.intent if isinstance(request.intent, dict) else {}
+    intent_data = intent_data.get("interpretation") if isinstance(intent_data.get("interpretation"), dict) else intent_data
+    intent = intent_data.get("intent") if isinstance(intent_data.get("intent"), dict) else intent_data
+    relation = _text((request.memory or {}).get("relation") if isinstance(request.memory, dict) else "").upper()
+    context = _selected_diagram_context(request) if relation == "CONTINUE" else []
+    answer_context = str(answer or "")
+    if _estimate_tokens(answer_context) > 700:
+        answer_context = _semantic_compress(answer_context, 700)
+
+    # For an elliptical file-only correction, resolve language/filename from the
+    # same selected active branch as well as the current utterance.
+    selected_context_text = " ".join(
+        _text(item.get(key)) for item in context if isinstance(item, dict) for key in ("user", "april")
+    )
+    request_and_context = " ".join((current_request, answer_context, selected_context_text))
+    name_match = re.search(r"\b([A-Za-z0-9_.-]+\.(?:py|js|ts|tsx|jsx|html|css|json|sh|ps1))\b", request_and_context)
+    is_python = bool(re.search(r"\bpython\b|python\s*[-–— ]\s*код|\.py\b", request_and_context, re.I))
+    fallback_filename = "app.py" if is_python else "app.js"
+    preferred_filename = name_match.group(1) if name_match else fallback_filename
+    preferred_extension = preferred_filename.rsplit(".", 1)[-1].lower()
+    extension_language = {
+        "py": "python", "js": "javascript", "ts": "typescript", "tsx": "typescript",
+        "jsx": "javascript", "html": "html", "css": "css", "json": "json",
+        "sh": "bash", "ps1": "powershell",
+    }
+    preferred_language = extension_language.get(preferred_extension, "python" if is_python else "javascript")
+
+    remaining_output_budget = max(0, min(FREE_CODE_REPAIR_OUTPUT_MAX, int(max_output_tokens or 0)))
+    empty_usage = {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+        "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0,
+    }
+    if remaining_output_budget < 512:
+        return None, empty_usage, {
+            "status": "skipped_output_budget_exhausted", "output_chars": 0,
+            "model": "not_called", "usage": dict(empty_usage),
+        }
+
+    repair_system = (
+        "You are April's source-code completion renderer. Interpretation already confirmed that the authenticated user explicitly requested source code. "
+        "Return one valid JSON object only with this shape: "
+        "{\"code\":{\"language\":\"python\",\"filename\":\"app.py\",\"code\":\"<complete source>\",\"content\":\"<same complete source>\",\"explanation\":\"<short explanation in RETURN_LANGUAGE>\"}}. "
+        "Generate the complete, runnable source required by CURRENT_REQUEST. Use SELECTED_DIALOGUE_CONTEXT only to resolve an elliptical follow-up and preserve its actual task. "
+        "Do not output a prose-only response, filename-only artifact, empty spec, ellipses, TODO placeholders or a source-code summary. "
+        "Keep all source inside code and content, exactly identical. Do not return file bytes or a download URL: the existing executor will persist these exact source bytes and attach FileDeliveryBlock when requested. "
+        "Use the preferred filename and language unless the task clearly requires another. Explain only the code's purpose in RETURN_LANGUAGE: " + language + "."
+    )
+    repair_payload = {
+        "RETURN_LANGUAGE": language,
+        "CURRENT_REQUEST": str(current_request or ""),
+        "SELECTED_DIALOGUE_CONTEXT": context,
+        "EXISTING_ANSWER": answer_context,
+        "PREFERRED_FILENAME": preferred_filename,
+        "PREFERRED_LANGUAGE": preferred_language,
+        "REQUIRED_RENDERER": "CodeBlock",
+        "WANTS_FILE": bool(intent.get("wants_file")),
+        "AUTHENTICATED_SCOPE": "existing request and selected same-dialogue context only",
+    }
+    response = await asyncio.to_thread(
+        client.responses.create,
+        model=MODEL,
+        input=[
+            {"role": "system", "content": repair_system},
+            {"role": "user", "content": json.dumps(repair_payload, ensure_ascii=False, separators=(",", ":"))},
+        ],
+        max_output_tokens=remaining_output_budget,
+    )
+    raw = _text(getattr(response, "output_text", ""))
+    usage_obj = getattr(response, "usage", None)
+    usage = {
+        "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+        "cached_input_tokens": int(getattr(usage_obj, "cached_input_tokens", 0) or 0),
+        "cache_write_tokens": int(getattr(usage_obj, "cache_write_tokens", 0) or 0),
+        "reasoning_tokens": int(getattr(usage_obj, "reasoning_tokens", 0) or 0),
+    }
+    meta: dict[str, Any] = {
+        "status": _text(getattr(response, "status", "unknown")).lower(),
+        "output_chars": len(raw), "model": MODEL, "usage": usage,
+    }
+    if not raw:
+        meta["failure"] = "empty_output"
+        return None, usage, meta
+    try:
+        decoded = _json_load(raw)
+    except Exception:
+        meta["failure"] = "invalid_json"
+        return None, usage, meta
+
+    candidate: Any = decoded.get("code") if isinstance(decoded, dict) else None
+    if not isinstance(candidate, dict) and isinstance(decoded, dict):
+        raw_blocks = decoded.get("render_blocks")
+        if isinstance(raw_blocks, list):
+            candidate = next((item for item in raw_blocks if isinstance(item, dict) and _text(item.get("type") or item.get("artifact_type")).lower() in {"code", "source_code", "script"}), None)
+    if not isinstance(candidate, dict) and isinstance(decoded, dict) and any(
+        isinstance(decoded.get(key), str) and decoded.get(key).strip()
+        for key in ("code", "source", "source_code", "content")
+    ):
+        candidate = decoded
+    if not isinstance(candidate, dict):
+        meta["failure"] = "code_payload_missing"
+        return None, usage, meta
+
+    nested = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+    source = next((
+        value for value in (
+            candidate.get("code"), candidate.get("source_code"), candidate.get("source"),
+            candidate.get("content"), nested.get("code"), nested.get("source_code"), nested.get("source"), nested.get("content"),
+        ) if isinstance(value, str) and value.strip()
+    ), "")
+    duplicate_content = _text(candidate.get("content") or nested.get("content"))
+    if not source or len(source.strip()) < 20:
+        meta["failure"] = "code_source_empty_or_too_short"
+        return None, usage, meta
+    if duplicate_content and duplicate_content.strip() != source.strip():
+        meta["failure"] = "code_and_content_mismatch"
+        return None, usage, meta
+
+    block_language = _text(candidate.get("language") or nested.get("language") or preferred_language).lower()
+    block_filename = _text(candidate.get("filename") or nested.get("filename") or preferred_filename)
+    explanation = _text(candidate.get("explanation") or nested.get("explanation"))
+    block = {
+        "type": "code", "artifact_type": "code",
+        "renderer": "CodeBlock", "viewer": "CodeBlock",
+        "language": block_language, "filename": block_filename,
+        "code": source, "content": source,
+        "explanation": explanation,
+        "source": "semantic_code_repair", "integrity_repaired": True,
+    }
+    normalized = normalize_render_blocks([block], answer_context)
+    repaired = next((
+        item for item in normalized
+        if isinstance(item, dict)
+        and _text(item.get("type") or item.get("artifact_type")).lower() == "code"
+        and _provider_render_block_is_concrete(item)
+    ), None)
+    if not repaired:
+        meta["failure"] = "code_not_concrete_after_normalization"
+        return None, usage, meta
+    repaired.setdefault("renderer", "CodeBlock")
+    repaired.setdefault("viewer", "CodeBlock")
+    repaired.setdefault("source", "semantic_code_repair")
+    repaired.setdefault("integrity_repaired", True)
+    meta.update({
+        "status": "complete_source_repaired",
+        "filename": _text(repaired.get("filename")),
+        "language": _text(repaired.get("language")),
+        "code_chars": len(source),
+        "file_persistence_deferred_to_executor": bool(intent.get("wants_file")),
+    })
+    return repaired, usage, meta
+
+
+def _code_delivery_failure_notice(display_language: str) -> str:
+    """A truthful fallback when requested source code could not be completed."""
+    language = _text(display_language or "ru").lower()
+    if language.startswith("uk"):
+        return "Не вдалося сформувати повний вихідний код у цьому запиті, тому файл не створено. Повторіть запит на створення коду, щоб отримати повний код і файл для завантаження."
+    if language.startswith("en"):
+        return "I could not produce the complete source code in this response, so no file was created. Please retry the code-generation request to receive the full source and downloadable file."
+    return "Не удалось сформировать полный исходный код в этом ответе, поэтому файл не создан. Повторите запрос на создание кода, чтобы получить полный код и файл для скачивания."
 
 
 async def _repair_requested_diagram(
@@ -6279,6 +6507,82 @@ async def generate_text(
                     machine = contract.get("machine_response") if isinstance(contract, dict) else {}
                     machine = machine if isinstance(machine, dict) else {}
                     out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
+                    code_requested = any(_text(item).lower() in {"code", "source_code", "script"} for item in normalized_requested_outputs) or bool(request_structured_intent.get("wants_code"))
+                    code_exists = any(
+                        isinstance(item, dict)
+                        and _text(item.get("type") or item.get("artifact_type")).lower() == "code"
+                        and _provider_render_block_is_concrete(item)
+                        for item in out_blocks
+                    )
+                    code_repair_usage: dict[str, int] = {}
+                    code_repair_meta: dict[str, Any] = {"status": "not_needed" if code_exists or not code_requested else "pending"}
+                    if code_requested and not code_exists:
+                        code_repair_started = time.perf_counter()
+                        remaining_code_output = max(
+                            0,
+                            min(
+                                FREE_CODE_REPAIR_OUTPUT_MAX,
+                                FREE_OUTPUT_TOKEN_LIMIT - int((usage_data or {}).get("output_tokens", 0) or 0),
+                            ),
+                        )
+                        _log_json("SEMANTIC_CODE_REPAIR", {
+                            "status": "started", "request_fingerprint": key[:16],
+                            "reason": "requested_code_missing_concrete_codeblock",
+                            "output_token_cap": remaining_code_output,
+                            "shared_free_output_budget_remaining": remaining_code_output,
+                            "file_requested": bool(request_structured_intent.get("wants_file")),
+                        })
+                        try:
+                            repaired_code, code_repair_usage, code_repair_meta = await _repair_requested_code(
+                                client, request, current_request=normalized_current_request,
+                                answer=_text(machine.get("answer") or answer), display_language=display_language,
+                                max_output_tokens=remaining_code_output,
+                            )
+                            if repaired_code:
+                                out_blocks = list(out_blocks)
+                                out_blocks.append(repaired_code)
+                                machine["render_blocks"] = out_blocks
+                            else:
+                                # A filename-only artifact is not a file. Replace any
+                                # premature success claim with a truthful status notice.
+                                failure_notice = _code_delivery_failure_notice(display_language)
+                                machine["answer"] = failure_notice
+                                machine["content"] = failure_notice
+                                machine["summary"] = failure_notice
+                                for text_block in out_blocks:
+                                    if isinstance(text_block, dict) and _text(text_block.get("type") or text_block.get("artifact_type")).lower() in {"text", "markdown"}:
+                                        text_block["content"] = failure_notice
+                                        text_block["text"] = failure_notice
+                                        break
+                                machine["render_blocks"] = out_blocks
+                            _log_json("SEMANTIC_CODE_REPAIR_RESULT", {
+                                "request_fingerprint": key[:16],
+                                "elapsed_ms": round((time.perf_counter() - code_repair_started) * 1000, 1),
+                                **code_repair_meta,
+                                "cost": _calculate_cost(code_repair_usage) if code_repair_usage else {"estimated_cost_usd": None, "pricing_configured": False},
+                            })
+                        except Exception as code_repair_error:
+                            failure_notice = _code_delivery_failure_notice(display_language)
+                            machine["answer"] = failure_notice
+                            machine["content"] = failure_notice
+                            machine["summary"] = failure_notice
+                            out_blocks = [item for item in out_blocks if not (isinstance(item, dict) and _text(item.get("type") or item.get("artifact_type")).lower() in {"text", "markdown"})]
+                            out_blocks.insert(0, {"type": "text", "artifact_type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "content": failure_notice, "text": failure_notice})
+                            machine["render_blocks"] = out_blocks
+                            code_repair_meta = {"status": "failed_without_claiming_file_ready", "error_type": type(code_repair_error).__name__}
+                            _log_json("SEMANTIC_CODE_REPAIR_RESULT", {
+                                "request_fingerprint": key[:16],
+                                "elapsed_ms": round((time.perf_counter() - code_repair_started) * 1000, 1),
+                                **code_repair_meta,
+                            })
+                        if code_repair_usage:
+                            usage_data = {
+                                field: int(usage_data.get(field, 0) or 0) + int(code_repair_usage.get(field, 0) or 0)
+                                for field in set(usage_data) | set(code_repair_usage)
+                            }
+                            response_summary["usage"] = usage_data
+                            response_summary["cost"] = _calculate_cost(usage_data)
+                        out_blocks = machine.get("render_blocks") if isinstance(machine.get("render_blocks"), list) else []
                     diagram_requested = any(_text(item).lower() == "diagram" for item in normalized_requested_outputs)
                     diagram_exists = any(
                         isinstance(item, dict)
