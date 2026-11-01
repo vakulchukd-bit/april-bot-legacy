@@ -422,6 +422,11 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_channel TEXT NOT NULL DEFAULT 'system_share'")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL")
                 cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ")
+                # A confirmed Free share unlocks the sender's six media operations
+                # immediately. These fields make that grant idempotent and prevent
+                # the later invitee claim from granting the same bonus a second time.
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_rewarded_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_reward_units INTEGER NOT NULL DEFAULT 0")
                 # New invitations identify a recipient through an explicitly selected
                 # device contact. Only its HMAC digest is stored; legacy email-bound
                 # rows remain readable and keep their old verification behavior.
@@ -2764,10 +2769,11 @@ def finish_april_referral_share(
     sent: Any,
     share_channel: Any = "system_share",
 ) -> dict[str, Any]:
-    """Mark a prepared share as handed to the chosen app, or release on cancel.
+    """Finish one Free invitation and unlock its one-time share reward.
 
-    Android's native share sheet does not return the selected target application
-    to Web, so the sender confirms the app in the April dialog after sharing.
+    A successful system-share completion grants six additional media operations
+    immediately. The target row stores the grant timestamp so retries and a later
+    invitee registration can never grant the same share bonus twice.
     """
     inviter = str(inviter_user_id or "").strip()
     token = str(invite_token or "").strip()
@@ -2787,8 +2793,13 @@ def finish_april_referral_share(
                 )
                 if not _is_authenticated_row(cur.fetchone()):
                     return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+
+                # Keep the same account -> quota -> invitation lock order as the
+                # preparation and media-reservation paths.
+                quota_row = _free_media_ensure_row(cur, inviter)
                 cur.execute(
-                    """SELECT id, status, share_channel FROM april_referral_share_targets
+                    """SELECT id, status, share_channel, share_rewarded_at, share_reward_units
+                       FROM april_referral_share_targets
                        WHERE inviter_user_id = %s AND invite_token = %s FOR UPDATE""",
                     (inviter, token),
                 )
@@ -2796,11 +2807,14 @@ def finish_april_referral_share(
                 if not row:
                     return {"success": False, "error_code": "REFERRAL_INVALID"}
                 status = str(row.get("status") or "")
+                already_rewarded = bool(row.get("share_rewarded_at"))
                 if status == "claimed":
                     return {
                         "success": True,
                         "status": "claimed",
                         "share_channel": str(row.get("share_channel") or "system_share"),
+                        "share_rewarded": already_rewarded,
+                        "reward_units": max(0, int(row.get("share_reward_units") or 0)),
                     }
                 if status in {"cancelled", "expired"}:
                     # Cancellation is idempotent: closing the UI twice or retrying
@@ -2808,21 +2822,60 @@ def finish_april_referral_share(
                     if sent is not True:
                         return {"success": True, "status": status}
                     return {"success": False, "error_code": "REFERRAL_INVALID"}
+
                 if sent is True:
-                    cur.execute(
-                        """UPDATE april_referral_share_targets
-                           SET status = 'sent',
-                               sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP),
-                               share_channel = %s
-                           WHERE id = %s AND status IN ('reserved', 'sent')""",
-                        (channel, int(row.get("id") or 0)),
-                    )
-                    return {"success": cur.rowcount == 1, "status": "sent", "share_channel": channel}
+                    reward_units = 0
+                    current = now()
+                    if not already_rewarded:
+                        reward_units = FREE_MEDIA_REFERRAL_REWARD_UNITS
+                        current_bonus = max(0, int(quota_row.get("bonus_units") or 0))
+                        cur.execute(
+                            """UPDATE free_media_quota
+                               SET bonus_units = %s, cooldown_until = NULL, updated_at = %s
+                               WHERE user_id = %s""",
+                            (current_bonus + reward_units, current, inviter),
+                        )
+                        if cur.rowcount != 1:
+                            raise RuntimeError("REFERRAL_SHARE_REWARD_QUOTA_UPDATE_FAILED")
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET status = 'sent',
+                                   sent_at = COALESCE(sent_at, %s),
+                                   share_channel = %s,
+                                   share_reward_units = %s,
+                                   share_rewarded_at = %s
+                               WHERE id = %s AND status IN ('reserved', 'sent')
+                                 AND share_rewarded_at IS NULL""",
+                            (current, channel, reward_units, current, int(row.get("id") or 0)),
+                        )
+                        if cur.rowcount != 1:
+                            raise RuntimeError("REFERRAL_SHARE_REWARD_ALREADY_SETTLED")
+                    else:
+                        cur.execute(
+                            """UPDATE april_referral_share_targets
+                               SET status = 'sent',
+                                   sent_at = COALESCE(sent_at, %s),
+                                   share_channel = %s
+                               WHERE id = %s AND status IN ('reserved', 'sent')""",
+                            (current, channel, int(row.get("id") or 0)),
+                        )
+                        if cur.rowcount != 1:
+                            raise RuntimeError("REFERRAL_SHARE_TARGET_UPDATE_FAILED")
+                    return {
+                        "success": True,
+                        "status": "sent",
+                        "share_channel": channel,
+                        "share_rewarded": True,
+                        "reward_units": reward_units,
+                    }
+
                 if status == "sent":
                     return {
                         "success": True,
                         "status": "sent",
                         "share_channel": str(row.get("share_channel") or channel),
+                        "share_rewarded": already_rewarded,
+                        "reward_units": max(0, int(row.get("share_reward_units") or 0)),
                     }
                 cur.execute(
                     """UPDATE april_referral_share_targets SET status = 'cancelled'
@@ -2842,7 +2895,7 @@ def claim_april_referral(
     referral_code: Any,
     invite_token: Any = None,
 ) -> dict[str, Any]:
-    """Reward the inviter immediately when a new authenticated invitee claims a link."""
+    """Claim an invitation and grant its bonus only if sharing did not already do so."""
     # The HTTP bridge resolves the authenticated public April ID before calling
     # this function; all referral records use the canonical internal user key.
     invitee = str(invitee_user_id or "").strip()
@@ -2882,6 +2935,10 @@ def claim_april_referral(
                 if not inviter or inviter == invitee:
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
+                # Lock in the same account -> quota -> share-target order as the
+                # sender's finish path. The row is already expected to exist because
+                # the referral code belongs to free_media_quota.
+                _free_media_ensure_row(cur, inviter)
                 share_target = None
                 token = str(invite_token or "").strip()
                 if token:
@@ -2889,7 +2946,7 @@ def claim_april_referral(
                         return {"success": False, "error_code": "REFERRAL_INVALID"}
                     cur.execute(
                         """SELECT id, inviter_user_id, recipient_email_hash, recipient_contact_hash,
-                                  referral_code, status
+                                  referral_code, status, share_rewarded_at, share_reward_units
                            FROM april_referral_share_targets
                            WHERE invite_token = %s FOR UPDATE""",
                         (token,),
@@ -2963,19 +3020,23 @@ def claim_april_referral(
                 ):
                     return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
 
-                reward_units = FREE_MEDIA_REFERRAL_REWARD_UNITS
-                cur.execute(
-                    """
-                    UPDATE free_media_quota
-                    SET bonus_units = bonus_units + %s,
-                        cooldown_until = NULL,
-                        updated_at = %s
-                    WHERE user_id = %s
-                    """,
-                    (reward_units, current, inviter),
-                )
-                if cur.rowcount != 1:
-                    return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+                # If the sender has already received the immediate share reward,
+                # claiming the same token must not credit a second six-operation bonus.
+                share_rewarded = bool(share_target and share_target.get("share_rewarded_at"))
+                reward_units = 0 if share_rewarded else FREE_MEDIA_REFERRAL_REWARD_UNITS
+                if reward_units > 0:
+                    cur.execute(
+                        """
+                        UPDATE free_media_quota
+                        SET bonus_units = bonus_units + %s,
+                            cooldown_until = NULL,
+                            updated_at = %s
+                        WHERE user_id = %s
+                        """,
+                        (reward_units, current, inviter),
+                    )
+                    if cur.rowcount != 1:
+                        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
 
                 cur.execute(
                     """
@@ -2988,9 +3049,14 @@ def claim_april_referral(
                 if share_target:
                     cur.execute(
                         """UPDATE april_referral_share_targets
-                           SET status = 'claimed', claimed_by_user_id = %s, claimed_at = %s
+                           SET status = 'claimed', claimed_by_user_id = %s, claimed_at = %s,
+                               share_rewarded_at = COALESCE(share_rewarded_at, %s),
+                               share_reward_units = CASE
+                                   WHEN share_rewarded_at IS NULL THEN %s
+                                   ELSE share_reward_units
+                               END
                            WHERE id = %s AND status IN ('reserved', 'sent')""",
-                        (invitee, current, int(share_target.get("id") or 0)),
+                        (invitee, current, current, reward_units, int(share_target.get("id") or 0)),
                     )
                     if cur.rowcount != 1:
                         raise RuntimeError("REFERRAL_SHARE_TARGET_ALREADY_CLAIMED")
@@ -3000,6 +3066,7 @@ def claim_april_referral(
                     "pending_confirmation": False,
                     "rewarded": True,
                     "reward_units": reward_units,
+                    "already_rewarded_on_share": share_rewarded,
                     "inviter_name": str(inviter_row.get("name") or "")[:80],
                 }
     except Exception as exc:
