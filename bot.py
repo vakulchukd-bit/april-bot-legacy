@@ -659,6 +659,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
             "svg", "svg_payload", "drawing", "mermaid", "elements", "shapes", "nodes", "edges",
             "src", "image_base64", "image_data_uri", "base64", "images", "items", "filename",
             "file_url", "download_url", "file_base64", "file_data_uri", "data_uri", "path", "mime_type",
+            "asset_ref", "export_payload", "content_type", "size_bytes", "source",
         ):
             if key not in merged and block.get(key) not in (None, "", [], {}):
                 merged[key] = block[key]
@@ -772,7 +773,20 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
                 return True
             return any(str(payload.get(k) or "").strip() for k in ("src", "url", "image", "image_data_uri", "image_base64", "base64"))
         if kind == "file":
-            return bool(any(str(payload.get(k) or "").strip() for k in ("url", "href", "file_url", "download_url", "file_data_uri", "data_uri", "file_base64", "base64", "content", "code")))
+            asset_ref = payload.get("asset_ref") if isinstance(payload.get("asset_ref"), dict) else {}
+            has_asset_ref = bool(
+                str(asset_ref.get("message_id") or "").strip()
+                and re.fullmatch(r"[a-f0-9]{64}", str(asset_ref.get("sha256") or ""), re.I)
+            )
+            export_payload = payload.get("export_payload") if isinstance(payload.get("export_payload"), dict) else {}
+            export_headers = export_payload.get("headers") or export_payload.get("columns")
+            export_rows = export_payload.get("rows") or export_payload.get("data")
+            has_export = isinstance(export_headers, list) and bool(export_headers) and isinstance(export_rows, list) and bool(export_rows)
+            has_inline = any(str(payload.get(k) or "").strip() for k in (
+                "url", "href", "file_url", "download_url", "file_data_uri", "data_uri",
+                "file_base64", "base64", "content", "text", "code",
+            ))
+            return bool(has_asset_ref or has_export or has_inline)
         if kind in {"audio", "video"}:
             return bool(any(str(payload.get(k) or "").strip() for k in ("url", "src", "media_url", "asset_url", "transcript", "caption", "description")))
         return bool(payload or content)
