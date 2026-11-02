@@ -4907,10 +4907,14 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                     str(profile.get("plan") or "free").lower() == "premium"
                     and float(profile.get("subscription_until") or 0) > now().timestamp()
                 )
+                configured_admin_id = str(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y") or "").strip().lower()
+                current_april_id = str(profile.get("april_id") or "").strip().lower()
+                is_admin = bool(configured_admin_id and configured_admin_id in {current_april_id, uid.lower()})
                 return {
                     "success": True,
                     "messages": messages,
                     "profile": {"display_name": display_name, "is_custom": bool(profile.get("is_custom"))},
+                    "is_admin": is_admin,
                     "plan": "premium" if active_premium else "free",
                     "can_post": True,
                     "max_message_chars": COMMUNITY_MAX_MESSAGE_CHARS,
@@ -5163,6 +5167,42 @@ def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
                 return {"success": True, "message_id": mid}
     except Exception as exc:
         print(f"[APRIL_COMMUNITY] MESSAGE_DELETE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[str, Any]:
+    """Delete any public community message, but only for the configured superadmin."""
+    admin_uid = _community_canonical_user(admin_user_id)
+    configured_admin_id = str(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y") or "").strip()
+    configured_admin_uid = resolve_user_id(configured_admin_id) if configured_admin_id else None
+    if not admin_uid or not configured_admin_uid or admin_uid != configured_admin_uid:
+        return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if mid <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE community_messages
+                       SET is_deleted = TRUE, message = '', attachment_name = NULL,
+                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
+                       WHERE id = %s AND is_deleted = FALSE""",
+                    (mid,),
+                )
+                if cur.rowcount != 1:
+                    return {"success": False, "error": "MESSAGE_NOT_FOUND"}
+                return {"success": True, "message_id": mid, "deleted_by": "admin"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] ADMIN_DELETE_FAILED type={type(exc).__name__}", flush=True)
         return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
     finally:
         conn.close()
