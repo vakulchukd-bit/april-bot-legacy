@@ -35,8 +35,6 @@ from psycopg2.extras import RealDictCursor
 # These values belong to the existing storage contract; the ZIP does not contain
 # a separate tariffs_config module, so storage must not import a missing file.
 ADMIN_ID = os.getenv("APRIL_ADMIN_ID", "")
-# Must match the fixed April ID used by app/settings/page.tsx Admin Profile.
-COMMUNITY_SUPERADMIN_APRIL_ID = "APR-WMBS-8W4Y"
 FREE_MESSAGES_LIMIT = int(os.getenv("APRIL_FREE_MESSAGES_LIMIT", "20"))
 FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
 LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
@@ -4909,11 +4907,11 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                     str(profile.get("plan") or "free").lower() == "premium"
                     and float(profile.get("subscription_until") or 0) > now().timestamp()
                 )
-                # Use the same fixed identity as the Web Admin Profile. Do not let
-                # an unrelated/misconfigured Railway env override hide admin controls.
-                configured_admin_id = COMMUNITY_SUPERADMIN_APRIL_ID.casefold()
-                current_april_id = str(profile.get("april_id") or "").strip().casefold()
-                is_admin = configured_admin_id in {current_april_id, uid.casefold()}
+                # Keep community moderation aligned with the single ID hardcoded in
+                # the Admin profile and Community UI. Do not let an unrelated Railway
+                # override hide the admin controls.
+                current_april_id = str(profile.get("april_id") or "").strip().upper()
+                is_admin = current_april_id == "APR-WMBS-8W4Y"
                 return {
                     "success": True,
                     "messages": messages,
@@ -5177,10 +5175,26 @@ def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
 
 
 def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[str, Any]:
-    """Delete any public community message, but only for the Admin Profile ID."""
+    """Delete any public community message, but only for the configured superadmin."""
     admin_uid = _community_canonical_user(admin_user_id)
     if not admin_uid:
         return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    # Authorization uses the exact April ID displayed in Admin-profile. Resolve
+    # the authenticated session to its DB user and verify that row server-side.
+    auth_conn = get_conn()
+    if not auth_conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with auth_conn.cursor() as cur:
+            cur.execute("SELECT april_id FROM users WHERE user_id = %s LIMIT 1", (admin_uid,))
+            admin_row = cur.fetchone() or {}
+        if str(admin_row.get("april_id") or "").strip().upper() != "APR-WMBS-8W4Y":
+            return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] ADMIN_AUTH_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        auth_conn.close()
     try:
         mid = int(message_id)
     except (TypeError, ValueError):
@@ -5193,13 +5207,6 @@ def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[
     try:
         with conn:
             with conn.cursor() as cur:
-                # Resolve the logged-in canonical user back to their public April ID.
-                # Authorization is enforced here, not by the visibility of the UI button.
-                cur.execute("SELECT april_id FROM users WHERE user_id = %s LIMIT 1", (admin_uid,))
-                admin_row = cur.fetchone() or {}
-                public_admin_id = str(admin_row.get("april_id") or "").strip().casefold()
-                if COMMUNITY_SUPERADMIN_APRIL_ID.casefold() not in {public_admin_id, admin_uid.casefold()}:
-                    return {"success": False, "error": "SUPERADMIN_REQUIRED"}
                 cur.execute(
                     """UPDATE community_messages
                        SET is_deleted = TRUE, message = '', attachment_name = NULL,
