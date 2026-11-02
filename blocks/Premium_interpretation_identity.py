@@ -3585,6 +3585,281 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     }
 
 
+def _transition_artifact_family(value: Any) -> str:
+    """Normalize saved render/asset types to the artifact families used by edits."""
+    low = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if not low:
+        return ""
+    aliases = (
+        ("graph", ("graph", "chart", "plot", "diagram_chart")),
+        ("table", ("table", "spreadsheet", "xlsx", "csv")),
+        ("formula", ("formula", "equation", "math")),
+        ("diagram", ("diagram", "flowchart", "schema", "drawing")),
+        ("code", ("code", "script", "source_code")),
+        ("image", ("image", "photo", "picture", "gallery", "screenshot")),
+        ("file", ("file", "document", "pdf", "presentation", "text_file")),
+    )
+    for family, markers in aliases:
+        if any(marker in low for marker in markers):
+            return family
+    return ""
+
+
+def _transition_answer_summary(value: Any, limit: int = 460) -> str:
+    """Produce a compact, readable note from April's actual previous answer."""
+    source = _text(value)
+    if not source:
+        return ""
+    source = re.sub(r"```[\s\S]*?```", "[кодовый блок сохранён отдельно]", source)
+    source = re.sub(r"!\[[^\]]*\]\([^)]*\)", "[изображение сохранено отдельно]", source)
+    source = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", source)
+    source = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", source)
+    source = re.sub(r"(?m)^\s*[-*+]\s+", "", source)
+    source = re.sub(r"\s+", " ", source).strip()
+    # Keep the answer's opening reasoning and conclusion cue, rather than only
+    # copying its first arbitrary characters into the next prompt.
+    sentences = re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z0-9])", source)
+    chosen = " ".join(part.strip() for part in sentences[:2] if part.strip())
+    if len(chosen) < 90 and len(sentences) > 2:
+        chosen = " ".join(part.strip() for part in sentences[:3] if part.strip())
+    return chosen[:limit].rstrip()
+
+
+def analyze_dialogue_transition(
+    current_request: Any,
+    dialogue_context: dict[str, Any] | None = None,
+    semantic_interpretation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compare the latest relevant April answer with this user turn.
+
+    This is an evidence layer, not a replacement for State Manager routing. It
+    explains *why* a turn continues, reopens history, revises an artifact, or
+    starts a new topic, and gives Provider a bounded non-repetition strategy.
+    """
+    request = _text(current_request)
+    context = dialogue_context if isinstance(dialogue_context, dict) else {}
+    semantics = semantic_interpretation if isinstance(semantic_interpretation, dict) else {}
+    relation = _text(context.get("relation") or "NEW").upper()
+    history_request = bool(context.get("history_request") or semantics.get("history_request"))
+    historical_match = bool(context.get("contextual_history_match"))
+    explicit_switch = bool(
+        semantics.get("explicit_topic_switch")
+        or semantics.get("explicit_topic_introduction")
+        or _has_explicit_topic_switch(request)
+    )
+
+    latest = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
+    selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
+    # A historical search must use the matched historical anchor, not accidentally
+    # the most recent unrelated message in the current chat.
+    if historical_match or (history_request and anchor):
+        source_pair = anchor or (selected[0] if selected and isinstance(selected[0], dict) else {})
+    elif relation == "CONTINUE" and latest:
+        source_pair = latest
+    else:
+        source_pair = anchor or (selected[0] if selected and isinstance(selected[0], dict) else {})
+
+    previous_user = _text(
+        source_pair.get("user") or source_pair.get("user_request") or source_pair.get("user_text")
+    )[:700]
+    previous_answer = _text(
+        source_pair.get("assistant_last_message") or source_pair.get("assistant_message")
+        or source_pair.get("april") or source_pair.get("april_text")
+    )[:5200]
+    answer_summary = _transition_answer_summary(previous_answer)
+    source_message_id = _text(source_pair.get("message_id") or source_pair.get("source_message_id"))[:120]
+    source_topic_id = _text(source_pair.get("topic_id") or source_pair.get("selected_topic_id"))[:120]
+    source_branch_id = _text(source_pair.get("branch_id") or source_pair.get("work_id"))[:120]
+    same_dialog = bool(source_pair.get("same_dialog", relation == "CONTINUE" and not historical_match))
+
+    artifacts: list[dict[str, Any]] = []
+    artifact_positions: dict[tuple[str, str], int] = {}
+    candidates: list[Any] = []
+    for key in ("assistant_artifact_index", "artifact_index"):
+        value = source_pair.get(key)
+        if isinstance(value, list):
+            candidates.extend(value[:16])
+    branch = context.get("active_work_branch") if isinstance(context.get("active_work_branch"), dict) else {}
+    if relation == "CONTINUE" and not historical_match:
+        branch_assets = branch.get("artifact_index")
+        if isinstance(branch_assets, list):
+            candidates.extend(branch_assets[:12])
+    for pair in selected[:6]:
+        if not isinstance(pair, dict):
+            continue
+        for key in ("assistant_artifact_index", "artifact_index"):
+            value = pair.get(key)
+            if isinstance(value, list):
+                candidates.extend(value[:8])
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        family = _transition_artifact_family(" ".join(
+            _text(item.get(key)) for key in (
+                "artifact_family", "kind", "type", "artifact_type", "output_type", "mime_type", "filename", "title"
+            ) if _text(item.get(key))
+        ))
+        artifact_id = _text(
+            item.get("artifact_id") or item.get("asset_id") or item.get("id")
+            or item.get("ref") or item.get("filename") or item.get("title")
+        )[:140]
+        dedupe = (family, artifact_id or _text(item.get("source_message_id")))
+        if dedupe == ("", ""):
+            continue
+        descriptor = {
+            "family": family,
+            "artifact_id": artifact_id,
+            "title": _text(item.get("title") or item.get("filename") or item.get("label"))[:140],
+            "source_message_id": _text(item.get("source_message_id") or item.get("message_id") or source_message_id)[:120],
+            "revision_chain_id": _text(item.get("revision_chain_id"))[:120],
+            "revision_number": item.get("revision_number"),
+        }
+        descriptor = {key: value for key, value in descriptor.items() if value not in (None, "", [], {})}
+        if dedupe in artifact_positions:
+            # Later dialogue_thread metadata carries revision lineage; enrich the
+            # same artifact identity instead of discarding that stronger record.
+            artifacts[artifact_positions[dedupe]].update(descriptor)
+        else:
+            artifact_positions[dedupe] = len(artifacts)
+            artifacts.append(descriptor)
+        if len(artifacts) >= 16:
+            break
+
+    saved_followup_kind = _text(
+        semantics.get("saved_artifact_followup_kind") or _explicit_saved_artifact_followup_kind(request)
+    ).lower()
+    low = request.lower().replace("ё", "е")
+    edit_operation = bool(re.search(
+        r"(?:исправ\w*|поправ\w*|передел\w*|переработ\w*|обнов\w*|измен\w*|добав\w*|допол\w*|улучш\w*|редакт\w*|восстанов\w*|верни|continue\s+editing|revise|fix|correct|update|modify|extend|improve)",
+        low, re.IGNORECASE,
+    ))
+    explicit_new_artifact = bool(re.search(
+        r"(?:\b(?:еще|ещё)\s+(?:одну|один|одна|одни)\s+(?:нов\w*\s+)?(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|файл\w*)|"
+        r"\bдруг\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|файл\w*)|"
+        r"\banother\s+(?:graph|chart|table|formula|diagram|file|document|image)|"
+        r"\badd\s+another\s+(?:graph|chart|table|formula|diagram|file|document|image))",
+        low, re.IGNORECASE,
+    ))
+    family_candidates = [item for item in artifacts if item.get("family")]
+    matching_artifacts = [item for item in family_candidates if item.get("family") == saved_followup_kind] if saved_followup_kind else []
+    deictic_edit = edit_operation and bool(re.search(
+        r"(?:\bэт\w*\b|\bэто\b|\bего\b|\bее\b|\bеё\b|\bпредыдущ\w*\b|\bпоследн\w*\b|\bэтот\s+результат\b|\bthis\b|\bit\b|\bthat\b|\bprevious\b)",
+        low, re.IGNORECASE,
+    ))
+    if not matching_artifacts and not saved_followup_kind and deictic_edit and len(family_candidates) == 1:
+        matching_artifacts = family_candidates[:1]
+        saved_followup_kind = _text(matching_artifacts[0].get("family"))
+
+    previous_signature = _context_signature(" ".join((previous_user, previous_answer)))
+    current_signature = _context_signature(request)
+    previous_terms = set(previous_signature.get("subject_terms") or [])
+    current_terms = set(current_signature.get("subject_terms") or [])
+    overlap = (
+        len(previous_terms & current_terms) / max(1, len(previous_terms | current_terms))
+        if previous_terms and current_terms else 0.0
+    )
+    references_previous = bool(
+        semantics.get("previous_answer_reference") or semantics.get("active_branch_repair")
+        or semantics.get("requires_memory") or current_signature.get("reference_strength", 0) >= 0.18
+    )
+    previous_sections = source_pair.get("sections") if isinstance(source_pair.get("sections"), list) else []
+    section_headings = []
+    for section in previous_sections[:12]:
+        if isinstance(section, dict):
+            heading = _text(section.get("heading") or section.get("h"))
+            if heading and heading.casefold() not in {x.casefold() for x in section_headings}:
+                section_headings.append(heading[:100])
+    if not section_headings:
+        for match in re.findall(r"(?m)^\s{0,3}#{1,4}\s+(.+)$", previous_answer):
+            if match.strip() and match.strip().casefold() not in {x.casefold() for x in section_headings}:
+                section_headings.append(match.strip()[:100])
+            if len(section_headings) >= 10:
+                break
+
+    if explicit_switch:
+        classification = "NEW_TOPIC"
+        strategy = "ANSWER_NEW_TOPIC"
+    elif saved_followup_kind and matching_artifacts and edit_operation and not explicit_new_artifact and (relation == "CONTINUE" or historical_match or history_request):
+        classification = "ARTIFACT_REVISION"
+        strategy = "REVISE_SAVED_ARTIFACT"
+    elif historical_match or (history_request and source_message_id):
+        classification = "HISTORICAL_TOPIC_REACTIVATION"
+        strategy = "RESUME_HISTORICAL_BRANCH"
+    elif relation == "CONTINUE" and source_message_id:
+        classification = "TOPIC_CONTINUATION"
+        strategy = "CONTINUE_WITH_NEW_INFORMATION"
+    elif references_previous and source_message_id and (overlap >= 0.12 or not current_terms):
+        # Use historical context only when State Manager has actually selected an
+        # anchor/pair; lexical similarity alone can never resurrect another topic.
+        classification = "HISTORICAL_TOPIC_REACTIVATION" if not same_dialog else "TOPIC_CONTINUATION"
+        strategy = "RESUME_HISTORICAL_BRANCH" if classification == "HISTORICAL_TOPIC_REACTIVATION" else "CONTINUE_WITH_NEW_INFORMATION"
+    else:
+        classification = "NEW_TOPIC"
+        strategy = "ANSWER_NEW_TOPIC"
+
+    latest_answer_text = answer_summary or _text(source_pair.get("april"))[:320]
+    if previous_user or latest_answer_text:
+        recap = "До этого: " + (previous_user[:180] if previous_user else "в этой ветке")
+        if latest_answer_text:
+            recap += "; April ответила: " + latest_answer_text[:420]
+    else:
+        recap = "Предыдущая реплика April не найдена среди выбранных записей; не приписывать прошлой ветке неподтверждённый ответ."
+    if classification == "ARTIFACT_REVISION":
+        target = _text(matching_artifacts[0].get("title") or matching_artifacts[0].get("artifact_id") or saved_followup_kind)
+        recap += f"; сейчас требуется исправить сохранённый артефакт: {target}."
+    elif classification == "HISTORICAL_TOPIC_REACTIVATION":
+        recap += "; пользователь возвращается к ранее обсуждавшейся исторической ветке."
+    elif classification == "TOPIC_CONTINUATION":
+        recap += "; текущий запрос развивает эту же тему, не повторяя уже закрытые части."
+    else:
+        recap = "Новая тема: отвечать на текущий запрос самостоятельно, не переносить посторонний контекст."
+    recap = recap[:900]
+
+    return {
+        "schema": "april_dialogue_transition_v1",
+        "classification": classification,
+        "response_strategy": strategy,
+        "source_relation": relation,
+        "confidence": round(min(1.0, 0.45 + (0.25 if source_message_id else 0.0) + (0.15 if matching_artifacts else 0.0) + min(0.15, overlap * 0.3)), 3),
+        "previous_exchange": {
+            "message_id": source_message_id,
+            "topic_id": source_topic_id,
+            "branch_id": source_branch_id,
+            "same_dialog": same_dialog,
+            "user_request": previous_user[:360],
+            "april_answer_summary": latest_answer_text[:460],
+            "april_answer_excerpt": previous_answer[:1800],
+            "answered_sections": section_headings[:10],
+        },
+        "current_request": {
+            "text": request[:700],
+            "artifact_family": saved_followup_kind,
+            "artifact_edit_requested": bool(edit_operation),
+            "references_previous_answer": references_previous,
+            "explicit_topic_switch": explicit_switch,
+            "subject_terms": list(current_signature.get("subject_terms") or [])[:10],
+        },
+        "alignment": {
+            "subject_overlap": round(overlap, 3),
+            "matched_previous_answer": bool(source_message_id and (overlap >= 0.12 or references_previous)),
+            "known_artifact_count": len(artifacts),
+            "matching_artifact_count": len(matching_artifacts),
+        },
+        "known_artifacts": artifacts[:12],
+        "revision_targets": matching_artifacts[:6],
+        "continuation_summary": recap,
+        "response_rules": {
+            "begin_with_brief_context_summary": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION", "ARTIFACT_REVISION"},
+            "do_not_repeat_completed_sections": True,
+            "develop_only_requested_or_unfinished_parts": True,
+            "use_exact_source_artifact_for_revision": classification == "ARTIFACT_REVISION",
+            "preserve_topic_branch_and_origin_ids": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION", "ARTIFACT_REVISION"},
+            "new_topic_must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
+        },
+    }
+
+
 def _is_history_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if _is_site_navigation_request(text):
