@@ -1990,6 +1990,74 @@ class AprilHandler(BaseHTTPRequestHandler):
             }, separators=(",", ":")), flush=True)
         return authorized
 
+    def _read_bounded_request_body(self, max_bytes: int) -> tuple[bytes | None, str | None]:
+        """Read Content-Length or chunked request bodies with a strict size cap.
+
+        Node/Undici may stream multipart FormData using Transfer-Encoding: chunked
+        and omit Content-Length. Community posting must accept that transport while
+        retaining the same total request-size limit used for fixed-length bodies.
+        """
+        transfer_encoding = str(self.headers.get("Transfer-Encoding", "")).strip().lower()
+        content_length = self.headers.get("Content-Length")
+        if transfer_encoding:
+            # Reject ambiguous framing rather than risk HTTP request smuggling.
+            if content_length is not None or transfer_encoding != "chunked":
+                self.close_connection = True
+                return None, "INVALID_REQUEST_BODY"
+            chunks = bytearray()
+            while True:
+                line = self.rfile.readline(4096)
+                if not line or not line.endswith(b"\r\n"):
+                    self.close_connection = True
+                    return None, "INVALID_REQUEST_BODY"
+                size_token = line[:-2].split(b";", 1)[0].strip()
+                try:
+                    if not size_token or len(size_token) > 16:
+                        raise ValueError("invalid chunk size")
+                    chunk_size = int(size_token, 16)
+                except ValueError:
+                    self.close_connection = True
+                    return None, "INVALID_REQUEST_BODY"
+                if chunk_size < 0:
+                    self.close_connection = True
+                    return None, "INVALID_REQUEST_BODY"
+                if chunk_size == 0:
+                    # Consume bounded trailer headers through the terminating CRLF.
+                    trailer_bytes = 0
+                    while True:
+                        trailer = self.rfile.readline(8192)
+                        trailer_bytes += len(trailer)
+                        if not trailer or not trailer.endswith(b"\r\n") or trailer_bytes > 64 * 1024:
+                            self.close_connection = True
+                            return None, "INVALID_REQUEST_BODY"
+                        if trailer == b"\r\n":
+                            return bytes(chunks), None
+                if len(chunks) + chunk_size > max_bytes:
+                    self.close_connection = True
+                    return None, "REQUEST_BODY_TOO_LARGE"
+                data = self.rfile.read(chunk_size)
+                if len(data) != chunk_size or self.rfile.read(2) != b"\r\n":
+                    self.close_connection = True
+                    return None, "INVALID_REQUEST_BODY"
+                chunks.extend(data)
+
+        try:
+            length = int(content_length or "0")
+        except (TypeError, ValueError):
+            self.close_connection = True
+            return None, "INVALID_REQUEST_BODY"
+        if length < 0:
+            self.close_connection = True
+            return None, "INVALID_REQUEST_BODY"
+        if length > max_bytes:
+            self.close_connection = True
+            return None, "REQUEST_BODY_TOO_LARGE"
+        raw = self.rfile.read(length) if length else b""
+        if len(raw) != length:
+            self.close_connection = True
+            return None, "INVALID_REQUEST_BODY"
+        return raw, None
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         # RFC 9110: a 204 response must not advertise/contain a JSON body.  The
         # previous Content-Length: 2 with no bytes desynchronised HTTP/1.1 keep-alive
@@ -2509,13 +2577,13 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             content_type = str(self.headers.get("Content-Type", "application/json"))
             try:
-                length = int(self.headers.get("Content-Length", "0"))
                 max_request = COMMUNITY_MAX_ATTACHMENT_BYTES + 96 * 1024
-                if length < 0 or length > max_request:
-                    self.close_connection = True
-                    self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE"})
+                raw, body_error = self._read_bounded_request_body(max_request)
+                if body_error:
+                    status_code = 413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400
+                    self._send_json(status_code, {"success": False, "error": body_error})
                     return
-                raw = self.rfile.read(length) if length else b""
+                raw = raw or b""
                 fields: dict[str, Any] = {}
                 attachment_data: bytes | None = None
                 attachment_name: str | None = None
