@@ -1833,12 +1833,84 @@ _HISTORY_MARKERS = (
 )
 
 
-def _dialogue_history_intent_kind(text: Any) -> str:
-    """Classify implicit requests to inspect retained dialogue without mutating it.
+def _strip_dialogue_assistant_vocative(text: Any) -> str:
+    """Remove April's name only when it is used as a punctuated direct address.
 
-    The wording can be indirect ("where did we leave off?") or expressed as a
-    complaint that the conversation seems to be missing. These are memory-retrieval
-    intents, not fresh topical requests and not commands to regenerate an artifact.
+    A name in a topical phrase (for example, "проект April") is preserved. This
+    prevents voice transcripts such as "..., Эппл? Напомни мне" from turning the
+    assistant's vocative into a false history-search subject.
+    """
+    value = re.sub(r"\s+", " ", _text(text)).strip()
+    if not value:
+        return ""
+    return re.sub(
+        r"(?i)(^|[,;!?]\s*)(?:эппл|эпл|эйприл|април+|april)(?=\s*[,;!?]|$)",
+        r"\1 ",
+        value,
+    )
+
+
+def _has_explicit_history_topic_reference(text: Any) -> bool:
+    """Tell a named-topic lookup from a subjectless request to resume the last turn."""
+    low = _strip_dialogue_assistant_vocative(text).lower().replace("ё", "е")
+    if not low:
+        return False
+
+    # Relational phrases make the following object an explicit history subject:
+    # "что обсуждали про April", "по поводу оплаты", "на чём остановились по API".
+    connector = re.search(
+        r"\b(?:про(?!\s+что\b)|насч[её]т|по\s+поводу|по\s+теме|"
+        r"касательно|относительно|в\s+отношении|по\s+проекту|about|regarding|concerning)\s+"
+        r"(?!что\b|чем\b|чём\b|том\b|этом\b|всем\b|всём\b)"
+        r"[^\W\d_][\w-]*",
+        low,
+        re.IGNORECASE,
+    )
+    if connector:
+        return True
+
+    # Remove both history wording and unnamed resume wording. This matters for
+    # "Расскажи, на чём мы остановились": the words "на чём/остановились"
+    # describe the operation, not a subject that should be searched in the archive.
+    residual = low
+    operation_patterns = (
+        r"\b(?:так\s+)?(?:о\s+ч[её]м|про\s+что)\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?"
+        r"(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)\b",
+        r"\b(?:что|какие\s+темы|какую\s+тему|какие\s+вопросы|что\s+именно)\s+"
+        r"(?:(?:мы|мы\s+с\s+тобой)\s+)?"
+        r"(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b",
+        r"\b(?:на\s+ч[её]м|на\s+каком\s+(?:этапе|месте|моменте)|где|с\s+какого\s+места)\s+"
+        r"(?:(?:мы|мы\s+с\s+тобой)\s+)?"
+        r"(?:остановил\w*|закончил\w*|прервал\w*|оборвал\w*|продолж\w*)\b",
+        r"\b(?:напомни|вспомни|расскажи|перескажи|резюмируй|суммируй|пожалуйста|"
+        r"вообще|нету|ничего|мне|нам|мы|тобой|так|где|на|чем|чём|месте|этапе|моменте)\w*\b",
+    )
+    for pattern in operation_patterns:
+        residual = re.sub(pattern, " ", residual, flags=re.IGNORECASE)
+
+    signature = _context_signature(residual)
+    if signature.get("has_explicit_subject"):
+        return True
+
+    # Topic acronyms (API, SQL, CRM) are short but can still identify a branch.
+    # Keep this tokenization single-escaped: double escaping would match literal
+    # backslashes instead of word characters and silently discard every acronym.
+    generic = set(_CONTEXT_SIGNATURE_GENERIC) | {
+        "так", "вообще", "нету", "список", "тем", "на", "чем", "чём", "где",
+        "остановились", "остановиться", "закончились", "закончили", "месте", "этапе",
+        "моменте", "проект", "проекта", "проекту", "проекте", "проекты", "проектов",
+        "расскажи", "напомни", "вспомни", "перескажи", "мы", "тобой",
+    }
+    residual_tokens = re.findall(r"[\w\u0080-\uffff]+", residual.lower().replace("ё", "е"))
+    return any(len(token) >= 3 and token not in generic for token in residual_tokens)
+
+
+def _dialogue_history_intent_kind(text: Any) -> str:
+    """Classify implicit and subject-specific requests to retrieve past dialogue.
+
+    A subjectless "what were we talking about?" first resumes from April's latest
+    answer and active branch. A named subject is searched across retained history.
+    Both retrieval paths are read-only.
     """
     low = re.sub(r"\s+", " ", _text(text).lower().replace("ё", "е")).strip()
     if not low or _has_explicit_topic_switch(low):
@@ -1857,10 +1929,16 @@ def _dialogue_history_intent_kind(text: Any) -> str:
         r"\bwhat\s+were\s+we\s+working\s+on\b",
     )
     if any(re.search(pattern, low, re.IGNORECASE) for pattern in resume_patterns):
-        return "RESUME_LATEST_BRANCH"
+        return (
+            "CHECK_DIALOGUE_HISTORY"
+            if _has_explicit_history_topic_reference(low)
+            else "RESUME_LATEST_BRANCH"
+        )
 
     history_check_patterns = (
         r"\b(?:о\s+чем|про\s+что)\s+(?:мы\s+)?(?:с\s+тобой\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
+        r"\b(?:что|какую\s+тему|какие\s+вопросы|что\s+именно)\s+(?:мы\s+)?(?:с\s+тобой\s+)?(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)",
+        r"\bнапомни\w*\b.{0,55}\b(?:что|о\s+чем|про\s+что)\b.{0,45}\b(?:обсуждал\w*|говорил\w*|рассматривал\w*)",
         r"\b(?:вообще\s+)?(?:нету|нет)\s+(?:ни\s+)?(?:о\s+)?чем\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
         r"\b(?:ничего|ничег\w*)\s+(?:не\s+)?(?:помню|помним|вижу|осталось)\b.{0,85}(?:о\s+чем|про\s+что|общал\w*|говорил\w*|обсуждал\w*|разговор\w*|диалог\w*)",
         r"\bне\s+помн\w*\b.{0,65}(?:о\s+чем|про\s+что).{0,65}(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
@@ -1868,7 +1946,13 @@ def _dialogue_history_intent_kind(text: Any) -> str:
         r"\bwe\s+(?:talked|spoke|discussed)\b.{0,45}\b(?:before|earlier|already)\b",
     )
     if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in history_check_patterns):
-        return "CHECK_DIALOGUE_HISTORY"
+        # An unnamed reference to the past belongs to the latest assistant answer
+        # first. Only a genuinely named subject should launch an all-history search.
+        return (
+            "CHECK_DIALOGUE_HISTORY"
+            if _has_explicit_history_topic_reference(low)
+            else "RESUME_LATEST_BRANCH"
+        )
     return ""
 
 
@@ -3236,7 +3320,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         # expand into the authenticated retained-history window.
         primary_intent = "TOPIC_CONTINUATION"
         direction = "ACTIVE_BRANCH_THEN_HISTORY_FALLBACK"
-        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        topic_reference = "PREVIOUS_ASSISTANT_ANSWER"
         time_scope = "ACTIVE_DIALOGUE"
         requires_memory = True
         history_request = False
