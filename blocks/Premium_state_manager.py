@@ -3031,24 +3031,28 @@ _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "plot3d": "graph",
     "plot_3d": "graph", "surface_plot": "graph", "surface_graph": "graph",
     "scatter3d": "graph", "scatter_3d": "graph", "wireframe": "graph",
-    "table": "table", "table_data": "table",
+    "graphblock": "graph", "graphrenderer": "graph", "graph3dblock": "graph", "surfaceplotrenderer": "graph",
+    "table": "table", "table_data": "table", "tableblock": "table", "tablerenderer": "table",
     "formula": "formula", "formula_data": "formula", "equation": "formula",
+    "formulablock": "formula", "formularenderer": "formula",
     "math": "formula", "latex": "formula", "physics_formula": "formula",
     "chemistry_formula": "formula", "biology_formula": "formula",
     "solution": "solution", "math_solution": "solution", "problem_solution": "solution",
+    "mathsolutionblock": "solution", "problemsolutionblock": "solution",
     "worked_solution": "solution", "solution_steps": "solution",
     # These types are part of the same Premium response/SceneContract. They are
     # persisted in the existing JSONB dialogue pair, not in a parallel memory.
-    "link": "link", "links": "link", "url": "link", "link_card": "link", "source_link": "link",
-    "code": "code", "source_code": "code", "code_block": "code", "script": "code",
-    "diagram": "diagram", "diagram_data": "diagram", "scheme": "diagram", "schema_diagram": "diagram",
+    "link": "link", "links": "link", "url": "link", "link_card": "link", "linkcard": "link", "linkrenderer": "link", "source_link": "link",
+    "copy": "copy", "copy_block": "copy", "copyblock": "copy", "copyable_text": "copy", "text_copy_block": "copy",
+    "code": "code", "source_code": "code", "code_block": "code", "codeblock": "code", "coderenderer": "code", "script": "code",
+    "diagram": "diagram", "diagram_data": "diagram", "diagramblock": "diagram", "diagramrenderer": "diagram", "schemerenderer": "diagram", "scheme": "diagram", "schema_diagram": "diagram",
     "flowchart": "diagram", "mermaid": "diagram",
-    "image": "image", "generated_image": "image", "gallery": "image", "visual": "image",
+    "image": "image", "generated_image": "image", "gallery": "image", "galleryblock": "image", "imagerenderer": "image", "screenshotblock": "image", "visual": "image",
     "screenshot": "image", "screen_shot": "image", "image_gallery": "image",
-    "file": "file", "document": "file", "document_file": "file", "text_file": "file",
+    "file": "file", "fileblock": "file", "documentblock": "file", "document": "file", "document_file": "file", "text_file": "file",
     "code_file": "file", "pdf": "file", "spreadsheet": "file", "presentation": "file",
-    "audio": "audio", "audio_file": "audio", "voice": "audio",
-    "video": "video", "video_file": "video",
+    "audio": "audio", "audio_file": "audio", "audioblock": "audio", "voice": "audio",
+    "video": "video", "video_file": "video", "videoblock": "video",
 }
 
 _PROTECTED_DATA_KEYS = {
@@ -3072,6 +3076,7 @@ _PROTECTED_DATA_KEYS = {
         "unknowns", "variables", "parameters", "result",
     },
     "link": {"url", "href", "uri", "target_url", "destination", "links", "link"},
+    "copy": {"content", "text", "markdown", "value", "copy_action", "language", "filename"},
     "code": {"code", "source_code", "source", "language", "filename", "entry_point", "symbols"},
     "diagram": {"svg", "svg_payload", "drawing", "nodes", "edges", "relations", "elements", "shapes", "vertices", "connectors", "mermaid", "source", "code", "geometry", "positions", "format", "layout", "direction"},
     "image": {"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri", "image_data_uri", "image_base64", "base64"},
@@ -3097,6 +3102,7 @@ def _protected_structured_kind(value: Any) -> str:
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
         "linkcard": "link", "linkrenderer": "link",
+        "copyblock": "copy",
         "codeblock": "code", "coderenderer": "code",
         "diagramrenderer": "diagram", "diagramblock": "diagram", "schemerenderer": "diagram",
         "galleryblock": "image", "imagerenderer": "image", "screenshotblock": "image",
@@ -3174,11 +3180,18 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "title", "name", "label", "unit", "units", "x_axis_label", "y_axis_label",
         "url", "href", "uri", "target_url", "destination", "filename", "language",
-        "alt", "caption", "description", "image_url", "src", "asset_id", "asset_ref", "ref", "id",
+        "alt", "caption", "description", "image_url", "src", "asset_id", "artifact_id", "asset_ref", "ref", "id",
         "storage_key", "mime_type", "code", "source_code", "source", "svg", "mermaid",
         "nodes", "edges", "elements", "shapes", "vertices", "connectors", "geometry",
         "asset_message_id", "message_id", "source_message_id", "output_type", "asset_role",
         "source_type", "original_filename", "size_bytes", "content_type", "entry_point", "symbols",
+        "revision_of", "revision_chain_id", "revision_number", "revision_status", "supersedes",
+        "derived_from_artifact_id", "source_topic_id", "source_branch_id", "topic_id", "branch_id",
+        "origin_message_id", "parent_message_id", "topic_origin_message_id", "operation",
+        "image_operation", "edit_operation", "edit_mode", "visual_operation", "action",
+        "request_anchor", "prompt_summary", "source_asset_id", "source_asset_message_id",
+        "generation_model", "quality", "checksum", "format", "copy_action", "chart_type",
+        "graph_type", "row_count", "column_count", "point_count", "series_count", "width", "height",
     ):
         if node.get(key) not in (None, "", [], {}):
             category[key] = deepcopy(node[key])
@@ -3194,6 +3207,12 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
                 category[key] = deepcopy(node[key])
     if kind == "link":
         for key in ("label", "title", "url", "href", "uri", "target_url", "destination", "description", "caption", "context"):
+            if node.get(key) not in (None, "", [], {}):
+                category[key] = deepcopy(node[key])
+    if kind == "copy":
+        # Copy Room payload is the exact user-facing text artifact. Keep it whole;
+        # do not confuse it with ordinary prose or rebuild it from a summary.
+        for key in ("content", "text", "markdown", "language", "filename"):
             if node.get(key) not in (None, "", [], {}):
                 category[key] = deepcopy(node[key])
 
@@ -3428,7 +3447,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("graph", "table", "formula", "solution", "link", "code", "diagram", "image", "file", "audio", "video"):
+    for kind in ("graph", "table", "formula", "solution", "link", "copy", "code", "diagram", "image", "file", "audio", "video"):
         if kind not in kinds:
             continue
         candidates_by_field = {
@@ -3951,7 +3970,8 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         block_type = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
         if block_type not in {
             "table", "table_data", "diagram", "graph", "chart", "plot",
-            "formula", "equation", "code", "source_code", "image", "gallery",
+            "formula", "equation", "copy", "copy_block", "copyable_text", "text_copy_block",
+            "link", "links", "url", "code", "source_code", "image", "gallery",
             "video", "audio", "scene", "layout", "visual", "renderer_scene",
         }:
             continue
@@ -4012,13 +4032,15 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
             for name in (
                 "kind", "type", "artifact_type", "output_type", "title", "label", "summary",
                 "description", "filename", "mime_type", "renderer", "viewer", "representation",
-                "asset_id", "artifact_id", "id", "message_id", "source_message_id",
+                "asset_id", "artifact_id", "id", "ref", "url", "href", "uri", "path", "message_id", "source_message_id",
                 "operation", "image_operation", "edit_operation", "edit_mode", "action",
                 "source_asset_id", "source_asset_message_id", "asset_role", "generation_model",
                 "quality", "request_anchor", "prompt_summary", "visual_operation",
                 "topic_id", "branch_id", "origin_message_id", "parent_message_id", "artifact_family",
                 "revision_of", "revision_chain_id", "revision_status", "supersedes",
                 "derived_from_artifact_id", "source_topic_id", "source_branch_id",
+                "format", "caption", "alt", "preview", "data_summary", "row_count", "column_count",
+                "point_count", "series_count", "width", "height", "revision_number", "revision_status",
             )
             if artifact.get(name) not in (None, "", [], {})
         }
@@ -4754,7 +4776,11 @@ def _image_source_subject_tokens(query: Any) -> set[str]:
         "красная", "красной", "красную", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только",
         "выдай", "выдайте", "пришли", "пришлите", "верни", "верните", "покажи", "покажите",
     }
-    words = [word for word in raw_words if word not in skip and len(word) >= 3]
+    words = [
+        word for word in raw_words
+        if word not in skip and len(word) >= 3
+        and not re.match(r"(?:прошл|предыдущ|истори|диалог|разговор|ветк|тем|стар)", word)
+    ]
     if not words:
         return set()
     # Require evidence that the first word describes the source, rather than being
@@ -4788,6 +4814,8 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
         ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
         ("diagram", r"(?:\bсхем\w*\b|\bдиаграмм\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("link", r"(?:\bссылк\w*\b|\burl\b|\blinks?\b|\bгиперссылк\w*\b)"),
+        ("copy", r"(?:\bcopyable\s+text\b|\bcopy\s+block\b|\bкопируем\w*\s+текст\w*\b|\bкопи(?:руем\w*)?\s+блок\w*\b|\bтекст\s+из\s+(?:прошл\w*|предыдущ\w*|истори\w*)|\bтекст\s+котор\w*\s+(?:ты|мы)\s+(?:создал\w*|сделал\w*|написал\w*))"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
         ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bснимк\w*\b|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
@@ -4807,7 +4835,8 @@ def _explicit_artifact_followup_kind(query: str) -> str:
 
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
-        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
+        r"найди\w*|открой\w*|вытащи\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
@@ -4823,11 +4852,31 @@ def _explicit_artifact_followup_kind(query: str) -> str:
     # old artifact. “Show a picture of him / his discoveries” is a new deliverable.
     explicit_saved_reference = bool(re.search(
         r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
-        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|стар\w*|из\s+истори\w*|"
+        r"из\s+(?:прошл\w*|предыдущ\w*)\s+(?:тем\w*|диалог\w*|ветк\w*)|"
+        r"в\s+(?:прошл\w*|предыдущ\w*)\s+(?:диалог\w*|ветк\w*)|"
+        r"котор\w*\s+(?:мы|ты)\s+(?:делал\w*|создавал\w*|создал\w*|исправлял\w*|писал\w*)|"
         r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
         low, re.IGNORECASE,
     ))
     return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference else ""
+
+
+def _explicit_historical_artifact_reference(query: str) -> bool:
+    """Identify a concrete saved artifact explicitly requested from earlier history."""
+    low = _text(query).lower().replace("ё", "е")
+    if not low or not _explicit_artifact_followup_kind(low):
+        return False
+    return bool(re.search(
+        r"(?:из\s+(?:прошл\w*|предыдущ\w*|стар\w*|истори\w*)\s*(?:тем\w*|диалог\w*|ветк\w*|разговор\w*)?|"
+        r"в\s+(?:прошл\w*|предыдущ\w*|стар\w*)\s+(?:диалог\w*|ветк\w*|разговор\w*|тем\w*)|"
+        r"\b(?:стар\w*|предыдущ\w*|прошл\w*)\s+(?:таблиц\w*|график\w*|диаграмм\w*|формул\w*|схем\w*|код\w*|скрипт\w*|ссылк\w*|копируем\w*\s+текст\w*|текст\w*|файл\w*|документ\w*|картинк\w*|фото\w*|изображен\w*)|"
+        r"по\s+истори\w*|из\s+истори\w*|вернись\s+к\s+(?:стар\w*|прошл\w*)|"
+        r"котор\w*\s+(?:мы|ты)\s+(?:делал\w*|создавал\w*|создал\w*|исправлял\w*|писал\w*)|"
+        r"from\s+(?:history|the\s+previous\s+conversation|another\s+chat)|"
+        r"in\s+(?:our\s+)?previous\s+(?:chat|thread|conversation)|earlier\s+(?:chat|thread|conversation))",
+        low, re.IGNORECASE,
+    ))
 
 
 def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
@@ -5554,19 +5603,146 @@ def _build_active_topic_context_descriptor(
             if not isinstance(asset, dict):
                 continue
             descriptor = dict(asset)
-            artifact_key = (
-                _text(descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
-                      or descriptor.get("asset_message_id") or descriptor.get("filename") or descriptor.get("name")),
-                _text(descriptor.get("asset_role") or descriptor.get("kind") or descriptor.get("type")
-                      or descriptor.get("artifact_type") or descriptor.get("output_type")),
+            artifact_identity = _text(
+                descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
+                or descriptor.get("ref") or descriptor.get("url") or descriptor.get("filename")
+                or descriptor.get("name") or descriptor.get("title")
             )
-            if artifact_key != ("", "") and artifact_key not in branch["_seen_artifacts"]:
+            artifact_key = (
+                artifact_identity or _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                _text(descriptor.get("source_item_path")),
+                _text(descriptor.get("artifact_family") or descriptor.get("asset_role") or descriptor.get("kind")
+                      or descriptor.get("type") or descriptor.get("artifact_type") or descriptor.get("output_type")),
+                _text(descriptor.get("revision_chain_id") or descriptor.get("revision_number")),
+            )
+            if artifact_key != ("", "", "", "", "") and artifact_key not in branch["_seen_artifacts"]:
                 branch["_seen_artifacts"].add(artifact_key)
                 branch["artifact_index"].append(descriptor)
                 all_artifacts.append(descriptor)
 
         # Existing asset references and renderer types provide a useful fallback for
         # old rows that do not yet have an artifact_index in dialogue_thread metadata.
+        compact_pair = _compact_pair(row)
+        assistant_descriptors = compact_pair.get("assistant_artifact_index") if isinstance(compact_pair.get("assistant_artifact_index"), list) else []
+        for asset in assistant_descriptors:
+            if not isinstance(asset, dict):
+                continue
+            descriptor = dict(asset)
+            descriptor.setdefault("asset_role", "april_output")
+            descriptor.setdefault("source_message_id", _text(row.get("message_id"))[:120])
+            descriptor.setdefault("asset_message_id", _text(row.get("message_id"))[:120])
+            descriptor.setdefault("topic_id", row_topic_id or topic_id)
+            descriptor.setdefault("branch_id", row_branch_id)
+            descriptor.setdefault("origin_message_id", row_root)
+            artifact_identity = _text(
+                descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
+                or descriptor.get("ref") or descriptor.get("url") or descriptor.get("filename")
+                or descriptor.get("name") or descriptor.get("title")
+            )
+            artifact_key = (
+                artifact_identity or _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                _text(descriptor.get("source_item_path")),
+                _text(descriptor.get("artifact_family") or descriptor.get("asset_role") or descriptor.get("kind")
+                      or descriptor.get("type") or descriptor.get("artifact_type") or descriptor.get("output_type")),
+                _text(descriptor.get("revision_chain_id") or descriptor.get("revision_number")),
+            )
+            if artifact_key != ("", "", "", "", "") and artifact_key not in branch["_seen_artifacts"]:
+                branch["_seen_artifacts"].add(artifact_key)
+                branch["artifact_index"].append(descriptor)
+                all_artifacts.append(descriptor)
+
+        # Legacy answers can contain a structured artifact without a renderer
+        # descriptor (for example a Markdown table, fenced code, CopyBlock text,
+        # or a URL embedded in prose). Index only its compact metadata so the
+        # historical topic can name and select it without duplicating its payload.
+        known_families = {
+            _text(asset.get("artifact_family") or asset.get("kind") or asset.get("type")
+                  or asset.get("artifact_type") or asset.get("output_type")).lower()
+            for asset in branch["artifact_index"] if isinstance(asset, dict)
+        }
+        legacy_answer = _protected_source_answer(row, response)
+        unindexed_inline_artifact = bool(
+            ("link" not in known_families and re.search(r"https?://", legacy_answer, re.IGNORECASE))
+            or (not known_families and legacy_answer)
+            or ("code" not in known_families and "```" in legacy_answer)
+            or ("table" not in known_families and re.search(
+                r"(?m)^\s*\|[^\n]+\|\s*\n\s*\|\s*:?-{3,}", legacy_answer
+            ))
+            or ("formula" not in known_families and re.search(r"\$\$|\\\[|\\\(", legacy_answer))
+        )
+        protected_record = _protected_structured_data_from_row(row) if unindexed_inline_artifact else {}
+        protected_items = protected_record.get("items") if isinstance(protected_record.get("items"), list) else []
+        for protected_item in protected_items[:80]:
+            if not isinstance(protected_item, dict):
+                continue
+            family = _text(protected_item.get("kind")).lower()
+            if not family or family in known_families:
+                continue
+            data = protected_item.get("data") if isinstance(protected_item.get("data"), dict) else {}
+            nested = data.get("payload") if isinstance(data.get("payload"), dict) else (
+                data.get("spec") if isinstance(data.get("spec"), dict) else {}
+            )
+            metadata = {**nested, **data}
+            raw_path = protected_item.get("index")
+            if isinstance(raw_path, (list, tuple)):
+                source_item_path = ".".join(str(part) for part in raw_path[:8])
+            else:
+                source_item_path = _text(raw_path)[:120]
+            descriptor = {
+                "kind": family,
+                "artifact_family": family,
+                "title": _text(metadata.get("title") or metadata.get("label") or metadata.get("filename") or metadata.get("name"))[:180],
+                "filename": _text(metadata.get("filename"))[:180],
+                "url": _text(metadata.get("url") or metadata.get("href") or metadata.get("uri"))[:480],
+                "language": _text(metadata.get("language"))[:80],
+                "mime_type": _text(metadata.get("mime_type") or metadata.get("content_type"))[:100],
+                "renderer": _text(metadata.get("renderer") or metadata.get("viewer"))[:100],
+                "description": _text(metadata.get("description") or metadata.get("context") or metadata.get("summary"))[:280],
+                "source_message_id": _text(row.get("message_id"))[:120],
+                "asset_message_id": _text(row.get("message_id"))[:120],
+                "source_item_path": source_item_path,
+                "topic_id": row_topic_id or topic_id,
+                "branch_id": row_branch_id,
+                "origin_message_id": row_root,
+                "artifact_id": _text(metadata.get("artifact_id") or metadata.get("asset_id") or metadata.get("id"))[:140],
+                "revision_of": _text(metadata.get("revision_of"))[:140],
+                "revision_chain_id": _text(metadata.get("revision_chain_id"))[:120],
+                "revision_number": metadata.get("revision_number"),
+                "revision_status": _text(metadata.get("revision_status"))[:40],
+                "supersedes": _text(metadata.get("supersedes"))[:140],
+                "derived_from_artifact_id": _text(metadata.get("derived_from_artifact_id"))[:140],
+                "operation": _text(metadata.get("operation") or metadata.get("image_operation") or metadata.get("edit_operation") or metadata.get("visual_operation"))[:180],
+                "copy_action": _text(metadata.get("copy_action"))[:80],
+                "source_asset_id": _text(metadata.get("source_asset_id"))[:140],
+                "source_asset_message_id": _text(metadata.get("source_asset_message_id"))[:120],
+                "generation_model": _text(metadata.get("generation_model"))[:100],
+                "quality": _text(metadata.get("quality"))[:80],
+                "row_count": metadata.get("row_count"),
+                "column_count": metadata.get("column_count"),
+                "point_count": metadata.get("point_count"),
+                "series_count": metadata.get("series_count"),
+            }
+            artifact_identity = _text(
+                descriptor.get("artifact_id") or descriptor.get("url") or descriptor.get("filename") or descriptor.get("title")
+            )
+            artifact_key = (
+                artifact_identity or _text(descriptor.get("source_message_id")),
+                _text(descriptor.get("source_message_id")),
+                _text(descriptor.get("source_item_path")),
+                family,
+                _text(descriptor.get("revision_chain_id") or descriptor.get("revision_number")),
+            )
+            if artifact_key not in branch["_seen_artifacts"]:
+                branch["_seen_artifacts"].add(artifact_key)
+                compact_descriptor = {
+                    key: value for key, value in descriptor.items()
+                    if value not in (None, "", [], {})
+                }
+                branch["artifact_index"].append(compact_descriptor)
+                all_artifacts.append(compact_descriptor)
+
         for bucket in (
             response.get("asset_refs", {}).get("source_inputs", []) if isinstance(response.get("asset_refs"), dict) else [],
             response.get("asset_refs", {}).get("april_outputs", []) if isinstance(response.get("asset_refs"), dict) else [],
@@ -5576,13 +5752,20 @@ def _build_active_topic_context_descriptor(
                 if not isinstance(asset, dict):
                     continue
                 descriptor = dict(asset)
-                artifact_key = (
-                    _text(descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
-                          or descriptor.get("asset_message_id") or descriptor.get("filename") or descriptor.get("name")),
-                    _text(descriptor.get("asset_role") or descriptor.get("kind") or descriptor.get("type")
-                          or descriptor.get("artifact_type") or descriptor.get("output_type")),
+                artifact_identity = _text(
+                    descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
+                    or descriptor.get("ref") or descriptor.get("url") or descriptor.get("filename")
+                    or descriptor.get("name") or descriptor.get("title")
                 )
-                if artifact_key != ("", "") and artifact_key not in branch["_seen_artifacts"]:
+                artifact_key = (
+                    artifact_identity or _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                    _text(descriptor.get("source_message_id") or descriptor.get("asset_message_id")),
+                    _text(descriptor.get("source_item_path")),
+                    _text(descriptor.get("artifact_family") or descriptor.get("asset_role") or descriptor.get("kind")
+                          or descriptor.get("type") or descriptor.get("artifact_type") or descriptor.get("output_type")),
+                    _text(descriptor.get("revision_chain_id") or descriptor.get("revision_number")),
+                )
+                if artifact_key != ("", "", "", "", "") and artifact_key not in branch["_seen_artifacts"]:
                     branch["_seen_artifacts"].add(artifact_key)
                     branch["artifact_index"].append(descriptor)
                     all_artifacts.append(descriptor)
@@ -5594,31 +5777,57 @@ def _build_active_topic_context_descriptor(
         branch["recent_steps"] = branch.get("recent_steps", [])[-24:]
         branch["question_sequence"] = branch.get("question_sequence", [])[-32:]
         branch["artifact_index"] = branch.get("artifact_index", [])[-80:]
+        artifact_labels = []
+        for artifact in branch["artifact_index"][-12:]:
+            if not isinstance(artifact, dict):
+                continue
+            family = _text(artifact.get("artifact_family") or artifact.get("kind") or artifact.get("type") or artifact.get("artifact_type") or artifact.get("output_type"))
+            title = _text(artifact.get("title") or artifact.get("label") or artifact.get("filename") or artifact.get("name"))
+            revision = _text(artifact.get("revision_status"))
+            rev_no = artifact.get("revision_number")
+            label = " ".join(part for part in (family, title, (f"v{rev_no}" if rev_no else ""), revision) if part)
+            if label:
+                artifact_labels.append(label[:100])
+        if artifact_labels:
+            branch["artifact_summary"] = list(dict.fromkeys(artifact_labels))[-12:]
+            branch["summary"] = _merge_compact_summaries(
+                branch.get("summary"), "Артефакты этой ветки: " + "; ".join(branch["artifact_summary"]), 900
+            )
         branches.append(branch)
     branches.sort(key=lambda item: float(item.get("last_at") or 0.0), reverse=True)
 
     all_artifact_index: list[dict[str, Any]] = []
-    seen_asset_keys: set[tuple[str, str]] = set()
+    seen_asset_keys: set[tuple[str, str, str, str, str]] = set()
     for item in all_artifacts:
-        key = (
-            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
-                  or item.get("asset_message_id") or item.get("filename") or item.get("name")),
-            _text(item.get("asset_role") or item.get("kind") or item.get("type")
-                  or item.get("artifact_type") or item.get("output_type")),
+        artifact_identity = _text(
+            item.get("asset_id") or item.get("artifact_id") or item.get("id")
+            or item.get("ref") or item.get("url") or item.get("filename") or item.get("name") or item.get("title")
         )
-        if key != ("", "") and key not in seen_asset_keys:
+        key = (
+            artifact_identity or _text(item.get("source_message_id") or item.get("asset_message_id")),
+            _text(item.get("source_message_id") or item.get("asset_message_id")),
+            _text(item.get("source_item_path")),
+            _text(item.get("artifact_family") or item.get("asset_role") or item.get("kind") or item.get("type")
+                  or item.get("artifact_type") or item.get("output_type")),
+            _text(item.get("revision_chain_id") or item.get("revision_number")),
+        )
+        if key != ("", "", "", "", "") and key not in seen_asset_keys:
             seen_asset_keys.add(key)
             all_artifact_index.append({
                 key_name: value for key_name, value in item.items()
                 if key_name in {
                     "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
-                    "mime_type", "renderer", "viewer", "chart_type", "asset_role", "source_message_id",
+                    "mime_type", "content_type", "media_type", "renderer", "viewer", "chart_type", "graph_type", "asset_role", "source_message_id",
                     "operation", "image_operation", "edit_operation", "edit_mode", "action",
                     "source_asset_id", "source_asset_message_id", "generation_model", "quality",
                     "asset_message_id", "asset_id", "artifact_id", "id", "ref", "url", "path",
                     "description", "summary", "data_summary", "preview", "alt", "caption", "label",
-                    "format", "language", "dimensions", "point_count", "series_count", "row_count",
+                    "format", "language", "dimensions", "topic_origin_message_id", "request_anchor", "prompt_summary",
+                    "copy_action", "visual_operation", "source_type", "quality", "generation_model", "source_item_path", "point_count", "series_count", "row_count",
                     "column_count", "checksum", "topic_id", "branch_id", "parent_message_id",
+                    "origin_message_id", "source_branch_id", "source_topic_id", "revision_of",
+                    "revision_chain_id", "revision_number", "revision_status", "supersedes",
+                    "derived_from_artifact_id", "asset_message_id", "source_item_path", "href", "uri", "path", "format",
                 } and value not in (None, "", [], {})
             })
     topic_label = _text(topic_label or _dialogue_thread_metadata(ordered[0]).get("topic") or ordered[0].get("topic"))[:240]
@@ -6157,9 +6366,16 @@ def search_dialogue_context(
     search_started = time.perf_counter()
     uid = _uid(user_id)
     query_interpretation = dict(query_interpretation or {})
+    preclassified_artifact_kind = (
+        _text(query_interpretation.get("saved_artifact_followup_kind"))
+        or _explicit_artifact_followup_kind(query)
+    )
+    explicit_historical_artifact_request = bool(
+        preclassified_artifact_kind and _explicit_historical_artifact_reference(query)
+    )
 
     hot_branch_probe_missed = False
-    if not _hot_branch_only and _should_probe_hot_branch_first(
+    if not _hot_branch_only and not explicit_historical_artifact_request and _should_probe_hot_branch_first(
         query, query_interpretation,
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
@@ -6247,8 +6463,11 @@ def search_dialogue_context(
         query, query_interpretation, has_image=has_image
     )
     targeted_active_repair = bool(
-        retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
-        or explicit_active_restatement or contextual_visual_development
+        not explicit_historical_artifact_request
+        and (
+            retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
+            or explicit_active_restatement or contextual_visual_development
+        )
     )
     state = hydrate(
         uid,
@@ -6342,16 +6561,22 @@ def search_dialogue_context(
     topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
     explicit_artifact_kind = (
         _text(query_interpretation.get("saved_artifact_followup_kind"))
-        if "saved_artifact_followup_kind" in query_interpretation
-        else _explicit_artifact_followup_kind(query)
+        or _explicit_artifact_followup_kind(query)
     )
     # A recap/praise may contain words like "asked you to edit the photo" but
     # does not ask to edit that artifact again. Voice transcripts are text turns,
     # so the semantic continuation route (below) should preserve the active branch
     # without the expensive saved-image recovery lane.
-    if retrospective_image_discussion and _text(explicit_artifact_kind).lower() == "image":
+    if (
+        retrospective_image_discussion
+        and _text(explicit_artifact_kind).lower() == "image"
+        and not explicit_historical_artifact_request
+    ):
         explicit_artifact_kind = ""
-    explicit_artifact_followup = bool(explicit_artifact_kind and not history_request and not new_topic_request)
+    # A request can be both a history lookup and an explicit artifact retrieval
+    # (for example, “подними таблицу из прошлого диалога”). Do not let the broad
+    # history flag suppress the exact typed-artifact recovery lane.
+    explicit_artifact_followup = bool(explicit_artifact_kind and not new_topic_request)
     context_signature = _query_context_signature(query, query_interpretation)
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
     speech_act = _text(query_interpretation.get("speech_act")).upper()
@@ -6521,7 +6746,8 @@ def search_dialogue_context(
         and not resume_key
     )
     needs_structured_search = bool(
-        (not retrospective_image_discussion and _structured_work_requested(query, query_interpretation, query_modalities))
+        explicit_artifact_followup
+        or (not retrospective_image_discussion and _structured_work_requested(query, query_interpretation, query_modalities))
         or history_request or time_filter.get("applied") or _is_section_request(query)
     )
 
@@ -9029,6 +9255,9 @@ def search_dialogue_context(
     # was that NEW_INFORMATION overrode semantic continuity and returned zero pairs.
     artifact_source_row: dict[str, Any] | None = None
     artifact_source_candidate: dict[str, Any] | None = None
+    historical_artifact_reactivation = False
+    explicit_historical_artifact_reference = _explicit_historical_artifact_reference(query)
+    artifact_search_scope: list[dict[str, Any]] = []
     if explicit_artifact_followup and not resume_key and not time_filter.get("applied"):
         # Never cross the authenticated conversation boundary: limit to the active
         # dialogue/conversation before checking exact persisted renderer payloads.
@@ -9060,11 +9289,13 @@ def search_dialogue_context(
         # intermediate points to the graph" incorrectly treats "intermediate" as
         # a new entity and rejects the only saved graph in the active dialogue.
         artifact_subject_query = re.sub(
-            r"(?:\b(?:graph|chart|plot|table|formula|equation|diagram|code|script|image|photo|picture|file|document)\w*\b|"
-            r"\b(?:график|диаграмм|таблиц|формул|уравнен|схем|чертеж|код|скрипт|картинк|изображен|фото|файл|документ)\w*\b|"
-            r"\b(?:данн|значен|точк|проме|добав|допол|исправ|измен|обнов|перестро|передел|редакт|улучш|замен|убер|восстанов|верни|пришл|выдай|вывед|отобраз|представ|покаж|сдела|постро|созда)\w*\b|"
+            r"(?:\b(?:graph|chart|plot|table|formula|equation|diagram|code|script|image|photo|picture|file|document|link|url|copy|copyable|text)\w*\b|"
+            r"\b(?:график|диаграмм|таблиц|формул|уравнен|схем|чертеж|код|скрипт|картинк|изображен|фото|файл|документ|ссылк|копир|копируем|текст)\w*\b|"
+            r"\b(?:данн|значен|точк|проме|добав|допол|исправ|измен|обнов|перестро|передел|редакт|улучш|замен|убер|восстанов|верни|подним|достан|найд|откро|вытащ|скопир|продолж|пришл|выдай|вывед|отобраз|представ|покаж|сдела|постро|созда|дай)\w*\b|"
             r"\b(?:день|дня|дней|днями|недел|месяц|года|год|за)\w*\b|"
             r"\b(?:daily|weekly|monthly|intermediate|estimated|points?|data|values?|days?|weeks?|months?|price|prices|growth)\w*\b|"
+            r"\b(?:стар\w*|предыдущ\w*|прошл\w*|истори\w*|диалог\w*|разговор\w*|ветк\w*|тем\w*)\b|"
+            r"\b(?:стар\w*|предыдущ\w*|прошл\w*|истори\w*|диалог\w*|разговор\w*|ветк\w*|тем\w*)\b|"
             r"\b(?:грн|руб|рубл|доллар|евро|uah|usd)\w*\b|\b\d+(?:[.,]\d+)?\b)",
             " ", _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
         )
@@ -9117,6 +9348,64 @@ def search_dialogue_context(
                 + 0.10 * float(scored.get("recency") or 0.0)
             )
             artifact_options.append((score, exact_subject, int(source_row.get("turn_index") or 0), source_row, scored))
+        # If the active dialogue contains no matching saved artifact, search the
+        # authenticated user's complete retained Premium history. An explicit
+        # cross-dialog/history reference forces this wider search even when a
+        # same-dialog artifact of the same family exists. The 24h retention and
+        # user ownership are already enforced by `all_rows` from storage.
+        if explicit_historical_artifact_reference or not artifact_options:
+            artifact_search_scope = [
+                row for row in all_rows
+                if isinstance(row, dict)
+                and not _row_is_pending_clarification(row)
+                and not _is_failed_provider_row(row)
+            ]
+            historical_options: list[tuple[float, float, int, dict[str, Any], dict[str, Any]]] = []
+            active_ids = {_text(row.get("message_id")) for row in artifact_scope if _text(row.get("message_id"))}
+            for source_row in artifact_search_scope:
+                source_id = _text(source_row.get("message_id"))
+                if not explicit_historical_artifact_reference and source_id in active_ids:
+                    continue
+                if not _row_has_value_bearing_artifact(source_row, explicit_artifact_kind):
+                    continue
+                row_subjects = _row_subject_tokens(source_row)
+                subject_overlap = _subject_overlap(artifact_query_subjects, row_subjects)
+                if artifact_query_subjects and row_subjects and _subject_conflicts(artifact_query_subjects, row_subjects):
+                    continue
+                if artifact_query_subjects and row_subjects and subject_overlap <= 0.0:
+                    continue
+                scored = _candidate_score(
+                    query, source_row,
+                    dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""),
+                    reference_followup=True,
+                    query_modalities=query_modalities,
+                    structured_evidence_required=True,
+                )
+                topic_text = " ".join((_row_subject_text_lightweight(source_row), _topic_label_lightweight(source_row)))
+                topic_match = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
+                exact_subject = 1.0 if not artifact_query_subjects else float(subject_overlap)
+                score = (
+                    0.44 * exact_subject
+                    + 0.22 * float(scored.get("source_data_alignment") or 0.0)
+                    + 0.14 * min(1.0, float(scored.get("structured_data_richness") or 0) / 40.0)
+                    + 0.12 * float(scored.get("recency") or 0.0)
+                    + 0.08 * topic_match
+                )
+                historical_options.append((score, exact_subject, int(source_row.get("turn_index") or 0), source_row, scored))
+            if historical_options:
+                artifact_options = historical_options
+                artifact_search_scope = [row for row in artifact_search_scope]
+                _apr_timing_log(
+                    "saved_artifact_history_fallback",
+                    None,
+                    user_key=_apr_diag_ref(uid),
+                    dialog_key=_apr_diag_ref(dialog_id),
+                    artifact_kind=explicit_artifact_kind,
+                    active_dialogue_candidates=len(active_ids),
+                    historical_candidates=len(historical_options),
+                    explicit_history_reference=bool(explicit_historical_artifact_reference),
+                )
         if artifact_options:
             if explicit_artifact_kind == "image":
                 # For an image explicitly referenced in the current dialogue, first
@@ -9138,9 +9427,12 @@ def search_dialogue_context(
             # Recover user-entered values from the originating turn when it belongs
             # to the same topic; include at most one origin plus the exact artifact.
             source_rows: list[dict[str, Any]] = []
+            artifact_source_is_historical = not bool((artifact_source_candidate or {}).get("same_dialog"))
+            historical_artifact_reactivation = bool(artifact_source_is_historical)
+            source_lookup_scope = artifact_search_scope if artifact_source_is_historical and artifact_search_scope else artifact_scope
             origin_id = _text(artifact_source_row.get("topic_origin_message_id") or artifact_source_row.get("origin_message_id"))
             if origin_id and origin_id != source_id:
-                origin_row = next((row for row in artifact_scope if _text(row.get("message_id")) == origin_id), None)
+                origin_row = next((row for row in source_lookup_scope if _text(row.get("message_id")) == origin_id), None)
                 if origin_row is not None:
                     origin_subjects = _row_subject_tokens(origin_row)
                     if not artifact_query_subjects or not origin_subjects or not _subject_conflicts(artifact_query_subjects, origin_subjects):
@@ -9150,7 +9442,7 @@ def search_dialogue_context(
                 # earlier user turn with matching subject and data-like content.
                 source_at = float(artifact_source_row.get("created_at") or 0.0)
                 prior_rows = []
-                for row in artifact_scope:
+                for row in source_lookup_scope:
                     if _text(row.get("message_id")) == source_id or float(row.get("created_at") or 0.0) >= source_at:
                         continue
                     row_subjects = _row_subject_tokens(row)
@@ -9200,7 +9492,10 @@ def search_dialogue_context(
             continuation = True
             self_contained_new_information = False
             hot_work_followup = True
-            hot_work_match_reason = "same_dialog_saved_artifact_recovered"
+            hot_work_match_reason = (
+                "historical_saved_artifact_recovered" if historical_artifact_reactivation
+                else "same_dialog_saved_artifact_recovered"
+            )
             hot_branch_candidate = True
             semantic_active_branch_intent = True
             active_subject_conflict = False
@@ -9244,8 +9539,11 @@ def search_dialogue_context(
                     requested_outputs.append("graph")
                 query_interpretation["requested_outputs"] = requested_outputs
                 query_interpretation["wants_graph"] = True
-            history_selection_method = "same_dialog_saved_artifact_recovery"
-            contextual_history_match = False
+            history_selection_method = (
+                "historical_saved_artifact_recovery" if historical_artifact_reactivation
+                else "same_dialog_saved_artifact_recovery"
+            )
+            contextual_history_match = bool(historical_artifact_reactivation)
             _apr_timing_log(
                 "saved_artifact_continuation_recovered",
                 search_started,
@@ -10207,6 +10505,14 @@ def search_dialogue_context(
         "referential_followup": reference_followup,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
+        "historical_artifact_reactivation": bool(historical_artifact_reactivation),
+        "artifact_recovery": ({
+            "status": "historical_match" if historical_artifact_reactivation else "active_dialogue_match",
+            "family": explicit_artifact_kind,
+            "source_message_id": _text(artifact_source_row.get("message_id")) if isinstance(artifact_source_row, dict) else "",
+            "topic_id": _text(artifact_source_row.get("topic_id")) if isinstance(artifact_source_row, dict) else "",
+            "branch_id": _text(artifact_source_row.get("branch_id")) if isinstance(artifact_source_row, dict) else "",
+        } if artifact_source_row else {}),
         "historical_topic_reactivated": bool(
             contextual_history_match and relation == "CONTINUE"
             and selected_for_context and branch_route_kind == "MATCHED_HISTORY"
