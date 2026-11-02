@@ -1,38 +1,338 @@
-"""APRIL state manager — DB-backed dialogue search and live route state.
+"""April Premium Stat Manager: canonical Premium access, PostgreSQL adapter, and 24-hour dialogue understanding.
 
-Persistent dialogue data belongs to storage.py.  This module is the processor-side
-memory/search engine: it hydrates the live 12h window from PostgreSQL, ranks the
-best USER↔APRIL pairs, decides CONTINUE/NEW candidates, and exposes the result to
-the Interpretation Identity layer.  It never owns a second database.
+This is the single Premium manager module. It uses the existing users and dialogue_memory
+tables, validates the active Premium subscription, loads/saves the canonical dialogue
+pairs, and provides the Premium state/search/continuation engine. Free storage and route
+implementations are not copied or modified here.
 """
 from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
-import re
 import json
 import math
-import os
+import re
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
+import psycopg2
 from rapidfuzz import fuzz
+from storage import get_conn, is_authenticated_user as _is_authenticated_user, now, cleanup_dialogue_memory_utc as _cleanup_dialogue_memory_utc, _dialogue_owner_ids_cursor
+from blocks.Premium_interpretation_identity import (
+    extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
+    _is_image_discussion_without_new_visual_action, _detect_image_modification,
+    _is_explicit_visual_revision_request, _has_independent_nonvisual_artifact_request,
+)
 
-DIALOGUE_WINDOW_HOURS = 12
-DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
+
+
+
+
+PREMIUM_MEMORY_WINDOW_HOURS = 24
+PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
+
+
+def init_db() -> None:
+    """Validate the canonical schema without starting/changing Free cleanup.
+
+    bot.py remains responsible for calling storage.init_db() during service startup.
+    """
+    conn = get_conn()
+    if not conn:
+        raise RuntimeError("DATABASE_URL_NOT_CONFIGURED")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users LIMIT 0")
+            cur.execute("SELECT 1 FROM dialogue_memory LIMIT 0")
+    except Exception as exc:
+        raise RuntimeError("CANONICAL_STORAGE_NOT_INITIALIZED") from exc
+    finally:
+        conn.close()
+
+
+def is_authenticated_user(user_id: Any) -> bool:
+    return _is_authenticated_user(user_id)
+
+
+def _active_premium_cursor(cur, uid: str, at: datetime) -> bool:
+    cur.execute(
+        "SELECT user_id, email, provider, plan, subscription_until FROM users WHERE user_id = %s",
+        (uid,),
+    )
+    row = cur.fetchone()
+    if not isinstance(row, dict):
+        return False
+    return bool(
+        str(row.get("user_id") or "").strip()
+        and str(row.get("email") or "").strip()
+        and str(row.get("provider") or "").strip()
+        and str(row.get("plan") or "free").strip().lower() == "premium"
+        and float(row.get("subscription_until") or 0) > at.timestamp()
+    )
+
+
+def _as_utc(value: float | int | datetime | None) -> datetime:
+    if value is None:
+        return now()
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return datetime.fromtimestamp(float(value), tz=timezone.utc)
+
+
+def load_dialogue_pairs(
+    user_id: Any,
+    *,
+    limit: int = 0,
+    timestamp: float | int | datetime | None = None,
+    dialog_id: str = "",
+    conversation_id: str = "",
+    topic_id: str = "",
+    branch_id: str = "",
+    topic_origin_message_id: str = "",
+    strict_dialog_scope: bool = False,
+) -> list[dict[str, Any]]:
+    """Load only this active Premium user's USER↔APRIL pairs from the last 24 hours."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+    # Do not open a separate authentication connection before the canonical
+    # Premium check below: _active_premium_cursor verifies the same required
+    # account fields and entitlement on the connection used for this read.
+    current = _as_utc(timestamp)
+    conn = get_conn()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            if not _active_premium_cursor(cur, uid, current):
+                return []
+            # Older deployments stored some retained pairs under the public April ID.
+            # Resolve aliases with the same collision-safe account check as history.
+            owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+            if not owner_ids:
+                return []
+            # A read must never run a broad retention UPDATE: it can wait on row locks
+            # and previously added tens of seconds to every full-history request. The
+            # canonical storage cleanup/save path persists Premium's 24-hour retention;
+            # this reader applies the active entitlement without mutating the table.
+            dialog_filters: list[str] = []
+            dialog_params: list[Any] = []
+            if (limit or strict_dialog_scope) and str(dialog_id or '').strip():
+                dialog_filters.append("dialog_id = %s")
+                dialog_params.append(str(dialog_id).strip())
+            if (limit or strict_dialog_scope) and str(conversation_id or '').strip():
+                conversation_filter = "conversation_id = %s"
+                dialog_filters.append(conversation_filter)
+                dialog_params.append(str(conversation_id).strip())
+            dialog_clause = " AND (" + " OR ".join(dialog_filters) + ")" if dialog_filters else ""
+
+            # Topic/branch expansion is deliberately a targeted JSONB lookup on the
+            # existing canonical pair table. It retrieves every saved pair in the
+            # matched topic without hydrating every unrelated row and its render data.
+            provenance_filters: list[str] = []
+            provenance_params: list[Any] = []
+            if str(topic_id or "").strip():
+                provenance_filters.append(
+                    "COALESCE("
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_thread,topic_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic_context_manifest,topic_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{metadata,dialogue_memory_record,topic_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{dialogue_thread,topic_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{memory,topic_context,topic_id}'), '')"
+                    ") = %s"
+                )
+                provenance_params.append(str(topic_id).strip())
+            if str(branch_id or "").strip():
+                provenance_filters.append(
+                    "COALESCE("
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_thread,branch_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,branch_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{dialogue_thread,branch_id}'), '')"
+                    ") = %s"
+                )
+                provenance_params.append(str(branch_id).strip())
+            if str(topic_origin_message_id or "").strip():
+                provenance_filters.append(
+                    "COALESCE("
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_thread,topic_origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_thread,origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic_origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic_context_manifest,root_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{dialogue_thread,topic_origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{dialogue_thread,origin_message_id}'), ''), "
+                    "NULLIF(BTRIM(structured_request #>> '{memory,topic_context,root_message_id}'), '')"
+                    ") = %s"
+                )
+                provenance_params.append(str(topic_origin_message_id).strip())
+            provenance_clause = " AND " + " AND ".join(provenance_filters) if provenance_filters else ""
+            order_clause = "ORDER BY created_at DESC, turn_index DESC, id DESC" if limit else "ORDER BY created_at ASC, turn_index ASC, id ASC"
+            limit_clause = " LIMIT %s" if limit else ""
+            # A bounded Premium read mirrors the existing migration's 24-hour
+            # entitlement without running a broad UPDATE over the whole table.
+            # This function only returns an active Premium user's history, so the
+            # effective retention is 24 hours even if a legacy row still contains 12.
+            # Keep created_at bare on both range bounds so PostgreSQL can use
+            # idx_dialogue_memory_user_created instead of evaluating an expression
+            # for every retained row. The existing parameter order stays unchanged.
+            retention_clause = "created_at > (%s - INTERVAL '24 hours')"
+            params: list[Any] = [owner_ids, current, current]
+            params.extend(dialog_params)
+            params.extend(provenance_params)
+            if limit:
+                params.append(max(1, min(32, int(limit))))
+            cur.execute(
+                f"""
+                SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text,
+                       user_text_en, april_text_en, language, relation, dialog_id,
+                       conversation_id, message_id, interpretation_id,
+                       structured_request, structured_response
+                FROM dialogue_memory
+                WHERE user_id = ANY(%s)
+                  AND created_at <= %s
+                  AND {retention_clause}
+                  {dialog_clause}
+                  {provenance_clause}
+                {order_clause}{limit_clause}
+                """,
+                tuple(params),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            # Reflect the active Premium entitlement in-memory for every read. Without
+            # this, _row_is_live() would drop valid 12–24h legacy rows after the SQL
+            # query already included them. Persistence remains the storage cleanup's job.
+            for row in rows:
+                row["retention_hours"] = 24
+            if limit:
+                rows.reverse()  # expose the same chronological order as full-history reads
+            for row in rows:
+                # Canonicalize legacy alias rows before they enter Premium context.
+                row["user_id"] = uid
+                created = row.get("created_at")
+                if isinstance(created, datetime):
+                    row["created_at"] = created.astimezone(timezone.utc).timestamp()
+            if limit and len(rows) > int(limit):
+                rows = rows[-int(limit):]
+            return rows
+    except psycopg2.errors.UndefinedTable:
+        return []
+    finally:
+        conn.close()
+
+
+def save_dialogue_pair(
+    user_id: Any,
+    user_text: str,
+    april_text: str,
+    *,
+    created_at: float | int | datetime | None = None,
+    turn_index: int = 0,
+    user_en: str = "",
+    april_en: str = "",
+    language: str = "en",
+    relation: str = "NEW",
+    dialog_id: str = "",
+    conversation_id: str = "",
+    message_id: str = "",
+    interpretation_id: str = "",
+    structured_request: dict[str, Any] | None = None,
+    structured_response: dict[str, Any] | None = None,
+    asset_payloads: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Persist one pair only for the authenticated user with active Premium."""
+    uid = str(user_id or "").strip()
+    user_value = str(user_text or "").strip()
+    april_value = str(april_text or "").strip()
+    if not uid or not user_value or not april_value:
+        return False
+    dt = _as_utc(created_at)
+    # Run the canonical expiry path first so any file sidecars are removed together
+    # with their expired dialogue rows. The asset store is Premium-only and is not
+    # a second memory database.
+    try:
+        _cleanup_dialogue_memory_utc(user_id=uid)
+    except Exception:
+        pass
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Entitlement is checked against server time, never the client-supplied
+                # message timestamp. The latter is only the record's display/retention origin.
+                save_now = now()
+                if not _active_premium_cursor(cur, uid, save_now):
+                    return False
+                # Expired rows were removed by the canonical cleanup path above;
+                # do not bypass its file-sidecar cleanup with a direct DELETE here.
+                pair_hash = hashlib.sha256(
+                    f"{uid}|{int(dt.timestamp() * 1000)}|{int(turn_index)}|{user_value}|{april_value}".encode("utf-8")
+                ).hexdigest()
+                cur.execute(
+                    """
+                    INSERT INTO dialogue_memory
+                      (user_id, created_at, retention_hours, turn_index, user_text, april_text,
+                       user_text_en, april_text_en, language, relation, pair_hash,
+                       dialog_id, conversation_id, message_id, interpretation_id,
+                       structured_request, structured_response, asset_payloads)
+                    VALUES (%s, %s, 24, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+                    ON CONFLICT (pair_hash) DO UPDATE SET
+                      user_text_en = EXCLUDED.user_text_en,
+                      april_text_en = EXCLUDED.april_text_en,
+                      structured_request = EXCLUDED.structured_request,
+                      structured_response = EXCLUDED.structured_response,
+                      asset_payloads = CASE WHEN EXCLUDED.asset_payloads IS NOT NULL AND EXCLUDED.asset_payloads <> '[]'::jsonb THEN EXCLUDED.asset_payloads ELSE dialogue_memory.asset_payloads END,
+                      interpretation_id = EXCLUDED.interpretation_id
+                    """,
+                    (
+                        uid, dt, int(turn_index or 0), user_value, april_value,
+                        str(user_en or user_value), str(april_en or april_value),
+                        str(language or "en"), str(relation or "NEW"), pair_hash,
+                        str(dialog_id or ""), str(conversation_id or ""),
+                        str(message_id or ""), str(interpretation_id or ""),
+                        json.dumps(structured_request or {}, ensure_ascii=False, default=str),
+                        json.dumps(structured_response or {}, ensure_ascii=False, default=str),
+                        json.dumps(asset_payloads or [], ensure_ascii=False, default=str),
+                    ),
+                )
+                # A write invalidates the process-local hydration snapshot. The next
+                # turn must see this canonical row, while multi-part searches inside
+                # the current request can still reuse the unchanged snapshot.
+                with _LOCK:
+                    _HYDRATED_AT.pop(uid, None)
+                return True
+    except psycopg2.errors.UndefinedTable:
+        return False
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Premium dialogue state/search engine (merged from the former state manager)
+# ---------------------------------------------------------------------------
+DIALOGUE_WINDOW_HOURS = PREMIUM_MEMORY_WINDOW_HOURS
+DIALOGUE_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_SECONDS
 
 _LOCK = threading.RLock()
 _STATES: dict[str, dict[str, Any]] = {}
+# A short process-local snapshot avoids re-reading and re-hydrating the same full
+# 24-hour history for every clause in one compound request. It is not a second
+# persistence layer: PostgreSQL dialogue_memory remains canonical, and writes
+# invalidate this snapshot immediately.
+_HYDRATE_CACHE_SECONDS = 30.0
+_HYDRATED_AT: dict[str, float] = {}
 
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
     try:
-        payload = {"component": "state_manager", "stage": stage}
+        payload = {"component": "premium_state_manager", "stage": stage}
         if started is not None:
             payload["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
         payload.update(fields)
@@ -241,7 +541,7 @@ def _prune(state: dict[str, Any], now_value: float | None = None) -> None:
         deepcopy(row)
         for row in (state.get("dialogue_pairs") or [])
         if isinstance(row, dict)
-        and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
+            and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
     ]
     pairs.sort(
         key=lambda x: (
@@ -266,7 +566,7 @@ def get_state(user_id: Any) -> dict[str, Any]:
 
 
 def purge_user_state(user_ids: Any) -> int:
-    """Remove process-local Free dialogue snapshots for the supplied identities."""
+    """Remove process-local Premium dialogue snapshots for the supplied identities."""
     if isinstance(user_ids, (str, bytes)):
         values = [str(user_ids).strip()]
     else:
@@ -279,34 +579,116 @@ def purge_user_state(user_ids: Any) -> int:
         for uid in set(value for value in values if value):
             if _STATES.pop(uid, None) is not None:
                 removed += 1
+            if _HYDRATED_AT.pop(uid, None) is not None:
+                removed += 1
     return removed
 
 
 def hydrate(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
+    *,
+    force: bool = False,
+    limit: int = 0,
+    dialog_id: str = "",
+    conversation_id: str = "",
+    strict_dialog_scope: bool = False,
 ) -> dict[str, Any]:
     """Refresh in-memory state from the canonical PostgreSQL dialogue store."""
     hydrate_started = time.perf_counter()
     uid = _uid(user_id)
+    cache_now = time.time()
+    if rows is None and not force:
+        with _LOCK:
+            cached_state = _STATES.get(uid)
+            cached_at = float(_HYDRATED_AT.get(uid) or 0.0)
+            if cached_state is not None and cached_at and cache_now - cached_at <= _HYDRATE_CACHE_SECONDS:
+                # A limited active-branch request must receive a bounded view even
+                # when the full 24h snapshot is warm. Returning the full cached state
+                # here bypassed limit=16 and could force a later deep scan of every
+                # saved render. Keep the shared snapshot intact and make a shallow view.
+                live_cached_rows = [
+                    row for row in (cached_state.get("dialogue_pairs") or [])
+                    if isinstance(row, dict) and _row_is_live(row, cache_now, DIALOGUE_WINDOW_HOURS)
+                ]
+                if limit:
+                    did = str(dialog_id or "").strip()
+                    cid = str(conversation_id or "").strip()
+                    if did or cid:
+                        scoped = [row for row in live_cached_rows if (
+                            (did and _text(row.get("dialog_id")) == did)
+                            or (cid and _text(row.get("conversation_id")) == cid)
+                        )]
+                        if scoped:
+                            live_cached_rows = scoped
+                        elif strict_dialog_scope:
+                            # Hot-branch probes must never silently fall back to the
+                            # user's latest unrelated topic when this dialog has no rows.
+                            live_cached_rows = []
+                    live_cached_rows = live_cached_rows[-max(1, min(32, int(limit))):]
+                    recent_state = _new_state(uid)
+                    recent_state["dialogue_pairs"] = list(live_cached_rows)
+                    recent_state["last_activity"] = cache_now
+                    recent_state["updated_at"] = cache_now
+                    _apr_timing_log(
+                        "hydrate_cache_recent_view_complete", hydrate_started,
+                        user_key=_apr_diag_ref(uid), retained_pairs=len(live_cached_rows),
+                        requested_limit=max(1, min(32, int(limit))),
+                        cache_age_ms=round((cache_now - cached_at) * 1000, 2),
+                    )
+                    return recent_state
+                cached_state["dialogue_pairs"] = live_cached_rows
+                _apr_timing_log(
+                    "hydrate_cache_hit", hydrate_started,
+                    user_key=_apr_diag_ref(uid), retained_pairs=len(cached_state["dialogue_pairs"]),
+                    cache_age_ms=round((cache_now - cached_at) * 1000, 2),
+                )
+                return cached_state
     load_started = time.perf_counter()
     load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
-    if rows is None:
-        from storage import load_dialogue_pairs
-        rows = load_dialogue_pairs(uid, limit=0)
+    rows_from_store = rows is None
+    if rows_from_store:
+        rows = load_dialogue_pairs(
+            uid, limit=limit, dialog_id=dialog_id, conversation_id=conversation_id,
+            strict_dialog_scope=strict_dialog_scope,
+        )
     _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
         source=load_source, rows_loaded=len(rows or []))
 
-    state = get_state(uid)
+    # A database read already gives this function newly-owned row dictionaries.
+    # Deep-copying every JSONB structure a second time was expensive for Premium
+    # turns with saved graphs/images and added no isolation: the rows are not shared
+    # with the cursor or another caller. Retain ownership of those fresh rows and
+    # only deep-copy externally supplied rows, whose caller may still mutate them.
+    stamp = time.time()
+    live_rows = [
+        (row if rows_from_store else deepcopy(row))
+        for row in (rows or [])
+        if isinstance(row, dict) and _row_is_live(row, stamp, DIALOGUE_WINDOW_HOURS)
+    ]
+    live_rows.sort(key=lambda x: (float(x.get("created_at") or 0), int(x.get("turn_index") or 0)))
+    if rows_from_store and limit:
+        # Do not replace the canonical full in-process snapshot with a partial query.
+        # This ephemeral view is used only for a response/repair turn tied to the
+        # current dialogue; explicit history requests still hydrate the full 24h set.
+        state = _new_state(uid)
+        state["dialogue_pairs"] = live_rows
+        state["last_activity"] = stamp
+        state["updated_at"] = stamp
+        _apr_timing_log("hydrate_recent_view_complete", hydrate_started,
+            user_key=_apr_diag_ref(uid), retained_pairs=len(live_rows), requested_limit=limit)
+        return state
     with _LOCK:
-        state["dialogue_pairs"] = [
-            deepcopy(row) for row in (rows or []) if isinstance(row, dict)
-        ]
-        _prune(state)
-        state["last_activity"] = time.time()
-        state["updated_at"] = state["last_activity"]
+        state = _STATES.get(uid)
+        if state is None:
+            state = _new_state(uid)
+            _STATES[uid] = state
+        state["dialogue_pairs"] = live_rows
+        state["last_activity"] = stamp
+        state["updated_at"] = stamp
+        _HYDRATED_AT[uid] = stamp
         _apr_timing_log("hydrate_complete", hydrate_started, user_key=_apr_diag_ref(uid),
-            retained_pairs=len(state.get("dialogue_pairs") or []))
+            retained_pairs=len(live_rows))
         return state
 
 
@@ -314,7 +696,7 @@ def refresh_state(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return hydrate(user_id, rows)
+    return hydrate(user_id, rows, force=True)
 
 
 def set_language(user_id: Any, language: str) -> None:
@@ -340,7 +722,7 @@ def get_dialogue_pairs(
     authenticated-user and UTC-window policy. ``limit`` returns the most recent
     pairs while preserving chronological order.
     """
-    state = hydrate(user_id) if refresh else get_state(user_id)
+    state = hydrate(user_id, force=True) if refresh else get_state(user_id)
     pairs = deepcopy(state.get("dialogue_pairs") or [])
     if limit and len(pairs) > int(limit):
         pairs = pairs[-int(limit):]
@@ -384,11 +766,11 @@ def continue_topic(
 
 
 def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
-    """Append one persisted pair and enforce the pair's saved lifetime."""
+    """Append one already-persisted pair and enforce the rolling 24h window."""
     state = get_state(user_id)
     item = deepcopy(row or {})
     item.setdefault("created_at", time.time())
-    item.setdefault("retention_hours", 12)
+    item.setdefault("retention_hours", 24)
     with _LOCK:
         pairs = [
             x for x in state.get("dialogue_pairs", [])
@@ -408,6 +790,7 @@ def append_pair(user_id: Any, row: dict[str, Any]) -> dict[str, Any]:
         )
         state["last_activity"] = time.time()
         state["updated_at"] = time.time()
+        _HYDRATED_AT.pop(_uid(user_id), None)
         return deepcopy(state)
 
 
@@ -422,7 +805,7 @@ def _prune_copy(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _row_is_live(row: dict[str, Any], stamp: float, fallback_hours: int) -> bool:
-    """Use lifetime captured when the pair was saved; legacy rows default to 12h."""
+    """Honor the lifetime saved for this pair; legacy rows default to 12h."""
     try:
         created = float(row.get("created_at") or 0)
         raw_hours = row.get("retention_hours")
@@ -457,6 +840,11 @@ _SEMANTIC_ALIASES = {
     # match persisted summaries phrased as "Имя пользователя: …".
     "зовут": "имя", "имени": "имя", "именем": "имя", "имена": "имя", "именах": "имя",
     "называюсь": "имя", "называешься": "имя", "называют": "имя",
+    # Keep common literary-topic variants on one retrieval concept.
+    "стихи": "стих", "стиха": "стих", "стиху": "стих", "стихом": "стих", "стихе": "стих",
+    "стихотворение": "стих", "стихотворения": "стих", "стихотворению": "стих",
+    "стихотворением": "стих", "стихотворении": "стих", "стихотворений": "стих",
+    "поэма": "поэм", "поэмы": "поэм", "поэме": "поэм", "поэмой": "поэм",
 }
 
 _STOP_WORDS = {
@@ -478,10 +866,6 @@ _HISTORY_COUNT_WORDS = {
     "пять": 5, "шесть": 6, "семь": 7,
     "восемь": 8, "девять": 9, "десять": 10,
 }
-
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _tokens(value: Any) -> set[str]:
@@ -520,7 +904,9 @@ _CONTEXT_GENERIC_TERMS = {
     "напиши", "написать", "напишите", "опиши", "описать", "опишите", "расскажи", "расскажите",
     "объясни", "объяснить", "объясните", "поясни", "пояснить", "покажи", "построй", "создай",
     "решил", "решила", "решили", "научно", "пошагово", "решать",
-    "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
+    "давай", "можешь", "может", "могу", "можно", "можем", "хочу", "хочешь", "нужно", "надо",
+    "окей", "okay", "хорошо", "пожалуйста", "please", "работать", "работаем", "работай",
+    "перенеси", "перенести", "перенос", "сделай", "вычисли", "рассчитай", "сравни", "найди", "проверь", "проанализируй", "приведи",
     "перечисли", "продолжи", "продолжим", "дальше", "далее", "есть", "какие", "какая", "какой",
     "должен", "должна", "должно", "должны", "был", "была", "были", "нет",
     "покажи", "показать", "покажите", "построй", "построить", "постройте", "сделай",
@@ -542,6 +928,12 @@ _CONTEXT_GENERIC_TERMS = {
     "table", "formula", "equation", "price", "prices", "cost", "growth", "fall",
     "change", "day", "days", "week", "weeks", "month", "months", "year", "years",
     "uah", "usd", "dollar", "dollars", "rubles", "ruble", "euro", "linear", "bar",
+    # Pure conversational reactions should not become topical entities or conflicts.
+    "спасибо", "спасиб", "благодарю", "благодарен", "благодарна", "классно", "круто",
+    "отлично", "прекрасно", "здорово", "молодец", "именно", "понятно", "ладно",
+    "согласен", "согласна", "правильно", "верно", "точно", "нравится", "ужасно",
+    "раздражает", "бесит", "переделай", "перепиши", "исправь", "улучши", "поправь",
+    "поняла", "понял", "получилось", "отнюдь", "мимо", "ошибка", "виду", "смысл",
 }
 _CONTEXT_REFERENCE_TERMS = {
     "это", "этого", "этой", "этом", "эту", "этот", "эта", "эти", "этих",
@@ -553,24 +945,7 @@ _CONTEXT_REFERENCE_TERMS = {
 }
 
 def _subject_family(token: Any) -> str:
-    """Normalize common Russian case/number endings before comparing subjects.
-
-    Prefix truncation alone treated «груши», «груше» and «грушах» as different
-    entities. A conservative suffix pass makes these inflections share one stem,
-    while English and non-Russian tokens retain the established prefix behavior.
-    """
     value = _text(token).lower().replace("ё", "е")
-    if re.search(r"[а-я]", value):
-        endings = (
-            "иями", "ями", "ами", "иях", "ях", "ах", "ого", "ему", "ому",
-            "ыми", "ими", "ией", "ов", "ев", "ей", "ам", "ям", "ой",
-            "ом", "ем", "а", "я", "ы", "и", "е", "у", "ю", "о",
-        )
-        for ending in endings:
-            if value.endswith(ending) and len(value) - len(ending) >= 4:
-                value = value[:-len(ending)]
-                break
-        return value
     return value[:5] if len(value) >= 5 else value
 
 _CONTEXT_NON_TOPICAL_ROOTS = (
@@ -578,11 +953,14 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "контекст", "случил", "произош", "диалог", "разговор", "бесед", "обращ",
     "напиш", "опиш", "расскаж", "объясн", "поясн", "покаж", "постро", "созда",
     "сдела", "вычисл", "рассчит", "сравн", "найд", "проверь", "проанализ", "привед",
-    "перечисл", "продолж", "дальш", "должн", "каки", "был",
+    "перечисл", "продолж", "дальш", "должн", "каки", "был", "работ", "перенес", "перенос",
+    "можеш", "может", "могу", "давай", "хочет", "хотел", "сможет", "сможешь", "просит", "попрос",
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
-    "доказал", "обосновал", "считал", "называл", "дава", "обща", "поговор",
-    "имел", "имела", "ввиду", "быва", "поподроб", "пообщ",
+    "доказал", "обосновал", "считал", "называл",
+    # Provenance questions describe an action/source, not a new topic.
+    "слиз", "скопир", "скач", "источник", "автор", "напис", "придум",
+    "плагиат", "нет", "нета",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -596,14 +974,9 @@ _PARTICIPANT_INTERLOCUTOR_WORDS = {
 
 
 def _is_non_topical_subject_term(token: str) -> bool:
-    if token in _CONTEXT_GENERIC_TERMS or token in {
-        "сорт", "сорта", "сортов", "сорту", "сортам", "сортами",
-    }:
+    if token in _CONTEXT_GENERIC_TERMS:
         return True
-    # Several important Russian conversational stems are four characters long
-    # ("дава", "имел", "быва"). Requiring five silently let them become fake
-    # subject entities and caused false topic-switch decisions.
-    return any(len(root) >= 4 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
+    return any(len(root) >= 5 and token.startswith(root) for root in _CONTEXT_NON_TOPICAL_ROOTS)
 
 
 def _contains_named_value(text: Any) -> bool:
@@ -676,7 +1049,7 @@ def _subject_tokens(value: Any) -> set[str]:
     return result
 
 def _row_subject_text(row: dict[str, Any]) -> str:
-    """Prefer the user's original task and persisted request intent over generated prose."""
+    """Derive the route subject from the exact canonical user request and April answer."""
     request = _parse_json(row.get("structured_request"))
     request_structure = request.get("request_structure") if isinstance(request.get("request_structure"), dict) else {}
     request_intent = request.get("intent") if isinstance(request.get("intent"), dict) else {}
@@ -687,16 +1060,132 @@ def _row_subject_text(row: dict[str, Any]) -> str:
     if not isinstance(memory_record, dict):
         metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
         memory_record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    thread = response.get("dialogue_thread") if isinstance(response.get("dialogue_thread"), dict) else {}
+    if not thread:
+        thread = request.get("dialogue_thread") if isinstance(request.get("dialogue_thread"), dict) else {}
+    questions = thread.get("question_sequence") if isinstance(thread.get("question_sequence"), list) else []
+    artifacts = thread.get("artifact_index") if isinstance(thread.get("artifact_index"), list) else []
+    thread_evidence = " ".join(
+        _text(item)
+        for item in (
+            thread.get("topic"), thread.get("branch_summary"), thread.get("last_action"),
+            *[_text(question.get("request")) for question in questions if isinstance(question, dict)],
+            *[
+                " ".join(_text(artifact.get(key)) for key in ("kind", "label", "filename", "summary"))
+                for artifact in artifacts if isinstance(artifact, dict)
+            ],
+        )
+        if _text(item)
+    )[:2400]
+    assistant_text = _text(row.get("april_text") or row.get("april_text_en"))[:5200]
+    response_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    response_artifacts = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+    assistant_render_evidence = " ".join(
+        " ".join(_text(block.get(key)) for key in ("type", "artifact_type", "title", "description", "representation", "language"))
+        for block in response_blocks if isinstance(block, dict)
+    )[:1200]
+    assistant_artifact_evidence = " ".join(
+        " ".join(_text(artifact.get(key)) for key in ("type", "artifact_type", "kind", "title", "label", "filename", "summary"))
+        for artifact in response_artifacts if isinstance(artifact, dict)
+    )[:1200]
+    # Routing is anchored to the actual canonical USER request and APRIL answer.
+    # Persisted topic/branch labels are deliberately excluded from the subject
+    # signature: older releases could leave a stale active-work label (for example,
+    # an electric-motor task) attached to a newer Mendeleev answer. Such metadata
+    # may enrich a matched branch later, but it must never decide what the latest
+    # assistant message is about.
     values = (
-        row.get("user_text"), row.get("user_text_en"),
+        row.get("user_text"), row.get("user_text_en"), row.get("user"),
         request_structure.get("user_goal"), request_structure.get("task_goal"),
-        request_intent.get("user_goal"), continuation.get("active_topic"),
-        memory_record.get("topic"), row.get("memory_summary"),
+        request_intent.get("user_goal"),
+        assistant_text or row.get("april") or row.get("assistant_last_message"),
+        assistant_render_evidence, assistant_artifact_evidence,
     )
     return " ".join(_text(item) for item in values if _text(item))
 
+def _row_subject_text_lightweight(row: dict[str, Any]) -> str:
+    """Build a topic signature from bounded plain-text columns; never scan a huge answer."""
+    values = (
+        row.get("user_text"), row.get("user_text_en"), row.get("user"),
+        str(row.get("april_text") or row.get("april") or row.get("assistant_last_message") or "")[:1800],
+        str(row.get("april_text_en") or "")[:900],
+    )
+    # Do not let cached topic summaries or thread titles override the last
+    # message's real subject during a latest-answer-first route decision.
+    text = " ".join(part for value in values if (part := _text(value)))
+    return text or _text(row.get("topic"))[:240]
+
+
 def _row_subject_tokens(row: dict[str, Any]) -> set[str]:
     return _subject_tokens(_row_subject_text(row))
+
+
+def _row_dialogue_content_subject_tokens(row: dict[str, Any]) -> set[str]:
+    """Subject evidence from the actual USER↔APRIL text, excluding render metadata.
+
+    Image filenames, gallery labels and renderer descriptions are useful when the
+    user explicitly revisits an artifact, but they must not silently redefine the
+    subject of the last conversational answer.
+    """
+    if not isinstance(row, dict):
+        return set()
+    user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("assistant_last_message"))
+    return _subject_tokens(" ".join(part for part in (user_text[:1800], answer_text[:5200]) if part))
+
+
+def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> dict[str, Any]:
+    """Compare the new turn separately with the immediately preceding user ask and APRIL answer.
+
+    This is a routing vector, not a semantic-model confidence claim. It keeps the
+    last answer's exact identity so continuation can be tied to the same topic/branch.
+    """
+    if not isinstance(row, dict):
+        return {
+            "matched": False, "answer_overlap": 0.0, "user_request_overlap": 0.0,
+            "answer_subject_overlap": 0.0, "user_subject_overlap": 0.0,
+            "answer_subject_conflict": False, "expects_user_input": False,
+            "message_id": "", "topic_id": "", "branch_id": "",
+        }
+    user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("assistant_last_message"))
+    query_tokens = _semantic_tokens(query)
+    answer_tokens = _semantic_tokens(answer_text[:5200])
+    user_tokens = _semantic_tokens(user_text[:1800])
+    query_subjects = _subject_tokens(query)
+    answer_subjects = _subject_tokens(answer_text[:5200])
+    user_subjects = _subject_tokens(user_text[:1800])
+    answer_subject_overlap = _subject_overlap(query_subjects, answer_subjects)
+    user_subject_overlap = _subject_overlap(query_subjects, user_subjects)
+    answer_subject_conflict = _subject_conflicts(query_subjects, answer_subjects)
+    answer_overlap = _concept_overlap(query_tokens, answer_tokens)
+    user_overlap = _concept_overlap(query_tokens, user_tokens)
+    # A topical match must be grounded in the actual answer, not a sidecar image or
+    # filename. The stricter subject threshold prevents generic words ("table",
+    # "answer", "image") from becoming branch identity.
+    matched = bool(
+        query_subjects and answer_subjects and not answer_subject_conflict
+        and (
+            answer_subject_overlap >= 0.34
+            or (answer_overlap >= 0.42 and answer_subject_overlap >= 0.20)
+        )
+    )
+    answer = answer_text[:5200]
+    return {
+        "matched": matched,
+        "answer_overlap": round(float(answer_overlap), 4),
+        "user_request_overlap": round(float(user_overlap), 4),
+        "answer_subject_overlap": round(float(answer_subject_overlap), 4),
+        "user_subject_overlap": round(float(user_subject_overlap), 4),
+        "answer_subject_conflict": bool(answer_subject_conflict),
+        "expects_user_input": bool(_assistant_expects_user_input(answer)),
+        "message_id": _text(row.get("message_id"))[:120],
+        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id"))[:120],
+        "topic_origin_message_id": _text(row.get("topic_origin_message_id") or row.get("origin_message_id"))[:120],
+        "answer_chars": len(answer_text),
+    }
+
 
 def _subject_overlap(left: set[str], right: set[str]) -> float:
     if not left or not right:
@@ -718,7 +1207,12 @@ def _numeric_anchors(value: Any) -> set[str]:
         found.add(f"{number:.6f}".rstrip("0").rstrip("."))
     return found
 
-def _query_numeric_overlap(query: str, row: dict[str, Any], query_subjects: set[str]) -> float:
+def _query_numeric_overlap(
+    query: str,
+    row: dict[str, Any],
+    query_subjects: set[str],
+    row_subjects: set[str] | None = None,
+) -> float:
     query_numbers = _numeric_anchors(query)
     if not query_numbers:
         return 0.0
@@ -728,8 +1222,8 @@ def _query_numeric_overlap(query: str, row: dict[str, Any], query_subjects: set[
     if not source_numbers:
         return 0.0
     # Numbers alone are weak evidence; they contribute only within a compatible subject.
-    row_subjects = _row_subject_tokens(row)
-    if _subject_conflicts(query_subjects, row_subjects):
+    resolved_row_subjects = row_subjects if row_subjects is not None else _row_subject_tokens(row)
+    if _subject_conflicts(query_subjects, resolved_row_subjects):
         return 0.0
     return len(query_numbers & source_numbers) / max(1, len(query_numbers))
 
@@ -798,6 +1292,889 @@ def _query_context_signature(query: str, interpretation: dict[str, Any] | None =
     }
 
 
+def _user_operation_profile(
+    query: str,
+    interpretation: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+    is_correction: bool = False,
+    is_short_acknowledgement: bool = False,
+) -> dict[str, Any]:
+    """Describe the user's discourse operation separately from topic identity.
+
+    This is an additive interpretation layer. It deliberately reuses the existing
+    semantic/pragmatic labels and does not alter tone classification or response
+    style; it only tells retrieval whether the message is operating on the current
+    branch, asking for a source, or opening an independent request.
+    """
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
+    intent = _text(profile.get("primary_intent")).upper()
+    direction = _text(profile.get("direction")).upper()
+    topic_reference = _text(profile.get("topic_reference")).upper()
+    speech_act = _text(profile.get("speech_act")).upper()
+    communicative_act = _text(profile.get("communicative_act")).upper()
+    relation_hint = _text(profile.get("relation_hint")).upper()
+
+    if history_request:
+        operation = "RETRIEVE_DIALOGUE_SOURCE"
+        evidence = "history_request"
+    elif new_topic_request:
+        operation = "OPEN_NEW_TOPIC"
+        evidence = "explicit_topic_switch"
+    elif speech_act in {"NEGATION_OR_DISAGREEMENT", "FRUSTRATION_OR_DISSATISFACTION"} or communicative_act == "RESPOND_TO_DISAGREEMENT":
+        # Keep emotional disagreement distinct from a factual correction operation.
+        # The original tone label is preserved independently below.
+        operation = "DISAGREE_OR_EXPRESS_DISSATISFACTION"
+        evidence = "pragmatic_disagreement"
+    elif is_correction or speech_act in {"CORRECTION_OR_REVISION", "REVISION_REQUEST"} or bool(
+        profile.get("active_branch_repair")
+        or pragmatic.get("active_branch_repair")
+        or profile.get("previous_answer_reference")
+        or pragmatic.get("previous_answer_reference")
+        or profile.get("factual_verification_request")
+        or pragmatic.get("factual_verification_request")
+    ):
+        operation = "CORRECT_OR_VERIFY_PREVIOUS_TURN"
+        evidence = "correction_or_previous_answer_reference"
+    elif communicative_act == "CLARIFICATION" or speech_act == "CLARIFICATION_REQUEST":
+        operation = "CLARIFY_PREVIOUS_POINT"
+        evidence = "clarification_act"
+    elif speech_act in {"AGREEMENT_OR_ACKNOWLEDGEMENT", "POSITIVE_EVALUATION", "GRATITUDE_OR_APPRECIATION"} or is_short_acknowledgement:
+        operation = "REACT_TO_PREVIOUS_TURN"
+        evidence = "acknowledgement_or_evaluation"
+    elif profile.get("parent_context_dependency") and (profile.get("requires_memory") or relation_hint == "CONTINUE"):
+        operation = "APPLY_NEW_OPERATION_TO_ACTIVE_BRANCH"
+        evidence = "parent_context_dependency"
+    elif (
+        intent == "TOPIC_CONTINUATION"
+        or relation_hint == "CONTINUE"
+        or direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+        or topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
+    ):
+        operation = "DEVELOP_ACTIVE_BRANCH"
+        evidence = "semantic_continuation_intent"
+    elif speech_act in {"EXPLANATION_REQUEST", "REFERENTIAL_CONTINUATION", "CONTINUATION_REQUEST"}:
+        operation = "EXPLAIN_OR_EXTEND_CURRENT_POINT"
+        evidence = "dialogue_act"
+    elif intent == "NEW_INFORMATION":
+        operation = "REQUEST_NEW_INFORMATION"
+        evidence = "new_information_intent"
+    elif _text(query).strip():
+        operation = "GENERAL_REQUEST_OR_STATEMENT"
+        evidence = "fallback"
+    else:
+        operation = "EMPTY_INPUT"
+        evidence = "empty_query"
+
+    return {
+        "type": operation,
+        "evidence": evidence,
+        "semantic_intent": intent or "UNSPECIFIED",
+        "direction": direction or "UNSPECIFIED",
+        "topic_reference": topic_reference or "UNSPECIFIED",
+        "relation_hint": relation_hint or "UNSPECIFIED",
+        "speech_act": speech_act or "UNSPECIFIED",
+        "communicative_act": communicative_act or "UNSPECIFIED",
+        # Keep the upstream tone visible and untouched. This field is descriptive,
+        # never a replacement for the original emotional/pragmatic interpretation.
+        "tone": _text(profile.get("tone") or "NEUTRAL").upper(),
+    }
+
+
+# Premium has one canonical dialogue store.  These helpers mark ongoing work
+# inside the existing structured_response JSONB rather than creating a second
+# task/session table.  The marker is deliberately descriptive and bounded.
+_WORK_ACTION_RE = re.compile(
+    r"(?:созда\w*|придум\w*|загадай\w*|загадыва\w*|сгенер\w*|нарис\w*|реш\w*|рассчит\w*|"
+    r"напиш\w*|допиш\w*|перепиш\w*|исправ\w*|почин\w*|отлад\w*|"
+    r"реализ\w*|разработ\w*|постро\w*|состав\w*|улучш\w*|редактир\w*|"
+    r"передел\w*|добав\w*|продолж\w*|проверь\w*|спроектир\w*|анимир\w*|"
+    r"сделай\w*|собери\w*|провед\w*|игра\w*|играем|поигра\w*|"
+    r"build\w*|create\w*|generate\w*|draw\w*|solve\w*|calculate\w*|"
+    r"write\w*|implement\w*|debug\w*|fix\w*|edit\w*|redesign\w*|"
+    r"improve\w*|continue\w*|modify\w*|play\w*)",
+    re.IGNORECASE,
+)
+_WORK_OBJECT_RE = re.compile(
+    r"(?:задач\w*|пример\w*|загадк\w*|головолом\w*|riddle\w*|puzzle\w*|quiz\w*|решени\w*|уравнен\w*|формул\w*|код\w*|скрипт\w*|"
+    r"функци\w*|проект\w*|схем\w*|диаграм\w*|график\w*|таблиц\w*|"
+    r"картин\w*|изображен\w*|визуал\w*|эффект\w*|анимац\w*|макет\w*|"
+    r"документ\w*|файл\w*|программ\w*|игр\w*|правил\w*|ход\w*|квест\w*|"
+    r"сценар\w*|модел\w*|прототип\w*|задач\w*|example\w*|problem\w*|"
+    r"code\w*|script\w*|function\w*|project\w*|diagram\w*|chart\w*|"
+    r"image\w*|picture\w*|effect\w*|animation\w*|game\w*|equation\w*|formula\w*)",
+    re.IGNORECASE,
+)
+_ACTIVE_CHOICE_RE = re.compile(
+    r"(?:выбирай|выбери(?:те)?|выберите действие|твой ход|ваш ход|"
+    r"какой вариант|выбери один|ответь цифрой|пришли номер|"
+    r"choose (?:one|an option)|your move|your turn|pick (?:one|an option)|"
+    r"select (?:one|an option)|вариант\s*[:：]?\s*[1-9]|\b[1-9]\s*[,/и]\s*[1-9])",
+    re.IGNORECASE,
+)
+_CHOICE_REPLY_RE = re.compile(
+    r"(?:^\s*(?:вариант|option|пункт|номер)\s*[1-9]\b|"
+    r"\b(?:я\s+)?(?:выбираю|выбрал|выбрала|беру|выберу|choose|pick|select)\s+"
+    r"(?:(?:вариант|option|пункт|номер)\s*)?[1-9]\b)",
+    re.IGNORECASE,
+)
+_SINGLE_SCALAR_REPLY_RE = re.compile(
+    r"^\s*(?:[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)|[A-Za-zА-Яа-яЁё])\s*[.!)]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_single_scalar_reply(value: Any) -> bool:
+    """Recognize one standalone numeric value or one Latin/Cyrillic letter."""
+    return bool(_SINGLE_SCALAR_REPLY_RE.fullmatch(_text(value)))
+
+_INTERACTIVE_ACTION_RE = re.compile(
+    r"(?:\bя\s+)?(?:крич\w*|зову\w*|говор\w*|спрашива\w*|иду\w*|пош[её]л\w*|"
+    r"заш[её]л\w*|приш[еёо]л\w*|приш\w*\s+за\b|вхожу\w*|захожу\w*|откр\w*|подход\w*|беру\w*|ищу\w*|"
+    r"осматрива\w*|трога\w*|нажима\w*|выбира\w*|выбрал\w*|выбираю\w*|"
+    r"поднима\w*|спуска\w*|атакую\w*|бегу\w*|использую\w*|"
+    r"i\s+(?:shout|call|say|ask|go|enter|open|take|look|inspect|choose|press|use)\w*)",
+    re.IGNORECASE,
+)
+_BRANCH_OPERATION_RE = re.compile(
+    r"(?:продолж\w*|дальше|следующ\w*|"
+    r"добав\w*\s+(?:к|в|туда)|исправ\w*|передел\w*|допиш\w*|перепиш\w*|"
+    r"измени\w*|улучши\w*|сохрани\w*|покажи\w*\s+(?:ещ[её]|снова|его|её|это)|"
+    r"на\s+основе\s+(?:этого|этой|него)|к\s+(?:нему|ней|этому|этой)|"
+    r"continue\w*|next\b|"
+    r"revise\w*|edit\w*|fix\w*|add\w*\s+(?:to|into)|change\w*)",
+    re.IGNORECASE,
+)
+
+
+def _response_and_request_records(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    request = _parse_json(row.get("structured_request"))
+    response = _parse_json(row.get("structured_response"))
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    memory_record = response.get("dialogue_memory_record")
+    if not isinstance(memory_record, dict):
+        memory_record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
+    return request, response, memory_record if isinstance(memory_record, dict) else {}
+
+
+def _assistant_expects_user_input(answer_text: str) -> bool:
+    """Return whether the latest assistant turn visibly leaves an input/action open.
+
+    This is recomputed from the saved answer because older task markers may carry a
+    stale ``expects_choice`` value after the assistant has moved to a new step.
+    A numbered list on its own is not enough; there must be an invitation/question.
+    """
+    text = _text(answer_text)
+    if not text:
+        return False
+    if _ACTIVE_CHOICE_RE.search(text):
+        return True
+    # A direct question at the end of April's turn leaves the dialogue open.
+    # This is important for generated follow-ups such as “Следующий вопрос:
+    # какая самая большая планета?”: the next one-word answer is not a new topic.
+    if re.search(r"[?？](?:[\"'»”\)\]]*)\s*$", text):
+        return True
+    low = text.lower().replace("ё", "е")
+    # Assistant turns often invite an answer through an imperative rather than a
+    # question mark (for example, “Назови цвет предмета…”). Treat these as an open
+    # input slot too; otherwise a one-word answer such as “Белый” is misrouted as
+    # a new topic and the active task's rules disappear from the next prompt.
+    invitation = bool(re.search(
+        r"(?:выбери(?:те)?|выбирай|что\s+выберешь|какой\s+(?:вариант|пункт|ход)|"
+        r"твой\s+ход|ваш\s+ход|твоя\s+очередь|теперь\s+ты|теперь\s+ваш\s+ход|"
+        r"ответь(?:те)?|напиши(?:те)?|пришли(?:те)?|загрузи(?:те)?|покажи(?:те)?|"
+        r"укажи(?:те)?|сообщи(?:те)?|скажи(?:те)?(?:\s+мне)?|"
+        r"назови(?:те)?|опиши(?:те)?|перечисли(?:те)?|оцени(?:те)?|уточни(?:те)?|"
+        r"подтверди(?:те)?|определи(?:те)?|вычисли(?:те)?|сравни(?:те)?|"
+        r"расскажи(?:те)?|объясни(?:те)?|поясни(?:те)?|представь(?:те)?|"
+        r"пусть\s+(?:все\s+)?(?:игроки|участники)\s+отвеча\w*|"
+        r"(?:игроки|участники)\s+отвеча\w*|"
+        r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|provide\s+the|"
+        r"name\s+(?:the|a)\b|describe\b|list\b|rate\b|specify\b|tell\s+me\b)",
+        low,
+    ))
+    # Common labeled alternatives (А/Б/В or A/B/C) count only if the answer
+    # actually asks the user to choose/respond, not when they are merely explained.
+    alternatives = bool(re.search(
+        r"(?:^|\n)\s*(?:[А-ЯA-C])\s*[.)—:：-].{0,160}"
+        r"(?:\n\s*(?:[А-ЯA-C])\s*[.)—:：-].{0,160}){1,}", text, re.IGNORECASE
+    ))
+    return invitation and (alternatives or "?" in text or "？" in text or len(text) < 220)
+
+
+def _looks_like_new_work_root_request(query: str, branch: dict[str, Any] | None = None) -> bool:
+    """Recognize a self-contained request that starts a new piece of work.
+
+    Deliberately uses action + object semantics, not game/task-specific triggers.
+    Requests explicitly operating on an existing artifact remain continuations.
+    """
+    text = _text(query)
+    if len(text) < 10:
+        return False
+    low = text.lower().replace("ё", "е")
+    root_action = bool(re.search(
+        r"(?:созда\w*|придум\w*|загадай\w*|загадыва\w*|сгенер\w*|нарис\w*|реш\w*|рассчит\w*|напиш\w*|"
+        r"разработ\w*|спроектир\w*|постро\w*|состав\w*|провед\w*|поигра\w*|"
+        r"давай\s+(?:сыграем|поиграем)|build\w*|create\w*|generate\w*|draw\w*|"
+        r"solve\w*|calculate\w*|write\w*|implement\w*|design\w*|play\s+(?:a\s+)?(?:new\s+)?game)",
+        low,
+    ))
+    if not root_action or not _WORK_OBJECT_RE.search(low):
+        return False
+    explicit_new = bool(re.search(
+        r"(?:нов\w*|друг\w*|отдельн\w*|с\s+нуля|заново|сначала|another|new|from\s+scratch)", low
+    ))
+    references_existing_artifact = bool(re.search(
+        r"(?:эт(?:от|а|о|у)\s+(?:код\w*|скрипт\w*|проект\w*|задач\w*|решени\w*|"
+        r"игр\w*|картин\w*|изображен\w*|файл\w*|схем\w*|диаграмм?\w*|график\w*|"
+        r"пример\w*|загадк\w*|головолом\w*)|на\s+основе\s+(?:этого|этой|него|нее|неё)|"
+        r"в\s+этом\s+(?:коде|проекте|файле|графике)|по\s+этой\s+(?:задаче|схеме|картинке))",
+        low,
+    ))
+    continuation_operation = bool(re.search(
+        r"(?:продолж\w*|допиш\w*|следующ\w*|добав\w*|исправ\w*|передел\w*|"
+        r"перепиш\w*|измени\w*|улучши|отредактир\w*|расшир\w*|доработ\w*|"
+        r"continue\w*|append\w*|extend\w*|next\b|revise\w*|edit\w*|fix\w*|add\w*|modify\w*)",
+        low,
+    ))
+    branch_text = " ".join((
+        _text(branch.get("topic")) if isinstance(branch, dict) else "",
+        _text(branch.get("goal")) if isinstance(branch, dict) else "",
+        _text(branch.get("state_summary")) if isinstance(branch, dict) else "",
+    ))
+    branch_overlap = _topic_query_overlap(text, branch_text) if branch_text else 0.0
+    # A generic word such as "поиграем" or "продолжение" must not make an
+    # independent request inherit an older game/task just because the same
+    # sentence also contains "active task". Compare the current subject with the
+    # saved branch before allowing generic continuation wording to veto a new root.
+    branch_subject_conflict = bool(
+        branch_text
+        and _subject_conflicts(_subject_tokens(text), _subject_tokens(branch_text))
+    )
+    explicit_named_branch_operation = bool(re.search(
+        r"\b(?:продолж\w*|продолжим|вернемся|вернёмся)\s+(?:к\s+)?(?:эт\w*\s+)?"
+        r"(?:игр\w*|задач\w*|загадк\w*|головолом\w*|квест\w*|сценар\w*|"
+        r"код\w*|скрипт\w*|проект\w*|формул\w*|схем\w*|диаграм\w*|файл\w*)\b|"
+        r"\b(?:в\s+эт\w*\s+игр\w*|следующ\w*\s+(?:ход|загадк|пункт)\w*)\b",
+        low,
+    ))
+    implicit_continuation = bool(re.search(
+        r"(?:продолжени\w*\s+(?:кода|задач\w*|игр\w*|схем\w*|истори\w*)|"
+        r"next\s+(?:step|part|move)|continue\s+the)", low
+    ))
+    if not explicit_new and (
+        references_existing_artifact
+        or explicit_named_branch_operation
+        or (
+            (continuation_operation or implicit_continuation)
+            and branch_overlap >= 0.12
+            and not (root_action and branch_subject_conflict)
+        )
+    ):
+        return False
+    # Root verbs such as “invent”, “draw”, “solve”, or “write” plus an explicit
+    # work object define a new brief unless the sentence says to continue/edit an
+    # already referenced artifact. “In this chat” is not itself such a reference.
+    return True
+
+
+def _looks_like_answer_verification(query: str) -> bool:
+    """Detect requests to evaluate an earlier user answer against its source task."""
+    low = _text(query).lower().replace("ё", "е")
+    asks_verdict = bool(re.search(
+        r"(?:угад\w*|правильн\w*\s+(?:ли\s+)?(?:ответ\w*|сказ\w*|выбрал\w*|решил\w*)|"
+        r"неправильн\w*\s+(?:сказ\w*|ответ\w*|решил\w*)|верн\w*\s+ли\s+(?:мой\s+)?ответ|"
+        r"мой\s+ответ|если\s+я\s+(?:ошиб\w*|не\s+прав|не\s+угад\w*)|"
+        r"tell\s+me\s+if\s+i\s+(?:was\s+wrong|got\s+it\s+right)|did\s+i\s+guess\s+right)", low
+    ))
+    refers_to_source_or_conditions = bool(re.search(
+        r"(?:услови\w*|загад\w*|вопрос\w*|пример\w*|задач\w*|решени\w*|расчет\w*|расчёт\w*|"
+        r"правил\w*|то\s+что\s+я\s+(?:сказ\w*|ответ\w*|выбрал\w*)|"
+        r"как\s+ты\s+(?:задава\w*|спрашива\w*|предлож\w*|объясн\w*)|"
+        r"original\s+(?:question|task|riddle)|conditions|rules)", low
+    ))
+    return asks_verdict and refers_to_source_or_conditions
+
+
+
+_TOPIC_CLOSURE_RE = re.compile(
+    r"(?:"
+    r"\b(?:эта\s+)?тема\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+    r"\b(?:эту\s+|данную\s+)?тему\s+(?:закры\w*|заверш\w*|заканчива\w*)\b|"
+    r"\b(?:всё|все)\s*,?\s*(?:эту\s+)?тему\s+(?:закрыли|закрываем|завершили|закончим)\b|"
+    r"\b(?:на\s+этом\s+)?(?:всё|все)\s*[.!…]*$|"
+    r"\b(?:давай(?:те)?\s+)?(?:на\s+этом\s+)?(?:остановимся|закончим|прекратим)\b|"
+    r"\b(?:больше\s+не\s+)?(?:будем\s+)?(?:продолжать|развивать)\s+(?:эту\s+)?тему\b|"
+    r"\btopic\s+is\s+closed\b|\b(?:let'?s\s+)?stop\s+here\b|\bend\s+this\s+topic\b"
+    r")",
+    re.IGNORECASE,
+)
+_TOPIC_REOPEN_RE = re.compile(
+    r"(?:\bверн\w*\s+к\b|\bверн\w*\s+обсужден\w*\b|\bвозобнов\w*\b|"
+    r"\bпродолж\w*\b|\bснова\s+(?:к|продолж\w*)\b|\bвернись\s+к\b|"
+    r"\bresume\b|\breopen\b|\bback\s+to\b|\bcontinue\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_explicit_topic_closure(text: Any) -> bool:
+    """Recognize a clear user signal that the current topic/task is finished."""
+    value = _text(text).lower().replace("ё", "е")
+    if not value or not _TOPIC_CLOSURE_RE.search(value):
+        return False
+    # A fresh concrete task in the same message remains actionable; closure only
+    # prevents importing the previously active branch into that task.
+    has_fresh_action = bool(re.search(
+        r"\b(?:построй\w*|созда\w*|сделай\w*|нарис\w*|исправ\w*|проверь\w*|"
+        r"просмотр\w*|изучи\w*|проанализируй|напиши\w*|разработ\w*|найди\w*|"
+        r"build\w*|create\w*|draw\w*|fix\w*|review\w*|analy[sz]e\w*|write\w*)\b",
+        value,
+        re.IGNORECASE,
+    ))
+    return not has_fresh_action
+
+
+def _explicit_reopen_of_closed_branch(query: str, branch: dict[str, Any]) -> bool:
+    """Only an explicit resume request can cross a saved topic-closure barrier."""
+    value = _text(query).lower().replace("ё", "е")
+    if not value or not _TOPIC_REOPEN_RE.search(value):
+        return False
+    topic_text = " ".join(
+        _text(branch.get(key))
+        for key in ("topic", "goal", "state_summary", "last_user_text", "last_assistant_answer")
+    )
+    if not topic_text.strip():
+        return False
+    # Require an explicit lexical/topic pointer, not just a generic "continue".
+    query_subjects = _subject_tokens(value)
+    branch_subjects = _subject_tokens(topic_text)
+    overlap = _subject_overlap(query_subjects, branch_subjects) if query_subjects else 0.0
+    topic_overlap = _topic_query_overlap(value, topic_text)
+    return bool(overlap >= 0.40 or topic_overlap >= 0.30)
+
+
+def _infer_active_work_branch(row: dict[str, Any]) -> dict[str, Any]:
+    """Recognize saved, still-actionable work from canonical pair content.
+
+    Explicit markers win. The heuristic fallback intentionally recognizes old
+    Premium rows saved before this version, so deploying the patch does not require
+    clearing history or migrating PostgreSQL columns.
+    """
+    if not isinstance(row, dict):
+        return {}
+    request, response, memory_record = _response_and_request_records(row)
+    metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    marker = response.get("active_work_branch")
+    if not isinstance(marker, dict):
+        marker = metadata.get("active_work_branch")
+    if not isinstance(marker, dict):
+        marker = memory_record.get("active_work_branch")
+    if isinstance(marker, dict) and marker.get("active"):
+        # These are per-request routing diagnostics, not durable task state.
+        # Old versions may have persisted them as true, so never trust them here.
+        profile = dict(marker)
+        profile.pop("matched_this_turn", None)
+        profile.pop("match_reason", None)
+        profile.pop("candidate_message_id", None)
+        saved_answer = _text(row.get("april_text") or row.get("april"))
+        saved_user = _text(row.get("user_text") or row.get("user"))
+        if saved_user:
+            profile.setdefault("last_user_text", saved_user[:500])
+        if saved_answer:
+            # A one-character/numeric move can be the complete assistant turn;
+            # preserve its exact text separately from a lossy semantic summary.
+            profile["last_assistant_answer"] = saved_answer[:900]
+            profile["expects_choice"] = bool(
+                _assistant_expects_user_input(saved_answer)
+                or (_text(profile.get("kind")) == "interactive_game" and _is_single_scalar_reply(saved_answer))
+            )
+        return profile
+
+    intent_root = request.get("intent") if isinstance(request.get("intent"), dict) else {}
+    intent = intent_root.get("intent") if isinstance(intent_root.get("intent"), dict) else intent_root
+    requested_outputs = request.get("requested_outputs")
+    if not isinstance(requested_outputs, list):
+        requested_outputs = intent.get("requested_outputs") if isinstance(intent.get("requested_outputs"), list) else []
+    output_names = {str(item or "").strip().lower() for item in requested_outputs}
+    render_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    artifacts = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+    rendered_types = {
+        str(item.get("type") or item.get("artifact_type") or "").strip().lower()
+        for item in render_blocks + artifacts if isinstance(item, dict)
+    }
+    user_text = _text(row.get("user_text") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april"))
+    summary = _text(memory_record.get("summary") or response.get("summary") or row.get("memory_summary"))
+    topic = _text(memory_record.get("topic") or request.get("goal") or user_text)[:240]
+    all_text = " ".join((user_text, topic, summary, answer_text[:1800])).lower().replace("ё", "е")
+    user_low = user_text.lower().replace("ё", "е")
+    answer_low = answer_text.lower().replace("ё", "е")
+
+    wants_code = bool(intent.get("wants_code") or "code" in output_names or "python" in output_names or "source_code" in output_names)
+    wants_visual = bool(intent.get("wants_image") or intent.get("wants_graph") or output_names & {
+        "image", "gallery", "graph", "diagram", "chart", "formula", "table", "file", "code", "document"
+    } or rendered_types & {"image", "graph", "diagram", "chart", "formula", "table", "code", "file", "document"})
+    # The noun "игра" alone is not evidence of an interactive game: a user may
+    # ask for a toy/ball "для игры" as part of a visual illustration. Strong
+    # gameplay signals remain valid even when the task also produces an image.
+    strong_game_signal = bool(re.search(
+        r"(?:\bигрок\w*|\bквест\w*|\bбашн\w*|\bключ\w*|\bсердц\w*|"
+        r"\bхранител\w*|\bправил\w*|\bход\w*|\byour turn\b|\bтвой ход\b|"
+        r"\bquest\w*|\btower\w*|\bkey\w*)", all_text
+    ))
+    generic_game_signal = bool(re.search(r"(?:\bигр\w*|\bgame\w*)", all_text))
+    game_signal = bool(strong_game_signal or (generic_game_signal and not wants_visual and not re.search(r"\bдля\s+игр\w*\b", all_text)))
+    scalar_game_move = bool(
+        game_signal
+        and re.search(r"(?:\bигр\w*|\bgame\w*|\bход\w*|\byour turn\b)", user_low, re.IGNORECASE)
+        and _is_single_scalar_reply(answer_text)
+    )
+    expects_choice = bool(_assistant_expects_user_input(answer_text) or scalar_game_move)
+    interaction_state = bool(game_signal and (
+        expects_choice
+        or _INTERACTIVE_ACTION_RE.search(answer_text)
+        or _INTERACTIVE_ACTION_RE.search(user_low)
+        or re.search(r"(?:начат\w*\s+(?:нов\w*\s+)?(?:совместн\w*\s+)?(?:пошагов\w*\s+)?игр|продолжен\w*\s+игр|твой ход|your turn|choose|выбирай)", answer_low)
+        or _WORK_ACTION_RE.search(user_low)
+    ))
+    # April may create the active next step itself by asking a question or
+    # explicitly inviting a response. Keep that branch even when the user did not
+    # originate a formal task and the subject words in the reply are very short.
+    interactive_dialogue_state = bool(expects_choice and not interaction_state)
+    task_action = bool(_WORK_ACTION_RE.search(user_low))
+    task_object = bool(_WORK_OBJECT_RE.search(user_low))
+    explicit_artifact = wants_code or wants_visual
+    active = bool(explicit_artifact or interaction_state or interactive_dialogue_state or (task_action and task_object))
+    if not active:
+        return {}
+
+    if interaction_state and not (wants_visual and not strong_game_signal):
+        kind = "interactive_game"
+    elif wants_code or rendered_types & {"code", "file"} or re.search(r"(?:код\w*|скрипт\w*|программ\w*|source code|python)", all_text):
+        kind = "code_or_software_task"
+    elif re.search(r"(?:картин\w*|изображен\w*|рису\w*|визуал\w*|эффект\w*|анимац\w*|image\w*|picture\w*)", all_text):
+        kind = "visual_creation_or_editing"
+    elif re.search(r"(?:задач\w*|пример\w*|загадк\w*|головолом\w*|riddle\w*|puzzle\w*|quiz\w*|решени\w*|уравнен\w*|формул\w*|математ\w*|расчет\w*|расчёт\w*|solve\w*|equation\w*)", all_text):
+        kind = "problem_solving"
+    elif re.search(r"(?:схем\w*|диаграм\w*|график\w*|таблиц\w*|документ\w*|план\w*|макет\w*|diagram\w*|chart\w*)", all_text):
+        kind = "structured_artifact"
+    elif interactive_dialogue_state:
+        kind = "interactive_dialogue"
+    else:
+        kind = "active_task"
+
+    message_id = _text(row.get("message_id"))[:120]
+    return {
+        "active": True,
+        "priority": "HOT_TASK_FIRST",
+        "work_id": _text(marker.get("work_id") if isinstance(marker, dict) else "") or ("work:" + message_id if message_id else "work:active"),
+        "kind": _text(marker.get("kind") if isinstance(marker, dict) else "") or kind,
+        "topic": _text((marker.get("topic") if isinstance(marker, dict) else "") or topic or user_text)[:240],
+        "goal": _text((marker.get("goal") if isinstance(marker, dict) else "") or user_text)[:500],
+        "state_summary": _text((marker.get("state_summary") if isinstance(marker, dict) else "") or summary or answer_text)[:800],
+        "last_action": _text((marker.get("last_action") if isinstance(marker, dict) else "") or user_text)[:240],
+        "expects_choice": bool((marker.get("expects_choice") if isinstance(marker, dict) else False) or expects_choice),
+        "last_user_text": user_text[:500],
+        "last_assistant_answer": answer_text[:900],
+        "recent_steps": [{"message_id": message_id, "user_text": user_text[:500], "april_text": answer_text[:900], "topic": topic[:180]}],
+        "source_message_id": _text((marker.get("source_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
+        "origin_message_id": _text((marker.get("origin_message_id") if isinstance(marker, dict) else "") or message_id)[:120],
+        "dialog_id": _text(row.get("dialog_id"))[:120],
+        "conversation_id": _text(row.get("conversation_id"))[:120],
+        "updated_at": row.get("created_at"),
+    }
+
+
+_WORK_ROOT_ACTION_RE = re.compile(
+    r"(?:созда\w*|придум\w*|загадай\w*|загадыва\w*|сгенер\w*|нарис\w*|реш\w*|"
+    r"рассчит\w*|напиш\w*|разработ\w*|спроектир\w*|постро\w*|состав\w*|"
+    r"провед\w*|изучи\w*|объясни\w*|проанализируй\w*|расшифруй\w*|вычисли\w*|"
+    r"проверь\w*|найди\w*|определи\w*|опиши\w*|сравни\w*|разбери\w*|игра\w*|поигра\w*|"
+    r"build\w*|create\w*|generate\w*|draw\w*|solve\w*|calculate\w*|write\w*|"
+    r"implement\w*|design\w*|analy[sz]e\w*|explain\w*|inspect\w*|decode\w*|play\w*)",
+    re.IGNORECASE,
+)
+
+
+def _is_active_work_root_candidate(row: dict[str, Any], profile: dict[str, Any], expected_kind: str) -> bool:
+    """Find the task's original specification when upgrading legacy rows in place."""
+    if not isinstance(row, dict) or not isinstance(profile, dict) or profile.get("kind") != expected_kind:
+        return False
+    user_text = _text(row.get("user_text") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april"))
+    user_low = user_text.lower().replace("ё", "е")
+    answer_low = answer_text.lower().replace("ё", "е")
+    # Preserve the stronger title/structure check for an explicitly named game,
+    # while also recognizing other structured roots (riddles, exercises, code, etc.)
+    # even when their saved marker was misclassified as an interactive scene.
+    user_starts_game = bool(re.search(
+        r"(?:нов\w*\s+игр\w*|созда\w*\s+игр\w*|придум\w*\s+игр\w*|"
+        r"перепиш\w*.{0,90}игр\w*|поигра\w*.{0,70}вместе|давай.{0,50}игр\w*)",
+        user_low,
+    ))
+    answer_starts_game = bool(re.search(
+        r"(?:начн[её]м.{0,60}нов\w*\s+игр\w*|начат\w*.{0,50}игр\w*|"
+        r"нов\w*\s+игр\w*|игр\w*\s*[«\"]|игроки\s*:|цель\s*:|правила\s*:)",
+        answer_low,
+    ))
+    user_has_object = bool(_WORK_OBJECT_RE.search(user_low))
+    user_has_root_action = bool(_WORK_ROOT_ACTION_RE.search(user_low))
+    answer_has_source = bool(answer_text.strip())
+    explicit_structured_root = bool(
+        user_has_root_action and user_has_object and answer_has_source
+        and (
+            answer_starts_game
+            or profile.get("expects_choice")
+            or _ACTIVE_CHOICE_RE.search(answer_text)
+            or "?" in answer_text
+            or "？" in answer_text
+        )
+    )
+    if expected_kind == "interactive_game":
+        return bool(
+            user_starts_game and (answer_starts_game or bool(profile.get("expects_choice")))
+            or explicit_structured_root
+        )
+    if expected_kind == "interactive_dialogue":
+        # Only the turn that originated the open question is a root. A later
+        # continuation may also end with a question, but its saved marker points
+        # to the original message and must not replace that origin during recovery.
+        profile_origin = _text(profile.get("origin_message_id"))
+        row_id = _text(row.get("message_id"))
+        same_root = not profile_origin or not row_id or profile_origin == row_id
+        return bool(answer_has_source and same_root and _assistant_expects_user_input(answer_text))
+
+    # Prefer an original creation/solution request over a later small edit.
+    return bool(user_has_root_action and user_has_object and answer_has_source)
+
+
+def _hot_work_followup_candidate(
+    query: str,
+    branch: dict[str, Any] | None,
+    branch_row: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+    has_attachment: bool = False,
+    reference_followup: bool = False,
+) -> tuple[bool, str]:
+    """Test the hot-task lane before generic historical ranking.
+
+    It accepts choice replies and in-task actions that classic intent detection may
+    label NEW, while refusing to hijack a clearly independent question.
+    """
+    text = _text(query).strip()
+    if not text or not isinstance(branch, dict) or not branch.get("active") or not isinstance(branch_row, dict):
+        return False, "no_active_work_branch"
+    if history_request or new_topic_request:
+        return False, "explicit_history_or_new_topic_switch"
+    low = text.lower().replace("ё", "е")
+    if _looks_like_new_work_root_request(text, branch):
+        return False, "self_contained_new_work_root"
+    tokens = _tokens(text)
+    semantic_tokens = _semantic_tokens(text)
+    pending_user_input = bool(
+        branch.get("expects_choice")
+        or _assistant_expects_user_input(_text(branch_row.get("april_text") or branch_row.get("april")))
+    )
+    topic = _text(branch.get("topic"))
+    branch_text = " ".join((
+        topic, _text(branch.get("goal")), _text(branch.get("state_summary")),
+        _text(branch_row.get("user_text") or branch_row.get("user")),
+        _text(branch_row.get("april_text") or branch_row.get("april")),
+    ))
+    is_choice = bool(re.fullmatch(
+        r"\s*(?:(?:вариант|option|пункт|номер|выбираю|выбираю вариант)\s*)?\d{1,4}(?:[.,]\d+)?(?:\s*(?:вариант|option))?\s*[.!)]?\s*",
+        low,
+    ) or re.fullmatch(r"\s*(?:вариант|option)\s*\d{1,4}\s*[.!)]?\s*", low))
+    is_single_scalar = _is_single_scalar_reply(low)
+    if is_single_scalar and (pending_user_input or _text(branch.get("kind")) == "interactive_game"):
+        return True, "single_scalar_reply_to_active_task"
+    if is_choice and (pending_user_input or _text(branch.get("kind")) == "interactive_game"):
+        # A bare numbered reply is unambiguous. For interactive games it remains
+        # a plausible move even when legacy assistant text did not expose a formal
+        # choice marker.
+        return True, "choice_reply_to_open_active_task"
+
+    has_operation = bool(_BRANCH_OPERATION_RE.search(low))
+    has_reference = bool(reference_followup or re.search(
+        r"(?:это|этот|эта|эту|его|ее|её|нему|ней|туда|такой|такая|"
+        r"продолж\w*|дальше|следующ\w*|вариант|на основе|в этой|в этом|"
+        r"the same|that one|this one|continue|next step)", low
+    ))
+    q_subjects = _subject_tokens(text)
+    branch_subjects = _subject_tokens(branch_text)
+    subject_conflict = _subject_conflicts(q_subjects, branch_subjects)
+    # Option/turn vocabulary is weak topical evidence by itself. Remove it before
+    # checking whether a complete question introduces a genuinely different subject.
+    independent_subjects = q_subjects - {"вариа", "вариант", "пункт", "номер", "выбор", "ход", "оптион"}
+    independent_subject_conflict = _subject_conflicts(independent_subjects, branch_subjects)
+    query_overlap = max(
+        _topic_query_overlap(text, branch_text),
+        _fuzzy_token_overlap(semantic_tokens, _semantic_tokens(branch_text)) if semantic_tokens else 0.0,
+    )
+    standalone_prefix = bool(re.match(
+        r"\s*(?:что\s+такое|кто\s+такой|кто\s+такая|расскажи\s+о|объясни|"
+        r"сколько(?:\s+будет)?|какая\s+погода|what\s+is|who\s+is|"
+        r"tell\s+me\s+about|how\s+much|calculate)\b",
+        low,
+    ))
+    standalone_question_shape = bool(
+        "?" in text or "？" in text or standalone_prefix
+    )
+    # A standalone factual question may contain only one semantic noun after
+    # stop-word removal (“Расскажи о фотосинтезе?”). Do not treat it as a short
+    # game answer merely because the active game is waiting for a reply.
+    enough_independent_content = bool(
+        len(semantic_tokens) >= 2
+        or (standalone_prefix and bool(q_subjects))
+    )
+    independent_question = bool(
+        enough_independent_content
+        and standalone_question_shape
+        and (independent_subject_conflict or query_overlap < 0.12)
+        and (not has_reference or independent_subject_conflict)
+        and not (has_operation and re.search(r"(?:добав\w*|исправ\w*|передел\w*|продолж\w*|допиш\w*|перепиш\w*|улучш\w*)", low))
+    )
+    if independent_question:
+        return False, "self_contained_independent_question"
+    # Do not match a broad assistant-side cue such as “твой ход” inside a factual
+    # question. Only a bare choice or an actual user selection statement is decisive.
+    if pending_user_input and (
+        _CHOICE_REPLY_RE.search(low)
+        or len(tokens) <= 5 and re.search(
+            r"(?:не\s+зна\w*|сдаюсь|сдаюс|не\s+получ\w*|не\s+могу\s+выбрат\w*|"
+            r"i\s+don't\s+know|i\s+give\s+up|not\s+sure)", low
+        )
+    ):
+        return True, "reply_to_pending_user_input"
+    # An interactive scene is a live state machine: first-person actions are moves,
+    # not unrelated entities, even when morphology prevents lexical overlap. This
+    # check follows the independent-question guard so “why did someone open a door?”
+    # cannot hijack a running scene.
+    if _text(branch.get("kind")) == "interactive_game" and len(tokens) <= 12 and _INTERACTIVE_ACTION_RE.search(low) and not standalone_question_shape:
+        return True, "interactive_task_action"
+    # A newly supplied image/file can be the source material for the current task
+    # (e.g. edit this picture, fix this file). It should not disable hot-branch
+    # matching by itself; however, an unreferenced attachment must not hijack the
+    # previous task merely because one exists.
+    if has_attachment and not (
+        reference_followup or has_reference or has_operation
+        or _ACTIVE_CHOICE_RE.search(low) or is_choice
+    ):
+        return False, "unreferenced_new_attachment"
+    if has_operation and (has_reference or len(tokens) <= 8):
+        return True, "operation_on_active_work_branch"
+    if subject_conflict and not has_reference and len(semantic_tokens) >= 5:
+        return False, "clear_subject_switch"
+    if query_overlap >= 0.16:
+        return True, "active_work_topic_alignment"
+    if len(tokens) <= 5 and (reference_followup or branch.get("expects_choice")):
+        return True, "underspecified_reply_to_active_task"
+    return False, "no_active_work_match"
+
+
+def build_active_work_branch_record(
+    *,
+    user_text: str,
+    april_text: str,
+    summary: str = "",
+    topic: str = "",
+    message_id: str = "",
+    dialog_id: str = "",
+    conversation_id: str = "",
+    relation: str = "NEW",
+    inherited_branch: dict[str, Any] | None = None,
+    intent: dict[str, Any] | None = None,
+    requested_outputs: list[Any] | None = None,
+    render_blocks: list[Any] | None = None,
+    artifacts: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Persist the hot-work marker alongside the existing USER↔APRIL pair."""
+    inherited = dict(inherited_branch or {}) if isinstance(inherited_branch, dict) else {}
+    relation_value = _text(relation).upper()
+    answer_low = _text(april_text).lower().replace("ё", "е")
+    expects_choice = _assistant_expects_user_input(answer_low)
+    def _step_record(step_message_id: str, step_user: str, step_april: str, step_topic: str = "") -> dict[str, str]:
+        return {
+            "message_id": _text(step_message_id)[:120],
+            "user_text": _text(step_user)[:900],
+            "april_text": _text(step_april)[:1800],
+            "topic": _text(step_topic)[:180],
+        }
+
+    if relation_value == "CONTINUE" and inherited.get("active"):
+        record = dict(inherited)
+        # Keep only durable state in PostgreSQL. Matching status belongs to the
+        # current request and must be recomputed on every incoming turn.
+        record.pop("matched_this_turn", None)
+        record.pop("match_reason", None)
+        record.pop("candidate_message_id", None)
+        prior_steps = inherited.get("recent_steps")
+        if not isinstance(prior_steps, list):
+            prior_steps = []
+        recent_steps = [
+            _step_record(
+                _text(item.get("message_id")), _text(item.get("user_text")),
+                _text(item.get("april_text")), _text(item.get("topic")),
+            )
+            for item in prior_steps if isinstance(item, dict)
+        ]
+        current_step = _step_record(message_id, user_text, april_text, topic)
+        if current_step["message_id"] and not any(
+            item.get("message_id") == current_step["message_id"] for item in recent_steps
+        ):
+            recent_steps.append(current_step)
+        record.update({
+            "active": True,
+            "priority": "HOT_TASK_FIRST",
+            "last_action": _text(user_text)[:240],
+            "state_summary": _text(summary or april_text)[:800],
+            "expects_choice": bool(
+                expects_choice
+                or (_text(inherited.get("kind")) == "interactive_game" and _is_single_scalar_reply(april_text))
+            ),
+            "last_user_text": _text(user_text)[:500],
+            "last_assistant_answer": _text(april_text)[:900],
+            "source_message_id": _text(inherited.get("source_message_id") or inherited.get("origin_message_id") or message_id)[:120],
+            "origin_message_id": _text(inherited.get("origin_message_id") or inherited.get("source_message_id") or message_id)[:120],
+            "last_message_id": _text(message_id)[:120],
+            "recent_steps": recent_steps[-3:],
+            "dialog_id": _text(dialog_id or inherited.get("dialog_id"))[:120],
+            "conversation_id": _text(conversation_id or inherited.get("conversation_id"))[:120],
+        })
+        return record
+
+    fake_row = {
+        "user_text": _text(user_text),
+        "april_text": _text(april_text),
+        "memory_summary": _text(summary),
+        "message_id": _text(message_id),
+        "dialog_id": _text(dialog_id),
+        "conversation_id": _text(conversation_id),
+        "structured_request": {
+            "intent": intent if isinstance(intent, dict) else {},
+            "requested_outputs": list(requested_outputs or []),
+        },
+        "structured_response": {
+            "summary": _text(summary),
+            "dialogue_memory_record": {"topic": _text(topic), "summary": _text(summary)},
+            "render_blocks": list(render_blocks or []),
+            "artifacts": list(artifacts or []),
+        },
+    }
+    inferred = _infer_active_work_branch(fake_row)
+    if not inferred:
+        return {}
+    inferred.update({
+        "active": True,
+        "priority": "HOT_TASK_FIRST",
+        "work_id": "work:" + (_text(message_id)[:120] or uuid.uuid4().hex[:12]),
+        "origin_message_id": _text(message_id)[:120],
+        "source_message_id": _text(message_id)[:120],
+        "last_message_id": _text(message_id)[:120],
+        "dialog_id": _text(dialog_id)[:120],
+        "conversation_id": _text(conversation_id)[:120],
+        "last_action": _text(user_text)[:240],
+        "state_summary": _text(summary or april_text)[:800],
+        "expects_choice": bool(
+            expects_choice or inferred.get("expects_choice")
+            or (_text(inferred.get("kind")) == "interactive_game" and _is_single_scalar_reply(april_text))
+        ),
+        "last_user_text": _text(user_text)[:500],
+        "last_assistant_answer": _text(april_text)[:900],
+        # A compact rolling trace preserves the most recent user/assistant steps
+        # alongside the immutable origin row. The full root is still restored from
+        # dialogue_memory by origin_message_id; this is not a second task database.
+        "recent_steps": [_step_record(message_id, user_text, april_text, topic)],
+    })
+    return inferred
+
+
+def _selection_followup_confirmed(query: str, interpretation: dict[str, Any] | None, latest_row: dict[str, Any] | None) -> tuple[bool, str, float]:
+    """Confirm selection language against the latest same-dialog answer only."""
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    candidate = bool(features.get("selection_followup_candidate")) or bool(re.search(
+        r"\b(?:выбери(?:те)?|выбирай(?:те)?|выбрать|подбери(?:те)?|остановись\s+на|бери|возьми|pick|choose|select|go\s+with)\b",
+        _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
+    ))
+    if not candidate or not isinstance(latest_row, dict):
+        return False, "not_a_selection_candidate", 0.0
+    if bool(profile.get("explicit_topic_switch")) or bool(profile.get("history_request")):
+        return False, "selection_overridden_by_switch_or_history", 0.0
+    answer = _text(latest_row.get("april_text") or latest_row.get("april") or latest_row.get("assistant_text"))
+    if not answer:
+        return False, "latest_answer_missing", 0.0
+    selection_noise = set(_SECTION_TOPIC_NOISE) | set(_CONTEXT_GENERIC_TERMS) | {
+        "выбери", "выберите", "выбирай", "выбирайте", "выбрать", "выбирал", "выбрала",
+        "выберу", "подбери", "подберите", "выбор", "лучше", "лучший", "лучшая", "лучшее",
+        "вариант", "варианта", "название", "названия", "рекомендую", "пожалуйста",
+        "да", "ага", "ну", "тогда", "choose", "choosing", "choose", "pick", "select",
+        "option", "recommend", "best", "prefer", "please",
+    }
+    query_terms = _semantic_tokens(query) - selection_noise
+    answer_terms = _semantic_tokens(answer) - selection_noise
+    overlap = _fuzzy_token_overlap(query_terms, answer_terms) if query_terms else 0.0
+    topic_overlap = _topic_query_overlap(query, _text(latest_row.get("topic")))
+    overlap = max(overlap, topic_overlap if topic_overlap >= 0.50 else 0.0)
+    low_answer = answer.lower().replace("ё", "е")
+    has_choices = bool(re.search(r"(?m)^\s*(?:\d+[.)]|[а-яa-z][.)])\s+", low_answer) or re.search(r"(?:вариант\w*|назван\w*|выбор\w*|можно\s+выбрать|я\s+бы\s+выбрал|рекомендую)", low_answer))
+    numbered_choice = bool(re.search(r"\b(?:вариант\s*)?[1-9]\b", _text(query).lower()))
+    expects_user_input = _assistant_expects_user_input(answer)
+    # An invitation to choose/answer is not enough by itself: a user can change
+    # topics in the next message. Only an underspecified choice or one that shares
+    # content with the latest answer may bind to that answer.
+    if expects_user_input and not query_terms:
+        return True, "underspecified_choice_after_input_prompt", round(overlap, 6)
+    if overlap >= 0.20:
+        return True, "selection_matches_latest_answer", round(overlap, 6)
+    if has_choices and numbered_choice:
+        return True, "numbered_option_from_latest_answer", round(overlap, 6)
+    return False, "selection_does_not_match_latest_answer", round(overlap, 6)
+
+
+def _has_semantic_active_branch_intent(
+    interpretation: dict[str, Any] | None,
+    *,
+    history_request: bool,
+    new_topic_request: bool,
+    has_attachment: bool,
+    reference_followup: bool,
+) -> bool:
+    """Trust explicit upstream continuation semantics over a later lexical veto.
+
+    This does not force every NEW into CONTINUE. History lookups, explicit topic
+    switches, and unrelated new attachments retain their existing precedence.
+    """
+    if history_request or new_topic_request:
+        return False
+    if has_attachment and not reference_followup:
+        return False
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    intent = _text(profile.get("primary_intent")).upper()
+    direction = _text(profile.get("direction")).upper()
+    topic_reference = _text(profile.get("topic_reference")).upper()
+    relation_hint = _text(profile.get("relation_hint")).upper()
+    requires_memory = bool(profile.get("requires_memory"))
+    parent_context_dependency = bool(profile.get("parent_context_dependency"))
+    explicit_active_topic_reference = bool(
+        intent == "TOPIC_CONTINUATION"
+        and (
+            requires_memory
+            or relation_hint == "CONTINUE"
+            or direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"}
+            or topic_reference in {"PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER", "TOPIC_FRAGMENT"}
+        )
+    )
+    operation_on_active_branch = bool(
+        parent_context_dependency and (requires_memory or relation_hint == "CONTINUE")
+    )
+    return bool(explicit_active_topic_reference or operation_on_active_branch)
+
+
 def _hot_branch_followup_candidate(
     query: str,
     interpretation: dict[str, Any] | None,
@@ -841,7 +2218,10 @@ def _hot_branch_followup_candidate(
     pragmatic_followup = any(term in pragmatic_value for term in (
         "reaction", "acknowledg", "agreement", "disagreement", "negation",
         "emotion", "evaluation", "referential", "ellipsis", "continuation",
+        "gratitude", "appreciation", "positive", "frustration", "dissatisfaction",
+        "revision", "correction", "revise_previous", "respond_to_disagreement",
         "реакц", "подтвержд", "несоглас", "отрицан", "эмоц", "оценк",
+        "благодар", "признатель", "раздраж", "недоволь", "передел", "исправ",
         "отсылк", "эллипсис", "продолж",
     ))
 
@@ -885,7 +2265,7 @@ def _hot_branch_followup_candidate(
 
     # Recency is a soft fallback for a human reaction/fragment immediately after an
     # exchange. It decays quickly so a later standalone phrase cannot stay attached
-    # to a completed task merely because that task is still in the 12-hour memory.
+    # to a completed task merely because that task is still in the 24-hour memory.
     try:
         created_at = float(latest_row.get("created_at") or 0.0)
     except (TypeError, ValueError):
@@ -914,6 +2294,74 @@ def _continuation_marker(query: str) -> bool:
     )
 
 
+_EXPLICIT_FOLLOWUP_PATTERNS = (
+    # Russian continuation/addendum language, including common spelling errors.
+    r"\b(?:давай|давай-ка|пожалуйста|расскажи|поясни|можно)\s+(?:мне\s+)?(?:поинтересн\w*|поподробн\w*|подробн\w*|дальше|еще|продолж\w*|продол\w*|больше)\b",
+    r"\bуже\b.{0,90}\b(?:рассказ\w*|расказ\w*|росказ\w*|говорил\w*|обсуждал\w*|отвечал\w*)\b.{0,100}\b(?:давай|еще|дальше|поинтересн\w*|поподробн\w*|продолж\w*|продол\w*)\b",
+    r"\b(?:добав\w*|дополн\w*|долож\w*|доскажи\w*|досказ\w*|учти\w*|вдобавок|к\s+этому|еще\s+один\s+момент|и\s+еще)\b",
+    # Equivalent English phrasing.
+    r"\b(?:one more thing|to add to that|additionally|i forgot to mention|elaborate|tell me more|more interesting|make it more interesting|continue|go on)\b",
+)
+
+
+def _explicit_followup_signal(query: str) -> bool:
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    return bool(low and any(re.search(pattern, low, flags=re.IGNORECASE) for pattern in _EXPLICIT_FOLLOWUP_PATTERNS))
+
+
+def _explicit_followup_anchor(
+    query: str,
+    matches: list[dict[str, Any]],
+    latest_same_dialog: dict[str, Any] | None,
+    query_subjects: set[str],
+) -> dict[str, Any] | None:
+    """Resolve an explicit addendum to compatible same-dialog evidence only."""
+    if not _explicit_followup_signal(query):
+        return None
+    candidates = [
+        item for item in matches
+        if isinstance(item, dict)
+        and bool(item.get("same_dialog"))
+        and not item.get("is_pending_clarification")
+        and not item.get("subject_mismatch")
+    ]
+    if not candidates:
+        return latest_same_dialog if not query_subjects and isinstance(latest_same_dialog, dict) else None
+    if not query_subjects:
+        return latest_same_dialog if isinstance(latest_same_dialog, dict) else max(
+            candidates, key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0))
+        )
+
+    ranked: list[tuple[float, float, float, dict[str, Any]]] = []
+    for item in candidates:
+        item_subjects = set(item.get("subject_terms") or [])
+        subject_fit = max(
+            float(item.get("subject_overlap") or 0.0),
+            _subject_overlap(query_subjects, item_subjects),
+        )
+        topic_text = " ".join((
+            _text(item.get("topic")), _text(item.get("user") or item.get("user_text")),
+            _text(item.get("april") or item.get("april_text")),
+        ))
+        topic_fit = _topic_query_overlap(query, topic_text)
+        semantic_fit = max(
+            float(item.get("score") or 0.0),
+            float(item.get("context") or 0.0),
+            float(item.get("entity_overlap") or 0.0),
+            float(item.get("answer_overlap") or 0.0),
+            float(item.get("user_overlap") or 0.0),
+        )
+        # A named subject must actually match the selected dialogue. A score alone
+        # is not enough if the subject terms conflict or the topic is unrelated.
+        if subject_fit < 0.16 and topic_fit < 0.30:
+            continue
+        ranked.append((max(subject_fit, topic_fit, semantic_fit * 0.55), topic_fit, float(item.get("created_at") or 0), item))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+    return ranked[0][3]
+
+
 def _is_history_request(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
@@ -923,40 +2371,21 @@ def _is_history_request(query: str) -> bool:
     # Keep direct/legacy callers on the same intent logic as Exkrutor. The import
     # is lazy to avoid changing module initialization order.
     try:
-        from blocks.interpretation_identity import interpret_request_semantics
+        from blocks.Premium_interpretation_identity import interpret_request_semantics
         return bool(interpret_request_semantics(query).get("history_request"))
     except Exception:
         return False
 
 
-def _history_topic_limit(query: str, default: int = 7) -> int:
-    low = _text(query).lower().replace("ё", "е")
-    number_pattern = r"(10|[1-5])"
-    unit_pattern = r"(?:диалог\w*|разговор\w*|сообщен\w*|тем\w*|пункт\w*|раздел\w*)"
-    match = re.search(rf"\bпоследн\w*\s+(?:из\s+)?{number_pattern}\b", low)
-    if not match:
-        match = re.search(rf"\b{number_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low)
-    if match:
-        return max(1, min(5, int(match.group(1))))
-    for word, count in _HISTORY_COUNT_WORDS.items():
-        word_pattern = re.escape(word)
-        if re.search(rf"\bпоследн\w*\s+(?:из\s+)?{word_pattern}\b", low) or re.search(
-            rf"\b{word_pattern}\s+(?:последн\w*\s+)?{unit_pattern}\b", low
-        ):
-            return max(1, min(5, count))
-    return max(1, min(5, default or 5))
+def _history_topic_limit(query: str, default: int = 10) -> int:
+    """Use the requested upper bound; “from 5 to 10 topics” means up to ten."""
+    _, maximum = extract_topic_count_bounds(query, default=default)
+    return max(1, min(10, int(maximum or default)))
 
 
-def _asks_for_oldest_history(query: str) -> bool:
-    """Recognize requests for the oldest retained items, not the latest ones."""
-    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
-    oldest = bool(re.search(
-        r"\b(?:самые\s+первые|первые\s+(?:диалог\w*|разговор\w*|сообщен\w*|тем\w*)|"
-        r"самые\s+стар\w*|старейш\w*|давние\s+диалог\w*|перед\s+удален\w*|"
-        r"которые\s+скоро\s+удал\w*)\b", low
-    ))
-    has_history_object = bool(re.search(r"\b(?:диалог\w*|разговор\w*|сообщен\w*|истори\w*|тем\w*)\b", low))
-    return oldest and has_history_object
+def _history_topic_minimum(query: str, default: int = 5) -> int:
+    minimum, _ = extract_topic_count_bounds(query, default=10)
+    return max(1, min(10, int(minimum or default)))
 
 
 def _domain_terms(text: str) -> set[str]:
@@ -1075,15 +2504,19 @@ def _concept_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> floa
 
 
 
-def _explicit_entity_overlap(query: str, row: dict[str, Any]) -> float:
+def _explicit_entity_overlap(query: str, row: dict[str, Any], *, max_chars: int | None = None) -> float:
     """Measure overlap of meaningful subject terms, excluding pronouns and fillers."""
     q = _semantic_tokens(query)
-    candidate = _semantic_tokens(
-        " ".join(
-            _text(row.get(name))
-            for name in ("user_text", "april_text", "user_text_en", "april_text_en")
-        )
-    )
+    raw_parts = [
+        row.get("user_text"), row.get("april_text"),
+        row.get("user_text_en"), row.get("april_text_en"),
+    ]
+    # Slice before strip/tokenization: some saved multimedia answers are very large.
+    parts = [
+        _text(str(value or "")[:max_chars] if max_chars is not None else value)
+        for value in raw_parts
+    ]
+    candidate = _semantic_tokens(" ".join(parts))
     return _concept_overlap(q, candidate)
 
 
@@ -1098,6 +2531,59 @@ def _parse_json(value: Any) -> dict[str, Any]:
     except Exception:
         return {}
 
+
+def _dialogue_thread_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    """Read the compact, durable topic/branch index from the canonical pair."""
+    request = _parse_json(row.get("structured_request"))
+    request_memory = request.get("memory") if isinstance(request.get("memory"), dict) else {}
+    stored_topic_context = request_memory.get("topic_context") if isinstance(request_memory.get("topic_context"), dict) else {}
+    response = _parse_json(row.get("structured_response"))
+    response_meta = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    memory_record = response.get("dialogue_memory_record")
+    if not isinstance(memory_record, dict):
+        memory_record = response_meta.get("dialogue_memory_record") if isinstance(response_meta.get("dialogue_memory_record"), dict) else {}
+    candidates = (
+        response.get("dialogue_thread"),
+        request.get("dialogue_thread"),
+        memory_record.get("dialogue_thread") if isinstance(memory_record, dict) else {},
+        memory_record.get("topic_context_manifest") if isinstance(memory_record, dict) else {},
+        memory_record,
+        response.get("active_work_branch"),
+    )
+    result: dict[str, Any] = {}
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for key, value in candidate.items():
+                if key not in result and value not in (None, "", [], {}):
+                    result[key] = value
+
+    # Newer turns persist the full topic index inside dialogue_thread. Older
+    # records may have only that nested manifest, so expose its durable root/ID
+    # without overwriting exact topic/branch fields stored on the individual pair.
+    manifest = result.get("topic_context_manifest")
+    if not isinstance(manifest, dict):
+        for candidate in candidates:
+            if isinstance(candidate, dict) and isinstance(candidate.get("topic_context_manifest"), dict):
+                manifest = candidate.get("topic_context_manifest")
+                break
+    if isinstance(manifest, dict):
+        fallbacks = {
+            "topic_id": manifest.get("topic_id"),
+            "topic": manifest.get("topic"),
+            "topic_origin_message_id": manifest.get("root_message_id"),
+            "origin_message_id": manifest.get("root_message_id"),
+            "topic_summary": manifest.get("summary"),
+        }
+        for key, value in fallbacks.items():
+            if result.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+                result[key] = value
+        result["topic_context_manifest"] = manifest
+    if stored_topic_context and (
+        isinstance(stored_topic_context.get("branches"), list)
+        or isinstance(stored_topic_context.get("artifact_index"), list)
+    ):
+        result["stored_topic_context"] = stored_topic_context
+    return result
 
 
 def _is_failed_provider_row(row: dict[str, Any]) -> bool:
@@ -1160,23 +2646,20 @@ def _row_modalities(row: dict[str, Any]) -> set[str]:
                     result.add("file")
                 elif kind == "image":
                     result.add("image")
-
-    # April-generated render assets belong to the same dialogue pair too.
-    # Keep their modality searchable, even though they are not user uploads.
-    response = _parse_json(row.get("structured_response"))
-    asset_refs = response.get("asset_refs") if isinstance(response.get("asset_refs"), dict) else {}
-    scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
-    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
-    dialogue_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
-    for item in (asset_refs.get("april_outputs") or dialogue_assets.get("april_outputs") or []):
-        if not isinstance(item, dict):
-            continue
-        kind = _text(item.get("kind") or item.get("output_type")).lower()
-        if kind in {"image", "gallery"}:
-            result.add("image")
-        elif kind in {"file", "text_file", "code", "document"}:
-            result.add("file")
     return result
+
+
+def _topic_label_lightweight(row: dict[str, Any]) -> str:
+    """Use direct text fields for ordinary topic search; reserve JSONB labels for artifact/history retrieval."""
+    for value in (
+        row.get("topic_summary"), row.get("topic"), row.get("user_text"),
+        row.get("user_text_en"), row.get("memory_summary"),
+        str(row.get("april_text") or "")[:140], str(row.get("april_text_en") or "")[:140],
+    ):
+        value = _text(value)
+        if value:
+            return re.sub(r"\s+", " ", value)[:140]
+    return "Безымянная тема"
 
 
 def _topic_label(row: dict[str, Any]) -> str:
@@ -1188,10 +2671,15 @@ def _topic_label(row: dict[str, Any]) -> str:
     memory_record = response.get("dialogue_memory_record") or response_meta.get("dialogue_memory_record") or {}
     if not isinstance(memory_record, dict):
         memory_record = {}
+    thread = response.get("dialogue_thread") if isinstance(response.get("dialogue_thread"), dict) else {}
+    if not thread:
+        thread = structured.get("dialogue_thread") if isinstance(structured.get("dialogue_thread"), dict) else {}
     attachment_index = structured.get("attachment_index") if isinstance(structured.get("attachment_index"), list) else []
     first_attachment = next((x for x in attachment_index if isinstance(x, dict)), {})
     for value in (
         memory_record.get("topic"),
+        thread.get("topic"),
+        thread.get("branch_summary"),
         (f"Файл {first_attachment.get('filename')}: {first_attachment.get('summary') or first_attachment.get('content_preview', '')[:90]}" if first_attachment.get("filename") else ""),
         cont.get("active_topic"),
         structured.get("request_structure", {}).get("user_goal") if isinstance(structured.get("request_structure"), dict) else "",
@@ -1208,8 +2696,32 @@ def _topic_tokens(label: str) -> set[str]:
     return _semantic_tokens(label)
 
 
-def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build a 12-hour topic/section index from the canonical persisted pairs.
+def _merge_compact_summaries(existing: Any, incoming: Any, limit: int = 640) -> str:
+    """Accumulate distinct grounded summary fragments instead of replacing history with the last turn."""
+    old = re.sub(r"\s+", " ", _text(existing)).strip()
+    new = re.sub(r"\s+", " ", _text(incoming)).strip()
+    if not old:
+        return new[:limit]
+    if not new or new.casefold() in old.casefold():
+        return old[:limit]
+    if old.casefold() in new.casefold():
+        return new[:limit]
+    # Split on sentence boundaries where possible; preserve chronology and avoid repeats.
+    fragments: list[str] = []
+    for source in (old, new):
+        for part in re.split(r"(?<=[.!?])\s+|\s*\|\s*", source):
+            part = part.strip(" ;,.")
+            if part and not any(part.casefold() == prior.casefold() for prior in fragments):
+                fragments.append(part)
+    result = "; ".join(fragments)
+    return result[:limit].rstrip(" ;,")
+
+
+def _build_topic_index(
+    rows: list[dict[str, Any]], *, include_sections: bool = True, include_structured: bool = True,
+    include_pending: bool = False,
+) -> list[dict[str, Any]]:
+    """Build a 24-hour topic/section index from the canonical persisted pairs.
 
     The index is derived from the existing PostgreSQL dialogue rows; it is not a
     second memory store. Each section keeps its short McDowell summary and the
@@ -1219,7 +2731,15 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
 
     ordered = sorted(
-        [row for row in rows if isinstance(row, dict) and not _row_is_pending_clarification(row)],
+        [
+            row for row in rows
+            if isinstance(row, dict)
+            and (include_pending or not _row_is_pending_clarification(row))
+            # History-recall prompts are navigation requests, not topics. Indexing
+            # them as ordinary subjects makes the next overview retrieve the old
+            # failed overview answer again and creates a self-reinforcing loop.
+            and not _is_history_recall_question(_text(row.get("user_text")))
+        ],
         key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
     )
     groups: list[dict[str, Any]] = []
@@ -1230,21 +2750,29 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for section in incoming:
             if not isinstance(section, dict):
                 continue
-            heading = _text(section.get("heading"))[:90]
+            heading = _text(section.get("heading"))[:180]
             if not heading:
                 continue
             key = re.sub(r"\s+", " ", heading.casefold())
             item = {
                 "heading": heading,
-                "summary": re.sub(r"\s+", " ", _text(section.get("summary")))[:180],
+                "summary": re.sub(r"\s+", " ", _text(section.get("summary")))[:360],
                 "order": int(section.get("order") or len(merged) + 1),
                 "message_id": _text(section.get("message_id") or message_id),
             }
+            for hierarchy_key in ("section_id", "parent_id", "parent_heading", "parent_section_id"):
+                if _text(section.get(hierarchy_key)):
+                    item[hierarchy_key] = _text(section.get(hierarchy_key))[:180]
             if key in positions:
-                # Update the meaning with the newest grounded description but keep
-                # the stable heading position from the original explanation.
+                # Keep a stable section identity and accumulate new information;
+                # do not erase useful details merely because the last answer was short.
                 pos = positions[key]
-                item["order"] = merged[pos].get("order") or item["order"]
+                previous = merged[pos]
+                item["order"] = previous.get("order") or item["order"]
+                item["summary"] = _merge_compact_summaries(previous.get("summary"), item.get("summary"), 480)
+                for hierarchy_key in ("section_id", "parent_id", "parent_heading", "parent_section_id"):
+                    if not item.get(hierarchy_key) and previous.get(hierarchy_key):
+                        item[hierarchy_key] = previous[hierarchy_key]
                 merged[pos] = item
             else:
                 positions[key] = len(merged)
@@ -1252,91 +2780,188 @@ def _build_topic_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(merged, key=lambda x: int(x.get("order") or 0))[:12]
 
     for row in ordered:
-        label = _topic_label(row)
+        label = _topic_label(row) if include_structured else _topic_label_lightweight(row)
         tokens = _topic_tokens(label)
         relation = _text(row.get("relation") or "NEW").upper()
+        thread = _dialogue_thread_metadata(row) if include_structured else {}
+        row_topic_id = _text(thread.get("topic_id"))
+        row_origin_id = _text(
+            thread.get("topic_origin_message_id") or thread.get("origin_message_id")
+            or row.get("message_id")
+        )
+        row_branch_id = _text(thread.get("branch_id") or thread.get("work_id"))
         same_as_prev = False
         if groups:
             prev = groups[-1]
+            prev_topic_id = _text(prev.get("topic_id"))
             similarity = fuzz.token_set_ratio(label.lower(), str(prev.get("topic") or "").lower()) / 100.0
-            current_modalities = _row_modalities(row)
+            current_modalities = _row_modalities(row) if include_structured else set()
             previous_modalities = set(prev.get("modalities") or [])
             modality_changed = bool(current_modalities and previous_modalities and current_modalities.isdisjoint(previous_modalities))
-            current_subjects = _row_subject_tokens(row)
+            current_subjects = (
+                _row_subject_tokens(row) if include_structured
+                else _subject_tokens(_row_subject_text_lightweight(row))
+            )
             previous_subjects = set(prev.get("subject_terms") or [])
             subject_conflict = _subject_conflicts(current_subjects, previous_subjects)
-            same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed and not subject_conflict
-            if (not same_as_prev and not modality_changed and not subject_conflict
-                    and _looks_like_referential_followup(str(row.get("user_text") or ""))):
+            # Persisted topic identity outranks similarity. Similar wording must not
+            # merge two deliberately separate topics; the same topic ID can continue
+            # across an intervening topic or a later conversation.
+            if row_topic_id and prev_topic_id:
+                same_as_prev = row_topic_id == prev_topic_id
+            else:
+                same_as_prev = relation != "NEW" and similarity >= 0.28 and not modality_changed and not subject_conflict
+            if (
+                not same_as_prev
+                and not (row_topic_id and prev_topic_id and row_topic_id != prev_topic_id)
+                and not modality_changed and not subject_conflict
+                and _looks_like_referential_followup(str(row.get("user_text") or ""))
+            ):
                 same_as_prev = True
 
-        row_sections = _dialogue_section_map(row)
+        # Section extraction can recursively inspect all saved renderers. It is
+        # useful for history/section lookups, but wasteful for ordinary continuation
+        # questions that need only a topic label and compact summary.
+        row_sections = _dialogue_section_map(row) if include_sections else []
         if not groups or not same_as_prev:
             groups.append({
                 "topic": label,
                 "topic_tokens": sorted(tokens),
-                "subject_terms": sorted(_row_subject_tokens(row)),
+                "subject_terms": sorted(
+                    _row_subject_tokens(row) if include_structured
+                    else _subject_tokens(_row_subject_text_lightweight(row))
+                ),
                 "start_turn": int(row.get("turn_index") or 0),
                 "end_turn": int(row.get("turn_index") or 0),
                 "first_at": float(row.get("created_at") or 0),
                 "last_at": float(row.get("created_at") or 0),
-                "last_question": _text(row.get("user_text"))[:180],
+                "last_question": _text(row.get("user_text"))[:360],
                 "message_id": _text(row.get("message_id")),
+                "origin_message_id": row_origin_id or _text(row.get("message_id")),
+                "origin_turn": int(row.get("turn_index") or 0),
+                "message_ids": [_text(row.get("message_id"))] if _text(row.get("message_id")) else [],
+                "topic_id": row_topic_id,
+                "branch_ids": [row_branch_id] if row_branch_id else [],
+                "active_branch_id": row_branch_id,
                 "dialog_id": _text(row.get("dialog_id")),
                 "conversation_id": _text(row.get("conversation_id")),
-                "modalities": sorted(_row_modalities(row)),
+                "modalities": sorted(_row_modalities(row)) if include_structured else [],
                 "pair_count": 1,
-                "summary": _compact_memory_summary(row),
+                "summary": _compact_memory_summary(row) if include_structured else _compact_memory_summary_lightweight(row),
                 "sections": merge_sections([], row_sections, _text(row.get("message_id"))),
             })
         else:
             group = groups[-1]
             group["end_turn"] = int(row.get("turn_index") or group["end_turn"])
             group["last_at"] = float(row.get("created_at") or group["last_at"])
-            group["last_question"] = _text(row.get("user_text"))[:180] or group["last_question"]
-            group["modalities"] = sorted(set(group.get("modalities") or []) | _row_modalities(row))
+            group["last_question"] = _text(row.get("user_text"))[:360] or group["last_question"]
+            group["modalities"] = sorted(
+                set(group.get("modalities") or []) | (_row_modalities(row) if include_structured else set())
+            )
             group["pair_count"] = int(group.get("pair_count") or 0) + 1
             group["message_id"] = _text(row.get("message_id")) or group.get("message_id")
-            group["summary"] = _compact_memory_summary(row) or group.get("summary", "")
+            if not _text(group.get("topic_id")) and row_topic_id:
+                group["topic_id"] = row_topic_id
+            if row_origin_id and (
+                not _text(group.get("origin_message_id"))
+                or float(row.get("created_at") or 0) < float(group.get("first_at") or 0)
+            ):
+                group["origin_message_id"] = row_origin_id
+            row_message_id = _text(row.get("message_id"))
+            if row_message_id and row_message_id not in (group.get("message_ids") or []):
+                group.setdefault("message_ids", []).append(row_message_id)
+            if row_branch_id:
+                group["branch_ids"] = list(dict.fromkeys((group.get("branch_ids") or []) + [row_branch_id]))
+                group["active_branch_id"] = row_branch_id
+            group["summary"] = _merge_compact_summaries(
+                group.get("summary"),
+                _compact_memory_summary(row) if include_structured else _compact_memory_summary_lightweight(row),
+                640,
+            )
             group["sections"] = merge_sections(group.get("sections") or [], row_sections, _text(row.get("message_id")))
 
     deduped: list[dict[str, Any]] = []
     for item in groups:
         found = None
-        for prev in reversed(deduped[-3:]):
-            similarity = fuzz.token_set_ratio(str(item.get("topic") or "").lower(), str(prev.get("topic") or "").lower()) / 100.0
-            subject_conflict = _subject_conflicts(set(item.get("subject_terms") or []), set(prev.get("subject_terms") or []))
-            if similarity >= 0.78 and not subject_conflict:
-                found = prev
-                break
+        item_topic_id = _text(item.get("topic_id"))
+        if item_topic_id:
+            found = next(
+                (prev for prev in deduped if _text(prev.get("topic_id")) == item_topic_id),
+                None,
+            )
+        if found is None:
+            for prev in reversed(deduped[-3:]):
+                prev_topic_id = _text(prev.get("topic_id"))
+                # Different durable IDs are an explicit boundary, not a fuzzy merge.
+                if item_topic_id and prev_topic_id and item_topic_id != prev_topic_id:
+                    continue
+                similarity = fuzz.token_set_ratio(str(item.get("topic") or "").lower(), str(prev.get("topic") or "").lower()) / 100.0
+                subject_conflict = _subject_conflicts(set(item.get("subject_terms") or []), set(prev.get("subject_terms") or []))
+                if similarity >= 0.78 and not subject_conflict:
+                    found = prev
+                    break
         if found is not None:
-            if float(item.get("last_at") or 0) >= float(found.get("last_at") or 0):
+            item_last_at = float(item.get("last_at") or 0)
+            found_last_at = float(found.get("last_at") or 0)
+            if item_last_at >= found_last_at:
                 found.update({
                     "end_turn": item.get("end_turn"), "last_at": item.get("last_at"),
                     "last_question": item.get("last_question"), "message_id": item.get("message_id"),
-                    "summary": item.get("summary") or found.get("summary"),
+                    "active_branch_id": item.get("active_branch_id") or found.get("active_branch_id"),
+                    "summary": _merge_compact_summaries(found.get("summary"), item.get("summary"), 640),
                     "subject_terms": sorted(set(found.get("subject_terms") or []) | set(item.get("subject_terms") or [])),
+                    "modalities": sorted(set(found.get("modalities") or []) | set(item.get("modalities") or [])),
                     "sections": merge_sections(found.get("sections") or [], item.get("sections") or [], _text(item.get("message_id"))),
                     "pair_count": int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0),
+                    "message_ids": list(dict.fromkeys((found.get("message_ids") or []) + (item.get("message_ids") or []))),
                 })
+            else:
+                found["summary"] = _merge_compact_summaries(found.get("summary"), item.get("summary"), 640)
+                found["sections"] = merge_sections(found.get("sections") or [], item.get("sections") or [], _text(item.get("message_id")))
+                found["pair_count"] = int(found.get("pair_count") or 0) + int(item.get("pair_count") or 0)
+                found["message_ids"] = list(dict.fromkeys((found.get("message_ids") or []) + (item.get("message_ids") or [])))
+            found["branch_ids"] = list(dict.fromkeys((found.get("branch_ids") or []) + (item.get("branch_ids") or [])))
+            if not _text(found.get("topic_id")) and item_topic_id:
+                found["topic_id"] = item_topic_id
         else:
             deduped.append(item)
 
     deduped.sort(key=lambda item: float(item.get("last_at") or 0), reverse=True)
     visible = []
     for idx, item in enumerate(deduped[:30], 1):
+        origin_message_id = _text(item.get("origin_message_id") or item.get("message_id"))
+        topic_id_seed = f"{origin_message_id}|{_text(item.get('topic')).casefold()}|{item.get('first_at', 0)}"
+        topic_id = _text(item.get("topic_id")) or (
+            "topic-" + hashlib.sha256(topic_id_seed.encode("utf-8")).hexdigest()[:16]
+        )
+        sections = []
+        for section in (item.get("sections") or [])[:10]:
+            if not isinstance(section, dict):
+                continue
+            normalized_section = dict(section)
+            normalized_section["topic_id"] = topic_id
+            normalized_section["topic_origin_message_id"] = origin_message_id
+            normalized_section["source_message_id"] = _text(section.get("message_id"))
+            sections.append(normalized_section)
         visible.append({
             "number": idx,
-            "topic": _text(item.get("topic"))[:120],
-            "summary": _text(item.get("summary"))[:220],
-            "sections": [dict(section) for section in (item.get("sections") or [])[:10] if isinstance(section, dict)],
+            "topic_id": topic_id,
+            "topic": _text(item.get("topic"))[:240],
+            "summary": _text(item.get("summary"))[:440],
+            "sections": sections,
             "turns": f"{item.get('start_turn', 0)}-{item.get('end_turn', 0)}",
-            "last_question": _text(item.get("last_question"))[:140],
+            "last_question": _text(item.get("last_question"))[:280],
             "pair_count": int(item.get("pair_count") or 0),
+            "first_at": item.get("first_at"),
             "last_at": item.get("last_at"),
+            "origin_message_id": origin_message_id,
+            "origin_turn": int(item.get("origin_turn") or item.get("start_turn") or 0),
+            "message_ids": list(dict.fromkeys(_text(x) for x in (item.get("message_ids") or []) if _text(x)))[:40],
             "message_id": _text(item.get("message_id")),
             "dialog_id": _text(item.get("dialog_id")),
             "conversation_id": _text(item.get("conversation_id")),
+            "branch_ids": list(dict.fromkeys(_text(x) for x in (item.get("branch_ids") or []) if _text(x)))[:12],
+            "active_branch_id": _text(item.get("active_branch_id"))[:120],
         })
     return visible
 
@@ -1357,8 +2982,8 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
                 continue
             chunks.extend([
                 _text(item.get("filename")), _text(item.get("kind")),
-                _text(item.get("mime_type")), _text(item.get("content_preview"))[:3500],
-                _text(item.get("summary"))[:800],
+                _text(item.get("mime_type")), _text(item.get("content_preview"))[:7000],
+                _text(item.get("summary"))[:1600],
             ])
     for item in req.get("attachments") or []:
         if isinstance(item, dict):
@@ -1367,57 +2992,92 @@ def _row_attachment_evidence(row: dict[str, Any]) -> str:
     if not isinstance(record, dict):
         metadata = resp.get("metadata") if isinstance(resp.get("metadata"), dict) else {}
         record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
-    chunks.extend([_text(record.get("topic")), _text(record.get("summary"))[:1400]])
+    chunks.extend([_text(record.get("topic")), _text(record.get("summary"))[:2800]])
     # Include a bounded excerpt of the exact code/document output generated by
     # April. This makes later requests about a function/symbol retrieve the pair
     # that owns the output asset, without putting raw binary into JSONB.
     for block in resp.get("render_blocks") or []:
-        if not isinstance(block, dict) or _text(block.get("type")).lower() != "code":
+        if not isinstance(block, dict):
             continue
-        chunks.extend([_text(block.get("filename")), _text(block.get("language")), _text(block.get("code") or block.get("content"))[:3500]])
-    asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
-    scene = resp.get("scene_contract") if isinstance(resp.get("scene_contract"), dict) else {}
-    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
-    dialogue_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
-    for item in (asset_refs.get("april_outputs") or dialogue_assets.get("april_outputs") or []):
-        if isinstance(item, dict):
+        kind = _text(block.get("type") or block.get("artifact_type")).lower()
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        if not payload and isinstance(block.get("spec"), dict):
+            payload = block["spec"]
+        if kind == "code" or _protected_structured_kind(block) == "code":
             chunks.extend([
-                _text(item.get("filename")), _text(item.get("output_type") or item.get("kind")),
-                _text(item.get("language")), _text(item.get("asset_role")),
-                _text(item.get("analysis_summary")), _text(item.get("prompt"))[:900],
+                _text(block.get("filename") or payload.get("filename")),
+                _text(block.get("language") or payload.get("language")),
+                _text(block.get("code") or block.get("content") or block.get("text") or payload.get("code") or payload.get("source_code") or payload.get("content"))[:7000],
             ])
+        elif kind in {"file", "document", "text_file", "code_file"}:
+            chunks.extend([_text(block.get("filename") or payload.get("filename") or payload.get("name")), _text(payload.get("url") or payload.get("download_url"))])
+    asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
+    for item in asset_refs.get("april_outputs") or []:
+        if isinstance(item, dict):
+            chunks.extend([_text(item.get("filename")), _text(item.get("output_type")), _text(item.get("language"))])
     for key in ("entities", "visual_observations", "code_symbols", "file_purpose"):
         value = record.get(key)
         if isinstance(value, list):
-            chunks.extend(_text(part)[:400] for part in value[:12])
+            chunks.extend(_text(part)[:800] for part in value[:12])
         elif value:
-            chunks.append(_text(value)[:900])
-    return " ".join(part for part in chunks if part)[:9000]
+            chunks.append(_text(value)[:1800])
+    return " ".join(part for part in chunks if part)[:18000]
 
 
 
 # Exact structured values preserved separately from compressible dialogue prose.
 _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "graph": "graph", "graph_data": "graph", "chart": "graph", "plot": "graph",
+    "graph3d": "graph", "graph_3d": "graph", "3d_graph": "graph", "plot3d": "graph",
+    "plot_3d": "graph", "surface_plot": "graph", "surface_graph": "graph",
+    "scatter3d": "graph", "scatter_3d": "graph", "wireframe": "graph",
     "table": "table", "table_data": "table",
     "formula": "formula", "formula_data": "formula", "equation": "formula",
     "math": "formula", "latex": "formula", "physics_formula": "formula",
     "chemistry_formula": "formula", "biology_formula": "formula",
     "solution": "solution", "math_solution": "solution", "problem_solution": "solution",
     "worked_solution": "solution", "solution_steps": "solution",
+    # These types are part of the same Premium response/SceneContract. They are
+    # persisted in the existing JSONB dialogue pair, not in a parallel memory.
+    "link": "link", "links": "link", "url": "link", "link_card": "link", "source_link": "link",
+    "code": "code", "source_code": "code", "code_block": "code", "script": "code",
+    "diagram": "diagram", "diagram_data": "diagram", "scheme": "diagram", "schema_diagram": "diagram",
+    "flowchart": "diagram", "mermaid": "diagram",
+    "image": "image", "generated_image": "image", "gallery": "image", "visual": "image",
+    "screenshot": "image", "screen_shot": "image", "image_gallery": "image",
+    "file": "file", "document": "file", "document_file": "file", "text_file": "file",
+    "code_file": "file", "pdf": "file", "spreadsheet": "file", "presentation": "file",
+    "audio": "audio", "audio_file": "audio", "voice": "audio",
+    "video": "video", "video_file": "video",
 }
 
 _PROTECTED_DATA_KEYS = {
     "graph": {
         "points", "data_points", "series", "datasets", "traces", "x_values", "y_values",
-        "x_axis", "y_axis", "labels", "categories",
+        "x_axis", "y_axis", "z_axis", "axes", "labels", "categories", "z_values",
+        "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution",
+        "spheres", "objects_3d", "objects", "meshes", "geometry", "scene", "dimensions",
+        "three_d", "curves", "function", "expression", "equation", "formula", "x_domain",
+        "y_domain", "z_domain", "x_range", "y_range", "z_range", "domain", "visualization",
+        "surface_mode", "wave_effect", "wave", "waves", "wave_type", "wave_function",
+        "wave_amplitude", "wave_frequency", "wave_phase", "color_scale", "color_map", "colormap",
+        "colour_scale", "colour_map", "temperature_field", "thermal_field", "heat_field",
+        "field_type", "visualization_mode", "surface_style", "show_zero_plane", "zero_plane",
+        "color_domain", "axis_labels",
     },
-    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels"},
-    "formula": {"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions"},
+    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels", "data", "values", "items", "column_roles", "wrap", "download"},
+    "formula": {"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions", "math", "markdown", "content"},
     "solution": {
         "solution_steps", "derivation", "calculations", "given_values", "known_values",
         "unknowns", "variables", "parameters", "result",
     },
+    "link": {"url", "href", "uri", "target_url", "destination", "links", "link"},
+    "code": {"code", "source_code", "source", "language", "filename", "entry_point", "symbols"},
+    "diagram": {"svg", "svg_payload", "drawing", "nodes", "edges", "relations", "elements", "shapes", "vertices", "connectors", "mermaid", "source", "code", "geometry", "positions", "format", "layout", "direction"},
+    "image": {"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri", "image_data_uri", "image_base64", "base64"},
+    "file": {"url", "href", "path", "filename", "name", "content", "text", "file_base64", "base64", "b64_json", "data_uri", "file_data_uri", "content_base64", "bytes", "download_url"},
+    "audio": {"url", "src", "path", "filename", "mime_type", "audio_url", "audio_base64", "base64", "content_base64", "transcript"},
+    "video": {"url", "src", "path", "filename", "mime_type", "video_url", "video_base64", "base64", "content_base64", "frames", "duration", "poster"},
 }
 
 
@@ -1432,18 +3092,26 @@ def _protected_structured_kind(value: Any) -> str:
             tags.append(tag)
 
     renderer_map = {
-        "graphblock": "graph", "graphrenderer": "graph",
+        "graphblock": "graph", "graphrenderer": "graph", "graph3dblock": "graph", "surfaceplotrenderer": "graph",
         "tableblock": "table", "tablerenderer": "table",
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
+        "linkcard": "link", "linkrenderer": "link",
+        "codeblock": "code", "coderenderer": "code",
+        "diagramrenderer": "diagram", "diagramblock": "diagram", "schemerenderer": "diagram",
+        "galleryblock": "image", "imagerenderer": "image", "screenshotblock": "image",
+        "fileblock": "file", "documentblock": "file", "audioblock": "audio", "videoblock": "video",
     }
+    # The declared artifact type is more specific than a generic viewer. For
+    # example, both a link and a downloadable file can use LinkCard, but they
+    # need different persistence and continuation behavior.
+    for tag in tags:
+        if tag in _PROTECTED_STRUCTURED_TYPE_ALIASES:
+            return _PROTECTED_STRUCTURED_TYPE_ALIASES[tag]
     for key in ("renderer", "viewer"):
         renderer = _text(value.get(key)).lower().replace("_", "").replace("-", "").replace(" ", "")
         if renderer in renderer_map:
             return renderer_map[renderer]
-    for tag in tags:
-        if tag in _PROTECTED_STRUCTURED_TYPE_ALIASES:
-            return _PROTECTED_STRUCTURED_TYPE_ALIASES[tag]
 
     payload = value.get("payload") if isinstance(value.get("payload"), dict) else value
     keys = {str(key).lower() for key in payload} if isinstance(payload, dict) else set()
@@ -1456,6 +3124,20 @@ def _protected_structured_kind(value: Any) -> str:
     # Do not classify an arbitrary object with a generic `steps` field as maths.
     if keys.intersection({"solution_steps", "derivation", "calculations", "given_values", "known_values", "unknowns"}):
         return "solution"
+    if keys.intersection({"url", "href", "uri", "target_url", "destination"}):
+        return "link"
+    if keys.intersection({"code", "source_code", "language", "filename", "entry_point"}):
+        return "code"
+    if keys.intersection({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry"}):
+        return "diagram"
+    if keys.intersection({"image_url", "src", "asset_id", "asset_ref", "storage_key", "images", "image_data_uri", "image_base64"}):
+        return "image"
+    if keys.intersection({"file_base64", "file_data_uri", "download_url", "content_base64", "b64_json", "path"}):
+        return "file"
+    if keys.intersection({"audio_url", "audio_base64", "transcript"}):
+        return "audio"
+    if keys.intersection({"video_url", "video_base64", "frames", "poster"}):
+        return "video"
     return ""
 
 
@@ -1489,9 +3171,31 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         "type": kind,
         "renderer": _text(node.get("renderer") or node.get("viewer"))[:80],
     }
-    for key in ("title", "name", "label", "unit", "units", "x_axis_label", "y_axis_label"):
+    for key in (
+        "title", "name", "label", "unit", "units", "x_axis_label", "y_axis_label",
+        "url", "href", "uri", "target_url", "destination", "filename", "language",
+        "alt", "caption", "description", "image_url", "src", "asset_id", "asset_ref", "ref", "id",
+        "storage_key", "mime_type", "code", "source_code", "source", "svg", "mermaid",
+        "nodes", "edges", "elements", "shapes", "vertices", "connectors", "geometry",
+        "asset_message_id", "message_id", "source_message_id", "output_type", "asset_role",
+        "source_type", "original_filename", "size_bytes", "content_type", "entry_point", "symbols",
+    ):
         if node.get(key) not in (None, "", [], {}):
             category[key] = deepcopy(node[key])
+
+    # Code renderers sometimes put the literal source in content/text rather than
+    # code. Preserve it verbatim; those fields are otherwise UI envelopes below.
+    if kind == "code":
+        literal_code = next((node.get(key) for key in ("code", "source_code", "source", "content", "text", "markdown") if _text(node.get(key))), None)
+        if literal_code is not None:
+            category["code"] = deepcopy(literal_code)
+        for key in ("language", "filename", "entry_point", "symbols", "imports", "dependencies"):
+            if node.get(key) not in (None, "", [], {}):
+                category[key] = deepcopy(node[key])
+    if kind == "link":
+        for key in ("label", "title", "url", "href", "uri", "target_url", "destination", "description", "caption", "context"):
+            if node.get(key) not in (None, "", [], {}):
+                category[key] = deepcopy(node[key])
 
     # Canonical render blocks carry the exact machine values in `payload`.
     payload = node.get("payload") if isinstance(node.get("payload"), dict) else {}
@@ -1499,13 +3203,16 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         signal = node.get("render_signal") if isinstance(node.get("render_signal"), dict) else {}
         if isinstance(signal.get("payload"), dict):
             payload = signal["payload"]
-    if payload and _protected_node_richness(kind, payload):
+    if payload:
+        # The renderer's nested payload is the source of truth. Do not discard it
+        # just because a newer renderer introduced keys unknown to this version.
         category["payload"] = deepcopy(payload)
         return category
 
-    # Some room artifacts store data under `spec`; retain it when it holds values.
+    # Some room artifacts store data under `spec`; preserve unknown future schema
+    # fields losslessly once the enclosing node has been classified as a renderer.
     spec = node.get("spec") if isinstance(node.get("spec"), dict) else {}
-    if spec and _protected_node_richness(kind, spec):
+    if spec:
         category["spec"] = deepcopy(spec)
         return category
 
@@ -1524,6 +3231,150 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         if value not in (None, "", [], {}):
             category[key] = deepcopy(value)
     return category
+
+def _protected_source_answer(row: dict[str, Any], response: dict[str, Any]) -> str:
+    """Return the longest persisted user-visible answer, including legacy text blocks."""
+    candidates = [
+        _text(response.get("answer")), _text(response.get("content")),
+        _text(row.get("april_text") or row.get("april")),
+    ]
+    blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    for block in blocks:
+        if isinstance(block, dict) and _text(block.get("type")).lower() in {"text", "markdown", "message", "message_text"}:
+            candidates.append(_text(block.get("content") or block.get("text") or block.get("markdown")))
+    return max((candidate for candidate in candidates if candidate), key=len, default="")
+
+
+def _answer_link_items(answer: str) -> list[dict[str, Any]]:
+    """Extract exact URLs and their nearby explanation when links live in prose."""
+    if not answer:
+        return []
+    url_re = re.compile(r"https?://[^\s<>\]\"']+", re.IGNORECASE)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in url_re.finditer(answer):
+        url = match.group(0).rstrip(".,;:!?)»】}")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        start = answer.rfind("\n\n", 0, match.start())
+        start = 0 if start < 0 else start + 2
+        end = answer.find("\n\n", match.end())
+        end = len(answer) if end < 0 else end
+        context = re.sub(r"\s+", " ", answer[start:end]).strip()
+        markdown_label = ""
+        # Recover a Markdown link label if this URL belongs to [label](URL).
+        before = answer[max(0, match.start() - 260):match.start()]
+        md = re.search(r"\[([^\]]{1,180})\]\(\s*$", before)
+        if md:
+            markdown_label = md.group(1).strip()
+        items.append({
+            "kind": "link",
+            "source_field": "answer_url_extract",
+            "index": len(items),
+            "data": {
+                "type": "link", "url": url,
+                **({"label": markdown_label} if markdown_label else {}),
+                "context": context[:1600],
+            },
+        })
+        if len(items) >= 32:
+            break
+    return items
+
+
+def _answer_code_and_diagram_items(answer: str, existing_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Protect fenced code/diagram source even when a renderer block was not emitted."""
+    if not answer:
+        return []
+    found: list[dict[str, Any]] = []
+    seen = {
+        _text((item.get("data") or {}).get("code") or (item.get("data") or {}).get("source_code"))
+        for item in existing_items if isinstance(item, dict) and isinstance(item.get("data"), dict)
+    }
+    fence_re = re.compile(r"(?m)^\s*```([^\r\n`]*)\r?\n(.*?)^\s*```\s*$", re.DOTALL)
+    diagram_languages = {"mermaid", "dot", "graphviz", "plantuml", "svg", "d2"}
+    for match in fence_re.finditer(answer):
+        header = _text(match.group(1))
+        body = match.group(2).rstrip("\r\n")
+        if not body.strip() or body in seen:
+            continue
+        language = (header.split(None, 1)[0] if header else "text").lower()
+        kind = "diagram" if language in diagram_languages else "code"
+        start = answer.rfind("\n\n", 0, match.start())
+        start = 0 if start < 0 else start + 2
+        context = re.sub(r"\s+", " ", answer[start:match.start()]).strip()[-700:]
+        data: dict[str, Any] = {"type": kind, "language": language, "code": body}
+        if context:
+            data["context"] = context
+        if kind == "diagram" and language == "mermaid":
+            data["mermaid"] = body
+        found.append({"kind": kind, "source_field": "answer_fenced_source", "index": len(found), "data": data})
+        seen.add(body)
+        if len(found) >= 24:
+            break
+    return found
+
+
+def _answer_markdown_table_items(answer: str) -> list[dict[str, Any]]:
+    """Extract Markdown tables as exact cell arrays when the answer has no TableBlock."""
+    if not answer:
+        return []
+    lines = answer.splitlines()
+    items: list[dict[str, Any]] = []
+    index = 0
+    while index + 2 < len(lines):
+        header = lines[index].strip()
+        separator = lines[index + 1].strip()
+        if header.count("|") < 2 or not re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", separator):
+            index += 1
+            continue
+        def cells(line: str) -> list[str]:
+            value = line.strip().strip("|")
+            return [part.strip() for part in value.split("|")]
+        headers = cells(header)
+        rows: list[list[str]] = []
+        cursor = index + 2
+        while cursor < len(lines) and lines[cursor].strip().count("|") >= 2:
+            row_cells = cells(lines[cursor])
+            if len(row_cells) == len(headers):
+                rows.append(row_cells)
+            cursor += 1
+        if headers and rows:
+            before = "\n".join(lines[max(0, index - 2):index]).strip()
+            title = next((line.lstrip("# ").strip() for line in reversed(before.splitlines()) if line.strip()), "")
+            data = {"type": "table", "headers": headers, "rows": rows}
+            if title:
+                data["title"] = title[:180]
+            items.append({"kind": "table", "source_field": "answer_markdown_table", "index": len(items), "data": data})
+        index = max(index + 1, cursor)
+        if len(items) >= 16:
+            break
+    return items
+
+
+def _answer_formula_items(answer: str) -> list[dict[str, Any]]:
+    """Retain explicitly delimited math expressions from prose-only legacy answers."""
+    if not answer:
+        return []
+    items: list[dict[str, Any]] = []
+    patterns = (
+        (re.compile(r"\$\$(.+?)\$\$", re.DOTALL), "display_math"),
+        (re.compile(r"\\\[(.+?)\\\]", re.DOTALL), "display_math"),
+        (re.compile(r"\\\((.+?)\\\)", re.DOTALL), "inline_math"),
+    )
+    seen: set[str] = set()
+    for pattern, style in patterns:
+        for match in pattern.finditer(answer):
+            expression = match.group(1).strip()
+            if not expression or expression in seen:
+                continue
+            seen.add(expression)
+            items.append({"kind": "formula", "source_field": "answer_math_extract", "index": len(items), "data": {"type": "formula", "latex": expression, "style": style}})
+            if len(items) >= 24:
+                return items
+    return items
+
 
 def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     """Extract exact typed structures and their owning answer, avoiding duplicate envelopes."""
@@ -1562,7 +3413,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
         return found
 
     field_candidates: dict[str, list[dict[str, Any]]] = {}
-    for field_name in ("render_blocks", "artifacts", "scene_contract"):
+    for field_name in ("render_blocks", "artifacts", "scene_contract", "asset_refs"):
         raw = response.get(field_name)
         if isinstance(raw, (dict, list)):
             field_candidates[field_name] = collect_typed_nodes(raw, field_name)
@@ -1577,7 +3428,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("graph", "table", "formula", "solution"):
+    for kind in ("graph", "table", "formula", "solution", "link", "code", "diagram", "image", "file", "audio", "video"):
         if kind not in kinds:
             continue
         candidates_by_field = {
@@ -1610,6 +3461,26 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
                 "index": item["index"],
                 "data": _protected_node_payload(kind, item["data"]),
             })
+
+    source_answer = _protected_source_answer(row, response)
+    if source_answer:
+        known_urls = {
+            _text((item.get("data") or {}).get("url") or (item.get("data") or {}).get("href"))
+            for item in items if isinstance(item, dict) and isinstance(item.get("data"), dict)
+        }
+        for link_item in _answer_link_items(source_answer):
+            if _text((link_item.get("data") or {}).get("url")) not in known_urls:
+                items.append(link_item)
+        # Structured content may be present in the canonical answer even if the
+        # model returned only one generic text block. Extract only unambiguous,
+        # machine-marked forms so source code, Mermaid schemes, Markdown tables
+        # and delimited formulas still have a lossless continuation representation.
+        items.extend(_answer_code_and_diagram_items(source_answer, items))
+        typed_kinds = {_text(item.get("kind")).lower() for item in items if isinstance(item, dict)}
+        if "table" not in typed_kinds:
+            items.extend(_answer_markdown_table_items(source_answer))
+        if "formula" not in typed_kinds:
+            items.extend(_answer_formula_items(source_answer))
 
     if not items:
         # Older text-only responses can still be protected when the persisted
@@ -1665,12 +3536,82 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "items": items,
         # The answer binds values to labels/axes and preserves verbal solution steps
         # when a legacy renderer stored only a presentation envelope.
-        "source_answer": str(response.get("answer") or response.get("content") or row.get("april_text") or row.get("april") or ""),
+        "source_answer": source_answer,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     payload["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return payload
 
+
+
+def _query_needs_structured_evidence(query: str, query_modalities: set[str] | None = None) -> bool:
+    """Only inspect large saved renderer/attachment payloads when the request needs them.
+
+    A plain factual continuation ("tell me more about Newton") should be ranked from
+    dialogue text and topic identity, not by recursively decoding every old graph,
+    image and code block in the user's entire history. Asset edits, renderer requests,
+    and explicit references to saved files still use the lossless structured path.
+    """
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
+        return True
+    low = _text(query).lower().replace("ё", "е")
+    renderer_or_asset = re.search(
+        r"(?:\bфото\b|\bфотограф\w*|\bфотк\w*|картинк\w*|изображен\w*|снимк\w*|скриншот\w*|вложен\w*|"
+        r"документ\w*|файл\w*|график\w*|диаграмм\w*|таблиц\w*|формул\w*|"
+        r"уравнен\w*|схем\w*|чертеж\w*|код\w*|скрипт\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bfile\b|\bdocument\b|"
+        r"\bgraph\b|\bchart\b|\btable\b|\bformula\b|\bdiagram\b|\bcode\b)",
+        low, re.IGNORECASE,
+    )
+    operation = re.search(
+        r"(?:измен\w*|редакт\w*|передел\w*|улучш\w*|замен\w*|добав\w*|убер\w*|"
+        r"исправ\w*|перестро\w*|восстанов\w*|верни\w*|покажи\s+(?:снова|его|ее|её|это)|"
+        r"\bedit\w*|\bchange\w*|\bmodify\w*|\brevise\w*|\brestore\w*|\bremove\w*|\badd\b)",
+        low, re.IGNORECASE,
+    )
+    deictic = re.search(r"\b(?:это|этот|эта|эту|его|ее|её|них|нему|него|тот|та|it|this|that|its|them)\b", low)
+    return bool(renderer_or_asset or (operation and deictic) or _is_section_request(low))
+
+
+def _is_structured_work_branch(branch: dict[str, Any] | None) -> bool:
+    """Whether a saved active-work branch represents a concrete artifact/task lane."""
+    if not isinstance(branch, dict):
+        return False
+    kind = _text(branch.get("kind")).lower().replace("-", "_").replace(" ", "_")
+    return bool(re.search(
+        r"(?:^|_)(?:visual|image|graph|diagram|chart|formula|table|code|document|file|renderer|artifact)(?:_|$)",
+        kind,
+    ))
+
+
+def _structured_work_requested(
+    query: str,
+    interpretation: dict[str, Any] | None = None,
+    query_modalities: set[str] | None = None,
+) -> bool:
+    """Decide artifact/task relevance using the entire user turn and its interpreted outputs."""
+    data = interpretation if isinstance(interpretation, dict) else {}
+    modalities = set(query_modalities or set())
+    if modalities.intersection({"image", "file", "text_file"}):
+        return True
+    outputs = data.get("parent_requested_outputs") or data.get("requested_outputs") or data.get("output_types") or []
+    if not isinstance(outputs, (list, tuple, set)):
+        outputs = [outputs]
+    output_names = {_text(item).lower() for item in outputs if _text(item)}
+    structured_outputs = {
+        "image", "gallery", "graph", "diagram", "chart", "formula", "table",
+        "code", "source_code", "file", "document", "3d", "3d_graph",
+    }
+    if output_names.intersection(structured_outputs):
+        return True
+    if any(bool(data.get(flag)) for flag in (
+        "wants_image", "wants_graph", "wants_code", "wants_file",
+        "wants_links", "wants_formula", "wants_table", "wants_diagram", "wants_chart",
+    )):
+        return True
+    full_turn = _text(data.get("parent_request_text") or query)
+    return _query_needs_structured_evidence(full_turn, modalities)
 
 
 def _candidate_score(
@@ -1682,6 +3623,7 @@ def _candidate_score(
     now_ts: float | None = None,
     reference_followup: bool = False,
     query_modalities: set[str] | None = None,
+    structured_evidence_required: bool | None = None,
 ) -> dict[str, Any]:
     q = str(query or "").strip().lower()
     user = str(row.get("user_text") or "")
@@ -1689,12 +3631,25 @@ def _candidate_score(
     user_en = str(row.get("user_text_en") or "")
     april_en = str(row.get("april_text_en") or "")
 
+    requested_modalities = set(query_modalities or set())
+    needs_structured_evidence = (
+        bool(structured_evidence_required)
+        if structured_evidence_required is not None
+        else _query_needs_structured_evidence(q, requested_modalities)
+    )
+    # Keep the normal text-search path bounded. Exact renderer payloads and full
+    # attachments are restored from the selected source rows later, after ranking.
+    answer_for_search = april if needs_structured_evidence else april[:6000]
+    answer_en_for_search = april_en if needs_structured_evidence else april_en[:3000]
     query_tokens = _semantic_tokens(q)
     user_tokens = _semantic_tokens(user)
-    answer_tokens = _semantic_tokens(april)
-    attachment_evidence = _row_attachment_evidence(row)
-    memory_summary = _compact_memory_summary(row)
-    candidate_text = " ".join(x for x in (user, user_en, april, april_en, memory_summary, attachment_evidence) if x)
+    answer_tokens = _semantic_tokens(answer_for_search)
+    attachment_evidence = _row_attachment_evidence(row) if needs_structured_evidence else ""
+    memory_summary = (
+        _compact_memory_summary(row) if needs_structured_evidence
+        else _compact_memory_summary_lightweight(row)
+    )
+    candidate_text = " ".join(x for x in (user, user_en, answer_for_search, answer_en_for_search, memory_summary, attachment_evidence) if x)
     candidate_tokens = _semantic_tokens(candidate_text)
 
     lexical = fuzz.token_set_ratio(
@@ -1707,21 +3662,34 @@ def _candidate_score(
         if q and overlap > 0.0 else 0.0
     )
 
-    row_modalities = _row_modalities(row)
-    requested_modalities = set(query_modalities or set())
+    row_modalities = (
+        _row_modalities(row)
+        if needs_structured_evidence or requested_modalities.intersection({"image", "file", "text_file"})
+        else set()
+    )
     modality_match = (
         len(requested_modalities & row_modalities) / max(1, len(requested_modalities))
         if requested_modalities else 0.0
     )
     answer_overlap = _concept_overlap(query_tokens, answer_tokens)
     user_overlap = _concept_overlap(query_tokens, user_tokens)
-    entity_overlap = _explicit_entity_overlap(query, row)
+    entity_overlap = _explicit_entity_overlap(query, row, max_chars=None if needs_structured_evidence else 6000)
     query_subjects = _subject_tokens(query)
-    row_subjects = _row_subject_tokens(row)
+    row_subjects = (
+        _row_subject_tokens(row) if needs_structured_evidence
+        else _subject_tokens(_row_subject_text_lightweight(row))
+    )
     subject_overlap = _subject_overlap(query_subjects, row_subjects)
     subject_mismatch = _subject_conflicts(query_subjects, row_subjects)
-    numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects)
-    protected_data = _protected_structured_data_from_row(row)
+    numeric_anchor_overlap = _query_numeric_overlap(query, row, query_subjects, row_subjects)
+    protected_data = _protected_structured_data_from_row(row) if needs_structured_evidence else {}
+    if protected_data and _text(row.get("topic_id")):
+        # Preserve the exact originating message while binding the payload to the
+        # topic and time range where it entered the dialogue.
+        protected_data["topic_id"] = _text(row.get("topic_id"))
+        protected_data["topic_origin_message_id"] = _text(row.get("topic_origin_message_id"))
+        protected_data["source_message_id"] = _text(row.get("message_id"))
+        protected_data["topic_origin_at"] = row.get("topic_origin_at")
     data_richness = _structured_data_richness(protected_data)
     source_data_alignment = _source_data_alignment(row, protected_data=protected_data) if data_richness else 0.0
 
@@ -1809,11 +3777,19 @@ def _candidate_score(
         "dialog_id": row_dialog,
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
-        "topic": _topic_label(row),
-        "sections": _dialogue_section_map(row),
+        "topic": _topic_label(row) if needs_structured_evidence else _topic_label_lightweight(row),
+        "topic_id": _text(row.get("topic_id")),
+        "topic_origin_message_id": _text(row.get("topic_origin_message_id")),
+        "topic_origin_at": row.get("topic_origin_at"),
+        "topic_last_at": row.get("topic_last_at"),
+        "topic_summary": _text(row.get("topic_summary"))[:440],
+        "sections": _dialogue_section_map(row) if _is_section_request(q) else [],
         "is_pending_clarification": _row_is_pending_clarification(row),
-        "memory_summary": _compact_memory_summary(row),
-        "attachment_evidence": attachment_evidence[:1800],
+        "memory_summary": (
+            _compact_memory_summary(row) if needs_structured_evidence
+            else _compact_memory_summary_lightweight(row)
+        ),
+        "attachment_evidence": attachment_evidence[:3600],
         "protected_structured_data": protected_data,
     }
 
@@ -1836,14 +3812,24 @@ def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str,
         for item in raw_sections[:limit]:
             if not isinstance(item, dict):
                 continue
-            heading = _text(item.get("heading") or item.get("title"))[:90]
-            summary = re.sub(r"\s+", " ", _text(item.get("summary")))[:140]
+            heading = _text(item.get("heading") or item.get("title"))[:180]
+            summary = re.sub(r"\s+", " ", _text(item.get("summary")))[:280]
             if heading:
                 try:
                     order = int(item.get("order") or len(sections) + 1)
                 except (TypeError, ValueError):
                     order = len(sections) + 1
-                sections.append({"heading": heading, "summary": summary, "order": order})
+                section_row = {"heading": heading, "summary": summary, "order": order}
+                parent_heading = _text(item.get("parent_heading") or item.get("parent_section"))[:180]
+                parent_id = _text(item.get("parent_id") or item.get("parent_section_id"))[:120]
+                section_id = _text(item.get("section_id") or item.get("id"))[:120]
+                if parent_heading:
+                    section_row["parent_heading"] = parent_heading
+                if parent_id:
+                    section_row["parent_id"] = parent_id
+                if section_id:
+                    section_row["section_id"] = section_id
+                sections.append(section_row)
     if sections:
         return sections
 
@@ -1854,11 +3840,11 @@ def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str,
     for idx, line in enumerate(lines):
         match = re.match(r"^\s*#{1,4}\s+(.+?)\s*#*\s*$", line.strip())
         if match and match.group(1).strip():
-            found.append((idx, match.group(1).strip()[:90]))
+            found.append((idx, match.group(1).strip()[:180]))
     for pos, (idx, heading) in enumerate(found[:limit]):
         end = found[pos + 1][0] if pos + 1 < len(found) else len(lines)
         body = re.sub(r"\s+", " ", " ".join(x.strip() for x in lines[idx + 1:end] if x.strip()))
-        sections.append({"heading": heading, "summary": body[:140], "order": pos + 1})
+        sections.append({"heading": heading, "summary": body[:280], "order": pos + 1})
     if sections:
         return sections
 
@@ -1882,14 +3868,22 @@ def _dialogue_section_map(row: dict[str, Any], limit: int = 8) -> list[dict[str,
                 heading += "…"
             summary = plain
         if heading:
-            sections.append({"heading": heading[:90], "summary": summary[:140], "order": len(sections) + 1})
+            sections.append({"heading": heading[:180], "summary": summary[:280], "order": len(sections) + 1})
     return sections
+
+
+def _compact_memory_summary_lightweight(row: dict[str, Any]) -> str:
+    """Bounded summary from text columns, without scanning a full multimedia answer."""
+    direct = _text(str(row.get("memory_summary") or "")[:1800])
+    if not direct:
+        direct = _text(str(row.get("april_text") or row.get("april_text_en") or "")[:1800])
+    return re.sub(r"\s+", " ", direct[:1800])[:440]
 
 
 def _compact_memory_summary(row: dict[str, Any]) -> str:
     direct = _text(row.get("memory_summary"))
     if direct:
-        return re.sub(r"\s+", " ", direct)[:220]
+        return re.sub(r"\s+", " ", direct)[:440]
     response = _parse_json(row.get("structured_response"))
     metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
     record = response.get("dialogue_memory_record")
@@ -1900,150 +3894,189 @@ def _compact_memory_summary(row: dict[str, Any]) -> str:
         summary = _text(response.get("summary"))
     if not summary:
         summary = _text(row.get("april_text"))
-    return re.sub(r"\s+", " ", summary)[:220]
+    return re.sub(r"\s+", " ", summary)[:440]
 
 
-def _compact_dialogue_assets(item: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Return bounded, message-scoped asset references without binary payloads."""
-    req = _parse_json(item.get("structured_request"))
-    resp = _parse_json(item.get("structured_response"))
-    req_index = req.get("attachment_index") if isinstance(req.get("attachment_index"), list) else []
-    asset_refs = resp.get("asset_refs") if isinstance(resp.get("asset_refs"), dict) else {}
-    scene = resp.get("scene_contract") if isinstance(resp.get("scene_contract"), dict) else {}
-    scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
-    scene_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
-    message_id = _text(item.get("message_id"))
-
-    def compact(items: Any, role: str) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        if not isinstance(items, list):
-            return result
-        for raw in items[:4]:
-            if not isinstance(raw, dict):
-                continue
-            entry = {
-                "filename": _text(raw.get("filename"))[:140],
-                "kind": _text(raw.get("kind") or raw.get("output_type")).lower()[:24],
-                "mime_type": _text(raw.get("mime_type"))[:80],
-                "asset_role": _text(raw.get("asset_role") or role)[:24],
-                "message_id": _text(raw.get("asset_message_id") or raw.get("message_id") or message_id)[:120],
-                "output_type": _text(raw.get("output_type"))[:32],
-                "sha256": _text(raw.get("sha256"))[:64],
-            }
-            if entry["filename"] or entry["kind"] or entry["message_id"]:
-                result.append(entry)
-        return result
-
-    user_inputs = compact(asset_refs.get("source_inputs") or scene_assets.get("user_inputs"), "user_input")
-    if not user_inputs:
-        user_inputs = compact(req_index, "user_input")
-    april_outputs = compact(asset_refs.get("april_outputs") or scene_assets.get("april_outputs"), "april_output")
-
-    # Render-only artifacts (graphs, tables, diagrams and formulas) do not always
-    # have a binary asset_ref. Their canonical SceneContract blocks are already
-    # stored with this dialogue pair, so expose a bounded semantic/data preview
-    # that can be continued without asking the user to recreate the artifact.
-    render_blocks = resp.get("render_blocks") if isinstance(resp.get("render_blocks"), list) else scene.get("render_blocks")
-    if isinstance(render_blocks, list):
-        known = {(entry.get("kind"), entry.get("filename")) for entry in april_outputs if isinstance(entry, dict)}
-        for block in render_blocks[:8]:
-            if not isinstance(block, dict):
-                continue
-            kind = _text(block.get("type") or block.get("representation") or block.get("renderer")).lower()[:24]
-            if not kind:
-                continue
-            filename = _text(block.get("filename") or block.get("name"))[:140]
-            signature = (kind, filename)
-            if signature in known:
-                continue
-            def safe_preview_value(value: Any, depth: int = 0) -> Any:
-                if depth > 4:
-                    return ""
-                if isinstance(value, str):
-                    candidate = value.strip()
-                    if re.match(r"(?is)^data:[^;]+;base64,", candidate):
-                        return ""
-                    if len(candidate) > 1000 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", candidate):
-                        return ""
-                    return candidate[:1800]
-                if isinstance(value, dict):
-                    clean: dict[str, Any] = {}
-                    for key, child in list(value.items())[:32]:
-                        normalized_key = str(key).lower()
-                        if any(secret in normalized_key for secret in (
-                            "base64", "data_uri", "image_url", "file_data", "content_base64",
-                        )):
-                            continue
-                        safe_child = safe_preview_value(child, depth + 1)
-                        if safe_child not in (None, "", [], {}):
-                            clean[str(key)[:80]] = safe_child
-                    return clean
-                if isinstance(value, list):
-                    return [safe for child in value[:32]
-                            if (safe := safe_preview_value(child, depth + 1)) not in (None, "", [], {})]
-                if isinstance(value, (int, float, bool)) or value is None:
-                    return value
-                return _text(value)[:180]
-
-            preview_source = (
-                block.get("description") or block.get("summary") or block.get("explanation")
-                or block.get("content") or block.get("code") or block.get("text") or ""
-            )
-            safe_preview = safe_preview_value(preview_source)
-            if isinstance(safe_preview, (dict, list)):
-                preview = json.dumps(safe_preview, ensure_ascii=False, default=str)
-            else:
-                preview = _text(safe_preview)
-            structured = block.get("payload") if isinstance(block.get("payload"), dict) else block.get("data")
-            safe_structured = safe_preview_value(structured) if isinstance(structured, (dict, list)) else None
-            if isinstance(safe_structured, (dict, list)) and safe_structured:
-                structured_text = json.dumps(safe_structured, ensure_ascii=False, default=str)
-                preview = (preview + " | data: " + structured_text).strip(" |")
-            entry = {
-                "filename": filename,
-                "kind": kind,
-                "asset_role": "april_output",
-                "message_id": message_id,
-                "output_type": kind,
-                "title": _text(block.get("title") or block.get("name"))[:120],
-                "language": _text(block.get("language") or block.get("lang"))[:32],
-                "structured_preview": preview[:1800],
-            }
-            if entry["kind"] or entry["structured_preview"]:
-                april_outputs.append(entry)
-                known.add(signature)
-    return {"user_inputs": user_inputs, "april_outputs": april_outputs[:8]}
+def _temporal_neighbor(item: dict[str, Any], side: str) -> dict[str, Any]:
+    """Create a small, factual descriptor for the closest retained pair near a time gap."""
+    try:
+        created_at = float(item.get("created_at") or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    try:
+        at_label = datetime.fromtimestamp(created_at, tz=timezone.utc).astimezone(
+            ZoneInfo("Europe/Kyiv")
+        ).strftime("%d.%m.%Y %H:%M") if created_at > 0 else "время неизвестно"
+    except (TypeError, ValueError, OverflowError, OSError):
+        at_label = "время неизвестно"
+    topic = _topic_label(item) or _text(item.get("user_text") or item.get("user"))[:120] or "Тема без названия"
+    user_text = _text(item.get("user") or item.get("user_text"))[:220]
+    summary = _compact_memory_summary(item)[:300]
+    return {
+        "side": side,
+        "created_at": created_at or None,
+        "time_label": at_label,
+        "topic": topic[:180],
+        "user": user_text,
+        "summary": summary,
+        "message_id": _text(item.get("message_id"))[:120],
+    }
 
 
 def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     sections = _dialogue_section_map(item)
-    # Keep both the assistant's actual last reply (including a question/action
-    # requested from the user) and its compact summary. The pair is the unit of
-    # dialogue continuity; neither speaker is discarded.
+    # Do not feed the previous long explanation back into the next prompt. Retain
+    # a compact summary plus McDowell's ordered section index instead.
     outline = _compact_memory_summary(item)
-    assistant_reply = _text(item.get("april") or item.get("april_text"))
     if not outline:
-        outline = assistant_reply[:220]
+        outline = _text(item.get("april") or item.get("april_text"))[:360]
     modalities = set(item.get("row_modalities") or [])
     has_asset = bool(modalities & {"image", "file", "text_file", "voice"})
-    evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:900] if has_asset else ""
+    evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:1800] if has_asset else ""
+    thread = _dialogue_thread_metadata(item)
+    topic_id = _text(item.get("topic_id") or thread.get("topic_id"))
+    origin_message_id = _text(
+        item.get("topic_origin_message_id") or thread.get("topic_origin_message_id")
+        or thread.get("origin_message_id") or item.get("origin_message_id") or item.get("message_id")
+    )
+    source_message_id = _text(item.get("message_id"))
+    _, response_record, _ = _response_and_request_records(item)
+    raw_blocks = response_record.get("render_blocks") if isinstance(response_record.get("render_blocks"), list) else []
+    response_blocks = raw_blocks
+    response_artifacts = response_record.get("artifacts") if isinstance(response_record.get("artifacts"), list) else []
+    assistant_structured_output: list[dict[str, Any]] = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+        if block_type not in {
+            "table", "table_data", "diagram", "graph", "chart", "plot",
+            "formula", "equation", "code", "source_code", "image", "gallery",
+            "video", "audio", "scene", "layout", "visual", "renderer_scene",
+        }:
+            continue
+        safe_block = deepcopy(block)
+        def _strip_binary(value: Any, depth: int = 0) -> Any:
+            if depth > 10:
+                return None
+            if isinstance(value, dict):
+                cleaned = {}
+                for key, child in value.items():
+                    normalized_key = str(key).lower()
+                    if normalized_key in {"image_base64", "base64_data", "binary_payload", "raw_bytes"}:
+                        continue
+                    if normalized_key in {"src", "data_uri", "image_data", "image_base64", "video_data", "audio_data"}:
+                        if isinstance(child, str) and (child.strip().lower().startswith("data:") or normalized_key in {"src", "image_data"}):
+                            continue
+                    cleaned[key] = _strip_binary(child, depth + 1)
+                return cleaned
+            if isinstance(value, list):
+                return [_strip_binary(child, depth + 1) for child in value[:1000]]
+            if isinstance(value, str) and value.strip().lower().startswith("data:image/"):
+                return "[image asset stored separately]"
+            return value
+        safe_block = _strip_binary(safe_block)
+        try:
+            if len(json.dumps(safe_block, ensure_ascii=False, default=str)) <= 24000:
+                assistant_structured_output.append(safe_block)
+        except Exception:
+            pass
+    assistant_last_message = _text(item.get("april_text") or item.get("april") or item.get("assistant_text"))
+    user_last_message = _text(item.get("user_text") or item.get("user"))
+    pair_subjects = _subject_tokens(" ".join((user_last_message, assistant_last_message)))
+    metadata_topic = _text(item.get("topic") or thread.get("topic"))
+    metadata_summary = _text(thread.get("branch_summary") or thread.get("summary"))
+    if pair_subjects and metadata_topic and _subject_conflicts(pair_subjects, _subject_tokens(metadata_topic)):
+        metadata_topic = ""
+    if pair_subjects and metadata_summary and _subject_conflicts(pair_subjects, _subject_tokens(metadata_summary)):
+        metadata_summary = ""
+    # A future turn must know exactly what April said and what she created. Keep
+    # compact artifact descriptors alongside the exact answer; binary payloads
+    # remain in the durable asset store and are never copied into dialogue text.
+    assistant_artifact_index: list[dict[str, Any]] = []
+    seen_artifacts: set[tuple[str, str]] = set()
+    for artifact in [
+        *response_artifacts,
+        *[block for block in response_blocks if isinstance(block, dict)],
+    ]:
+        if not isinstance(artifact, dict):
+            continue
+        kind = _text(artifact.get("kind") or artifact.get("type") or artifact.get("artifact_type") or artifact.get("output_type")).lower()
+        artifact_id = _text(artifact.get("artifact_id") or artifact.get("asset_id") or artifact.get("id") or artifact.get("message_id"))
+        key = (kind, artifact_id or _text(artifact.get("filename") or artifact.get("title")))
+        if key in seen_artifacts:
+            continue
+        seen_artifacts.add(key)
+        descriptor = {
+            name: _text(artifact.get(name))[:220]
+            for name in (
+                "kind", "type", "artifact_type", "output_type", "title", "label", "summary",
+                "description", "filename", "mime_type", "renderer", "viewer", "representation",
+                "asset_id", "artifact_id", "id", "message_id", "source_message_id",
+                "operation", "image_operation", "edit_operation", "edit_mode", "action",
+                "source_asset_id", "source_asset_message_id", "asset_role", "generation_model",
+                "quality", "request_anchor", "prompt_summary", "visual_operation",
+                "topic_id", "branch_id", "origin_message_id", "parent_message_id", "artifact_family",
+                "revision_of", "revision_chain_id", "revision_status", "supersedes",
+                "derived_from_artifact_id", "source_topic_id", "source_branch_id",
+            )
+            if artifact.get(name) not in (None, "", [], {})
+        }
+        for lineage_number in ("revision_number",):
+            if artifact.get(lineage_number) is not None:
+                try:
+                    descriptor[lineage_number] = max(1, int(artifact.get(lineage_number)))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        for count_key in ("row_count", "column_count", "node_count", "edge_count", "width", "height", "size_bytes"):
+            if artifact.get(count_key) is not None:
+                try:
+                    descriptor[count_key] = int(artifact.get(count_key))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        if descriptor:
+            assistant_artifact_index.append(descriptor)
+        if len(assistant_artifact_index) >= 10:
+            break
+    for section in sections:
+        if isinstance(section, dict):
+            section["topic_id"] = topic_id
+            section["topic_origin_message_id"] = origin_message_id
+            section["source_message_id"] = _text(section.get("message_id") or source_message_id)
     return {
         "turn": item.get("turn_index"),
-        "created_at": float(item.get("created_at") or 0) if item.get("created_at") else None,
-        "history_time_relation": _text(item.get("history_time_relation")),
-        "history_time_label": _text(item.get("history_time_label"))[:140],
-        "history_age_minutes": item.get("history_age_minutes"),
-        "history_gap_minutes": item.get("history_gap_minutes"),
-        "user": _text(item.get("user") or item.get("user_text"))[:240],
-        "april": assistant_reply[:420] if assistant_reply else outline[:220],
-        "april_summary": outline[:220],
-        "topic": _text(item.get("topic"))[:100],
+        "user": _text(item.get("user") or item.get("user_text"))[:360],
+        "april": outline[:440],
+        "assistant_last_message": assistant_last_message[:5200],
+        "assistant_structured_output": assistant_structured_output[:8],
+        "assistant_artifact_index": assistant_artifact_index[:10],
+        "topic": (metadata_topic or _text(item.get("user_text") or item.get("user"))[:200])[:200],
+        "topic_id": topic_id,
+        "topic_origin_message_id": _text(item.get("topic_origin_message_id") or thread.get("topic_origin_message_id") or thread.get("origin_message_id")),
+        "origin_message_id": origin_message_id,
+        "branch_id": _text(item.get("branch_id") or thread.get("branch_id") or thread.get("work_id")),
+        "parent_message_id": _text(item.get("parent_message_id") or thread.get("parent_message_id")),
+        "branch_summary": metadata_summary[:640],
+        "artifact_index": [
+            dict(artifact) for artifact in (thread.get("artifact_index") or [])
+            if isinstance(artifact, dict)
+        ][:8],
+        "recent_steps": [
+            dict(step) for step in (thread.get("recent_steps") or [])
+            if isinstance(step, dict)
+        ][-18:],
+        "question_sequence": [
+            dict(step) for step in (thread.get("question_sequence") or [])
+            if isinstance(step, dict)
+        ][-24:],
+        "topic_origin_at": item.get("topic_origin_at"),
+        "topic_last_at": item.get("topic_last_at"),
+        "source_message_id": _text(item.get("message_id")),
         "sections": sections,
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
         "attachment_evidence": evidence,
-        "dialogue_assets": _compact_dialogue_assets(item),
         "context_binding": {
             "subject_terms": list(item.get("subject_terms") or [])[:12],
             "numeric_anchor_overlap": float(item.get("numeric_anchor_overlap") or 0),
@@ -2075,33 +4108,28 @@ _SECTION_TOPIC_NOISE = _SECTION_QUERY_NOISE | {
 # Keeping this separate from the general stop-word list prevents names and subject nouns
 # from being removed when selecting relevant memories.
 _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
-    "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
+    "говор", "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
     "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
-    "разговоры", "разговоров", "разговорам", "разговорами", "разговорах",
-    "история", "истории", "историю", "историей", "истории", "диалог", "диалога", "диалоге",
-    "диалоги", "диалогов", "диалогам", "диалогами", "диалогах", "общение", "общения",
-    "переписка", "переписки", "переписку", "перепиской", "сообщение", "сообщения",
-    "сообщений", "сообщениям", "сообщениями", "сообщениях",
+    "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
     "сегодня", "вчера", "позавчера", "сейчас", "раньше", "тогда", "недавно",
-    "время", "времен", "последнее", "последний", "последнюю", "последней",
-    "последние", "последних", "последнего", "последнюю", "итак", "вообще", "вообщем",
-    "назови", "назвать", "назад", "тому", "час", "часа", "часов", "ч", "минут", "минуту",
-    "минуты", "минутой", "день", "дня", "дней", "сутки", "суток",
-    "полчаса", "примерно", "около", "приблизительно", "утра", "вечера",
-    "ночью", "днем", "днём", "вечером", "утром", "в", "один", "одна", "одно",
-    "одну", "два", "две", "пару", "пара", "три", "четыре", "пять", "шесть",
-    "семь", "восемь", "девять", "десять", "полтора", "полторы", "говорим",
-    "говорить", "говорю", "говорят", "говоришь", "общаемся", "обсуждаем",
     "прошлый", "прошлая", "прошлое", "прошлую", "предыдущий", "предыдущая",
-    "предыдущее", "предыдущую", "первые", "первый", "первая", "первое", "первых",
-    "самые", "старые", "старый", "старая", "ранние", "давние", "последние",
-    "последних", "покажи", "покажите", "скажи", "скажите", "назови", "назовите",
-    "перечисли", "перечислите", "дай", "дайте", "выведи", "найди", "найдите",
-    "напомни", "вспомни", "помнишь", "помним",
+    "предыдущее", "предыдущую", "напомни", "вспомни", "помнишь", "помним",
     "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
     "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
+    # Demonstratives in questions such as “что такое гравитация?” are grammar,
+    # not the requested subject. Leaving “такое” here let it falsely match a
+    # historical topic and inject that unrelated pair into a NEW request.
+    "такое", "такой", "такая", "такие", "такого", "такую", "таком", "таким", "таких", "такова", "таков",
     "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
+    "последних", "последние", "час", "часа", "часов", "минут", "минуты", "дней", "дня", "недели",
+    "назад", "хоть", "примерно", "около", "время", "времени", "помни", "помниш", "помнишь", "вспоминаешь",
+    "list", "topic", "topics", "show", "history", "conversation", "conversations", "talked", "talking", "discuss", "discussed",
+    "тем", "темами", "темах", "топик", "топика", "топики", "топиков", "диалогов", "разговоров", "обсуждении", "обсуждение",
+    "сегодняшний", "утром", "вечером", "ночью", "период", "периода", "время", "времени",
+    "октября", "ноября", "декабря", "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday", "hours", "hour", "minutes", "minute", "yesterday", "today", "last",
 }
 _SECTION_REQUEST_MARKERS = (
     "подроб", "применен", "раздел", "пункт", "часть", "расскажи больше", "объясни подробнее",
@@ -2124,536 +4152,122 @@ def _fuzzy_token_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> 
         ):
             matched += 1
             continue
-        if len(query_token) >= 5 and any(fuzz.ratio(query_token, candidate) >= 76 for candidate in candidate_list if len(candidate) >= 5):
+        if len(query_token) >= 5 and any(
+            len(candidate) >= 5 and (
+                fuzz.ratio(query_token, candidate) >= 76
+                # Compare the first five characters as well as the full inflected
+                # form. This tolerates one leading typo plus a Russian case ending
+                # (e.g. "ыизику" -> "физика") without dropping the topic entirely.
+                or fuzz.ratio(query_token[:5], candidate[:5]) >= 76
+            )
+            for candidate in candidate_list
+        ):
+            matched += 1
+    return matched / max(1, len(query_tokens))
+
+
+def _history_topic_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> float:
+    """Strict overlap for selecting a past *topic*, distinct from typo-tolerant pair search.
+
+    The general fuzzy matcher tolerates one edit in the first five letters. That
+    is useful for a direct typo like “ыизика” -> “физика”, but it can also make
+    unrelated words such as “гравитация” and “правила” look like a topic match.
+    History-topic selection therefore requires a shared morphological prefix or
+    a strong whole-token match before it counts a subject as found.
+    """
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    matched = 0
+    candidates = list(candidate_tokens)
+    for query_token in query_tokens:
+        if query_token in candidate_tokens or any(
+            len(candidate) >= 5 and len(query_token) >= 5
+            and (query_token[:5] == candidate[:5]
+                 or query_token.startswith(candidate[:6])
+                 or candidate.startswith(query_token[:6]))
+            for candidate in candidates
+        ):
+            matched += 1
+            continue
+        if len(query_token) >= 6 and any(
+            len(candidate) >= 6 and fuzz.ratio(query_token, candidate) >= 82
+            for candidate in candidates
+        ):
             matched += 1
     return matched / max(1, len(query_tokens))
 
 
 def _topic_query_overlap(query: str, topic: str) -> float:
     """Overlap only on topic-bearing words, not generic continuation vocabulary."""
-    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE
+    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE - _CONTEXT_GENERIC_TERMS
     topic_tokens = _topic_tokens(topic)
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
 
 
-# Discourse around returning to a subject is not itself the subject. This separate
-# vocabulary is intentionally used only by the second-stage topic-vector search so
-# the existing general recall and entity ranking keep their established behavior.
-_TOPIC_REFERENCE_NOISE = _SECTION_TOPIC_NOISE | {
-    "хорошо", "тогда", "остановился", "остановилась", "остановились", "остановится",
-    "останавливались", "хотел", "хотела", "хотели", "чтобы", "развей", "развейте",
-    "развить", "разверни", "разверните", "тему", "темы", "тема", "мы", "ты", "вы",
-    "на", "чем", "как", "бы", "мне", "нам", "вам", "наш", "наша", "наше", "наши",
-    "нашем", "нашей", "нашего", "обсуждали", "обсуждал", "обсуждала", "обсуждение",
-    "обсуждения", "говорили", "говорил", "говорила", "говорим", "разговор", "разговора",
-    "предыдущий", "предыдущая", "предыдущем", "предыдущую", "прежний", "прежняя",
-    "прежнем", "актуальный", "актуальная", "актуальную", "именно", "пожалуйста",
-    "где", "что", "кто", "когда", "почему", "зачем",
-}
+def _is_broad_history_overview_query(query: str) -> bool:
+    """Recognize overview/recall prompts that ask about the conversation itself.
 
-
-def _topic_reference_query_tokens(query: str) -> set[str]:
-    """Extract the named subject from a continuation sentence, not its discourse."""
-    discourse_roots = (
-        "продолж", "развей", "разверни", "разверните", "останов", "обсужд",
-        "хотел", "хорош", "говорил", "говорила", "говорили",
-    )
-    return {
-        token for token in (_semantic_tokens(query) - _TOPIC_REFERENCE_NOISE)
-        if not token.isdigit() and len(token) > 2
-        and not any(token.startswith(root) for root in discourse_roots)
-    }
-
-
-def _rank_topic_vector_candidates(
-    query: str,
-    rows: list[dict[str, Any]],
-    *,
-    limit: int = 8,
-) -> list[dict[str, Any]]:
-    """Second-stage search inside retained history by topic, section and content.
-
-    Unlike the active-turn ranker, this searches *all* retained rows. It favors the
-    user's named topic/section over recency, while requiring more than a single weak
-    word overlap so a recent history-list answer cannot masquerade as a topic match.
+    Such prompts must use the chronological topic inventory, not lexical matching
+    against the words "April", "talked", or "today" in old answers. A named subject
+    (for example, "what did we discuss about Einstein") remains subject-specific.
     """
-    query_tokens = _topic_reference_query_tokens(query)
-    if not query_tokens:
-        return []
-    query_subjects = _subject_tokens(query)
-    ranked: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict) or _row_is_pending_clarification(row):
-            continue
-        # A history-list answer may mention the exact target topic in its summary
-        # ("math overview, algebra, ..."). It is evidence about the lookup, not the
-        # underlying topic branch, so never let it become the continuation anchor.
-        row_user_text = _text(row.get("user_text") or row.get("user_text_en"))
-        if row_user_text and _is_history_request(row_user_text):
-            continue
-        topic = _topic_label(row)
-        sections = _dialogue_section_map(row)
-        section_text = " ".join(
-            f"{_text(section.get('heading'))} {_text(section.get('summary'))}"
-            for section in sections if isinstance(section, dict)
-        )
-        summary = _compact_memory_summary(row)
-        searchable = " ".join((
-            topic, _row_subject_text(row), _text(row.get("user_text")),
-            _text(row.get("user_text_en")), summary, section_text,
-        ))
-        content_tokens = _semantic_tokens(searchable)
-        topic_tokens = _topic_tokens(topic)
-        section_tokens = _semantic_tokens(section_text)
-        content_overlap = _fuzzy_token_overlap(query_tokens, content_tokens)
-        topic_overlap = _fuzzy_token_overlap(query_tokens, topic_tokens)
-        section_overlap = _fuzzy_token_overlap(query_tokens, section_tokens) if section_tokens else 0.0
-        subject_overlap = _subject_overlap(query_subjects, _row_subject_tokens(row))
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip(" .,!?:;—-")
+    if not low:
+        return False
+    named_subject = bool(re.search(
+        r"(?:\bпро\s+[\w\u0080-\uffff]+|\bо(?!\s+(?:чем|чём|том|этом|нашем|нашей|наших)\b)\s+[\w\u0080-\uffff]+|"
+        r"\bоб\s+(?!этом\b)[\w\u0080-\uffff]+|\b(?:насчет|касательно|относительно|по поводу)\s+[\w\u0080-\uffff]+|"
+        r"\b(?:about|regarding|concerning)\s+(?!today\b|yesterday\b|now\b|recently\b|earlier\b|this\s+(?:week|month|year)\b)[a-z\u0080-\uffff]+)",
+        low,
+    ))
+    if named_subject:
+        return False
+    patterns = (
+        r"(?:^|\b)(?:о чем|о чём) (?:мы\s+)?(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:говорили|обсуждали|общались|разговаривали)(?:\s+(?:сегодня|вчера|недавно))?",
+        r"(?:^|\b)(?:что мы\s+(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:обсуждали|говорили|делали|решили|успели))",
+        r"(?:^|\b)(?:напомни|вспомни|покажи|перечисли|суммируй|резюмируй)\w*.{0,55}(?:разговор|переписк|обсуждени|истори|темы|диалог)",
+        r"(?:^|\b)(?:покажи|суммируй|резюмируй)\w*.{0,35}(?:истори\w* диалог|истори\w* переписк|наши темы)",
+        r"(?:^|\b)(?:what did we (?:talk|discuss) about|what have we discussed|what were we talking about|summari[sz]e our conversation|recap our conversation|what did we do today)",
+        r"(?:^|\b)(?:remind me what we (?:said|discussed|worked on)|show me our conversation history)",
+    )
+    if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in patterns):
+        return True
+    # Compact generic phrasings such as "история диалога за сегодня" and
+    # "наши темы за день" are overview requests too.
+    return bool(re.search(
+        r"(?:истори\w* (?:диалог\w*|переписк\w*)|наши темы|темы разговора).{0,35}(?:сегодня|вчера|за день|за неделю|today|yesterday|this week)?$",
+        low,
+        re.IGNORECASE,
+    ))
 
-        # A single matching word in a long assistant answer is not enough. A strong
-        # match in either the topic label or an indexed section heading is valid;
-        # this lets a named subtopic lead back to its parent overview even when the
-        # original user prompt used a broader heading.
-        if max(topic_overlap, section_overlap) < 0.50 and content_overlap < 0.75:
-            continue
-        score = (
-            0.50 * topic_overlap
-            + 0.25 * section_overlap
-            + 0.20 * content_overlap
-            + 0.05 * subject_overlap
-        )
-        if score < 0.34:
-            continue
-        ranked.append({
-            "row": row,
-            "score": round(score, 6),
-            "topic_overlap": round(topic_overlap, 6),
-            "section_overlap": round(section_overlap, 6),
-            "content_overlap": round(content_overlap, 6),
-            "subject_overlap": round(subject_overlap, 6),
-            "topic": topic,
-            "created_at": float(row.get("created_at") or 0),
-            "message_id": _text(row.get("message_id")),
-        })
-    ranked.sort(key=lambda item: (
-        float(item.get("score") or 0),
-        float(item.get("topic_overlap") or 0),
-        float(item.get("content_overlap") or 0),
-        float(item.get("created_at") or 0),
-    ), reverse=True)
 
-    output: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in ranked:
-        row_id = _text(item.get("message_id")) or f"{item.get('created_at')}|{item.get('topic')}"
-        if row_id in seen:
-            continue
-        seen.add(row_id)
-        output.append(item)
-        if len(output) >= max(1, min(8, int(limit or 8))):
-            break
-    return output
+def _is_history_recall_question(query: str) -> bool:
+    """Return true for user turns whose purpose is to recall earlier dialogue.
+
+    Subject-specific recall still searches for its named topic, but the recall
+    question itself must not become a new topic in the dialogue index.
+    """
+    if _is_broad_history_overview_query(query):
+        return True
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
+    return bool(re.search(
+        r"(?:\bчто\s+(?:мы\s+)?(?:сегодня\s+|вчера\s+|раньше\s+)?(?:говорили|обсуждали|решили|делали)\b|"
+        r"\b(?:напомни|вспомни|резюмируй|суммируй)\b.{0,90}(?:мы\s+)?(?:говорили|обсуждали|делали|решили|проекта|разговор|переписк|тему|темы|истори)\b|"
+        r"\bwhat did we (?:talk|discuss|decide|work on)\b|\bwhat have we discussed\b|"
+        r"\b(?:recap|summari[sz]e)\b.{0,50}\b(?:our conversation|what we discussed|our discussion)\b|"
+        r"\bshow me\b.{0,35}\b(?:our|the)\s+(?:conversation|dialogue|chat)\s+history\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
 
 
 def _history_query_topic_tokens(query: str) -> set[str]:
     """Extract subject-bearing words from a history request, excluding recall wording and times."""
+    if _is_broad_history_overview_query(query):
+        return set()
     return {
         token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
         if not token.isdigit() and len(token) > 2
     }
-
-
-_HISTORY_TIME_NUMBERS = {
-    "ноль": 0, "один": 1, "одна": 1, "одно": 1, "одну": 1,
-    "два": 2, "две": 2, "пару": 2, "пара": 2,
-    "три": 3, "четыре": 4, "пять": 5, "шесть": 6, "семь": 7,
-    "восемь": 8, "девять": 9, "десять": 10, "полтора": 1.5,
-    "полторы": 1.5,
-}
-def _history_time_number(raw: str | None) -> float | None:
-    value = _text(raw).lower().replace("ё", "е")
-    if not value:
-        return None
-    if value.isdigit():
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return _HISTORY_TIME_NUMBERS.get(value)
-
-
-def _format_history_duration(minutes: float) -> str:
-    """Format a time gap for user-facing explanation without assuming a timezone."""
-    total = max(0, int(round(abs(float(minutes)))))
-    days, rem = divmod(total, 1440)
-    hours, mins = divmod(rem, 60)
-    bits = []
-    if days:
-        bits.append(f"{days} дн.")
-    if hours:
-        bits.append(f"{hours} ч.")
-    if mins or not bits:
-        bits.append(f"{mins} мин.")
-    return " ".join(bits)
-
-
-def _history_local_now(now_value: float, utc_offset_minutes: int | None) -> tuple[datetime, str]:
-    """Resolve wall-clock references in the client's zone or configured app default.
-
-    April Premium already uses Europe/Kyiv as the project's default civil timezone;
-    Free follows the same default but accepts a client offset when the Web sends it.
-    Deployments serving another primary timezone can override APRIL_DEFAULT_TIMEZONE.
-    """
-    if utc_offset_minutes is not None:
-        try:
-            zone = timezone(timedelta(minutes=int(utc_offset_minutes)))
-            return datetime.fromtimestamp(now_value, tz=zone), "client_offset"
-        except (TypeError, ValueError, OverflowError, OSError):
-            pass
-    zone_name = (os.getenv("APRIL_DEFAULT_TIMEZONE") or "Europe/Kyiv").strip() or "Europe/Kyiv"
-    try:
-        zone = ZoneInfo(zone_name)
-        return datetime.fromtimestamp(now_value, tz=zone), f"default_timezone:{zone_name}"
-    except (ZoneInfoNotFoundError, ValueError, OSError):
-        return datetime.fromtimestamp(now_value).astimezone(), "process_local_fallback"
-
-
-def _parse_history_time_reference(
-    query: str,
-    *,
-    now_ts: float | None = None,
-    utc_offset_minutes: int | None = None,
-) -> dict[str, Any]:
-    """Resolve a stated history time to an epoch interval in the retained memory.
-
-    Relative expressions are timezone-independent. Clock-only expressions use a
-    supplied client UTC offset when available and otherwise APRIL_DEFAULT_TIMEZONE
-    (Europe/Kyiv by default, matching the existing Premium temporal layer). The normal
-    search tolerance is +/- 30 minutes around a point/range.
-    """
-    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
-    if not low:
-        return {}
-    now_value = float(now_ts if now_ts is not None else time.time())
-    tolerance = 30 * 60
-
-    unit_pattern = r"(?:минут\w*|мин|час\w*|ч\b|дн\w*|сут\w*)"
-    number_pattern = r"(?:\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять|полтора|полторы)"
-
-    # Ranges like "два-три часа назад" define an interval, not one guessed instant.
-    range_match = re.search(
-        rf"({number_pattern})\s*(?:-|–|—|до)\s*({number_pattern})\s*({unit_pattern})\s*(?:назад|тому назад)",
-        low,
-    )
-    if range_match:
-        # Group numbers are duplicated by the reusable fragments; retrieve them
-        # from the full match to avoid depending on regex group numbering.
-        nums = [range_match.group(1), range_match.group(2)]
-        unit_word = re.search(r"минут\w*|\bмин\b|час\w*|\bч\b|дн\w*|сут\w*", range_match.group(0))
-        first = _history_time_number(nums[0]) if nums else None
-        second = _history_time_number(nums[1]) if len(nums) > 1 else None
-        unit = _text(unit_word.group(0)) if unit_word else "час"
-        multiplier = 60 if unit.startswith("мин") else 86400 if unit.startswith(("дн", "сут")) else 3600
-        if first is not None and second is not None:
-            low_distance, high_distance = sorted((first, second))
-            # “2–3 hours ago” spans [now-3h, now-2h], widened by the tolerance.
-            target_start = now_value - high_distance * multiplier
-            target_end = now_value - low_distance * multiplier
-            return {
-                "requested": True, "kind": "relative_range",
-                "requested_phrase": range_match.group(0),
-                "target_start_ts": target_start, "target_end_ts": target_end,
-                "window_start_ts": target_start - tolerance,
-                "window_end_ts": target_end + tolerance,
-                "tolerance_minutes": 30,
-                "target_description": f"между {_format_history_duration(low_distance * multiplier / 60)} и {_format_history_duration(high_distance * multiplier / 60)} назад",
-            }
-
-    # Point expressions: "час назад", "два часа назад", "15 минут назад".
-    point_pattern = re.search(
-        rf"(?:(?P<num>\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять|полтора|полторы)\s*)?(?P<unit>полчаса|пол\s+часа|минут\w*|мин\b|час\w*|\bч\b|дн\w*|сут\w*)\s*(?:назад|тому назад)",
-        low,
-    )
-    if point_pattern:
-        unit_word = point_pattern.group("unit")
-        if unit_word.startswith("пол"):
-            amount = 0.5
-            multiplier = 3600
-        else:
-            amount = _history_time_number(point_pattern.group("num"))
-            if amount is None:
-                amount = 1.0
-            multiplier = 60 if unit_word.startswith("мин") else 86400 if unit_word.startswith(("дн", "сут")) else 3600
-        distance = amount * multiplier
-        target = now_value - distance
-        return {
-            "requested": True, "kind": "relative_point",
-            "requested_phrase": point_pattern.group(0),
-            "target_start_ts": target, "target_end_ts": target,
-            "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
-            "tolerance_minutes": 30,
-            "target_description": f"примерно {_format_history_duration(distance / 60)} назад",
-        }
-
-    # Period requests such as "за последний час" mean [now-duration, now],
-    # rather than a point centred one hour in the past.
-    period_match = re.search(
-        rf"(?:за\s+)?последн\w*\s+(?:(?P<num>\d+|один|одна|одно|одну|два|две|пару|пара|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*)?(?P<unit>минут\w*|час\w*|дн\w*|сут\w*)",
-        low,
-    )
-    if period_match:
-        amount = _history_time_number(period_match.group("num")) or 1.0
-        unit_word = period_match.group("unit")
-        multiplier = 60 if unit_word.startswith("мин") else 86400 if unit_word.startswith(("дн", "сут")) else 3600
-        start = now_value - amount * multiplier
-        return {
-            "requested": True, "kind": "recent_period",
-            "requested_phrase": period_match.group(0),
-            "target_start_ts": start, "target_end_ts": now_value,
-            "window_start_ts": start, "window_end_ts": now_value,
-            "tolerance_minutes": 0,
-            "target_description": f"за последние {_format_history_duration(amount * multiplier / 60)}",
-        }
-
-    # Clock time. Explicit calendar-day words must override the default rule
-    # that rolls a future-looking clock time back to yesterday.
-    explicit_day_offset = -2 if re.search(r"\bпозавчера\b", low) else (-1 if re.search(r"\bвчера\b", low) else 0)
-    # Use a client timezone offset when one is provided. In legacy callers with
-    # no offset, use process-local time and mark that basis in metadata.
-    hour_match = re.search(
-        r"(?:\bв\s+|около\s+|примерно\s+в\s+)(\d{1,2})(?:\s*(?:час(?:а|ов)?))?\s*(утра|вечера|дня|днем|днём|ночи)\b",
-        low,
-    )
-    if hour_match:
-        hour = int(hour_match.group(1))
-        daypart_word = hour_match.group(2)
-        if 0 <= hour <= 23:
-            if daypart_word == "вечера" or daypart_word in {"дня", "днем", "днём"}:
-                hour = hour + 12 if hour < 12 else hour
-            elif daypart_word == "ночи" and hour == 12:
-                hour = 0
-            elif daypart_word == "утра" and hour == 12:
-                hour = 0
-            local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
-            candidate = local_now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if explicit_day_offset:
-                candidate += timedelta(days=explicit_day_offset)
-            elif candidate.timestamp() > now_value + tolerance:
-                candidate -= timedelta(days=1)
-            target = candidate.timestamp()
-            return {
-                "requested": True, "kind": "clock_point",
-                "requested_phrase": hour_match.group(0),
-                "target_start_ts": target, "target_end_ts": target,
-                "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
-                "tolerance_minutes": 30, "time_basis": time_basis,
-                "target_description": f"примерно в {hour:02d}:00",
-            }
-    clock_match = re.search(r"(?:\bв\s+|около\s+|примерно\s+в\s+)(\d{1,2})[:.](\d{2})\b", low)
-    if clock_match:
-        hour, minute = int(clock_match.group(1)), int(clock_match.group(2))
-        if 0 <= hour <= 23 and 0 <= minute <= 59:
-            local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
-            candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if explicit_day_offset:
-                candidate += timedelta(days=explicit_day_offset)
-            elif candidate.timestamp() > now_value + tolerance:
-                candidate -= timedelta(days=1)
-            target = candidate.timestamp()
-            return {
-                "requested": True, "kind": "clock_point",
-                "requested_phrase": clock_match.group(0),
-                "target_start_ts": target, "target_end_ts": target,
-                "window_start_ts": target - tolerance, "window_end_ts": target + tolerance,
-                "tolerance_minutes": 30, "time_basis": time_basis,
-                "target_description": f"примерно в {hour:02d}:{minute:02d}",
-            }
-
-    # Dayparts use a bounded interval; only records still in the canonical retention
-    # window can be returned, so older requests transparently fall back to nearest rows.
-    daypart = None
-    if "сегодня утром" in low or re.search(r"\bутром\b", low):
-        daypart = (4, 12, "сегодня утром")
-    elif "сегодня днем" in low or "сегодня днём" in low or re.search(r"\bднем\b|\bднём\b", low):
-        daypart = (12, 17, "сегодня днём")
-    elif "сегодня вечером" in low or re.search(r"\bвечером\b", low):
-        daypart = (17, 23, "сегодня вечером")
-    if daypart:
-        local_now, time_basis = _history_local_now(now_value, utc_offset_minutes)
-        day = local_now.date() + timedelta(days=explicit_day_offset)
-        day_name = "позавчера" if explicit_day_offset == -2 else "вчера" if explicit_day_offset == -1 else "сегодня"
-        label = f"{day_name} {daypart[2].replace('сегодня ', '')}"
-        start_dt = local_now.replace(year=day.year, month=day.month, day=day.day, hour=daypart[0], minute=0, second=0, microsecond=0)
-        end_dt = local_now.replace(year=day.year, month=day.month, day=day.day, hour=daypart[1], minute=0, second=0, microsecond=0)
-        return {
-            "requested": True, "kind": "daypart", "requested_phrase": label,
-            "target_start_ts": start_dt.timestamp(), "target_end_ts": end_dt.timestamp(),
-            "window_start_ts": start_dt.timestamp(), "window_end_ts": min(end_dt.timestamp(), now_value),
-            "tolerance_minutes": 0, "time_basis": time_basis, "target_description": label,
-        }
-    return {}
-
-
-def _history_time_gap_label(created_at: float, spec: dict[str, Any], now_ts: float) -> tuple[str, str, int, int]:
-    start = float(spec.get("window_start_ts") or 0)
-    end = float(spec.get("window_end_ts") or 0)
-    target_start = float(spec.get("target_start_ts") or start)
-    target_end = float(spec.get("target_end_ts") or end)
-    midpoint = (target_start + target_end) / 2.0
-    age_minutes = int(round((now_ts - created_at) / 60.0))
-    delta_minutes = int(round((created_at - midpoint) / 60.0))
-    if start <= created_at <= end:
-        relation = "inside_requested_window"
-        gap_minutes = 0
-        label = "внутри указанного временного промежутка"
-    elif created_at < start:
-        relation = "before_requested_window"
-        gap_minutes = int(round((start - created_at) / 60.0))
-        label = f"примерно за {_format_history_duration(gap_minutes)} до указанного промежутка"
-    else:
-        relation = "after_requested_window"
-        gap_minutes = int(round((created_at - end) / 60.0))
-        label = f"примерно через {_format_history_duration(gap_minutes)} после указанного промежутка"
-    age_label = f"сам диалог сохранён примерно {_format_history_duration(age_minutes)} назад"
-    return relation, f"{label}; {age_label}", gap_minutes, delta_minutes
-
-
-def _select_temporal_history_pairs(
-    query: str,
-    matches: list[dict[str, Any]],
-    all_rows: list[dict[str, Any]],
-    spec: dict[str, Any],
-    *,
-    now_ts: float | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
-    """Select records in a requested time window; otherwise return nearest neighbors."""
-    now_value = float(now_ts if now_ts is not None else time.time())
-    usable = [item for item in matches if isinstance(item, dict)
-              and not item.get("is_pending_clarification") and float(item.get("created_at") or 0) > 0]
-    usable.sort(key=lambda item: float(item.get("created_at") or 0))
-    if not usable:
-        meta = {**spec, "status": "no_saved_dialogues", "dialogues_in_window": 0,
-                "selected_dialogues": [], "instruction": "No dialogue pair exists in retained memory; say so clearly and do not invent a topic."}
-        return [], meta, 0
-
-    topic_tokens = _history_query_topic_tokens(query)
-    topic_hits: list[dict[str, Any]] = []
-    if topic_tokens:
-        for item in usable:
-            candidate_text = " ".join((_text(item.get("topic")), _text(item.get("user")),
-                                       _text(item.get("user_en")), _text(item.get("april")),
-                                       _text(item.get("april_en")), _text(item.get("memory_summary"))))
-            overlap = _fuzzy_token_overlap(topic_tokens, _semantic_tokens(candidate_text))
-            if overlap >= 0.34 or (len(topic_tokens) == 1 and overlap > 0):
-                topic_hits.append(item)
-    constrained = bool(topic_tokens and topic_hits)
-    candidates = topic_hits if constrained else usable
-    start = float(spec.get("window_start_ts") or 0)
-    end = float(spec.get("window_end_ts") or 0)
-    in_window = [item for item in candidates if start <= float(item.get("created_at") or 0) <= end]
-    topic_status = "topic_match_found" if constrained else ("topic_not_confirmed" if topic_tokens else "not_applicable")
-
-    if in_window:
-        matched_count = len(in_window)
-        target_midpoint = (float(spec.get("target_start_ts") or start) + float(spec.get("target_end_ts") or end)) / 2.0
-        if _text(spec.get("kind")) in {"recent_period", "daypart"}:
-            # Period requests should read like a compact timeline, oldest first.
-            in_window.sort(key=lambda item: float(item.get("created_at") or 0))
-        else:
-            in_window.sort(key=lambda item: (
-                abs(float(item.get("created_at") or 0) - target_midpoint),
-                -float(item.get("score") or 0),
-            ))
-            # Select the five nearest records, then show them chronologically.
-            in_window = sorted(
-                in_window[:5], key=lambda item: float(item.get("created_at") or 0)
-            )
-        chosen = in_window[:5]
-        status = "matched_requested_window" if constrained or not topic_tokens else "matched_window_topic_unconfirmed"
-        instruction = "Use the supplied saved dialogue summaries and pairs as factual evidence. Show no more than five, in chronological order."
-    else:
-        # A point or clock-time search first widens the neighborhood to +/- two
-        # hours. These are explicitly labelled as neighboring records, never as
-        # exact hits. This is more useful than jumping straight to distant records.
-        target_start = float(spec.get("target_start_ts") or start)
-        target_end = float(spec.get("target_end_ts") or end)
-        nearby_start = target_start - 120 * 60
-        nearby_end = target_end + 120 * 60
-        nearby = [item for item in candidates if nearby_start <= float(item.get("created_at") or 0) <= nearby_end]
-        if nearby:
-            midpoint = (target_start + target_end) / 2.0
-            nearby.sort(key=lambda item: (
-                abs(float(item.get("created_at") or 0) - midpoint),
-                -float(item.get("created_at") or 0),
-            ))
-            chosen = sorted(nearby[:5], key=lambda item: float(item.get("created_at") or 0))
-            status = "nearby_window_dialogues"
-            matched_count = 0
-            instruction = (
-                "No saved dialogue is inside the exact requested interval. Show the nearby dialogue(s) found within about two hours, "
-                "state that they are neighboring rather than exact matches, and use each time label. Do not say the history is empty."
-            )
-        else:
-            # Topic is an explicit constraint: nearest prior/next matching-topic
-            # records take precedence. If none is nearby, the nearest saved records
-            # are returned with an explicit before/after gap label.
-            before = [item for item in candidates if float(item.get("created_at") or 0) < start]
-            after = [item for item in candidates if float(item.get("created_at") or 0) > end]
-            previous = max(before, key=lambda item: float(item.get("created_at") or 0), default=None)
-            following = min(after, key=lambda item: float(item.get("created_at") or 0), default=None)
-            chosen = []
-            if previous:
-                chosen.append(previous)
-            if following and (not previous or _text(following.get("message_id")) != _text(previous.get("message_id"))):
-                chosen.append(following)
-            if not chosen:
-                # This happens when the target is beyond the retained edge. Return
-                # the closest retained record(s), and disclose their actual distance.
-                chosen = sorted(candidates, key=lambda item: abs(float(item.get("created_at") or 0) - ((start + end) / 2.0)))[:2]
-            status = "nearest_topic_dialogues_outside_window" if constrained else "empty_window_nearest_dialogues"
-            matched_count = 0
-            instruction = (
-                "No saved dialogue exists inside or within about two hours of the requested interval. Say so clearly, "
-                "then describe the nearest returned dialogue(s), whether each is before or after the interval, and the approximate gap. "
-                "Never present a neighboring pair as if it occurred inside the requested interval."
-            )
-
-    selected: list[dict[str, Any]] = []
-    selected_dialogue_times = []
-    for item in chosen:
-        pair = _compact_pair(item)
-        created = float(item.get("created_at") or 0)
-        relation, label, gap_minutes, delta_minutes = _history_time_gap_label(created, spec, now_value)
-        pair["history_time_relation"] = relation
-        pair["history_time_label"] = label
-        pair["history_age_minutes"] = int(round((now_value - created) / 60.0))
-        pair["history_gap_minutes"] = gap_minutes
-        selected.append(pair)
-        selected_dialogue_times.append({
-            "topic": _text(item.get("topic"))[:100],
-            "user": _text(item.get("user") or item.get("user_text"))[:120],
-            "summary": _compact_memory_summary(item)[:150],
-            "message_id": _text(item.get("message_id")),
-            "relation": relation,
-            "time_label": label,
-            "age_minutes": pair["history_age_minutes"],
-            "gap_minutes": gap_minutes,
-            "offset_from_target_minutes": delta_minutes,
-        })
-
-    meta = {
-        **spec,
-        "status": status,
-        "topic_constraint": bool(topic_tokens),
-        "topic_match_found": constrained,
-        "topic_terms": sorted(topic_tokens)[:8],
-        "dialogues_in_window": matched_count,
-        "selected_count": len(selected),
-        "nearby_tolerance_minutes": 120 if status == "nearby_window_dialogues" else 0,
-        "selected_dialogues": selected_dialogue_times,
-        "instruction": instruction,
-    }
-    return selected, meta, matched_count
 
 
 def _history_topic_text(item: dict[str, Any]) -> str:
@@ -2673,11 +4287,11 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     bounded = [dict(item) for item in topics if isinstance(item, dict)]
     tokens = _history_query_topic_tokens(query)
     if not tokens:
-        return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
+        return bounded[:max(1, min(10, int(limit or 10)))] if fallback else []
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
         candidate_tokens = _semantic_tokens(_history_topic_text(item))
-        overlap = _fuzzy_token_overlap(tokens, candidate_tokens)
+        overlap = _history_topic_overlap(tokens, candidate_tokens)
         if overlap <= 0:
             continue
         phrase = fuzz.token_set_ratio(" ".join(sorted(tokens)), " ".join(sorted(candidate_tokens))) / 100.0 if candidate_tokens else 0.0
@@ -2686,9 +4300,9 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
     if not ranked:
         # Broad history overview may fall back to recent topics; a normal request
         # must not receive unrelated topics merely because no semantic match exists.
-        return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
+        return bounded[:max(1, min(10, int(limit or 10)))] if fallback else []
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [dict(item) for _, _, item in ranked[:max(1, min(5, int(limit or 5)))]]
+    return [dict(item) for _, _, item in ranked[:max(1, min(10, int(limit or 10)))]]
 
 
 def _select_history_context_pairs(
@@ -2697,11 +4311,16 @@ def _select_history_context_pairs(
     topic_index: list[dict[str, Any]],
     all_rows: list[dict[str, Any]],
     *,
-    requested_topic_count: int = 5,
+    requested_topic_count: int = 10,
+    broad_overview: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int]:
     """Select grounded pairs for history recall even though its relation remains NEW."""
-    tokens = _history_query_topic_tokens(query)
+    tokens = set() if broad_overview else _history_query_topic_tokens(query)
     eligible = [item for item in matches if isinstance(item, dict) and not item.get("is_pending_clarification")]
+    if broad_overview:
+        substantive = [item for item in eligible if not _is_history_recall_question(_text(item.get("user") or item.get("user_text")))]
+        if substantive:
+            eligible = substantive
     selected: list[dict[str, Any]] = []
     method = "topic_index_overview"
     matched_count = 0
@@ -2727,7 +4346,7 @@ def _select_history_context_pairs(
             ranked.append((relevance, float(item.get("created_at") or 0), item))
         matched_count = len(ranked)
         ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        # Return up to five evidence pairs for the named topic; deduplicate exact message IDs.
+        # Return up to four evidence pairs for the named topic; deduplicate exact message IDs.
         seen_ids: set[str] = set()
         for _, _, item in ranked:
             message_id = _text(item.get("message_id"))
@@ -2736,47 +4355,46 @@ def _select_history_context_pairs(
             if message_id:
                 seen_ids.add(message_id)
             selected.append(_compact_pair(item))
-            if len(selected) >= 5:
+            if len(selected) >= 4:
                 break
 
         if not selected:
             # Secondary bridge: a topic-index entry may identify the matching turn
             # even if the old row's text/translation fields differ from the new query.
-            topic_ranked = _rank_history_topics(query, topic_index, 5, fallback=False)
+            topic_ranked = _rank_history_topics(query, topic_index, 4, fallback=False)
             row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
             for topic in topic_ranked:
                 row = row_by_id.get(_text(topic.get("message_id")))
                 if row:
                     selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
-                    if len(selected) >= 5:
+                    if len(selected) >= 3:
                         break
             if selected:
                 method = "subject_topic_index_fallback"
     else:
-        # Broad recall must actually return the latest (or explicitly oldest)
-        # retained dialogue pairs. A topic-index representative can be older than
-        # the latest five saved turns and was the reason overview queries appeared
-        # to return only a vague fragment.
-        ordered = sorted(
-            eligible,
-            key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
-        )
-        count = max(1, min(5, int(requested_topic_count or 5)))
-        if _asks_for_oldest_history(query):
-            chosen = ordered[:count]
-        else:
+        # Broad recall: use representatives of the latest distinct topics, not
+        # arbitrary pairs with high recency-weighted similarity to the word 'today'.
+        row_by_id = {_text(row.get("message_id")): row for row in all_rows if _text(row.get("message_id"))}
+        for topic in topic_index[:min(4, max(1, requested_topic_count))]:
+            row = row_by_id.get(_text(topic.get("message_id")))
+            if row is None:
+                continue
+            selected.append(_compact_pair(_candidate_score(query, row, dialog_id="")))
+        if not selected:
+            # When the topic index is unavailable, don't return high-scoring but
+            # potentially stale candidates for a broad history request. Use the
+            # newest saved turns in chronological order so the overview reflects
+            # what the user actually discussed most recently.
+            ordered = sorted(
+                eligible,
+                key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+            )
+            count = max(1, min(4, int(requested_topic_count or 4)))
             chosen = ordered[-count:]
-        now_value = time.time()
-        for item in chosen:
-            pair = _compact_pair(item)
-            created_at = float(item.get("created_at") or 0)
-            if created_at > 0:
-                age_minutes = max(0, int(round((now_value - created_at) / 60.0)))
-                pair["history_age_minutes"] = age_minutes
-                pair["history_time_label"] = f"сохранён примерно {_format_history_duration(age_minutes)} назад"
-            selected.append(pair)
-        method = "oldest_dialogue_pairs" if _asks_for_oldest_history(query) else "latest_dialogue_pairs"
-        matched_count = len(selected)
+            selected = [_compact_pair(item) for item in chosen]
+            matched_count = len(selected)
+            if selected:
+                method = "latest_dialogue_pairs"
 
     return selected, method, matched_count
 
@@ -2806,14 +4424,7 @@ def _looks_like_topic_correction(query: str) -> bool:
         "я говорил о", "я говорила о", "я имел в виду именно", "я про ",
         "я имел в виду тему", "i meant", "i mean", "what i meant was",
     )
-    if any(marker in low for marker in markers):
-        return True
-    # Also accept the common conversational order «нет, о грушах я имел ввиду»:
-    # the corrected subject may appear before the phrase «я имел(а) в виду».
-    return bool(re.search(
-        r"\b(?:нет[, ]*)?(?:о|об|про)\s+.{2,90}?\s+я\s+имел(?:а)?\s+(?:в\s+)?ввиду\b",
-        low,
-    ))
+    return any(marker in low for marker in markers)
 
 
 def _is_section_request(query: str) -> bool:
@@ -2972,7 +4583,7 @@ def _explicit_section_number(query: str) -> int | None:
 
 
 def _rank_sections_across_history(query: str, rows: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
-    """Search all authenticated 12-hour turns, including stored section headings and summaries."""
+    """Search all authenticated 24-hour turns, including stored section headings and summaries."""
     target = _clarification_target_text(query)
     explicit_order = _explicit_section_number(target)
     # Remove the ordinal marker from text similarity; it is matched as a separate
@@ -2998,8 +4609,8 @@ def _rank_sections_across_history(query: str, rows: list[dict[str, Any]], limit:
             sections = [
                 {
                     "topic": topic,
-                    "heading": _text(section.get("heading"))[:90],
-                    "summary": _text(section.get("summary"))[:180],
+                    "heading": _text(section.get("heading"))[:180],
+                    "summary": _text(section.get("summary"))[:360],
                     "order": section.get("order"),
                     "message_id": _text(section.get("message_id") or row.get("message_id")),
                     "dialog_id": _text(row.get("dialog_id")),
@@ -3033,7 +4644,7 @@ def _rank_sections_across_history(query: str, rows: list[dict[str, Any]], limit:
             ranked.append({
                 "topic": topic,
                 "heading": topic,
-                "summary": summary[:180],
+                "summary": summary[:360],
                 "order": 0,
                 "message_id": _text(row.get("message_id")),
                 "dialog_id": _text(row.get("dialog_id")),
@@ -3071,7 +4682,7 @@ def _clarification_prompt(original_request: str, options: list[dict[str, Any]], 
     for index, item in enumerate(options, 1):
         heading = _text(item.get("heading") or item.get("topic"))
         summary = _text(item.get("summary"))
-        label = heading[:90]
+        label = heading[:180]
         if summary and summary.casefold() != heading.casefold():
             label += " — " + summary[:95]
         labels.append(f"{index}. {label[:190]}")
@@ -3098,8 +4709,8 @@ def _rank_sections_for_row(query: str, row: dict[str, Any]) -> list[dict[str, An
             continue
         ranked.append({
             "topic": _topic_label(row),
-            "heading": _text(section.get("heading"))[:90],
-            "summary": _text(section.get("summary"))[:180],
+            "heading": _text(section.get("heading"))[:180],
+            "summary": _text(section.get("summary"))[:360],
             "order": section.get("order"),
             "message_id": _text(section.get("message_id") or row.get("message_id")),
             "dialog_id": _text(row.get("dialog_id")),
@@ -3108,6 +4719,1420 @@ def _rank_sections_for_row(query: str, row: dict[str, Any]) -> list[dict[str, An
         })
     ranked.sort(key=lambda item: (float(item.get("score") or 0), -int(item.get("order") or 0)), reverse=True)
     return ranked
+
+
+def _image_source_subject_tokens(query: Any) -> set[str]:
+    """Extract only the named source-image subject, not objects being added.
+
+    For example, in "добавь к этой фотке пустыни караван с верблюдами" the
+    source is the desert; the caravan and camels are the requested additions.
+    If the phrase does not identify a source subject confidently, return an empty
+    set so active-dialog recency can choose the current image instead of guessing.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    image_match = re.search(
+        r"(?:фотограф\w*|фотк\w*|фото\b|картинк\w*|изображен\w*|снимк\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)",
+        low,
+        re.IGNORECASE,
+    )
+    if not image_match:
+        return set()
+    tail = low[image_match.end():image_match.end() + 120]
+    tail = re.split(r"[.!?;\n]", tail, maxsplit=1)[0]
+    raw_words = re.findall(r"[a-zа-яёіїєґ][a-zа-яёіїєґ-]{1,}", tail, re.IGNORECASE)
+    skip = {
+        "с", "со", "из", "изо", "на", "в", "во", "про", "об", "обо", "о", "от", "для",
+        "with", "of", "from", "about", "in", "on", "the", "a", "an", "this", "that",
+        "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
+        "которое", "ты", "мне", "ты", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
+        "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
+        "замени", "удали", "убери", "переделай", "переделать", "перерисуй", "исправь", "исправить",
+        "сохрани", "добавить", "какую", "цифрами", "цифры", "цифру", "цифр", "числа", "число",
+        "показание", "показания", "показанием", "дисплей", "дисплея", "дисплее", "стрелка", "стрелки",
+        "стрелку", "стрелкой", "указатель", "указателя", "указателем", "маркер", "маркера", "красный",
+        "красная", "красной", "красную", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только",
+        "выдай", "выдайте", "пришли", "пришлите", "верни", "верните", "покажи", "покажите",
+    }
+    words = [word for word in raw_words if word not in skip and len(word) >= 3]
+    if not words:
+        return set()
+    # Require evidence that the first word describes the source, rather than being
+    # the sole direct object in "добавь к этой фотке кота". A preposition such as
+    # "с/of/with", a second topical word, or an edit verb after the source phrase
+    # gives us that evidence. Otherwise the recent image in this dialogue wins.
+    explicit_source_link = bool(re.match(r"\s*(?:с\b|со\b|из\b|про\b|of\b|with\b|from\b|about\b)", tail, re.I))
+    edit_after_source = bool(re.search(
+        r"\b(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|"
+        r"переделай|исправь|add\w*|edit\w*|change\w*|modify\w*)\b", tail, re.I
+    ))
+    if not (explicit_source_link or len(words) >= 2 or edit_after_source):
+        return set()
+    # First meaningful token after the image noun is the only source hint. Terms
+    # later in the phrase describe what the user wants added/changed.
+    return _subject_tokens(words[0])
+
+
+def _explicit_artifact_followup_kind(query: str) -> str:
+    """Return the artifact family when a turn explicitly edits/extends a saved artifact.
+
+    This deliberately stays narrow: an ordinary new graph request must remain NEW,
+    while edits such as "add intermediate points to the graph" must re-open the
+    value-bearing artifact from the same dialogue even if semantic intent calls it NEW.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    if not low:
+        return ""
+    artifact_patterns = (
+        ("graph", r"(?:\bграфик\w*\b|\bдиаграмм\w*\b|\bgraph\b|\bchart\b|\bplot\b)"),
+        ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
+        ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
+        ("diagram", r"(?:\bсхем\w*\b|\bдиаграмм\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
+        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bснимк\w*\b|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"),
+        ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
+    )
+    kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
+    if not kind:
+        return ""
+    # Explicitly creating a new/another artifact is not a saved-artifact edit.
+    fresh_artifact_request = bool(re.search(
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
+        r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
+        low, re.IGNORECASE,
+    ))
+    if fresh_artifact_request:
+        return ""
+
+    edit_or_extend = bool(re.search(
+        r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
+        r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
+        r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
+        low, re.IGNORECASE,
+    ))
+    # Delivery/show verbs alone are insufficient (they may start a fresh request),
+    # but with intermediate values/time points they unambiguously target a saved artifact.
+    delivery_with_detail = bool(
+        re.search(r"(?:пришл\w*|выдай\w*|вывед\w*|покаж\w*|дай\w*|send\w*|show\w*|display\w*)", low, re.IGNORECASE)
+        and re.search(r"(?:промежуточ\w*|по\s+дням|по\s+датам|точк\w*|значени\w*|данн\w*|intermediate|daily|dated\s+points)", low, re.IGNORECASE)
+    )
+    # Possessives describe the entity; they are not proof that the user wants an
+    # old artifact. “Show a picture of him / his discoveries” is a new deliverable.
+    explicit_saved_reference = bool(re.search(
+        r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
+        low, re.IGNORECASE,
+    ))
+    return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference else ""
+
+
+def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
+    """Check the persisted canonical response, not text mentions of an artifact."""
+    protected = _protected_structured_data_from_row(row)
+    items = protected.get("items") if isinstance(protected, dict) else None
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict) or _text(item.get("kind")).lower() != kind:
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        richness = _protected_node_richness(kind, data)
+        if richness >= 8:
+            return True
+        # Known renderer + nonempty nested source object is valid even when this
+        # version does not recognize the schema's individual value field names.
+        nested_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        nested_spec = data.get("spec") if isinstance(data.get("spec"), dict) else {}
+        if nested_payload or nested_spec:
+            if any(value not in (None, "", [], {}) for key, value in {**nested_payload, **nested_spec}.items()):
+                return True
+        ignored = {"type", "renderer", "viewer", "title", "name", "label", "description", "caption", "alt", "step_index", "step_title", "sequence_index"}
+        if any(key not in ignored and value not in (None, "", [], {}) for key, value in data.items()):
+            return True
+    return False
+
+def _is_visual_misroute_correction(query: Any) -> bool:
+    """True only for an explicit correction of the immediately preceding visual topic.
+
+    This is not a generic image-edit detector. A present-tense edit command must keep
+    the ordinary image workflow; this fast path is for statements such as
+    "Какие зайчики? Я тебе про цифры, ты путаешь".
+    """
+    low = _text(query).lower().replace("ё", "е")
+    if not low or _detect_image_modification(low) or _has_independent_nonvisual_artifact_request(low):
+        return False
+    visual_reference = bool(re.search(
+        r"(?:фото|фотк|картинк|изображен|цифр|циферблат|диспле|табло|\b\d{2,}[:.,]?\d*\b|image|photo|picture|digits|display|screen)",
+        low, re.IGNORECASE,
+    ))
+    misroute_correction = bool(re.search(
+        r"(?:какие\s+[^?!.]{1,35}\??.{0,100}\bя\s+(?:тебе\s+)?про\b|"
+        r"\bты\s+(?:что|шо)[- ]?то\s+путаешь\b|\bты\s+путаешь\b|"
+        r"\bты\s+(?:все|всё)\s+напутал\w*\b|\bты\s+перепутал\w*\b|"
+        r"\bi\s+meant\b.{0,70}\b(?:you\s+(?:mixed|mixing)\s+(?:it\s+)?up|confus\w*)\b|"
+        r"\bwhat\s+(?:about|do\s+you\s+mean)\b.{0,80}\bi\s+(?:asked|meant)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    return bool(visual_reference and misroute_correction)
+
+
+def _query_targets_graph_or_diagram(query: str, query_interpretation: dict[str, Any] | None = None) -> bool:
+    """Identify graph/diagram continuation before the image-only anchor selector runs."""
+    interpretation = query_interpretation if isinstance(query_interpretation, dict) else {}
+    # An explicit photo edit must retain its current image workflow even if the
+    # message also discusses an earlier graph; do not let graph vocabulary hijack it.
+    if _is_explicit_visual_revision_request(query):
+        return False
+    outputs = interpretation.get("requested_outputs") or interpretation.get("output_types") or []
+    if isinstance(outputs, str):
+        outputs = [outputs]
+    output_set = {str(value).strip().lower() for value in outputs if str(value).strip()}
+    if output_set.intersection({"graph", "diagram"}):
+        return True
+    low = _text(query).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:\b3\s*[- ]?d\b|\b3\s*д\b|тр[её]хмерн\w*|\bgraph\b|\bchart\b|\bplot\b|"
+        r"график\w*|диаграмм\w*|схем\w*|scatterplot|surface\s*plot)",
+        low, re.IGNORECASE,
+    ))
+
+
+def _row_has_saved_image_output(row: dict[str, Any]) -> bool:
+    """Check the persisted answer contract for an image April actually returned.
+
+    User-uploaded inputs do not count as output. This distinction lets a follow-up
+    continue from April's generated/edited result instead of accidentally restoring
+    only an unrelated input photo from an older task.
+    """
+    if not isinstance(row, dict):
+        return False
+    _, response, memory_record = _response_and_request_records(row)
+    for owner in (response, memory_record):
+        if not isinstance(owner, dict):
+            continue
+        for key in ("render_blocks", "artifacts", "rendered_artifacts", "outputs"):
+            values = owner.get(key)
+            if isinstance(values, dict):
+                values = list(values.values())
+            if not isinstance(values, (list, tuple)):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                signal = item.get("signal") if isinstance(item.get("signal"), dict) else {}
+                kind = str(
+                    item.get("artifact_type") or item.get("type") or item.get("kind")
+                    or signal.get("artifact_type") or signal.get("type") or ""
+                ).strip().lower()
+                if kind in {"image", "gallery", "generated_image", "image_edit"}:
+                    # The saved response contract represents an output. Explicitly
+                    # input-only asset records are handled below and never qualify.
+                    return True
+        assets = owner.get("asset_payloads") or owner.get("assets") or []
+        if isinstance(assets, dict):
+            assets = list(assets.values())
+        if isinstance(assets, (list, tuple)):
+            for item in assets:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or item.get("artifact_type") or "").strip().lower()
+                role = str(item.get("asset_role") or item.get("role") or "").strip().lower()
+                if kind in {"image", "gallery", "generated_image", "image_edit"} and role not in {"user_input", "input", "source_input"}:
+                    if role in {"april_output", "assistant_output", "generated_output", "edited_output"} or item.get("generated") or item.get("edited"):
+                        return True
+    return False
+
+
+def _is_visual_scene_development_followup(
+    query: str,
+    query_interpretation: dict[str, Any] | None,
+    *,
+    has_image: bool,
+) -> bool:
+    """Resolve an edit/development operation against the current visual branch.
+
+    Prefer the interpretation layer's continuation semantics. The existing image
+    edit detector remains a compatibility path for utterances that explicitly ask
+    for a returned photo but omit a demonstrative image noun (for example, adding
+    an object to the ship and asking for the photo in the same sentence).
+    A new attachment is authoritative and therefore bypasses history re-anchoring.
+    """
+    if has_image or not _text(query):
+        return False
+    interpretation = query_interpretation if isinstance(query_interpretation, dict) else {}
+    if interpretation.get("history_request") or interpretation.get("explicit_topic_switch"):
+        return False
+    if _is_image_discussion_without_new_visual_action(query):
+        return False
+    if _detect_image_modification(query) or _is_explicit_visual_revision_request(query):
+        return True
+
+    primary_intent = _text(interpretation.get("primary_intent")).upper()
+    relation_hint = _text(interpretation.get("relation_hint")).upper()
+    direction = _text(interpretation.get("direction")).upper()
+    feature_map = interpretation.get("features") if isinstance(interpretation.get("features"), dict) else {}
+    pragmatic = interpretation.get("pragmatic_features") if isinstance(interpretation.get("pragmatic_features"), dict) else {}
+    semantically_continues = bool(
+        primary_intent in {"TOPIC_CONTINUATION", "FOLLOW_UP", "CONTINUE"}
+        or relation_hint == "CONTINUE"
+        or direction in {"SEARCH_ACTIVE_OR_REFERENCED_TOPIC", "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"}
+        or feature_map.get("explicit_visual_revision")
+        or pragmatic.get("explicit_visual_revision")
+    )
+    visual_operation_context = bool(re.search(
+        r"\b(?:картинк\w*|изображен\w*|фот\w*|скриншот\w*|график\w*|диаграмм\w*|"
+        r"схем\w*|черт[её]ж\w*|рисунк\w*|иллюстрац\w*|рендер\w*|svg|"
+        r"фон\w*|цвет\w*|ракурс\w*|кадр\w*|объект\w*|корабл\w*|"
+        r"image\w*|photo\w*|picture\w*|screenshot\w*|chart\w*|diagram\w*|"
+        r"scheme\w*|drawing\w*|render\w*|background\w*|color\w*|camera\w*)\b",
+        _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+    ))
+    return bool(
+        semantically_continues
+        and _BRANCH_OPERATION_RE.search(_text(query))
+        and visual_operation_context
+    )
+
+
+def _select_recent_visual_task_anchor(rows: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    """Select the best matching saved visual operation, including AI output-only roots.
+
+    The old recency-only rank could attach a ship edit to an unrelated newer photo.
+    Existing subject/topic similarity now chooses the matching scene first; actual
+    saved image output and recency break ties. No subject vocabulary is hard-coded.
+    """
+    low_query = _text(query).lower().replace("ё", "е")
+    numeric_query = set(re.findall(r"\d+(?:[.,:]\d+)*", low_query))
+    visual_noun = re.compile(r"(?:фото\w*|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)", re.I)
+    visual_action = re.compile(
+        r"(?:измен\w*|редактир\w*|добав\w*|встав\w*|дорис\w*|замен\w*|исправ\w*|"
+        r"созда\w*|сгенерир\w*|нарис\w*|изобраз\w*|\bedit\w*|\bmodify\w*|\badd\w*|"
+        r"\breplace\w*|\bcreate\w*|\bgenerate\w*|\bdraw\w*)", re.I,
+    )
+    query_subjects = _subject_tokens(query)
+    ranked: list[tuple[float, float, int, int, float, int, dict[str, Any]]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        user_text = _text(row.get("user_text") or row.get("user"))
+        if not user_text or not visual_action.search(user_text):
+            continue
+        has_saved_output = _row_has_saved_image_output(row)
+        # Generated image requests such as “Нарисуй корабль в пустыне” do not
+        # necessarily contain the word “photo/image”; the persisted render is
+        # sufficient evidence that this user turn created a visual artifact.
+        if not visual_noun.search(user_text) and not has_saved_output:
+            continue
+        if _is_image_discussion_without_new_visual_action(user_text):
+            continue
+        _, response, memory_record = _response_and_request_records(row)
+        row_numbers = set(re.findall(r"\d+(?:[.,:]\d+)*", user_text.lower()))
+        numeric_hits = len(numeric_query & row_numbers)
+        row_subjects = _row_subject_tokens(row)
+        # A saved raster does not authorize reuse when the current request names
+        # a different semantic subject. Recency and artifact presence only rank
+        # candidates after subject compatibility has been established.
+        if query_subjects and row_subjects and _subject_conflicts(query_subjects, row_subjects):
+            continue
+        subject_fit = _subject_overlap(query_subjects, row_subjects) if query_subjects and row_subjects else 0.0
+        topic_text = " ".join((
+            user_text,
+            _text(row.get("april_text") or row.get("april")),
+            _text(row.get("memory_summary")),
+            _text(memory_record.get("topic")),
+            _text(response.get("summary")),
+        ))
+        topic_fit = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
+        timestamp = float(row.get("created_at") or 0.0)
+        turn = int(row.get("turn_index") or 0)
+        ranked.append((subject_fit, topic_fit, int(has_saved_output), numeric_hits, timestamp, turn, row))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[:-1], reverse=True)
+    return ranked[0][-1]
+
+
+
+_HOT_BRANCH_FAST_INTENTS = {
+    "TOPIC_CONTINUATION",
+    "PREVIOUS_ANSWER_FOLLOWUP",
+}
+_HOT_BRANCH_TOPIC_REFERENCES = {
+    "PREVIOUS_OR_ACTIVE_TOPIC",
+    "PREVIOUS_ASSISTANT_ANSWER",
+    "TOPIC_FRAGMENT",
+}
+
+
+def _should_probe_hot_branch_first(
+    query: str,
+    interpretation: dict[str, Any] | None,
+    *,
+    dialog_id: str = "",
+    conversation_id: str = "",
+    resume_message_id: str = "",
+) -> bool:
+    """Probe the five most recent pairs before a full-history lookup.
+
+    The semantic label is evidence, not a hard gate: long replies can contain many
+    new nouns while still referring to the immediately preceding answer. Only clear
+    history/time requests and an explicit topic boundary bypass this lightweight probe.
+    """
+    profile = interpretation if isinstance(interpretation, dict) else {}
+    if not (_text(dialog_id) or _text(conversation_id)) or _text(resume_message_id):
+        return False
+
+    intent = _text(profile.get("primary_intent")).upper()
+    topic_reference = _text(profile.get("topic_reference")).upper()
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
+    time_window = profile.get("time_window") if isinstance(profile.get("time_window"), dict) else {}
+
+    if (
+        profile.get("history_request")
+        or profile.get("history_inventory_request")
+        or intent in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+        or _is_history_request(query)
+        or profile.get("has_explicit_time_window")
+        or time_window.get("has_constraint")
+        or _text(profile.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
+        or profile.get("site_navigation_request")
+    ):
+        return False
+
+    low = _text(query).lower().replace("ё", "е")
+    explicit_reopen = bool(profile.get("explicit_closed_branch_reopen"))
+    # Recognize anaphora even when the semantic classifier called the turn
+    # NEW_INFORMATION. Adjectives, domain nouns and modality flags must not erase
+    # this evidence (e.g. “в нём всё нравится: сюжет, флора и фауна”).
+    reference_signal = bool(
+        profile.get("strong_anaphoric_reference")
+        or profile.get("topic_reference_fragment")
+        or profile.get("previous_answer_reference")
+        or profile.get("active_branch_repair")
+        or features.get("strong_anaphoric_reference")
+        or features.get("topic_reference_fragment")
+        or features.get("previous_answer_reference")
+        or features.get("active_branch_repair")
+        or pragmatic.get("context_dependent_question")
+        or pragmatic.get("context_dependent_reaction")
+        or re.search(
+            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
+            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|"
+            r"он|она|оно|они|его|ее|её|ему|ей|этот|эта|эту|этого|этой|"
+            r"этим|этом|такая|такой|такое|к\s+этой|к\s+этому|"
+            r"about\s+it|within\s+it|in\s+it|its|he|she|they|that|this)\b",
+            low,
+            re.IGNORECASE,
+        )
+        and not _looks_like_new_topic(query)
+    )
+    explicit_boundary = bool(
+        profile.get("explicit_topic_switch")
+        or profile.get("explicit_topic_introduction")
+        or _looks_like_new_topic(query)
+    )
+    # A real topic switch must remain a boundary. But if the classifier's switch
+    # marker was inferred from nouns in a clearly anaphoric sentence, let the
+    # recent-pair probe decide from the actual preceding exchange.
+    if explicit_boundary and not reference_signal and not explicit_reopen:
+        return False
+
+    continuation = bool(
+        intent in _HOT_BRANCH_FAST_INTENTS
+        or (
+            profile.get("requires_memory")
+            and topic_reference in _HOT_BRANCH_TOPIC_REFERENCES
+        )
+        or profile.get("active_branch_repair")
+        or profile.get("previous_answer_reference")
+        or pragmatic.get("active_branch_repair")
+        or pragmatic.get("previous_answer_reference")
+        or pragmatic.get("context_dependent_question")
+        or pragmatic.get("context_dependent_reaction")
+        or features.get("active_branch_repair")
+        or features.get("explicit_previous_answer_correction")
+        or features.get("answer_followup")
+        or features.get("topic_reference_fragment")
+        or features.get("strong_anaphoric_reference")
+        or _text(profile.get("saved_artifact_followup_kind"))
+        or reference_signal
+    )
+    # The bounded recent check is also used when the interpreter says NEW: it can
+    # confirm a direct connection from the last five pairs, otherwise normal history
+    # routing remains the fallback. This is a lookup, not an unconditional CONTINUE.
+    return bool(continuation or not explicit_boundary or explicit_reopen)
+
+
+def _promote_grounded_recent_anaphoric_candidate(
+    result: dict[str, Any] | None,
+    query_interpretation: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Recover a direct anaphoric match in the recent five pairs when labels conflict.
+
+    This is intentionally narrower than a generic semantic fallback: explicit topic
+    introductions/switches and history requests remain hard boundaries, candidate
+    rows must belong to the same dialog and must not carry a subject-conflict signal.
+    """
+    if not isinstance(result, dict) or _text(result.get("relation")).upper() == "CONTINUE":
+        return result
+    profile = query_interpretation if isinstance(query_interpretation, dict) else {}
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
+    if (
+        profile.get("history_request")
+        or profile.get("history_inventory_request")
+        or profile.get("explicit_topic_switch")
+        or profile.get("explicit_topic_introduction")
+        or _looks_like_new_topic(_text(result.get("query")))
+        or result.get("explicit_topic_switch")
+        or result.get("new_topic_request")
+        or result.get("new_work_root_request")
+        or result.get("historical_task_override")
+        or result.get("topic_closure_barrier")
+        or result.get("current_topic_closure")
+        or result.get("clarification_needed")
+    ):
+        return result
+
+    intent = _text(profile.get("primary_intent")).upper()
+    strong_anaphora = bool(
+        profile.get("strong_anaphoric_reference")
+        or features.get("strong_anaphoric_reference")
+        or pragmatic.get("strong_anaphoric_reference")
+        or profile.get("topic_reference_fragment")
+        or features.get("topic_reference_fragment")
+        or pragmatic.get("topic_reference_fragment")
+        or profile.get("previous_answer_reference")
+        or features.get("previous_answer_reference")
+        or pragmatic.get("previous_answer_reference")
+        or profile.get("active_branch_repair")
+        or features.get("active_branch_repair")
+        or pragmatic.get("active_branch_repair")
+    )
+    semantic_continuation = intent in {
+        "TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "FOLLOW_UP", "CONTINUE"
+    } or bool(profile.get("requires_memory") and _text(profile.get("topic_reference")).upper() in _HOT_BRANCH_TOPIC_REFERENCES)
+    if not (strong_anaphora or semantic_continuation):
+        return result
+
+    # `matches` carries scores/subject alignment from the five-row probe; selected
+    # can be empty or can contain compressed canonical pairs without ranking fields.
+    candidates = result.get("matches") if isinstance(result.get("matches"), list) else []
+    candidates = [item for item in candidates if isinstance(item, dict)]
+    if not candidates:
+        candidates = result.get("selected") if isinstance(result.get("selected"), list) else []
+        candidates = [item for item in candidates if isinstance(item, dict)]
+    if not candidates:
+        return result
+
+    active_branch = result.get("active_branch") if isinstance(result.get("active_branch"), dict) else {}
+    current_topic_id = _text(active_branch.get("active_topic_id") or active_branch.get("selected_topic_id"))
+    dialog_id = _text(result.get("dialog_id"))
+    conversation_id = _text(result.get("conversation_id"))
+    ranked: list[tuple[float, float, float, dict[str, Any]]] = []
+    for candidate in candidates[:5]:
+        message_id = _text(candidate.get("message_id") or candidate.get("source_message_id"))
+        if not message_id:
+            continue
+        candidate_dialog = _text(candidate.get("dialog_id"))
+        candidate_conversation = _text(candidate.get("conversation_id"))
+        if dialog_id and candidate_dialog and dialog_id != candidate_dialog:
+            continue
+        if conversation_id and candidate_conversation and conversation_id != candidate_conversation:
+            continue
+        if candidate.get("subject_mismatch"):
+            continue
+        candidate_topic_id = _text(candidate.get("topic_id") or candidate.get("selected_topic_id"))
+        if current_topic_id and candidate_topic_id and current_topic_id != candidate_topic_id:
+            continue
+        try:
+            score = float(candidate.get("score") or 0.0)
+            overlap = float(candidate.get("subject_overlap") or 0.0)
+            recency = float(candidate.get("recency") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        same_topic = bool(current_topic_id and candidate_topic_id == current_topic_id)
+        direct_context = bool(
+            (result.get("routing_evidence") or {}).get("contextual_antecedent")
+            if isinstance(result.get("routing_evidence"), dict) else False
+        )
+        # Require positive evidence, not merely being the most recent row. Stable
+        # topic identity/explicit antecedent can lower the score threshold safely.
+        if score < 0.28 and not (same_topic and score >= 0.12) and not (direct_context and overlap >= 0.20):
+            continue
+        ranked.append((score + (0.12 if same_topic else 0.0), overlap, recency, candidate))
+    if not ranked:
+        return result
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    candidate = dict(ranked[0][3])
+    result["anchor"] = candidate
+    result["selected"] = [candidate]
+    result["relation"] = "CONTINUE"
+    result["reason"] = "hot_branch_anaphoric_candidate_match"
+    result["relation_confidence"] = max(0.42, min(1.0, float(ranked[0][0])))
+    result["routing_decision"] = "ACTIVE_BRANCH_FIRST"
+    result["contextual_antecedent"] = True
+    result["topic_reference_fragment"] = True
+    result["strong_anaphoric_reference"] = bool(strong_anaphora)
+    result["active_subject_conflict"] = False
+    result["semantic_subject_switch"] = False
+    result["decision_subject_switch"] = False
+    result["self_contained_subject_switch"] = False
+    result["unrelated_active_work_topic"] = False
+    result["active_work_root_subject_conflict"] = False
+    result["active_work_topic_origin_mismatch"] = False
+    result["active_work_marker_detached"] = False
+    result["active_branch_repair"] = bool(profile.get("active_branch_repair"))
+    evidence = result.get("routing_evidence") if isinstance(result.get("routing_evidence"), dict) else {}
+    evidence = dict(evidence)
+    evidence.update({
+        "latest_message_id": message_id[:120] if (message_id := _text(candidate.get("message_id"))) else "",
+        "contextual_antecedent": True,
+        "anaphoric_predicate": True,
+        "subject_conflict": False,
+    })
+    result["routing_evidence"] = evidence
+    result["active_branch"] = {
+        **active_branch,
+        "status": "ACTIVE",
+        "active_topic_id": current_topic_id or _text(candidate.get("topic_id")),
+        "selected_topic_id": _text(candidate.get("topic_id") or current_topic_id),
+        "branch_id": _text(candidate.get("branch_id") or active_branch.get("branch_id")),
+    }
+    _apr_timing_log(
+        "hot_branch_anaphoric_candidate_promoted",
+        None,
+        query_key=_apr_diag_ref(result.get("query")),
+        anchor_message_key=_apr_diag_ref(candidate.get("message_id")),
+        relation="CONTINUE",
+        candidate_score=round(float(ranked[0][0]), 4),
+        subject_overlap=round(float(ranked[0][1]), 4),
+        same_topic=bool(current_topic_id and _text(candidate.get("topic_id")) == current_topic_id),
+        reason="same_dialog_recent_anaphoric_match",
+    )
+    return result
+
+
+def _hot_branch_result_is_clear(result: dict[str, Any] | None) -> bool:
+    """Accept a grounded hot-branch continuation before doing a history scan.
+
+    Long anaphoric turns may contain many descriptive nouns ("мне в нём всё
+    нравится: сюжет, флора и фауна"), so lexical subject-switch flags alone must
+    not veto a same-dialog antecedent already selected by the active-branch route.
+    Explicit topic switches, topic introductions, conflicting durable topic IDs,
+    and failed/new work roots remain hard boundaries.
+    """
+    if not isinstance(result, dict):
+        return False
+    if (
+        _text(result.get("relation")).upper() != "CONTINUE"
+        or result.get("history_request")
+        or result.get("clarification_needed")
+        or result.get("topic_closure_barrier")
+        or result.get("current_topic_closure")
+        or result.get("explicit_topic_switch")
+        or result.get("explicit_topic_introduction")
+        or result.get("new_topic_request")
+        or not isinstance(result.get("anchor"), dict)
+    ):
+        return False
+
+    anchor = result.get("anchor") or {}
+    selected = result.get("selected") if isinstance(result.get("selected"), list) else []
+    anchor_id = _text(anchor.get("message_id") or anchor.get("source_message_id"))
+    selected_ids = {
+        _text(item.get("message_id") or item.get("source_message_id"))
+        for item in selected if isinstance(item, dict)
+    }
+    if not anchor_id or (selected_ids and anchor_id not in selected_ids):
+        return False
+
+    dialog_id = _text(result.get("dialog_id"))
+    anchor_dialog_id = _text(anchor.get("dialog_id"))
+    # The hot-only probe is SQL-scoped to this authenticated dialogue. Still check
+    # explicit row provenance when both identifiers are available.
+    if dialog_id and anchor_dialog_id and dialog_id != anchor_dialog_id:
+        return False
+
+    active_branch = result.get("active_branch") if isinstance(result.get("active_branch"), dict) else {}
+    evidence = result.get("routing_evidence") if isinstance(result.get("routing_evidence"), dict) else {}
+    route_decision = _text(result.get("routing_decision")).upper()
+    active_topic_id = _text(active_branch.get("active_topic_id"))
+    selected_topic_id = _text(active_branch.get("selected_topic_id") or anchor.get("topic_id"))
+    # Stable topic identity is authoritative if both sides are present.
+    if active_topic_id and selected_topic_id and active_topic_id != selected_topic_id:
+        return False
+
+    strong_contextual_route = bool(
+        route_decision in {"ACTIVE_BRANCH_FIRST", "UNCHANGED"}
+        and evidence.get("contextual_antecedent")
+        and (
+            evidence.get("anaphoric_predicate")
+            or result.get("strong_anaphoric_reference")
+            or result.get("topic_reference_fragment")
+            or result.get("contextual_antecedent")
+            or result.get("previous_answer_reference")
+            or result.get("hot_work_followup")
+        )
+        and not result.get("explicit_topic_switch")
+        and not result.get("explicit_topic_introduction")
+        and not result.get("active_work_root_subject_conflict")
+        and not result.get("active_work_topic_origin_mismatch")
+        and not result.get("active_work_marker_detached")
+        and (not dialog_id or not anchor_dialog_id or dialog_id == anchor_dialog_id)
+    )
+
+    # These switches are often inferred from lexical mismatch between a topic noun
+    # and its attributes, not from a real user-requested topic change. Allow them
+    # only when the same-dialog route has independently grounded an anaphoric
+    # antecedent; explicit switch markers remain hard boundaries above.
+    inferred_subject_switch = bool(
+        result.get("semantic_subject_switch")
+        or result.get("decision_subject_switch")
+        or result.get("self_contained_subject_switch")
+        or result.get("active_subject_conflict")
+    )
+    if inferred_subject_switch and not strong_contextual_route:
+        return False
+    if result.get("unrelated_active_work_topic") and not strong_contextual_route:
+        return False
+
+    if _text(active_branch.get("status")).upper() != "ACTIVE" and not strong_contextual_route:
+        return False
+    if (not active_topic_id or not selected_topic_id) and not strong_contextual_route:
+        return False
+    if result.get("new_work_root_request") or result.get("historical_task_override"):
+        return False
+
+    try:
+        confidence = float(result.get("relation_confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < 0.42 and not strong_contextual_route:
+        return False
+
+    return bool(selected or anchor.get("topic") or anchor.get("april") or anchor.get("summary"))
+
+
+
+def _build_active_topic_context_descriptor(
+    topic_rows: list[dict[str, Any]],
+    *,
+    topic_id: str = "",
+    root_message_id: str = "",
+    topic_label: str = "",
+) -> dict[str, Any]:
+    """Build a compact inventory of the complete matched topic, all branches and assets.
+
+    Canonical pairs remain the source of truth. This descriptor is a retrieval index:
+    it preserves branch identities, chronological summaries and artifact references
+    without copying image/file payloads into the model prompt.
+    """
+    ordered = sorted(
+        [row for row in topic_rows if isinstance(row, dict) and not _is_failed_provider_row(row)],
+        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+    )
+    if not ordered:
+        return {}
+
+    groups: dict[str, dict[str, Any]] = {}
+    all_artifacts: list[dict[str, Any]] = []
+    topic_summaries: list[str] = []
+    all_steps: list[dict[str, Any]] = []
+    seen_step_ids: set[str] = set()
+
+    for row in ordered:
+        thread = _dialogue_thread_metadata(row)
+        row_topic_id = _text(thread.get("topic_id") or row.get("topic_id"))
+        row_root = _text(
+            thread.get("topic_origin_message_id") or thread.get("origin_message_id")
+            or row.get("topic_origin_message_id") or row.get("message_id")
+        )
+        row_branch_id = _text(thread.get("branch_id") or thread.get("work_id") or row.get("branch_id"))
+        branch_key = row_branch_id or row_root or _text(row.get("message_id")) or "branch:legacy"
+        row["topic_id"] = row_topic_id or topic_id
+        row["branch_id"] = row_branch_id
+        row["topic_origin_message_id"] = row_root
+        row["topic"] = _text(thread.get("topic") or row.get("topic") or topic_label)[:240]
+        row["branch_summary"] = _text(thread.get("branch_summary") or thread.get("summary"))[:640]
+
+        user_text = _text(row.get("user_text") or row.get("user"))
+        assistant_summary = _compact_memory_summary_lightweight(row) or _text(row.get("april_text") or row.get("april"))
+        row_summary = _text(thread.get("branch_summary") or thread.get("summary") or assistant_summary)
+        if row_summary:
+            topic_summaries.append(row_summary[:360])
+
+        branch = groups.get(branch_key)
+        if branch is None:
+            branch = {
+                "branch_id": row_branch_id[:120],
+                "topic": _text(thread.get("topic") or row.get("topic") or topic_label)[:200],
+                "root_message_id": _text(
+                    thread.get("origin_message_id") or thread.get("topic_origin_message_id")
+                    or row_root or row.get("message_id")
+                )[:120],
+                "summary": "",
+                "pair_count": 0,
+                "first_at": row.get("created_at"),
+                "last_at": row.get("created_at"),
+                "last_message_id": "",
+                "last_user_request": "",
+                "last_answer_summary": "",
+                "recent_steps": [],
+                "question_sequence": [],
+                "artifact_index": [],
+                "_seen_artifacts": set(),
+                "_seen_questions": set(),
+            }
+            groups[branch_key] = branch
+
+        branch["pair_count"] += 1
+        branch["last_at"] = row.get("created_at")
+        branch["last_message_id"] = _text(row.get("message_id"))[:120]
+        branch["last_user_request"] = user_text[:220]
+        branch["last_answer_summary"] = assistant_summary[:280]
+        branch["summary"] = _merge_compact_summaries(branch.get("summary"), row_summary or user_text, 620)
+
+        steps = thread.get("recent_steps") if isinstance(thread.get("recent_steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            step_id = _text(step.get("message_id"))
+            if step_id and step_id not in seen_step_ids:
+                normalized_step = {
+                    "message_id": step_id[:120],
+                    "user_request": _text(step.get("user_request") or step.get("request"))[:220],
+                    "answer_summary": _text(step.get("answer_summary") or step.get("summary"))[:260],
+                    "topic_id": _text(step.get("topic_id") or row_topic_id or topic_id)[:120],
+                    "branch_id": _text(step.get("branch_id") or row_branch_id)[:120],
+                }
+                branch["recent_steps"].append(normalized_step)
+                all_steps.append(normalized_step)
+                seen_step_ids.add(step_id)
+
+        # Preserve the exact current canonical pair as a step even if this older
+        # record predates the durable recent_steps field.
+        message_id = _text(row.get("message_id"))
+        if message_id and message_id not in seen_step_ids:
+            step = {
+                "message_id": message_id[:120],
+                "user_request": user_text[:220],
+                "answer_summary": assistant_summary[:260],
+                "topic_id": row_topic_id or topic_id,
+                "branch_id": row_branch_id,
+            }
+            branch["recent_steps"].append(step)
+            all_steps.append(step)
+            seen_step_ids.add(message_id)
+
+        questions = thread.get("question_sequence") if isinstance(thread.get("question_sequence"), list) else []
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+            qkey = _text(question.get("request_key") or question.get("message_id")) + "|" + _text(
+                question.get("request") or question.get("question")
+            ).casefold()
+            if not qkey.strip("|") or qkey in branch["_seen_questions"]:
+                continue
+            branch["_seen_questions"].add(qkey)
+            branch["question_sequence"].append({
+                "request_key": _text(question.get("request_key"))[:120],
+                "request": _text(question.get("request") or question.get("question"))[:180],
+                "intent": _text(question.get("intent") or question.get("semantic_intent"))[:64],
+                "output_types": [_text(item)[:32] for item in (question.get("output_types") or [])[:6] if _text(item)],
+            })
+
+        raw_artifacts = thread.get("artifact_index") if isinstance(thread.get("artifact_index"), list) else []
+        _, response, memory_record = _response_and_request_records(row)
+        for asset in raw_artifacts:
+            if not isinstance(asset, dict):
+                continue
+            descriptor = dict(asset)
+            artifact_key = (
+                _text(descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
+                      or descriptor.get("asset_message_id") or descriptor.get("filename") or descriptor.get("name")),
+                _text(descriptor.get("asset_role") or descriptor.get("kind") or descriptor.get("type")
+                      or descriptor.get("artifact_type") or descriptor.get("output_type")),
+            )
+            if artifact_key != ("", "") and artifact_key not in branch["_seen_artifacts"]:
+                branch["_seen_artifacts"].add(artifact_key)
+                branch["artifact_index"].append(descriptor)
+                all_artifacts.append(descriptor)
+
+        # Existing asset references and renderer types provide a useful fallback for
+        # old rows that do not yet have an artifact_index in dialogue_thread metadata.
+        for bucket in (
+            response.get("asset_refs", {}).get("source_inputs", []) if isinstance(response.get("asset_refs"), dict) else [],
+            response.get("asset_refs", {}).get("april_outputs", []) if isinstance(response.get("asset_refs"), dict) else [],
+            memory_record.get("artifact_index", []) if isinstance(memory_record.get("artifact_index"), list) else [],
+        ):
+            for asset in bucket:
+                if not isinstance(asset, dict):
+                    continue
+                descriptor = dict(asset)
+                artifact_key = (
+                    _text(descriptor.get("asset_id") or descriptor.get("artifact_id") or descriptor.get("id")
+                          or descriptor.get("asset_message_id") or descriptor.get("filename") or descriptor.get("name")),
+                    _text(descriptor.get("asset_role") or descriptor.get("kind") or descriptor.get("type")
+                          or descriptor.get("artifact_type") or descriptor.get("output_type")),
+                )
+                if artifact_key != ("", "") and artifact_key not in branch["_seen_artifacts"]:
+                    branch["_seen_artifacts"].add(artifact_key)
+                    branch["artifact_index"].append(descriptor)
+                    all_artifacts.append(descriptor)
+
+    branches = []
+    for branch in groups.values():
+        branch.pop("_seen_artifacts", None)
+        branch.pop("_seen_questions", None)
+        branch["recent_steps"] = branch.get("recent_steps", [])[-24:]
+        branch["question_sequence"] = branch.get("question_sequence", [])[-32:]
+        branch["artifact_index"] = branch.get("artifact_index", [])[-80:]
+        branches.append(branch)
+    branches.sort(key=lambda item: float(item.get("last_at") or 0.0), reverse=True)
+
+    all_artifact_index: list[dict[str, Any]] = []
+    seen_asset_keys: set[tuple[str, str]] = set()
+    for item in all_artifacts:
+        key = (
+            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
+                  or item.get("asset_message_id") or item.get("filename") or item.get("name")),
+            _text(item.get("asset_role") or item.get("kind") or item.get("type")
+                  or item.get("artifact_type") or item.get("output_type")),
+        )
+        if key != ("", "") and key not in seen_asset_keys:
+            seen_asset_keys.add(key)
+            all_artifact_index.append({
+                key_name: value for key_name, value in item.items()
+                if key_name in {
+                    "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
+                    "mime_type", "renderer", "viewer", "chart_type", "asset_role", "source_message_id",
+                    "operation", "image_operation", "edit_operation", "edit_mode", "action",
+                    "source_asset_id", "source_asset_message_id", "generation_model", "quality",
+                    "asset_message_id", "asset_id", "artifact_id", "id", "ref", "url", "path",
+                    "description", "summary", "data_summary", "preview", "alt", "caption", "label",
+                    "format", "language", "dimensions", "point_count", "series_count", "row_count",
+                    "column_count", "checksum", "topic_id", "branch_id", "parent_message_id",
+                } and value not in (None, "", [], {})
+            })
+    topic_label = _text(topic_label or _dialogue_thread_metadata(ordered[0]).get("topic") or ordered[0].get("topic"))[:240]
+    distinct_summaries = list(dict.fromkeys(re.sub(r"\s+", " ", value).strip() for value in topic_summaries if value.strip()))
+    # A full-topic overview names every branch and its latest state; the canonical
+    # dialogue rows and exact asset payloads remain unchanged in PostgreSQL.
+    summary_parts = [f"{item.get('topic') or 'Ветка'}: {_text(item.get('summary'))[:150]}" for item in branches]
+    topic_summary = _text(" | ".join(summary_parts))[:5000]
+    return {
+        "schema": "april_active_topic_context_v1",
+        "topic_id": _text(topic_id or _dialogue_thread_metadata(ordered[-1]).get("topic_id"))[:120],
+        "topic": topic_label,
+        "root_message_id": _text(root_message_id or _dialogue_thread_metadata(ordered[0]).get("topic_origin_message_id")
+                                  or _dialogue_thread_metadata(ordered[0]).get("origin_message_id")
+                                  or ordered[0].get("message_id"))[:120],
+        "pair_count": len(ordered),
+        "branch_count": len(branches),
+        "summary": topic_summary or _merge_compact_summaries("", "; ".join(distinct_summaries), 1800),
+        "branches": branches[:80],
+        "artifact_count": len(all_artifact_index),
+        "artifact_index": all_artifact_index[-80:],
+        "recent_steps": all_steps[-24:],
+        "source_message_ids": [_text(row.get("message_id"))[:120] for row in ordered if _text(row.get("message_id"))][-160:],
+        "first_at": ordered[0].get("created_at"),
+        "last_at": ordered[-1].get("created_at"),
+    }
+
+
+def _merge_persisted_topic_context(
+    context: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    topic_id: str = "",
+    root_message_id: str = "",
+) -> dict[str, Any]:
+    """Keep a prior full topic index when legacy canonical rows omit branch metadata."""
+    if not isinstance(context, dict) or not context:
+        return context
+    persisted: dict[str, Any] = {}
+    ordered_rows = sorted(
+        [row for row in rows if isinstance(row, dict)],
+        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+    )
+    for row in reversed(ordered_rows):
+        meta = _dialogue_thread_metadata(row)
+        candidate = meta.get("stored_topic_context")
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        candidate_topic_id = _text(candidate.get("topic_id"))
+        candidate_root = _text(candidate.get("root_message_id"))
+        if topic_id and candidate_topic_id and candidate_topic_id != topic_id:
+            continue
+        if root_message_id and candidate_root and candidate_root != root_message_id:
+            continue
+        if isinstance(candidate.get("branches"), list) or isinstance(candidate.get("artifact_index"), list):
+            persisted = candidate
+            break
+    if not persisted:
+        return context
+
+    def identity(item: dict[str, Any]) -> str:
+        return (
+            _text(item.get("branch_id") or item.get("i"))
+            or _text(item.get("root_message_id") or item.get("r"))
+            or _text(item.get("last_message_id") or item.get("l"))
+        )
+
+    def safe_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    merged_branches: dict[str, dict[str, Any]] = {}
+    for item in (persisted.get("branches") or []):
+        if isinstance(item, dict):
+            key = identity(item)
+            if key:
+                merged_branches[key] = dict(item)
+    for item in (context.get("branches") or []):
+        if not isinstance(item, dict):
+            continue
+        key = identity(item)
+        current = dict(item)
+        if not _text(current.get("branch_id")) and current.get("last_message_id"):
+            # If old rows lack branch IDs, align the reconstructed branch by its
+            # last canonical source message rather than merging it into the topic root.
+            last_id = _text(current.get("last_message_id"))
+            matching_key = next((
+                stored_key for stored_key, stored_branch in merged_branches.items()
+                if _text(stored_branch.get("last_message_id") or stored_branch.get("l")) == last_id
+                or last_id in {
+                    _text(step.get("message_id") or step.get("i"))
+                    for step in (stored_branch.get("recent_steps") or stored_branch.get("steps") or [])
+                    if isinstance(step, dict)
+                }
+            ), "")
+            if matching_key:
+                key = matching_key
+        if not key:
+            continue
+        old = merged_branches.get(key, {})
+        merged = dict(old)
+        for field, value in current.items():
+            if value not in (None, "", [], {}):
+                merged[field] = value
+            elif field not in merged:
+                merged[field] = value
+        for list_field in ("recent_steps", "question_sequence", "artifact_index"):
+            combined = []
+            seen = set()
+            for value in list(old.get(list_field) or []) + list(current.get(list_field) or []):
+                if not isinstance(value, dict):
+                    continue
+                stable = _text(
+                    value.get("message_id") or value.get("request_key") or value.get("asset_id")
+                    or value.get("artifact_id") or value.get("id") or value.get("asset_message_id")
+                )
+                stable = stable or json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+                if stable not in seen:
+                    seen.add(stable)
+                    combined.append(value)
+            if combined:
+                merged[list_field] = combined[-20:]
+        merged["pair_count"] = max(safe_int(old.get("pair_count")), safe_int(current.get("pair_count")))
+        merged_branches[key] = merged
+
+    branches = list(merged_branches.values())
+    branches.sort(key=lambda item: float(item.get("last_at") or item.get("last_message_timestamp") or 0.0), reverse=True)
+    context["branches"] = branches[:80]
+    context["branch_count"] = max(
+        len(context["branches"]), safe_int(context.get("branch_count")), safe_int(persisted.get("branch_count"))
+    )
+    context["pair_count"] = max(safe_int(context.get("pair_count")), safe_int(persisted.get("pair_count")))
+    if not _text(context.get("active_branch_id")) and _text(persisted.get("active_branch_id")):
+        context["active_branch_id"] = _text(persisted.get("active_branch_id"))[:120]
+
+    artifacts: list[dict[str, Any]] = []
+    seen_artifacts: set[str] = set()
+    for item in list(persisted.get("artifact_index") or []) + list(context.get("artifact_index") or []):
+        if not isinstance(item, dict):
+            continue
+        stable = "|".join((
+            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id") or item.get("asset_message_id")),
+            _text(item.get("source_message_id") or item.get("asset_message_id") or item.get("parent_message_id")),
+            _text(item.get("branch_id")),
+            _text(item.get("kind") or item.get("type") or item.get("artifact_type") or item.get("output_type")),
+        ))
+        if stable == "|||" or stable in seen_artifacts:
+            continue
+        seen_artifacts.add(stable)
+        artifacts.append(dict(item))
+    context["artifact_index"] = artifacts[-80:]
+    context["artifact_count"] = max(
+        len(context["artifact_index"]), safe_int(context.get("artifact_count")), safe_int(persisted.get("artifact_count"))
+    )
+
+    steps: list[dict[str, Any]] = []
+    seen_steps: set[str] = set()
+    for step in list(persisted.get("recent_steps") or []) + list(context.get("recent_steps") or []):
+        if not isinstance(step, dict):
+            continue
+        step_id = _text(step.get("message_id"))
+        if step_id and step_id not in seen_steps:
+            seen_steps.add(step_id)
+            steps.append(dict(step))
+    if steps:
+        context["recent_steps"] = steps[-24:]
+
+    source_ids: list[str] = []
+    seen_sources: set[str] = set()
+    for value in list(persisted.get("source_message_ids") or []) + list(context.get("source_message_ids") or []):
+        source_id = _text(value)
+        if source_id and source_id not in seen_sources:
+            seen_sources.add(source_id)
+            source_ids.append(source_id[:120])
+    if source_ids:
+        context["source_message_ids"] = source_ids[-160:]
+    _apr_timing_log(
+        "persisted_topic_manifest_merged",
+        None,
+        topic_id=_apr_diag_ref(context.get("topic_id") or topic_id),
+        branches=len(context.get("branches") or []),
+        artifacts=len(context.get("artifact_index") or []),
+        source_messages=len(context.get("source_message_ids") or []),
+    )
+    return context
+
+
+def _expand_hot_branch_to_topic(
+    result: dict[str, Any],
+    user_id: Any,
+    *,
+    dialog_id: str = "",
+    conversation_id: str = "",
+) -> dict[str, Any]:
+    """Load the complete matched topic after a five-pair probe, not all user history."""
+    if not isinstance(result, dict):
+        return result
+    anchor = result.get("anchor") if isinstance(result.get("anchor"), dict) else {}
+    anchor_id = _text(anchor.get("message_id") or anchor.get("source_message_id"))
+    match_rows = result.get("matches") if isinstance(result.get("matches"), list) else []
+    anchor_row = next((item for item in match_rows if isinstance(item, dict) and _text(item.get("message_id")) == anchor_id), {})
+    thread = _dialogue_thread_metadata(anchor_row) if isinstance(anchor_row, dict) else {}
+    if not thread:
+        thread = _dialogue_thread_metadata(anchor)
+    topic_id = _text(thread.get("topic_id") or anchor.get("topic_id"))
+    root_id = _text(
+        thread.get("topic_origin_message_id") or thread.get("origin_message_id")
+        or anchor.get("topic_origin_message_id") or anchor.get("origin_message_id")
+    )
+    topic_label = _text(thread.get("topic") or anchor.get("topic") or result.get("active_topic"))[:240]
+    query_subjects = _subject_tokens(result.get("query") or "")
+    anchor_subjects = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else _subject_tokens(
+        " ".join((_text(anchor.get("user")), _text(anchor.get("assistant_last_message")), _text(anchor.get("topic"))))
+    )
+    if anchor_subjects and topic_label and _subject_conflicts(anchor_subjects, _subject_tokens(topic_label)):
+        topic_label = _text(anchor_row.get("user_text") or anchor_row.get("user") or anchor.get("user"))[:200] or "Текущая тема"
+    if query_subjects and anchor_subjects and _subject_conflicts(query_subjects, anchor_subjects):
+        result["topic_context_expansion"] = {
+            "status": "rejected_subject_conflict",
+            "reason": "latest_request_subject_does_not_match_selected_topic_anchor",
+            "topic_id": topic_id,
+            "root_message_id": root_id,
+        }
+        return result
+    uid = _uid(user_id)
+    rows: list[dict[str, Any]] = []
+
+    # Durable identities enable a targeted query over the complete topic. Try the
+    # exact topic ID first, then the root identity for older rows with partial metadata.
+    if topic_id:
+        rows = load_dialogue_pairs(uid, topic_id=topic_id)
+    if not rows and root_id:
+        rows = load_dialogue_pairs(uid, topic_origin_message_id=root_id)
+    fallback_mode = ""
+    if not rows and (dialog_id or conversation_id):
+        # Compatibility for pre-thread-metadata rows: inspect only this authenticated
+        # dialog, derive its topic index, and retain the group owning the matched anchor.
+        legacy_rows = load_dialogue_pairs(
+            uid, dialog_id=dialog_id, conversation_id=conversation_id, strict_dialog_scope=True
+        )
+        if legacy_rows:
+            legacy_topics = _build_topic_index(legacy_rows, include_sections=False, include_structured=False)
+            matching_topic = next((
+                item for item in legacy_topics
+                if anchor_id in (item.get("message_ids") or [])
+                or root_id and _text(item.get("origin_message_id")) == root_id
+                or topic_id and _text(item.get("topic_id")) == topic_id
+            ), None)
+            if matching_topic:
+                ids = {_text(item) for item in (matching_topic.get("message_ids") or []) if _text(item)}
+                if _text(matching_topic.get("origin_message_id")):
+                    ids.add(_text(matching_topic.get("origin_message_id")))
+                rows = [row for row in legacy_rows if _text(row.get("message_id")) in ids]
+                topic_id = _text(matching_topic.get("topic_id") or topic_id)
+                root_id = _text(matching_topic.get("origin_message_id") or root_id)
+                topic_label = _text(matching_topic.get("topic") or topic_label)
+                fallback_mode = "legacy_same_dialog_topic_index"
+            else:
+                fallback_mode = "legacy_topic_not_reconstructed"
+    if not rows:
+        result["topic_context_expansion"] = {
+            "status": "not_available",
+            "reason": "no_durable_topic_or_root_match",
+            "topic_id": topic_id,
+            "root_message_id": root_id,
+        }
+        return result
+
+    cleaned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for source in rows:
+        if not isinstance(source, dict) or _row_is_pending_clarification(source) or _is_failed_provider_row(source):
+            continue
+        row = dict(source)
+        anchor_subjects_for_topic = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else set()
+        row_subjects_for_topic = _row_subject_tokens(row)
+        if anchor_subjects_for_topic and row_subjects_for_topic and _subject_conflicts(anchor_subjects_for_topic, row_subjects_for_topic):
+            continue
+        row_thread = _dialogue_thread_metadata(row)
+        persisted_tid = _text(row_thread.get("topic_id"))
+        persisted_root = _text(
+            row_thread.get("topic_origin_message_id") or row_thread.get("origin_message_id")
+        )
+        row["topic_id"] = persisted_tid or topic_id
+        row["branch_id"] = _text(row_thread.get("branch_id") or row_thread.get("work_id"))
+        row["topic_origin_message_id"] = persisted_root or root_id
+        row["origin_message_id"] = persisted_root or root_id
+        row["topic"] = _text(row_thread.get("topic") or row.get("topic") or topic_label)[:240]
+        row["branch_summary"] = _text(row_thread.get("branch_summary") or row_thread.get("summary"))[:640]
+        if _text(row.get("message_id")) not in seen_ids:
+            cleaned.append(row)
+            seen_ids.add(_text(row.get("message_id")))
+    if not cleaned:
+        return result
+
+    # The persisted topic id can span unrelated subjects when an older release
+    # accidentally reused an active-work marker. If its root was excluded by the
+    # semantic subject check, the remaining matching branch is re-rooted at the
+    # latest compatible anchor instead of retaining a dangling old root.
+    cleaned_ids = {_text(row.get("message_id")) for row in cleaned if _text(row.get("message_id"))}
+    stale_root_reanchored = bool(root_id and root_id not in cleaned_ids and anchor_id in cleaned_ids)
+    if stale_root_reanchored:
+        # The previous root was filtered out as a different subject. Establish a
+        # new durable topic identity from the earliest compatible source row, and
+        # rebuild its thread metadata from those matching canonical pairs only.
+        oldest_compatible = min(
+            cleaned,
+            key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        )
+        root_id = _text(oldest_compatible.get("message_id") or anchor_id)
+        topic_label = topic_label or _text(oldest_compatible.get("user_text") or oldest_compatible.get("user"))[:200]
+        scope_id = _text(dialog_id or conversation_id)
+        topic_id = "topic-" + hashlib.sha256(
+            "|".join((uid, scope_id, root_id, topic_label.casefold())).encode("utf-8")
+        ).hexdigest()[:20]
+        branch_id = "branch-" + hashlib.sha256(
+            "|".join((uid, scope_id, topic_id, root_id)).encode("utf-8")
+        ).hexdigest()[:20]
+        retained_ids = set(cleaned_ids)
+        seed_subjects_for_rebuild = _row_subject_tokens(anchor_row) if isinstance(anchor_row, dict) and anchor_row else _subject_tokens(topic_label)
+        for row in cleaned:
+            _, response, _ = _response_and_request_records(row)
+            thread_meta = dict(_dialogue_thread_metadata(row))
+            thread_meta.update({
+                "topic_id": topic_id,
+                "topic": topic_label[:240],
+                "topic_origin_message_id": root_id,
+                "origin_message_id": root_id,
+                "branch_id": branch_id,
+            })
+            old_steps = thread_meta.get("recent_steps") if isinstance(thread_meta.get("recent_steps"), list) else []
+            thread_meta["recent_steps"] = [
+                step for step in old_steps
+                if isinstance(step, dict) and _text(step.get("message_id")) in retained_ids
+            ][-24:]
+            old_questions = thread_meta.get("question_sequence") if isinstance(thread_meta.get("question_sequence"), list) else []
+            thread_meta["question_sequence"] = [
+                step for step in old_questions
+                if isinstance(step, dict)
+                and not _subject_conflicts(seed_subjects_for_rebuild, _subject_tokens(step.get("request") or step.get("question")))
+            ][-32:]
+            old_artifacts = thread_meta.get("artifact_index") if isinstance(thread_meta.get("artifact_index"), list) else []
+            thread_meta["artifact_index"] = [
+                artifact for artifact in old_artifacts
+                if isinstance(artifact, dict)
+                and _text(artifact.get("source_message_id") or artifact.get("asset_message_id") or artifact.get("message_id")) in retained_ids
+            ][-80:]
+            response["dialogue_thread"] = thread_meta
+            row["structured_response"] = json.dumps(response, ensure_ascii=False, default=str)
+            row["topic_id"] = topic_id
+            row["topic_origin_message_id"] = root_id
+            row["origin_message_id"] = root_id
+            row["branch_id"] = branch_id
+            row["topic"] = topic_label[:240]
+            row["branch_summary"] = _compact_memory_summary_lightweight(row)[:640]
+        fallback_mode = "reanchored_after_stale_root_filtered"
+
+    context = _build_active_topic_context_descriptor(
+        cleaned, topic_id=topic_id, root_message_id=root_id, topic_label=topic_label
+    )
+    if not stale_root_reanchored:
+        context = _merge_persisted_topic_context(
+            context, cleaned, topic_id=topic_id, root_message_id=root_id
+        )
+    anchor_thread = _dialogue_thread_metadata(anchor_row) if isinstance(anchor_row, dict) else {}
+    active_branch_id = "" if stale_root_reanchored else _text(
+        anchor_thread.get("branch_id") or anchor_thread.get("work_id") or anchor.get("branch_id")
+    )[:120]
+    if not active_branch_id:
+        # Legacy rows may have topic metadata but no explicit branch_id. Recover the
+        # matching branch by its last step/source ID; assign a stable in-memory ID so
+        # the prompt can distinguish it from sibling branches and persistence can
+        # carry that identity into the current turn.
+        for branch in context.get("branches") or []:
+            if not isinstance(branch, dict):
+                continue
+            step_ids = {
+                _text(step.get("message_id"))
+                for step in (branch.get("recent_steps") or [])
+                if isinstance(step, dict) and _text(step.get("message_id"))
+            }
+            if (
+                anchor_id and (
+                    _text(branch.get("last_message_id")) == anchor_id
+                    or anchor_id in step_ids
+                )
+            ):
+                active_branch_id = _text(branch.get("branch_id"))
+                if not active_branch_id:
+                    branch_root = _text(branch.get("root_message_id") or context.get("root_message_id") or root_id)
+                    active_branch_id = "legacy-branch-" + hashlib.sha256(
+                        "|".join((uid, _text(context.get("topic_id") or topic_id), branch_root)).encode("utf-8")
+                    ).hexdigest()[:18]
+                    branch["branch_id"] = active_branch_id
+                break
+    if not _text(context.get("topic_id")):
+        # Give legacy topics a deterministic identity once their root is resolved,
+        # so the next saved turn can carry a stable topic ID without a migration.
+        scope_id = _text(dialog_id or conversation_id)
+        stable_root = _text(context.get("root_message_id") or root_id or anchor_id)
+        stable_topic = _text(context.get("topic") or topic_label).casefold()
+        if stable_root:
+            context["topic_id"] = "topic-" + hashlib.sha256(
+                "|".join((uid, scope_id, stable_root, stable_topic)).encode("utf-8")
+            ).hexdigest()[:20]
+    context["active_branch_id"] = active_branch_id[:120]
+    # Carry the resolved identity into the current executor turn as well as the index.
+    # Otherwise a legacy row without branch_id would be re-saved under a different ID
+    # and the next turn could split an existing branch into a duplicate.
+    current_active = result.get("active_branch") if isinstance(result.get("active_branch"), dict) else {}
+    current_active = dict(current_active)
+    current_active.update({
+        "status": "ACTIVE",
+        "branch_id": active_branch_id[:120] or _text(current_active.get("branch_id"))[:120],
+        "active_topic_id": _text(context.get("topic_id") or topic_id)[:120],
+        "selected_topic_id": _text(context.get("topic_id") or topic_id)[:120],
+        "topic": _text(context.get("topic") or topic_label)[:240],
+        "topic_origin_message_id": _text(context.get("root_message_id") or root_id)[:120],
+        "message_id": anchor_id[:120],
+    })
+    result["active_branch"] = current_active
+    result["active_topic"] = _text(context.get("topic") or topic_label)[:240]
+    if isinstance(result.get("anchor"), dict):
+        result["anchor"] = {
+            **result["anchor"],
+            "topic_id": _text(context.get("topic_id") or topic_id or result["anchor"].get("topic_id"))[:120],
+            "branch_id": active_branch_id[:120] or _text(result["anchor"].get("branch_id"))[:120],
+            "topic_origin_message_id": _text(context.get("root_message_id") or root_id or result["anchor"].get("topic_origin_message_id"))[:120],
+            "origin_message_id": _text(context.get("root_message_id") or root_id or result["anchor"].get("origin_message_id"))[:120],
+            "topic": _text(context.get("topic") or topic_label or result["anchor"].get("topic"))[:240],
+        }
+    # Bring the root, the exact retrieved anchor and the five newest source pairs
+    # into the prompt; the branch inventory carries compact summaries and all asset
+    # references for the entire topic without overflowing the Premium context budget.
+    ordered = sorted(cleaned, key=lambda row: (
+        float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+    ))
+    chosen_ids: list[str] = []
+    ordered_by_id = {_text(row.get("message_id")): row for row in ordered if _text(row.get("message_id"))}
+    for preferred_id in (context.get("root_message_id"), anchor_id):
+        if preferred_id and preferred_id not in chosen_ids and preferred_id in ordered_by_id:
+            chosen_ids.append(preferred_id)
+
+    anchor_thread = _dialogue_thread_metadata(anchor_row) if isinstance(anchor_row, dict) else {}
+    active_branch_id = _text(anchor_thread.get("branch_id") or anchor_thread.get("work_id") or anchor.get("branch_id"))
+    active_root_id = _text(
+        anchor_thread.get("topic_origin_message_id") or anchor_thread.get("origin_message_id")
+        or context.get("root_message_id")
+    )
+    branch_rows = [
+        row for row in ordered
+        if (
+            active_branch_id and _text(_dialogue_thread_metadata(row).get("branch_id") or _dialogue_thread_metadata(row).get("work_id")) == active_branch_id
+        ) or (
+            not active_branch_id
+            and active_root_id
+            and _text(_dialogue_thread_metadata(row).get("topic_origin_message_id") or _dialogue_thread_metadata(row).get("origin_message_id")) == active_root_id
+        )
+    ]
+    recent_branch_rows = branch_rows[-5:] if branch_rows else ordered[-5:]
+    for row in recent_branch_rows:
+        row_id = _text(row.get("message_id"))
+        if row_id and row_id not in chosen_ids:
+            chosen_ids.append(row_id)
+    by_id = {_text(row.get("message_id")): row for row in ordered}
+    selected_pairs = [_compact_pair(by_id[mid]) for mid in chosen_ids if mid in by_id]
+    selected_pairs.sort(key=lambda item: (
+        float(item.get("topic_origin_at") or 0.0),
+        int(item.get("turn") or 0),
+    ))
+    result["selected"] = selected_pairs
+    result["topic_context"] = context
+    result["topic_context_expansion"] = {
+        "status": "loaded",
+        "mode": fallback_mode or ("topic_id" if topic_id else "topic_origin_message_id"),
+        "topic_id": context.get("topic_id"),
+        "root_message_id": context.get("root_message_id"),
+        "loaded_pairs": len(cleaned),
+        "branch_count": context.get("branch_count"),
+        "artifact_count": context.get("artifact_count"),
+        "selected_pairs": len(selected_pairs),
+    }
+    result["branch_context_expanded"] = True
+    # Preserve the whole-topic index separately from the global history index.
+    result["topic_index"] = [{
+        "number": 1,
+        "topic_id": context.get("topic_id"),
+        "topic": context.get("topic"),
+        "summary": context.get("summary"),
+        "origin_message_id": context.get("root_message_id"),
+        "message_ids": context.get("source_message_ids") or [],
+        "pair_count": context.get("pair_count"),
+        "branch_count": context.get("branch_count"),
+        "branch_ids": [_text(item.get("branch_id")) for item in (context.get("branches") or []) if _text(item.get("branch_id"))],
+        "first_at": context.get("first_at"),
+        "last_at": context.get("last_at"),
+    }]
+    result["matched_topic_count"] = 1
+    _apr_timing_log(
+        "hot_branch_topic_expanded", None,
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id),
+        anchor_message_key=_apr_diag_ref(anchor_id),
+        topic_id=_apr_diag_ref(context.get("topic_id")),
+        root_message_key=_apr_diag_ref(context.get("root_message_id")),
+        loaded_pairs=len(cleaned),
+        branch_count=context.get("branch_count"),
+        artifact_count=context.get("artifact_count"),
+        selected_pairs=len(selected_pairs),
+        fallback_mode=fallback_mode or "durable_topic_identity",
+    )
+    return result
 
 def search_dialogue_context(
     user_id: Any,
@@ -3121,46 +6146,391 @@ def search_dialogue_context(
     has_file: bool = False,
     has_voice: bool = False,
     query_interpretation: dict[str, Any] | None = None,
+    _hot_branch_only: bool = False,
 ) -> dict[str, Any]:
-    """Find the smallest reliable continuation point in the authenticated 12h memory.
+    """Find the smallest reliable continuation point in authenticated 24h memory.
 
-    Retrieval hierarchy: topic -> USER↔APRIL pair -> McDowell section. Only the
-    selected pair/section is passed forward. An unclear choice yields a local
-    clarification state that persists the original request and can be resumed.
+    Continuation requests first inspect a bounded, strict current-dialog window.
+    Only a confident match returns immediately; a miss runs the unchanged full-history
+    selector so older topics and their artifacts remain recoverable.
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    state = hydrate(uid)
-    all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    query_interpretation = dict(query_interpretation or {})
+
+    hot_branch_probe_missed = False
+    if not _hot_branch_only and _should_probe_hot_branch_first(
+        query, query_interpretation,
+        dialog_id=str(dialog_id or ""),
+        conversation_id=str(conversation_id or ""),
+        resume_message_id=str(resume_message_id or ""),
+    ):
+        probe_started = time.perf_counter()
+        hot_result = search_dialogue_context(
+            uid,
+            query,
+            dialog_id=dialog_id,
+            conversation_id=conversation_id,
+            resume_message_id=resume_message_id,
+            limit=limit,
+            has_image=has_image,
+            has_file=has_file,
+            has_voice=has_voice,
+            query_interpretation=query_interpretation,
+            _hot_branch_only=True,
+        )
+        hot_result = _promote_grounded_recent_anaphoric_candidate(hot_result, query_interpretation)
+        if _hot_branch_result_is_clear(hot_result):
+            expanded_hot_result = _expand_hot_branch_to_topic(
+                hot_result, uid, dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+            )
+            expansion = expanded_hot_result.get("topic_context_expansion") if isinstance(expanded_hot_result.get("topic_context_expansion"), dict) else {}
+            if _text(expansion.get("status")).lower() == "loaded":
+                hot_result = expanded_hot_result
+                hot_result["hot_branch_first"] = True
+                hot_result["history_scan_skipped"] = True
+                hot_result["search_stage"] = "HOT_BRANCH_MATCH"
+                hot_result["hot_branch_window_count"] = int(hot_result.get("total_pairs") or 0)
+                retrieval_profile = hot_result.get("retrieval_profile")
+                if isinstance(retrieval_profile, dict):
+                    retrieval_profile["search_stage"] = "HOT_BRANCH_MATCH"
+                    retrieval_profile["history_search_skipped"] = True
+                    retrieval_profile["history_search_deferred"] = False
+                _apr_timing_log(
+                    "hot_branch_first_match", probe_started,
+                    user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                    query_key=_apr_diag_ref(query), relation=hot_result.get("relation"),
+                    reason=hot_result.get("reason"),
+                    window_pairs=hot_result.get("total_pairs"),
+                    selected_pairs=len(hot_result.get("selected") or []),
+                    confidence=hot_result.get("relation_confidence"),
+                    topic_branches=expansion.get("branch_count"),
+                    topic_artifacts=expansion.get("artifact_count"),
+                    history_scan_skipped=True,
+                )
+                return hot_result
+            # The recent hit is not enough if we cannot restore its complete topic:
+            # fall back to the canonical history selector rather than silently
+            # continuing with an incomplete branch and losing its sibling context.
+            hot_result = expanded_hot_result
+        _apr_timing_log(
+            "hot_branch_first_miss", probe_started,
+            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+            query_key=_apr_diag_ref(query),
+            probe_relation=(hot_result or {}).get("relation"),
+            probe_reason=(hot_result or {}).get("reason"),
+            probe_confidence=(hot_result or {}).get("relation_confidence"),
+            probe_topic_conflict=bool(((hot_result or {}).get("active_branch") or {}).get("active_topic_id")
+                                      and ((hot_result or {}).get("active_branch") or {}).get("selected_topic_id")
+                                      and ((hot_result or {}).get("active_branch") or {}).get("active_topic_id")
+                                      != ((hot_result or {}).get("active_branch") or {}).get("selected_topic_id")),
+            fallback="FULL_HISTORY",
+        )
+        hot_branch_probe_missed = True
+
+    retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
+    explicit_visual_revision = _is_explicit_visual_revision_request(query)
+    visual_misroute_correction = _is_visual_misroute_correction(query)
+    query_features_for_repair = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    query_pragmatic_for_repair = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    explicit_active_restatement = bool(
+        not query_interpretation.get("history_request")
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            query_interpretation.get("active_branch_repair")
+            or query_features_for_repair.get("explicit_previous_answer_correction")
+            or query_pragmatic_for_repair.get("explicit_previous_answer_correction")
+        )
+    )
+    contextual_visual_development = _is_visual_scene_development_followup(
+        query, query_interpretation, has_image=has_image
+    )
+    targeted_active_repair = bool(
+        retrospective_image_discussion or visual_misroute_correction or explicit_visual_revision
+        or explicit_active_restatement or contextual_visual_development
+    )
+    state = hydrate(
+        uid,
+        limit=5 if _hot_branch_only else (16 if targeted_active_repair else 0),
+        dialog_id=str(dialog_id or ""),
+        conversation_id=str(conversation_id or ""),
+        strict_dialog_scope=bool(_hot_branch_only),
+    )
+    # Make per-search top-level copies. The cache is shared between request threads;
+    # this search annotates rows with derived topic provenance, so mutating cached row
+    # dictionaries directly could let concurrent turns overwrite one another's context.
+    # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
+    all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    if targeted_active_repair:
+        same_dialog_rows = [row for row in all_rows if (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )]
+        if same_dialog_rows:
+            all_rows = sorted(same_dialog_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        else:
+            all_rows = sorted(all_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))[-16:]
+        explicit_graph_or_diagram_target = _query_targets_graph_or_diagram(query, query_interpretation)
+        visual_anchor = None if explicit_graph_or_diagram_target else _select_recent_visual_task_anchor(all_rows, query)
+        if explicit_graph_or_diagram_target:
+            # The visual-anchor helper is deliberately image-specific. A correction
+            # about a 3D graph/diagram must continue from a saved graph artifact, not
+            # collapse history to the latest photograph operation.
+            _apr_timing_log(
+                "image_anchor_skipped_for_structured_visual_target", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                requested_kinds=["graph_or_diagram"], retained_rows=len(all_rows),
+                reason="preserve_matching_graph_or_diagram_history",
+            )
+        if visual_anchor is not None:
+            # Keep the full current-dialogue window. A matching visual record adds
+            # asset evidence; it must never replace the latest assistant answer or
+            # the user edits made after that artifact was created.
+            visual_anchor_id = _text(visual_anchor.get("message_id"))
+            latest_pair = max(all_rows, key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ), default=None)
+            latest_id = _text((latest_pair or {}).get("message_id"))
+            ordered_rows = []
+            if latest_pair is not None:
+                ordered_rows.append(latest_pair)
+            if visual_anchor_id and visual_anchor_id != latest_id:
+                ordered_rows.append(visual_anchor)
+            ordered_rows.extend(
+                row for row in all_rows
+                if _text(row.get("message_id")) not in {latest_id, visual_anchor_id}
+            )
+            all_rows = ordered_rows[:16]
+            _apr_timing_log(
+                "active_visual_branch_reanchored", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                source_message_key=_apr_diag_ref(visual_anchor.get("message_id")),
+                recent_rows=len(same_dialog_rows), reason=(
+                    "retrospective_image_feedback" if retrospective_image_discussion else (
+                    "contextual_visual_scene_development" if contextual_visual_development else (
+                    "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
+                ))
+                ),
+            )
+    # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
+    # lookup if an explicitly requested time interval contains no saved dialogue pairs.
+    retained_rows = list(all_rows)
     resume_key = _text(resume_message_id)
+    reference_followup = _looks_like_referential_followup(query)
+    dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
+    history_request = dialogue_profile_request or bool(query_interpretation.get("history_request")) or _is_history_request(query)
+    # In normal Premium routing the interpretation result is authoritative.
+    # The lexical helper remains only as compatibility fallback for direct legacy callers.
+    new_topic_request = (
+        bool(query_interpretation.get("explicit_topic_switch"))
+        if "explicit_topic_switch" in query_interpretation
+        else _looks_like_new_topic(query)
+    )
+    interpreted_topic_closure = (
+        bool(query_interpretation.get("explicit_topic_closure"))
+        if "explicit_topic_closure" in query_interpretation
+        else _is_explicit_topic_closure(query)
+    )
+    interpreted_direction = _text(query_interpretation.get("direction"))
+    interpreted_intent = _text(query_interpretation.get("primary_intent"))
+    site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
+    topic_reference_fragment = _text(query_interpretation.get("topic_reference")) == "TOPIC_FRAGMENT"
+    explicit_artifact_kind = (
+        _text(query_interpretation.get("saved_artifact_followup_kind"))
+        if "saved_artifact_followup_kind" in query_interpretation
+        else _explicit_artifact_followup_kind(query)
+    )
+    # A recap/praise may contain words like "asked you to edit the photo" but
+    # does not ask to edit that artifact again. Voice transcripts are text turns,
+    # so the semantic continuation route (below) should preserve the active branch
+    # without the expensive saved-image recovery lane.
+    if retrospective_image_discussion and _text(explicit_artifact_kind).lower() == "image":
+        explicit_artifact_kind = ""
+    explicit_artifact_followup = bool(explicit_artifact_kind and not history_request and not new_topic_request)
+    context_signature = _query_context_signature(query, query_interpretation)
+    pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    speech_act = _text(query_interpretation.get("speech_act")).upper()
+    communicative_act = _text(query_interpretation.get("communicative_act")).upper()
+    is_correction = bool(
+        pragmatic_features.get("correction")
+        or pragmatic_features.get("active_branch_repair")
+        or pragmatic_features.get("previous_answer_reference")
+        or pragmatic_features.get("factual_verification_request")
+        or query_interpretation.get("active_branch_repair")
+        or query_interpretation.get("previous_answer_reference")
+        or query_interpretation.get("factual_verification_request")
+        or speech_act in {"CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "NEGATION_OR_DISAGREEMENT"}
+        or communicative_act in {"REVISE_PREVIOUS_RESPONSE", "RESPOND_TO_DISAGREEMENT"}
+        or _looks_like_topic_correction(query)
+        or _looks_like_answer_verification(query)
+    )
+    is_short_acknowledgement = bool(
+        pragmatic_features.get("acknowledgement_or_agreement")
+        and len(_tokens(query)) <= 3
+        and not pragmatic_features.get("has_independent_payload")
+        and not history_request
+        and not new_topic_request
+    )
+    # In a correction, a rejected entity ("not Mendeleev") is not the intended
+    # search subject. If the user supplies a positive replacement ("I mean math"),
+    # resolve subjects from that replacement clause only.
+    subject_query = query
+    low_subject_query = _text(query).lower().replace("ё", "е")
+    positive_replacement = re.search(r"\b(?:я\s+(?:тебе\s+)?про|я\s+имел\w*\s+в\s+виду|я\s+имела\w*\s+в\s+виду|именно)\s+(.+)$", low_subject_query)
+    if is_correction and positive_replacement:
+        subject_query = positive_replacement.group(1)
+    elif is_correction and re.search(r"\bне\s+про\s+[^,.;!?]+(?:\s+(?:спрашивал|спрашивала|говорил|говорила|имел|имела)\b|$)", low_subject_query):
+        subject_query = ""
+    supplied_subjects = context_signature.get("subject_terms")
+    query_subjects = set(_subject_tokens(subject_query)) if subject_query != query else (
+        set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
+    )
+    if targeted_active_repair and all_rows:
+        # The authenticated source task is the semantic anchor; do not let reaction
+        # wording introduce unrelated entities into the branch selection.
+        anchor_row = all_rows[-1]
+        anchor_text = " ".join((
+            _text(anchor_row.get("user_text") or anchor_row.get("user")),
+            _text(anchor_row.get("user_text_en")),
+        ))
+        anchor_subjects = _subject_tokens(anchor_text)
+        if anchor_subjects:
+            query_subjects = set(anchor_subjects)
+    # Referential questions about an object's origin are continuations, not a new
+    # "internet/source" topic. The grammar/predicate terms are excluded above; this
+    # fallback prevents morphology/typos from creating a false subject conflict.
+    if reference_followup and not positive_replacement and not is_correction:
+        low = _text(query).lower().replace("ё", "е")
+        if re.search(r"\b(?:его|ее|её|это|этот|эта|эту)\b", low) and re.search(r"\b(?:придум\w*|слиз\w*|скопир\w*|напис\w*|взял\w*|взяла\w*)\b", low):
+            query_subjects = set()
+
+    # Resolve a text-specified period into an actual filter over the authenticated
+    # Premium memory. This preserves the 24-hour product retention cap and uses
+    # local civil time for “today/morning/14:00”, with timestamps normalized to UTC.
+    search_now_ts = time.time()
+    parsed_window = query_interpretation.get("time_window") if isinstance(query_interpretation.get("time_window"), dict) else {}
+    if not parsed_window.get("has_constraint") or not isinstance(parsed_window.get("start_at"), (int, float)) or not isinstance(parsed_window.get("end_at"), (int, float)):
+        parsed_window = extract_temporal_window(query, reference_ts=search_now_ts)
+    should_apply_time_filter = bool(
+        parsed_window.get("has_constraint")
+        and not resume_key
+        and not explicit_artifact_followup
+        and (
+            history_request
+            or bool(query_interpretation.get("requires_memory"))
+            or bool(query_interpretation.get("history_inventory_request"))
+            or interpreted_intent in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "TOPIC_CONTINUATION", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+        )
+    )
+    time_filter = intersect_retention_window(
+        parsed_window, now_ts=search_now_ts, retention_seconds=DIALOGUE_WINDOW_SECONDS
+    ) if should_apply_time_filter else {
+        "applied": False, "empty": False, "start_at": None, "end_at": None, "source": "none"
+    }
+    if time_filter.get("applied"):
+        time_filter["matched_rows"] = 0
+        time_filter["neighbors"] = {"before": None, "after": None}
+        time_filter["retention_hours"] = DIALOGUE_WINDOW_HOURS
+        if time_filter.get("empty"):
+            # Distinguish old requests from future times: both have no searchable rows,
+            # but only the former is outside Premium's retained 24-hour window.
+            requested_start = float(time_filter.get("requested_start_at") or parsed_window.get("start_at") or 0.0)
+            requested_end = float(time_filter.get("requested_end_at") or parsed_window.get("end_at") or 0.0)
+            retention_start = search_now_ts - DIALOGUE_WINDOW_SECONDS
+            if requested_start > search_now_ts:
+                time_filter["empty_reason"] = "future_period"
+            elif requested_end <= retention_start:
+                time_filter["empty_reason"] = "outside_retention"
+            else:
+                time_filter["empty_reason"] = "no_past_overlap"
+            all_rows = []
+            time_filter["outside_retention_window"] = time_filter["empty_reason"] == "outside_retention"
+            # Even when the requested interval does not overlap retained history,
+            # provide the closest *available* record on either side. This never
+            # widens the Premium window: candidates still come only from retained_rows.
+            before_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) < requested_start]
+            after_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) >= requested_end]
+            before_row = max(before_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+            after_row = min(after_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+            time_filter["neighbors"] = {
+                "before": _temporal_neighbor(before_row, "before") if before_row else None,
+                "after": _temporal_neighbor(after_row, "after") if after_row else None,
+            }
+        else:
+            lower = float(time_filter["start_at"])
+            upper = float(time_filter["end_at"])
+            all_rows = [
+                row for row in retained_rows
+                if lower <= float(row.get("created_at") or 0.0) < upper
+            ]
+            time_filter["matched_rows"] = len(all_rows)
+            time_filter["outside_retention_window"] = False
+            if not all_rows:
+                # Exact interval is empty: return the nearest retained record on each
+                # side as clearly labelled neighbors, never as matches inside the range.
+                before_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) < lower]
+                after_rows = [row for row in retained_rows if float(row.get("created_at") or 0.0) >= upper]
+                before_row = max(before_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+                after_row = min(after_rows, key=lambda row: float(row.get("created_at") or 0.0), default=None)
+                time_filter["neighbors"] = {
+                    "before": _temporal_neighbor(before_row, "before") if before_row else None,
+                    "after": _temporal_neighbor(after_row, "after") if after_row else None,
+                }
     resume_anchor_row = next((row for row in all_rows if (
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
-    query_interpretation = dict(query_interpretation or {})
-    pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
-    correction_turn = bool(_looks_like_topic_correction(query) or pragmatic_features.get("correction"))
-    retrieval_query = _clarification_target_text(query) if correction_turn else _text(query)
-    reference_followup = _looks_like_referential_followup(query) or correction_turn
-    history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
-    new_topic_request = _looks_like_new_topic(query)
-    interpreted_direction = _text(query_interpretation.get("direction"))
-    interpreted_intent = _text(query_interpretation.get("primary_intent"))
-    site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
-    if correction_turn:
-        # The interpreter's raw signature may contain correction words («имел»,
-        # «ввиду») as fake entities. Rebuild only the retrieval signature from the
-        # corrected subject; CURRENT_REQUEST itself remains untouched for April.
-        context_signature = _query_context_signature(retrieval_query)
-        query_subjects = _subject_tokens(retrieval_query)
-    else:
-        context_signature = _query_context_signature(query, query_interpretation)
-        # Use normalized source-text entities for retrieval. The interpretation
-        # signature can contain clipped stems ("конф", "виль") and discourse
-        # fillers ("давай", "поподроб"), which are unsafe as subject identities.
-        # Keep the richer signature for diagnostics, but do not let it manufacture
-        # a topic switch or block a match to names in April's immediately prior answer.
-        query_subjects = _subject_tokens(retrieval_query)
+    low_query_for_assets = _text(query).lower().replace("ё", "е")
+    image_noun_pattern = r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"
+    image_edit_action_pattern = r"(?:измен\w*|отредактир\w*|модифицир\w*|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|передел\w*|поправ\w*|исправ\w*|перерис\w*|\bedit\b|\bmodify\b|\badd\b|\bremove\b|\breplace\b|\bredraw\b)"
+    image_reference_pattern = rf"(?:{image_noun_pattern}|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|(?:к\s+)?эту\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|(?:к\s+)?этой\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|this\s+(?:photo|image|picture)|on\s+it)\b)"
+    # A visual correction can refer to an earlier image without uploading it again.
+    # Treat that as an image retrieval operation so continuation narrowing does not
+    # collapse the search to the latest unrelated generated render in the hot branch.
+    image_edit_reference = bool(
+        not retrospective_image_discussion
+        and (
+            re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
+            or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+        )
+    )
+    explicit_new_visual = bool(re.search(
+        r"\b(?:создай|сгенерир\w*|нарису\w*|изобрази|generate|create|draw)\b.{0,45}(?:нов\w*\s+)?(?:картинк\w*|изображени\w*|фото\b|\bimage\b|\bphoto\b|\bpicture\b)",
+        low_query_for_assets, re.I | re.S,
+    ))
+    if explicit_new_visual:
+        image_edit_reference = False
+    query_modalities = {modality for modality, enabled in (
+        ("image", bool(has_image or image_edit_reference)), ("file", bool(has_file)), ("voice", bool(has_voice)),
+    ) if enabled}
+    # A historical-image edit needs exact source retrieval, but it should not
+    # trigger expensive full-JSON scoring for every retained message. The targeted
+    # fast path below includes all image-bearing rows in this same dialogue and
+    # ranks a smaller semantic set for the active-work branch.
+    image_edit_history_fast_path = bool(
+        image_edit_reference
+        and not has_image
+        and not has_file
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+    )
+    needs_structured_search = bool(
+        (not retrospective_image_discussion and _structured_work_requested(query, query_interpretation, query_modalities))
+        or history_request or time_filter.get("applied") or _is_section_request(query)
+    )
+
+    def search_topic_label(row: dict[str, Any]) -> str:
+        return _topic_label(row) if needs_structured_search else _topic_label_lightweight(row)
+
+    def search_subject_text(row: dict[str, Any]) -> str:
+        return _row_subject_text(row) if needs_structured_search else _row_subject_text_lightweight(row)
+
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -3173,6 +6543,14 @@ def search_dialogue_context(
         search_direction=interpreted_direction,
         time_scope=_text(query_interpretation.get("time_scope")),
         search_scope=_text(query_interpretation.get("search_scope")),
+        temporal_filter_requested=bool(parsed_window.get("has_constraint")),
+        temporal_filter_applied=bool(time_filter.get("applied")),
+        temporal_filter_source=_text(time_filter.get("source")),
+        temporal_rows_after_filter=len(all_rows),
+        temporal_match_count=time_filter.get("matched_rows"),
+        temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
+        temporal_outside_retention=bool(time_filter.get("outside_retention_window")),
+        image_edit_reference=bool(image_edit_reference),
     )
 
     scope_started = time.perf_counter()
@@ -3186,9 +6564,20 @@ def search_dialogue_context(
     else:
         scoped_rows = list(all_rows)
 
-    # Search the whole user's 12-hour window for a distinctly named old topic,
+    # Search the whole user's 24-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
-    topic_bearing = _semantic_tokens(retrieval_query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    topic_bearing = _semantic_tokens(subject_query if is_correction and subject_query != query else query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    # A pure correction such as "I wasn't asking about Mendeleev" rejects that
+    # entity; searching the archive for the rejected name would repeat the mistake.
+    if is_correction and not subject_query.strip():
+        topic_bearing = set()
+    if reference_followup and not query_subjects and re.search(
+        r"\b(?:придум\w*|слиз\w*|скопир\w*|напис\w*|взял\w*|взяла\w*)\b",
+        _text(query).lower().replace("ё", "е"),
+    ):
+        # A referential authorship/source question has no new topical entity.
+        # Do not launch a cross-history named-topic search for its predicates.
+        topic_bearing = set()
     named_rows: list[tuple[float, dict[str, Any]]] = []
     if not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
@@ -3198,12 +6587,12 @@ def search_dialogue_context(
             mid = _text(row.get("message_id"))
             if mid and mid in scoped_ids:
                 continue
-            row_subjects = _row_subject_tokens(row)
+            row_subjects = _subject_tokens(search_subject_text(row))
             subject_overlap = _subject_overlap(query_subjects, row_subjects)
             if _subject_conflicts(query_subjects, row_subjects):
                 continue
-            searchable_topic = " ".join((_topic_label(row), _row_subject_text(row)))
-            overlap = _topic_query_overlap(retrieval_query, searchable_topic)
+            searchable_topic = " ".join((search_topic_label(row), search_subject_text(row)))
+            overlap = _topic_query_overlap(query, searchable_topic)
             if overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60):
                 # Subject alignment is useful only when there is also meaningful
                 # task/topic overlap; it must not pull a different old task solely
@@ -3227,13 +6616,57 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         rows_in_window=len(all_rows), rows_in_scope=len(rows), history_request=history_request, query_chars=len(str(query or "")))
 
-    # Voice is a transport modality, not a new attachment boundary: the transcript
-    # is the user's semantic text and must be classified exactly like typed input.
-    # Only a newly uploaded image/file changes the attachment-routing decision.
-    query_modalities = {modality for modality, enabled in (
-        ("image", bool(has_image)), ("file", bool(has_file)),
-    ) if enabled}
-    has_new_user_asset = bool(query_modalities)
+    # Continuations are scoped by the semantic direction, not by word-triggered
+    # rules. If the user names the subject ("continue about Newton"), rank the
+    # source rows whose actual dialogue text names that subject; if the follow-up
+    # is elliptical ("what happened?"), search the latest same-dialogue window.
+    # Explicit history/time searches, deliberate History anchors and image/file
+    # operations retain the full canonical candidate set.
+    continuation_intent = interpreted_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+    should_narrow_continuation = bool(
+        continuation_intent
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+        and not (has_image or has_file)
+        and not image_edit_reference
+        and rows
+    )
+    if should_narrow_continuation:
+        before_count = len(rows)
+        narrowed_rows: list[dict[str, Any]] = []
+        scope_reason = ""
+        if query_subjects:
+            for row in rows:
+                searchable_subject = " ".join((
+                    _text(row.get("user_text") or row.get("user")),
+                    _text(row.get("user_text_en")),
+                    _text(row.get("april_text") or row.get("april"))[:1800],
+                    _text(row.get("april_text_en"))[:1000],
+                ))
+                row_subjects = _subject_tokens(searchable_subject)
+                if _subject_overlap(query_subjects, row_subjects) >= 0.20:
+                    narrowed_rows.append(row)
+            scope_reason = "explicit_subject_text_match"
+        else:
+            current_scope_rows = [row for row in rows if (
+                (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (conversation_id and _text(row.get("conversation_id")) == _text(conversation_id))
+            )]
+            latest_scope = current_scope_rows or rows
+            narrowed_rows = sorted(
+                latest_scope,
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            )[-8:]
+            scope_reason = "latest_active_dialogue_window"
+        if narrowed_rows:
+            rows = narrowed_rows
+        _apr_timing_log(
+            "continuation_candidate_scope", user_key=_apr_diag_ref(uid),
+            before_count=before_count, after_count=len(rows), reason=scope_reason,
+            explicit_subject=bool(query_subjects), narrowed=bool(narrowed_rows),
+        )
+
     pending_clarification = _latest_pending_clarification([row for row in rows if not dialog_id or _text(row.get("dialog_id")) == _text(dialog_id)])
     pending_option: dict[str, Any] = {}
     pending_resolved = False
@@ -3245,72 +6678,479 @@ def search_dialogue_context(
         # original request rather than becoming the new active topic.
 
     candidate_started = time.perf_counter()
-    matches = [_candidate_score(retrieval_query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
-               for row in rows]
+    scoring_rows = rows
+    light_prefilter_used = False
+    # A general inventory request (“what did we discuss today/yesterday?”) is
+    # served from the chronological topic index and needs no O(history) fuzzy
+    # scoring of every row. Named-topic history searches still get full ranking.
+    history_inventory_fast_path = bool(
+        history_request and (
+            bool(query_interpretation.get("history_inventory_request"))
+            or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or _is_broad_history_overview_query(query)
+            or not _history_query_topic_tokens(query)
+        )
+    )
+    needs_full_candidate_rank = bool(
+        not image_edit_history_fast_path
+        and (
+            (history_request and not history_inventory_fast_path)
+            or needs_structured_search or _is_section_request(query)
+            or query_modalities or is_correction or is_short_acknowledgement
+            or reference_followup or explicit_artifact_followup or resume_key
+            or continuation_intent or pending_clarification
+        )
+    )
+    if history_inventory_fast_path and not image_edit_history_fast_path:
+        # A broad inventory query is answered from the chronological topic index.
+        # Scoring every large structured row here defeats the fast path and was taking
+        # ~43 seconds for 69 rows in the supplied production log.
+        scoring_rows = []
+    elif len(rows) > 18:
+        # Keep the complete retained history available to topic/time/history layers,
+        # but bound deep payload scoring to a semantic shortlist. A request for an
+        # image, structured artifact, or continuation must not force every saved
+        # JSON scene to be parsed with expensive fuzzy and payload scoring. Small
+        # scopes still receive full ranking; large scopes use this loss-minimizing
+        # prefilter and explicitly preserve the latest active-dialogue row/anchor.
+        query_tokens_light = _semantic_tokens(query)
+        lightweight_rank: list[tuple[float, float, dict[str, Any]]] = []
+        rank_now = time.time()
+        for row in rows:
+            light_text = _row_subject_text_lightweight(row)
+            light_tokens = _semantic_tokens(light_text)
+            light_subjects = _subject_tokens(light_text)
+            topic_fit = _topic_query_overlap(query, light_text)
+            token_fit = _concept_overlap(query_tokens_light, light_tokens)
+            subject_fit = _subject_overlap(query_subjects, light_subjects) if query_subjects else 0.0
+            created_at = float(row.get("created_at") or 0.0)
+            age = max(0.0, rank_now - created_at)
+            recency_fit = max(0.0, 1.0 - age / DIALOGUE_WINDOW_SECONDS)
+            light_score = 0.48 * topic_fit + 0.32 * subject_fit + 0.18 * token_fit + 0.02 * recency_fit
+            lightweight_rank.append((light_score, created_at, row))
+        lightweight_rank.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        scoring_rows = [item[2] for item in lightweight_rank[:18]]
+        # Keep the latest source in this exact dialogue available for the hot-branch
+        # arbiter even when the current request is a clear subject switch.
+        latest_same_dialog_row = max((row for row in rows if (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )), key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)), default=None)
+        if latest_same_dialog_row is not None:
+            seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows}
+            if _text(latest_same_dialog_row.get("message_id")) not in seen_scoring_ids:
+                scoring_rows.append(latest_same_dialog_row)
+        if resume_anchor_row is not None:
+            seen_scoring_ids = {_text(row.get("message_id")) for row in scoring_rows}
+            if _text(resume_anchor_row.get("message_id")) not in seen_scoring_ids:
+                scoring_rows.append(resume_anchor_row)
+        light_prefilter_used = True
+
+    # Preserve source recall while avoiding a full deep-score pass over every
+    # dialogue row. Keep all image-bearing rows from the authenticated active
+    # dialogue/conversation, even if they fall outside the lightweight top 18.
+    if image_edit_history_fast_path:
+        source_image_terms = _image_source_subject_tokens(query)
+        image_source_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            same_dialogue = bool(
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+            )
+            if (dialog_id or conversation_id) and not same_dialogue:
+                continue
+
+            response_data = _parse_json(row.get("structured_response"))
+            request_data = _parse_json(row.get("structured_request"))
+            if not isinstance(response_data, dict):
+                response_data = {}
+            if not isinstance(request_data, dict):
+                request_data = {}
+
+            # Asset references are the cheapest and most reliable signal. Legacy
+            # scenes may lack them, so also recognize typed image blocks/inputs.
+            asset_refs = response_data.get("asset_refs") if isinstance(response_data.get("asset_refs"), dict) else {}
+            has_saved_image = False
+            for ref_group in ("source_inputs", "april_outputs"):
+                refs = asset_refs.get(ref_group) if isinstance(asset_refs.get(ref_group), list) else []
+                if any(
+                    isinstance(ref, dict) and (
+                        _text(ref.get("kind")).lower() == "image"
+                        or _text(ref.get("mime_type")).lower().startswith("image/")
+                        or _text(ref.get("filename")).lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                    )
+                    for ref in refs
+                ):
+                    has_saved_image = True
+                    break
+
+            if not has_saved_image:
+                for block_list in (
+                    response_data.get("render_blocks"),
+                    (response_data.get("scene_contract") or {}).get("render_blocks")
+                    if isinstance(response_data.get("scene_contract"), dict) else None,
+                    response_data.get("artifacts"),
+                ):
+                    if isinstance(block_list, list) and any(
+                        isinstance(block, dict) and (
+                            _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+                            in {"image", "gallery", "generated_image", "image_gallery"}
+                            or "galleryblock" in _text(block.get("renderer") or block.get("viewer")).lower()
+                        )
+                        for block in block_list
+                    ):
+                        has_saved_image = True
+                        break
+
+            if not has_saved_image:
+                visual_context = request_data.get("visual_context") if isinstance(request_data.get("visual_context"), dict) else {}
+                attachments = request_data.get("attachments") if isinstance(request_data.get("attachments"), list) else []
+                visual_items = visual_context.get("items") if isinstance(visual_context.get("items"), list) else []
+                has_saved_image = bool(
+                    visual_context.get("has_input_images")
+                    or any(isinstance(item, dict) and (
+                        _text(item.get("type")).lower() in {"input_image", "image"}
+                        or _text(item.get("mime_type")).lower().startswith("image/")
+                    ) for item in visual_items)
+                    or any(isinstance(item, dict) and (
+                        _text(item.get("kind") or item.get("source_type")).lower() == "image"
+                        or _text(item.get("mime_type")).lower().startswith("image/")
+                    ) for item in attachments)
+                )
+            if not has_saved_image:
+                continue
+
+            if source_image_terms:
+                evidence_parts = [
+                    _row_subject_text_lightweight(row),
+                    _text(row.get("user_text")),
+                    _text(row.get("april_text"))[:1800],
+                ]
+                for ref_group in ("source_inputs", "april_outputs"):
+                    refs = asset_refs.get(ref_group) if isinstance(asset_refs.get(ref_group), list) else []
+                    for ref in refs:
+                        if not isinstance(ref, dict):
+                            continue
+                        metadata = ref.get("metadata") if isinstance(ref.get("metadata"), dict) else {}
+                        evidence_parts.extend(
+                            _text(value) for value in (
+                                metadata.get("prompt"), metadata.get("analysis_summary"),
+                                metadata.get("caption"), metadata.get("user_request"),
+                                metadata.get("april_response"),
+                            ) if _text(value)
+                        )
+                evidence_tokens = _subject_tokens(" ".join(evidence_parts))
+                if not _subject_overlap(source_image_terms, evidence_tokens):
+                    continue
+            image_source_rows.append(row)
+
+        if image_source_rows:
+            existing_ids = {_text(row.get("message_id")) for row in scoring_rows if isinstance(row, dict)}
+            added_rows = [
+                row for row in image_source_rows
+                if _text(row.get("message_id")) not in existing_ids
+            ]
+            if added_rows:
+                scoring_rows = list(scoring_rows) + added_rows
+            _apr_timing_log(
+                "image_edit_history_fast_path",
+                None,
+                source_terms=sorted(source_image_terms)[:4],
+                image_rows_found=len(image_source_rows),
+                image_rows_added=len(added_rows),
+                candidates_scored=len(scoring_rows),
+                full_history_rows=len(rows),
+            )
+        else:
+            _apr_timing_log(
+                "image_edit_history_fast_path",
+                None,
+                source_terms=sorted(source_image_terms)[:4],
+                image_rows_found=0,
+                image_rows_added=0,
+                candidates_scored=len(scoring_rows),
+                full_history_rows=len(rows),
+            )
+
+    matches = [_candidate_score(
+        query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
+        reference_followup=reference_followup, query_modalities=query_modalities,
+        structured_evidence_required=needs_structured_search,
+    ) for row in scoring_rows]
     # For participant-centered, subjectless questions, first rank factual evidence
     # written from the relevant speaker perspective; use the existing relevance and
     # recency ordering for all other turns. No fixed score gate is introduced.
     matches.sort(key=lambda item: (
+        int(bool((is_correction or is_short_acknowledgement) and item.get("same_dialog"))),
         int(item.get("participant_alignment") or 0) if not query_subjects else 0,
         float(item["score"]), float(item["recency"]), int(item["turn_index"])
     ), reverse=True)
-    _apr_timing_log("candidate_score_rank", candidate_started, candidates_scored=len(rows), matches=len(matches))
+    _apr_timing_log(
+        "candidate_score_rank", candidate_started,
+        total_scoped_rows=len(rows), candidates_scored=len(scoring_rows), matches=len(matches),
+        lightweight_prefilter=light_prefilter_used,
+        history_inventory_fast_path=history_inventory_fast_path,
+    )
 
     # Build the index once and share it between topic ranking, pair selection and Provider.
-    topics = _build_topic_index(all_rows)
-    if history_request and _asks_for_oldest_history(query):
-        topics = sorted(topics, key=lambda item: float(item.get("last_at") or 0))
-    history_limit = _history_topic_limit(query, 7)
-    # A genuinely broad recall may fall back to a recent/oldest overview. A named
-    # topic must not be replaced with unrelated recent topics when it has no match.
-    history_topic_tokens = _history_query_topic_tokens(query)
-    broad_history_request = history_request and not history_topic_tokens
-    topic_index = _rank_history_topics(query, topics, 10, fallback=broad_history_request)
-    history_topics = _rank_history_topics(
-        query, topics, history_limit, fallback=broad_history_request
-    ) if history_request else []
-    # History overviews need usable, dated entries, not only a topic count.
-    # Attach a stable relative-age label before the data leaves State Manager.
-    now_for_history_labels = time.time()
-    for topic in history_topics:
-        if not isinstance(topic, dict):
+    needs_section_index = bool(
+        history_request
+        or _is_section_request(query)
+        or re.search(r"\b(?:раздел|подраздел|глава|пункт|section|subsection|chapter|heading)\b", _text(query), re.IGNORECASE)
+    )
+    topics = _build_topic_index(
+        all_rows,
+        include_sections=needs_section_index,
+        # On a large retained history, structured fields are deep-scored only for
+        # shortlisted candidates above. A full structured topic-index pass remains
+        # enabled for small scopes and explicit time-window searches where those
+        # payload details are essential; general history inventories stay lightweight.
+        include_structured=bool(
+            needs_structured_search
+            and (len(all_rows) <= 18 or bool(time_filter.get("applied")))
+        ),
+        include_pending=history_request,
+    )
+    requested_limit = query_interpretation.get("requested_topic_count")
+    history_limit = max(1, min(10, int(requested_limit or _history_topic_limit(query, 10))))
+    history_minimum = max(1, min(history_limit, int(
+        query_interpretation.get("minimum_topic_count") or _history_topic_minimum(query, 5)
+    )))
+
+    # Bind every pair and value-bearing structured asset to the topic in which it
+    # originated. Exact message ids remain the source of truth; topic ids are an
+    # index identity and never replace source provenance.
+    topic_by_message_id: dict[str, dict[str, Any]] = {}
+    for topic in topics:
+        for source_id in list(topic.get("message_ids") or []) + [topic.get("message_id"), topic.get("origin_message_id")]:
+            normalized_id = _text(source_id)
+            if normalized_id:
+                topic_by_message_id[normalized_id] = topic
+    for row in all_rows:
+        topic = topic_by_message_id.get(_text(row.get("message_id")))
+        if not topic:
             continue
-        last_at = float(topic.get("last_at") or 0)
-        if last_at > 0:
-            age_minutes = max(0, int(round((now_for_history_labels - last_at) / 60.0)))
-            topic["history_age_minutes"] = age_minutes
-            topic["history_age_label"] = f"примерно {_format_history_duration(age_minutes)} назад"
+        row["topic_id"] = _text(topic.get("topic_id"))
+        row["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+        row["topic_origin_at"] = topic.get("first_at")
+        row["topic_last_at"] = topic.get("last_at")
+        row["topic_summary"] = _text(topic.get("summary"))[:440]
+    for match in matches:
+        topic = topic_by_message_id.get(_text(match.get("message_id")))
+        if not topic:
+            continue
+        match.update({
+            "topic_id": _text(topic.get("topic_id")),
+            "topic_origin_message_id": _text(topic.get("origin_message_id")),
+            "topic_origin_at": topic.get("first_at"),
+            "topic_last_at": topic.get("last_at"),
+            "topic_summary": _text(topic.get("summary"))[:440],
+        })
+        for section in match.get("sections") or []:
+            if isinstance(section, dict):
+                section["topic_id"] = _text(topic.get("topic_id"))
+                section["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+        protected = match.get("protected_structured_data")
+        if isinstance(protected, dict) and protected:
+            protected["topic_id"] = _text(topic.get("topic_id"))
+            protected["topic_origin_message_id"] = _text(topic.get("origin_message_id"))
+            protected["source_message_id"] = _text(match.get("message_id"))
+            protected["topic_origin_at"] = topic.get("first_at")
+
+    # History recall may show up to ten distinct topics; normal requests receive
+    # only semantically matching topics. Broad history requests fall back to
+    # recency ordering after the explicit temporal filter has narrowed the rows.
+    history_query_tokens = _history_query_topic_tokens(query)
+    broad_history_overview = bool(
+        history_request and (
+            query_interpretation.get("history_inventory_request")
+            or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or _is_broad_history_overview_query(query)
+            or not history_query_tokens
+        )
+    )
+    topic_index = _rank_history_topics(query, topics, 10, fallback=broad_history_overview)
+    history_topics = _rank_history_topics(query, topics, history_limit, fallback=broad_history_overview) if history_request else []
 
     latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
+    selection_followup_confirmed, selection_followup_reason, selection_followup_score = _selection_followup_confirmed(query, query_interpretation, latest_same_dialog)
+    if selection_followup_confirmed and not history_request and not new_topic_request and not query_modalities and not resume_key:
+        query_interpretation = dict(query_interpretation)
+        query_interpretation["primary_intent"] = "TOPIC_CONTINUATION"
+        query_interpretation["direction"] = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+        query_interpretation["topic_reference"] = "PREVIOUS_ASSISTANT_ANSWER"
+        query_interpretation["requires_memory"] = True
+        query_interpretation["history_request"] = False
+        query_interpretation["relation_hint"] = "CONTINUE"
+        query_interpretation["reason"] = "selection_followup_confirmed_against_latest_answer"
+        query_interpretation["selection_followup_confirmed"] = True
+        interpreted_intent = "TOPIC_CONTINUATION"
+        interpreted_direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
+    # Search an ongoing task branch before generic topic ranking. The marker lives
+    # in structured_response JSONB; the inference fallback recognizes legacy rows
+    # written before the marker existed. Explicit time/history queries bypass it.
+    active_work_pair: dict[str, Any] | None = None
+    active_work_branch: dict[str, Any] = {}
+    active_work_row_index = -1
+    active_work_has_marker = False
+    scoped_work_rows: list[dict[str, Any]] = []
+    # Artifact branch inference parses structured_response payloads. For a normal
+    # text request with an explicit subject, it cannot improve the answer and may
+    # accidentally resurrect an old image/code task from another topic.
+    should_scan_active_work = bool(needs_structured_search or not query_subjects)
+    if should_scan_active_work and not history_request and not time_filter.get("applied") and not resume_key:
+        scoped_work_rows = [
+            row for row in all_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and (
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+            )
+        ]
+        scoped_work_rows.sort(
+            key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            reverse=True,
+        )
+        if len(scoped_work_rows) > 18 and not history_request and not time_filter.get("applied"):
+            # Active-work inference inspects nested scene/render payloads. Retain all
+            # rows for semantic/history retrieval, but inspect likely matches and a
+            # recent hot-branch window here rather than parsing every old artifact.
+            shortlist_ids = {
+                _text(row.get("message_id")) for row in scoring_rows if isinstance(row, dict)
+            }
+            recent_work_rows = scoped_work_rows[:8]
+            bounded_work_rows = [
+                row for row in scoped_work_rows
+                if _text(row.get("message_id")) in shortlist_ids
+            ]
+            seen_work_ids = {_text(row.get("message_id")) for row in bounded_work_rows}
+            bounded_work_rows.extend(
+                row for row in recent_work_rows
+                if _text(row.get("message_id")) not in seen_work_ids
+            )
+            scoped_work_rows = bounded_work_rows
+        for work_index, work_row in enumerate(scoped_work_rows):
+            work_profile = _infer_active_work_branch(work_row)
+            if work_profile.get("active"):
+                active_work_pair = work_row
+                active_work_branch = dict(work_profile)
+                active_work_row_index = work_index
+                _, response_record, memory_record = _response_and_request_records(work_row)
+                response_meta = response_record.get("metadata") if isinstance(response_record.get("metadata"), dict) else {}
+                persisted_marker = response_record.get("active_work_branch")
+                if not isinstance(persisted_marker, dict):
+                    persisted_marker = response_meta.get("active_work_branch")
+                if not isinstance(persisted_marker, dict):
+                    persisted_marker = memory_record.get("active_work_branch")
+                active_work_has_marker = bool(isinstance(persisted_marker, dict) and persisted_marker.get("active"))
+                active_work_branch.setdefault("source_message_id", _text(work_row.get("message_id")))
+                active_work_branch.setdefault("origin_message_id", _text(work_row.get("message_id")))
+                active_work_branch["candidate_message_id"] = _text(work_row.get("message_id"))[:120]
+                break
+        _apr_timing_log(
+            "active_work_branch_scan",
+            user_key=_apr_diag_ref(uid),
+            scanned=bool(should_scan_active_work),
+            reason=("structured_or_elliptical_request" if should_scan_active_work else "named_text_request_skips_artifact_branch"),
+            scoped_rows=len(scoped_work_rows),
+            matched=bool(active_work_pair),
+        )
+        # Upgrade old rows without a task marker: locate the nearest preceding
+        # task-start row of the same kind, without crossing into an older unrelated
+        # game. Persist this origin on the next accepted continuation.
+        if active_work_pair and active_work_branch and not active_work_has_marker:
+            expected_kind = _text(active_work_branch.get("kind"))
+            for origin_row in scoped_work_rows[active_work_row_index + 1:]:
+                origin_profile = _infer_active_work_branch(origin_row)
+                if _is_active_work_root_candidate(origin_row, origin_profile, expected_kind):
+                    origin_id = _text(origin_row.get("message_id"))
+                    if origin_id:
+                        active_work_branch["origin_message_id"] = origin_id[:120]
+                        root_topic = _text(origin_profile.get("topic"))
+                        root_answer = _text(origin_row.get("april_text") or origin_row.get("april"))
+                        if expected_kind == "interactive_game":
+                            titled_game = re.search(r"\b(?:игра|game)\s*[«\"]([^»\"]{2,100})[»\"]", root_answer, re.IGNORECASE)
+                            if titled_game:
+                                root_topic = _text(titled_game.group(1))
+                        if root_topic:
+                            active_work_branch["topic"] = root_topic[:240]
+                        root_goal = _text(origin_profile.get("goal"))
+                        if root_goal:
+                            active_work_branch["goal"] = root_goal[:500]
+                    break
+        # A marker may exist and still have a corrupted origin (for example, a new
+        # “create a game” request was saved as a continuation of the prior game).
+        # Validate the saved root and prefer the nearest newer root specification
+        # when the marker's origin predates a distinct self-contained work request.
+        if active_work_pair and active_work_branch and active_work_has_marker:
+            expected_kind = _text(active_work_branch.get("kind"))
+            current_origin_id = _text(active_work_branch.get("origin_message_id"))
+            origin_index = next((i for i, row in enumerate(scoped_work_rows)
+                                 if _text(row.get("message_id")) == current_origin_id), -1)
+            origin_row = scoped_work_rows[origin_index] if origin_index >= 0 else None
+            origin_profile = _infer_active_work_branch(origin_row) if origin_row else {}
+            origin_valid = bool(
+                origin_row and _is_active_work_root_candidate(origin_row, origin_profile, expected_kind)
+            )
+            recovered_root = None
+            for root_row in scoped_work_rows[active_work_row_index + 1:]:
+                root_profile = _infer_active_work_branch(root_row)
+                if not _is_active_work_root_candidate(root_row, root_profile, expected_kind):
+                    continue
+                root_id = _text(root_row.get("message_id"))
+                root_index = next((i for i, row in enumerate(scoped_work_rows)
+                                   if _text(row.get("message_id")) == root_id), -1)
+                # The list is newest-first: a smaller index is newer than the old
+                # origin. Recover if the origin is invalid or a newer root intervened.
+                if root_id and (not origin_valid or (origin_index >= 0 and root_index < origin_index)):
+                    recovered_root = root_row
+                    break
+            if recovered_root is not None:
+                root_id = _text(recovered_root.get("message_id"))
+                root_profile = _infer_active_work_branch(recovered_root)
+                root_user = _text(recovered_root.get("user_text") or recovered_root.get("user"))
+                root_answer = _text(recovered_root.get("april_text") or recovered_root.get("april"))
+                root_topic = _topic_label(recovered_root) or root_user
+                if expected_kind == "interactive_game":
+                    titled_game = re.search(r"\b(?:игра|game)\s*[«\"]([^»\"]{2,100})[»\"]", root_answer, re.IGNORECASE)
+                    if titled_game:
+                        root_topic = _text(titled_game.group(1))
+                active_work_branch["origin_message_id"] = root_id[:120]
+                active_work_branch["work_id"] = "work:" + root_id[:120]
+                active_work_branch["source_message_id"] = root_id[:120]
+                if root_topic:
+                    active_work_branch["topic"] = root_topic[:240]
+                if root_user:
+                    active_work_branch["goal"] = root_user[:500]
+                active_work_branch["origin_recovered"] = True
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
-    # A named subject change in a self-contained new request is a new task even
-    # when old and new requests share the same verbs/output format. Referential
-    # corrections remain eligible for retrieval from the matching older context.
-    # An explicitly named subject in a self-contained request wins over nearby
-    # anaphora ("Раскажи про Коперника ... как он выглядел"). A pronoun inside
-    # the same request must not drag an unrelated old pair into the context.
+    # Anaphora inside a complete message (for example, "Расскажи об Эйнштейне
+    # ... где применяются его открытия") refers to the subject named in that same
+    # message, not necessarily to the previous turn. A sufficiently detailed,
+    # self-contained request with a conflicting subject must therefore switch topic
+    # even if the generic referential-follow-up detector sees a pronoun such as "его".
     self_contained_subject_switch = bool(
         active_subject_conflict
         and query_subjects
-        and len(_semantic_tokens(query)) >= 4
-        and interpreted_intent == "NEW_INFORMATION"
+        # A named new entity plus its own pronoun/clause is self-contained even
+        # when the sentence is short (“Расскажи про Коперника и как он выглядел”).
+        # Requiring four lexical tokens alone let “он” suppress the topic switch.
+        and (len(_semantic_tokens(query)) >= 4 or _contains_named_value(query))
         and not history_request
         and not new_topic_request
-        and not correction_turn
     )
     semantic_subject_switch = bool(
         active_subject_conflict
-        and (self_contained_subject_switch or (
-            interpreted_intent == "NEW_INFORMATION"
-            and not reference_followup
-            and not _continuation_marker(query)
-        ))
+        and (interpreted_intent == "NEW_INFORMATION" or self_contained_subject_switch)
+        and (self_contained_subject_switch or (not reference_followup and not _continuation_marker(query)))
         and not history_request
         and not new_topic_request
-        and not correction_turn
     )
     candidate_match_by_id = {
         _text(item.get("message_id")): item for item in matches if _text(item.get("message_id"))
@@ -3322,11 +7162,38 @@ def search_dialogue_context(
             continue
         row_subjects = _row_subject_tokens(row)
         subject_overlap = _subject_overlap(query_subjects, row_subjects)
-        if _subject_conflicts(query_subjects, row_subjects):
+        answer_text_for_topic = _text(
+            row.get("april_text") or row.get("april") or row.get("assistant_text")
+        )
+        answer_topic_overlap = (
+            _topic_query_overlap(query, answer_text_for_topic[:1800])
+            if (is_correction or reference_followup or topic_reference_fragment)
+            else 0.0
+        )
+        answer_has_multiple_options = bool(
+            is_correction
+            and len(re.findall(r"(?m)^\s*\d+[.)]\s+", answer_text_for_topic)) >= 2
+        )
+        # On an explicit correction, the desired item may occur only in an older
+        # assistant list, while the user's original request named the broader task
+        # (e.g. coffee-shop names). Let the list itself ground that exception, but
+        # never bypass subject conflict for an ordinary request.
+        grounded_named_option = bool(answer_has_multiple_options and answer_topic_overlap >= 0.30)
+        if _subject_conflicts(query_subjects, row_subjects) and not grounded_named_option:
             continue
-        searchable_topic = " ".join((_topic_label(row), _row_subject_text(row), _text(row.get("april_text") or row.get("april"))))
-        overlap = _topic_query_overlap(retrieval_query, searchable_topic)
-        topic_hit = overlap >= 0.50 or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
+        searchable_topic = " ".join((search_topic_label(row), search_subject_text(row)))
+        if is_correction or reference_followup or topic_reference_fragment:
+            # A named correction can refer to a concrete choice that appeared only
+            # in April's previous answer, not in the user's original wording.
+            # Include that answer as retrieval evidence only on referential/repair
+            # turns; ordinary new-topic requests must not match old generated prose.
+            searchable_topic += " " + answer_text_for_topic[:1800]
+        overlap = _topic_query_overlap(query, searchable_topic)
+        topic_hit = (
+            overlap >= 0.50
+            or (query_subjects and subject_overlap >= 0.60 and (reference_followup or _looks_like_topic_correction(query)))
+            or (answer_has_multiple_options and answer_topic_overlap >= 0.30)
+        )
         mid = _text(row.get("message_id")) or f"{row.get('created_at')}|{row.get('turn_index')}"
         if topic_hit and mid not in seen_topic_hit_ids:
             seen_topic_hit_ids.add(mid)
@@ -3345,6 +7212,67 @@ def search_dialogue_context(
             )
             explicit_topic_hits.append((row_rank, row))
     explicit_topic_hits.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0)), reverse=True)
+    topic_pointer_match = bool(topic_reference_fragment and explicit_topic_hits)
+    # A successfully matched topic pointer explicitly refers to that prior topic,
+    # even when the latest turn is about something else. Preserve the raw switch
+    # diagnostic, but don't let the latest topic veto the user's resolved pointer.
+    decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match and not is_correction and not is_short_acknowledgement)
+    repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
+    # A correction may explicitly name a choice from a prior assistant list after
+    # an intervening misinterpretation created a false active branch. Locate only a
+    # same-dialog answer that actually offered a numbered list and shares the named
+    # content; this is a grounded re-anchor, not a generic historical-topic fallback.
+    named_option_reanchor_row: dict[str, Any] | None = None
+    named_option_reanchor_score = 0.0
+    query_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    explicit_answer_correction = bool(query_features.get("explicit_previous_answer_correction"))
+    if repair_active_branch and explicit_answer_correction and query_subjects and not query_modalities:
+        ranked_named_options: list[tuple[float, float, dict[str, Any]]] = []
+        for _, candidate_row in explicit_topic_hits:
+            candidate_id = _text(candidate_row.get("message_id"))
+            candidate_match = candidate_match_by_id.get(candidate_id) or {}
+            if not candidate_id or not candidate_match.get("same_dialog"):
+                continue
+            candidate_answer = _text(
+                candidate_row.get("april_text") or candidate_row.get("april") or candidate_row.get("assistant_text")
+            )
+            option_count = len(re.findall(r"(?m)^\s*\d+[.)]\s+", candidate_answer))
+            if option_count < 2:
+                continue
+            content_overlap = _topic_query_overlap(query, candidate_answer[:5200])
+            if content_overlap < 0.30:
+                continue
+            # Prefer the original multi-option answer over a later repair that
+            # merely repeats the same word while explaining the misunderstanding.
+            score = min(1.0, content_overlap + min(0.20, 0.05 * option_count))
+            ranked_named_options.append((score, float(candidate_row.get("created_at") or 0), candidate_row))
+        if ranked_named_options:
+            ranked_named_options.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            named_option_reanchor_score, _, named_option_reanchor_row = ranked_named_options[0]
+    explicit_followup_anchor = _explicit_followup_anchor(query, matches, latest_same_dialog, query_subjects)
+    # Voice has already been transcribed into the current query. It is an input
+    # modality, but not a separate visual/file artifact that should block an
+    # authenticated active-branch continuation.
+    has_new_attachment = bool(query_modalities.intersection({"image", "file", "text_file"}))
+    explicit_attachment_followup = has_new_attachment and (reference_followup or explicit_followup_anchor is not None)
+    user_operation = _user_operation_profile(
+        query, query_interpretation,
+        history_request=history_request,
+        new_topic_request=new_topic_request,
+        is_correction=is_correction,
+        is_short_acknowledgement=is_short_acknowledgement,
+    )
+    semantic_active_branch_intent = bool(
+        latest_same_dialog
+        and _has_semantic_active_branch_intent(
+            query_interpretation,
+            history_request=history_request,
+            new_topic_request=new_topic_request,
+            has_attachment=has_new_attachment,
+            reference_followup=reference_followup,
+        )
+    )
+    semantic_active_branch_intent = bool(semantic_active_branch_intent or selection_followup_confirmed)
 
     # Treat the ranked match as contextual when it contains actual semantic evidence,
     # rather than requiring a fixed hand-chosen score cutoff. Subject conflict remains
@@ -3359,104 +7287,606 @@ def search_dialogue_context(
     short_contextual = len(_tokens(query)) <= 12 and _text(query).lower().startswith(("а ", "и ", "ну ", "так ")) and (
         reference_followup or marker or len(_semantic_tokens(query)) == 0
     )
-    # If April's own last answer asked the user to provide evidence, an upload in
-    # the next turn is normally the answer to that request. Treat the attachment
-    # as part of the active exchange even when the accompanying words are only
-    # "here it is" or the user dictates the explanation instead of typing it.
-    last_april_reply = _text((latest_same_dialog or {}).get("april") or (latest_same_dialog or {}).get("april_text"))
-    assistant_requested_user_asset = bool(
-        has_new_user_asset
-        and latest_same_dialog
-        and not new_topic_request
-        # A bare upload acknowledgement may contain no topic noun and can be
-        # spuriously marked as a subject switch by tokenization. April's direct
-        # request for this asset is stronger conversational evidence.
-        and re.search(
-            r"(?:пришл\w*|отправ\w*|загруз\w*|прикреп\w*|скин\w*|покаж\w*\s+(?:мне\s+)?(?:фото|фотограф|скрин|изображ|файл|документ)|"
-            r"сфотограф\w*|прилож\w*\s+(?:файл|фото|скрин)|можешь\s+(?:мне\s+)?(?:прислать|отправить|загрузить)|"
-            r"send\s+(?:me\s+)?(?:a\s+)?(?:photo|picture|image|screenshot|file|document)|"
-            r"upload\s+(?:the\s+)?(?:image|photo|screenshot|file|document)|attach\s+(?:the\s+)?(?:file|image)|"
-            r"share\s+(?:the\s+)?(?:screenshot|image|file))",
-            last_april_reply.lower().replace("ё", "е"),
-        ) is not None
-    )
     hot_branch_candidate = _hot_branch_followup_candidate(
-        retrieval_query, query_interpretation, latest_same_dialog,
+        query, query_interpretation, latest_same_dialog,
         query_subjects=query_subjects, reference_followup=reference_followup,
-        marker=marker, conversation_id=str(conversation_id or ""), has_attachment=has_new_user_asset,
+        marker=marker, conversation_id=str(conversation_id or ""),
+        has_attachment=bool(query_modalities.intersection({"image", "file", "text_file"})),
         history_request=history_request, new_topic_request=new_topic_request,
     )
-    latest_april_text = _text((latest_same_dialog or {}).get("april") or (latest_same_dialog or {}).get("april_text"))
-    query_answer_terms = _semantic_tokens(retrieval_query) - _CONTEXT_GENERIC_TERMS - _SECTION_QUERY_NOISE
-    answer_terms = _semantic_tokens(latest_april_text) - _CONTEXT_GENERIC_TERMS - _SECTION_QUERY_NOISE
-    answer_to_april_question = bool(
-        latest_same_dialog
-        and ("?" in latest_april_text or "？" in latest_april_text)
-        and query_answer_terms
-        and _concept_overlap(query_answer_terms, answer_terms) >= 0.20
-        and not new_topic_request
-        and not history_request
-        and not has_new_user_asset
+    new_work_root_request = _looks_like_new_work_root_request(query, active_work_branch)
+    structured_work_requested = _structured_work_requested(query, query_interpretation, query_modalities)
+    # A shared entity is not sufficient proof that a text question resumes an old
+    # artifact-editing task. Use the whole current turn's interpreted output needs;
+    # if it is text-only, detach a visual/code/artifact branch for this turn while
+    # keeping the canonical history available to ordinary topic search.
+    structured_branch_detached = bool(
+        _is_structured_work_branch(active_work_branch)
+        and not structured_work_requested
+        and not selection_followup_confirmed
+        and not repair_active_branch
     )
-    # April may have introduced named options in a declarative answer, not only
-    # in a sentence ending with a question mark. A request to expand one of those
-    # exact names is still a continuation of April's own answer.
-    latest_answer_subjects = _subject_tokens(latest_april_text)
-    query_named_overlap = _subject_overlap(query_subjects, latest_answer_subjects)
-    asks_to_expand_named_item = bool(re.search(
-        r"(?:подроб|деталь|расскаж|объясн|поясн|разбер|раскрой|expand|explain|\bmore\b|in\s+detail)",
-        retrieval_query.lower().replace("ё", "е"),
-    ))
-    april_named_answer_followup = bool(
-        latest_same_dialog
-        and query_subjects
-        and latest_answer_subjects
-        and query_named_overlap >= 0.50
-        and asks_to_expand_named_item
-        and not new_topic_request
-        and not history_request
-        and not has_new_user_asset
+    if structured_branch_detached:
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
+    hot_work_followup, hot_work_match_reason = _hot_work_followup_candidate(
+        query, active_work_branch, active_work_pair,
+        history_request=history_request,
+        new_topic_request=new_topic_request,
+        has_attachment=bool(query_modalities & {"image", "file"}),
+        reference_followup=reference_followup,
     )
-    answer_to_april_question = answer_to_april_question or april_named_answer_followup
-    # A brief named phrase can return to an earlier branch within this same chat.
-    # Require a recent same-dialog match; a remote topic elsewhere in the 12h window
-    # is not enough to hijack an otherwise independent request.
-    short_named_topic = len(_tokens(retrieval_query)) <= 4 and len(query_subjects) <= 2 and bool(query_subjects)
-    recent_same_dialog_rows = sorted(
-        [row for row in rows if isinstance(row, dict) and (
-            (dialog_id and _text(row.get("dialog_id")) == str(dialog_id))
-            or (conversation_id and _text(row.get("conversation_id")) == str(conversation_id))
-        )],
-        key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
-    )[-6:]
-    recent_named_topic_reentry = bool(
-        short_named_topic
-        and not new_topic_request
-        and not history_request
-        and any(
-            _subject_overlap(query_subjects, _row_subject_tokens(row)) >= 0.60
-            or _topic_query_overlap(retrieval_query, " ".join((
-                _topic_label(row), _row_subject_text(row), _text(row.get("april_text") or row.get("april"))
-            ))) >= 0.55
-            for row in recent_same_dialog_rows
+    if structured_branch_detached:
+        hot_work_followup = False
+        hot_work_match_reason = "current_turn_does_not_request_structured_work"
+
+    # The persisted hot-work marker is not itself proof that the current request
+    # belongs to that task. Compare its immutable origin with the topic provenance
+    # built by the memory search. Earlier versions could save unrelated turns as
+    # CONTINUE; those turns then polluted state_summary and made every later query
+    # look like a continuation of the original task. Keep the old task searchable,
+    # but detach it from the live route unless either the current request genuinely
+    # matches its source or it is already attached to a newer, separately indexed
+    # topic in this dialogue.
+    active_work_origin_id = _text(active_work_branch.get("origin_message_id"))
+    latest_topic_origin_id = _text((latest_same_dialog or {}).get("topic_origin_message_id"))
+    active_work_root_row = next((
+        row for row in all_rows
+        if isinstance(row, dict) and active_work_origin_id
+        and _text(row.get("message_id")) == active_work_origin_id
+    ), None)
+    active_work_root_profile = _infer_active_work_branch(active_work_root_row) if active_work_root_row else {}
+    active_work_root_user_text = _text((active_work_root_row or {}).get("user_text") or (active_work_root_row or {}).get("user"))
+    active_work_root_text = " ".join(filter(None, (
+        _row_subject_text(active_work_root_row) if active_work_root_row else "",
+        active_work_root_user_text,
+        _text(active_work_root_profile.get("topic")) if active_work_root_profile.get("active") else ("" if active_work_root_row else _text(active_work_branch.get("topic"))),
+        _text(active_work_root_profile.get("goal")) if active_work_root_profile.get("active") else ("" if active_work_root_row else _text(active_work_branch.get("goal"))),
+    )))
+    active_work_root_subjects = _subject_tokens(active_work_root_text)
+    active_work_root_subject_overlap = _subject_overlap(query_subjects, active_work_root_subjects)
+    active_work_root_subject_conflict = _subject_conflicts(query_subjects, active_work_root_subjects)
+    active_work_root_topic_overlap = _topic_query_overlap(query, active_work_root_text) if active_work_root_text else 0.0
+    # A root match must come from its subject/source, not the mutable rolling
+    # state_summary or the latest row that may already have been attached by error.
+    active_work_root_match = bool(
+        active_work_root_text
+        and (
+            active_work_root_subject_overlap >= 0.34
+            or (active_work_root_topic_overlap >= 0.36 and not active_work_root_subject_conflict)
         )
     )
-    # These three signals are grounded in the current exchange or a recent named
-    # branch. They outrank a lexical subject-conflict signal produced by words
-    # such as "Conference" / "Williams" that April itself just introduced.
-    if correction_turn or answer_to_april_question or recent_named_topic_reentry:
-        semantic_subject_switch = False
+
+    # The newest active branch may belong to a newer, unrelated topic. For an
+    # explicit semantic return, search the retained current-dialogue rows for a
+    # task whose immutable origin actually matches the request. Do not reactivate
+    # old work from recency alone, and do not use rows whose topic provenance
+    # contradicts the task origin even if a stale marker claims they belong to it.
+    historical_work_reactivated = False
+    semantic_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    explicit_historical_work_reference = bool(
+        should_scan_active_work
+        and not history_request
+        and not new_topic_request
+        and not new_work_root_request
+        and not interpreted_topic_closure
+        and not selection_followup_confirmed
+        and not repair_active_branch
+        and (
+            reference_followup
+            or topic_pointer_match
+            or bool(semantic_features.get("continuation_action"))
+            or bool(semantic_features.get("recall_action"))
+            or (bool(semantic_features.get("self_reference")) and bool(semantic_features.get("interrogative")))
+            or (interpreted_intent == "TOPIC_CONTINUATION" and bool(query_interpretation.get("requires_memory")))
+        )
+    )
+    if (
+        not active_work_root_match
+        and explicit_historical_work_reference
+        and not history_request
+        and not time_filter.get("applied")
+        and not resume_key
+    ):
+        historical_work_candidates: list[tuple[float, int, dict[str, Any], dict[str, Any], str, dict[str, Any], str]] = []
+        for candidate_index, candidate_row in enumerate(scoped_work_rows):  # newest-first
+            if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
+                continue
+            candidate_profile = _infer_active_work_branch(candidate_row)
+            if not candidate_profile.get("active"):
+                continue
+            if (
+                _is_structured_work_branch(candidate_profile)
+                and not structured_work_requested
+                and not selection_followup_confirmed
+                and not repair_active_branch
+            ):
+                continue
+            candidate_origin_id = _text(candidate_profile.get("origin_message_id")) or _text(candidate_row.get("message_id"))
+            if not candidate_origin_id or candidate_origin_id == active_work_origin_id:
+                continue
+            candidate_topic_origin = _text(candidate_row.get("topic_origin_message_id"))
+            if candidate_topic_origin and candidate_topic_origin != candidate_origin_id:
+                continue
+            candidate_root = next((
+                source for source in all_rows
+                if isinstance(source, dict) and _text(source.get("message_id")) == candidate_origin_id
+            ), None)
+            if not candidate_root:
+                continue
+            root_topic_origin = _text(candidate_root.get("topic_origin_message_id"))
+            if root_topic_origin and root_topic_origin != candidate_origin_id:
+                continue
+            root_profile = _infer_active_work_branch(candidate_root)
+            candidate_root_text = " ".join(filter(None, (
+                search_subject_text(candidate_root),
+                _text(candidate_root.get("user_text") or candidate_root.get("user")),
+                _text(root_profile.get("topic")) if root_profile.get("active") else "",
+                _text(root_profile.get("goal")) if root_profile.get("active") else "",
+            )))
+            if not candidate_root_text:
+                continue
+            candidate_subjects = _subject_tokens(candidate_root_text)
+            candidate_subject_overlap = _subject_overlap(query_subjects, candidate_subjects)
+            candidate_subject_conflict = _subject_conflicts(query_subjects, candidate_subjects)
+            candidate_topic_overlap = _topic_query_overlap(query, candidate_root_text)
+            candidate_root_match = bool(
+                candidate_subject_overlap >= 0.34
+                or (candidate_topic_overlap >= 0.36 and not candidate_subject_conflict)
+            )
+            if not candidate_root_match:
+                continue
+            candidate_score = max(candidate_subject_overlap, candidate_topic_overlap)
+            historical_work_candidates.append((
+                candidate_score, candidate_index, candidate_row, candidate_profile,
+                candidate_origin_id, candidate_root, candidate_root_text,
+            ))
+
+        if historical_work_candidates:
+            historical_work_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+            (_, candidate_index, candidate_row, candidate_profile,
+             candidate_origin_id, candidate_root, candidate_root_text) = historical_work_candidates[0]
+            candidate_root_profile = _infer_active_work_branch(candidate_root)
+            active_work_branch = dict(candidate_profile)
+            # Use stable task identity from the origin, not rolling fields from the
+            # most recent turn. The rolling state is retained only from a turn that
+            # independently belongs to this same topic.
+            active_work_branch["active"] = True
+            active_work_branch["origin_message_id"] = candidate_origin_id[:120]
+            active_work_branch["work_id"] = "work:" + candidate_origin_id[:120]
+            active_work_branch["source_message_id"] = candidate_origin_id[:120]
+            if candidate_root_profile.get("active") and candidate_root_profile.get("topic"):
+                active_work_branch["topic"] = _text(candidate_root_profile.get("topic"))[:240]
+            elif _text(candidate_root.get("user_text") or candidate_root.get("user")):
+                active_work_branch["topic"] = _text(candidate_root.get("user_text") or candidate_root.get("user"))[:240]
+            if candidate_root_profile.get("active") and candidate_root_profile.get("goal"):
+                active_work_branch["goal"] = _text(candidate_root_profile.get("goal"))[:500]
+            elif _text(candidate_root.get("user_text") or candidate_root.get("user")):
+                active_work_branch["goal"] = _text(candidate_root.get("user_text") or candidate_root.get("user"))[:500]
+            active_work_pair = candidate_row
+            active_work_row_index = candidate_index
+            active_work_has_marker = True
+            active_work_origin_id = candidate_origin_id
+            active_work_root_row = candidate_root
+            active_work_root_text = candidate_root_text
+            active_work_root_subjects = candidate_subjects
+            active_work_root_subject_overlap = candidate_subject_overlap
+            active_work_root_subject_conflict = candidate_subject_conflict
+            active_work_root_topic_overlap = candidate_topic_overlap
+            active_work_root_match = True
+            historical_work_reactivated = True
+            hot_work_followup, hot_work_match_reason = _hot_work_followup_candidate(
+                query, active_work_branch, active_work_pair,
+                history_request=history_request,
+                new_topic_request=new_topic_request,
+                has_attachment=bool(query_modalities & {"image", "file"}),
+                reference_followup=reference_followup,
+            )
+            if not hot_work_followup:
+                # Semantic retrieval has independently proven the old task origin
+                # matches. Keep the recovered task selected for this explicit return
+                # rather than falling back to the unrelated newest branch.
+                hot_work_followup = True
+                hot_work_match_reason = "historical_task_reactivated"
+            hot_branch_candidate = True
+
+    active_work_topic_origin_mismatch = bool(
+        active_work_branch
+        and active_work_origin_id
+        and latest_topic_origin_id
+        and latest_topic_origin_id != active_work_origin_id
+    )
+    active_work_marker_is_from_another_topic = bool(
+        active_work_topic_origin_mismatch
+        and not active_work_root_match
+        and not topic_pointer_match
+    )
+
+    # If the user explicitly returns to an older task, do not resume from the
+    # newest row carrying its stale marker. Re-anchor the task to the latest row
+    # whose topic provenance really belongs to the task's immutable origin. This
+    # preserves intentional returns without importing turns from an intervening
+    # topic that was accidentally stored as CONTINUE.
+    active_work_reanchored_to_origin = False
+    if (
+        active_work_topic_origin_mismatch
+        and (active_work_root_match or topic_pointer_match)
+        and active_work_origin_id
+    ):
+        root_topic_rows = [
+            (idx, row) for idx, row in enumerate(scoped_work_rows)
+            if isinstance(row, dict)
+            and _text(row.get("topic_origin_message_id")) == active_work_origin_id
+            and (
+                _text(row.get("message_id")) == active_work_origin_id
+                or bool(_infer_active_work_branch(row).get("active"))
+            )
+        ]
+        if root_topic_rows:
+            reanchor_index, reanchor_row = root_topic_rows[0]  # scoped_work_rows is newest-first
+            reanchor_profile = _infer_active_work_branch(reanchor_row)
+            if reanchor_profile.get("active"):
+                active_work_branch = dict(reanchor_profile)
+            active_work_branch["active"] = True
+            active_work_branch["origin_message_id"] = active_work_origin_id[:120]
+            active_work_branch["work_id"] = "work:" + active_work_origin_id[:120]
+            active_work_branch["source_message_id"] = active_work_origin_id[:120]
+            active_work_pair = reanchor_row
+            active_work_row_index = reanchor_index
+            active_work_has_marker = bool(reanchor_profile.get("active"))
+            active_work_reanchored_to_origin = True
+            # Re-evaluate the explicit return against the recovered, topic-local
+            # state. The originally selected marker may have had contaminated
+            # topic/state fields and therefore failed the first matching pass.
+            reanchored_hot_followup, reanchored_match_reason = _hot_work_followup_candidate(
+                query, active_work_branch, active_work_pair,
+                history_request=history_request,
+                new_topic_request=new_topic_request,
+                has_attachment=bool(query_modalities & {"image", "file"}),
+                reference_followup=reference_followup,
+            )
+            if reanchored_hot_followup:
+                hot_work_followup = True
+                hot_work_match_reason = reanchored_match_reason
+                hot_branch_candidate = True
+    unrelated_active_work_topic = bool(
+        active_work_branch
+        and active_work_origin_id
+        and active_work_root_subject_conflict
+        and not active_work_root_match
+        and (not latest_topic_origin_id or latest_topic_origin_id == active_work_origin_id)
+        and not history_request
+        and not resume_anchor_row
+        and not topic_pointer_match
+        and not new_topic_request
+    )
+    if active_work_marker_is_from_another_topic or unrelated_active_work_topic:
+        stale_reason = (
+            "active_work_origin_differs_from_current_topic"
+            if active_work_marker_is_from_another_topic
+            else "current_request_conflicts_with_active_work_origin"
+        )
+        hot_work_followup = False
+        hot_work_match_reason = stale_reason
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
+        # Do not allow the old task's interpretation to turn a new subject into
+        # CONTINUE. If a newer topic has already been established, ordinary dialogue
+        # search can still continue that newer topic; otherwise this request opens
+        # a clean topic while the old task remains in retained memory.
+        if unrelated_active_work_topic and not (selection_followup_confirmed or repair_active_branch):
+            semantic_active_branch_intent = False
+            hot_branch_candidate = False
+            repair_active_branch = False
+
+    # An explicit closure in a newer USER turn supersedes the saved active-work
+    # marker. A later explicit request naming that task may reopen it; vague
+    # follow-ups may not silently revive it.
+    current_topic_closure = interpreted_topic_closure
+    closed_branch_barrier = False
+    explicit_closed_branch_reopen = False
+    if active_work_pair and active_work_branch and active_work_row_index > 0:
+        closure_row = next((
+            row for row in scoped_work_rows[:active_work_row_index]
+            if _is_explicit_topic_closure(row.get("user_text") or row.get("user"))
+        ), None)
+        if closure_row is not None:
+            explicit_closed_branch_reopen = _explicit_reopen_of_closed_branch(query, active_work_branch)
+            if not explicit_closed_branch_reopen:
+                closed_branch_barrier = True
+    if current_topic_closure:
+        closed_branch_barrier = True
+        explicit_closed_branch_reopen = False
+
+    if closed_branch_barrier and not explicit_closed_branch_reopen:
+        hot_work_followup = False
+        hot_work_match_reason = "explicit_topic_closure_barrier"
+        active_work_branch = {}
+        active_work_pair = None
+        active_work_row_index = -1
+        active_work_has_marker = False
+        semantic_active_branch_intent = False
+        hot_branch_candidate = False
+        repair_active_branch = False
+
+    # A task marker may outlive a later, explicitly NEW topic. Do not let a bare
+    # option number or generic “continue” jump back to that stale task. A named
+    # reference to the older task (e.g. “продолжи игру”) is still allowed to
+    # reactivate it, preserving deliberate returns to prior work.
+    if hot_work_followup and active_work_pair and active_work_row_index > 0:
+        newer_topic_barrier = next((
+            row for row in scoped_work_rows[:active_work_row_index]
+            if _text(row.get("relation") or "NEW").upper() == "NEW"
+        ), None)
+        if newer_topic_barrier is not None:
+            branch_text = " ".join((
+                _text(active_work_branch.get("topic")),
+                _text(active_work_branch.get("goal")),
+                _text(active_work_branch.get("state_summary")),
+                _text(active_work_pair.get("user_text") or active_work_pair.get("user")),
+                _text(active_work_pair.get("april_text") or active_work_pair.get("april")),
+            ))
+            query_branch_overlap = _topic_query_overlap(query, branch_text)
+            query_subjects_for_branch = _subject_tokens(query)
+            branch_subjects_for_branch = _subject_tokens(branch_text)
+            query_branch_subject_overlap = _subject_overlap(
+                query_subjects_for_branch, branch_subjects_for_branch
+            ) if query_subjects_for_branch else 0.0
+            explicit_older_branch_reference = bool(
+                query_branch_overlap >= 0.28
+                or query_branch_subject_overlap >= 0.50
+            )
+            if not explicit_older_branch_reference:
+                hot_work_followup = False
+                hot_work_match_reason = "superseded_by_newer_topic_without_explicit_reference"
+                # Keep this older marker in storage, but do not pass it to the
+                # current Provider request as if it were still the active task.
+                active_work_branch = {}
+                active_work_pair = None
+                active_work_row_index = -1
+                active_work_has_marker = False
+
+    if (new_work_root_request or unrelated_active_work_topic) and not history_request:
+        hot_work_followup = False
+        if new_work_root_request:
+            hot_work_match_reason = "self_contained_new_work_root"
+        hot_branch_candidate = False
+        semantic_active_branch_intent = False
+        repair_active_branch = False
+        # A fresh self-contained brief must not inherit an old task through the
+        # generic topic index merely because it shares words such as “game”, “code”,
+        # or “problem”. History remains stored and searchable on a later explicit
+        # recall request; it is simply not sent as context for this new work root.
+        topic_index = []
+        topic_table_md = ""
+    if hot_work_followup:
+        # Keep the raw subject-conflict diagnostic, but do not let an imperfect
+        # lexical stem veto a choice or an action within a saved work state.
+        decision_subject_switch = False
+        hot_branch_candidate = True
+
+    # A request to judge an earlier answer must be compared with the task source,
+    # not automatically answered from the most recent turn. First estimate whether
+    # the active task actually contains the requested topic; if not, search the full
+    # retained history for stronger source/condition evidence.
+    historical_task_override = False
+    historical_task_source_id = ""
+    historical_task_anchor: dict[str, Any] | None = None
+    answer_verification_request = _looks_like_answer_verification(query)
+    if (
+        answer_verification_request
+        and active_work_pair
+        and active_work_branch
+        and not pending_clarification
+        and not history_request
+        and not new_work_root_request
+    ):
+        active_origin_id = _text(active_work_branch.get("origin_message_id"))
+        active_source = " ".join((
+            _text(active_work_branch.get("topic")),
+            _text(active_work_branch.get("goal")),
+            _text(active_work_branch.get("origin_message_id")),
+        ))
+        active_fit = _topic_query_overlap(query, active_source)
+        historical_options = []
+        for source_row in all_rows:
+            source_id = _text(source_row.get("message_id"))
+            if not source_id or source_id in {
+                _text(active_work_pair.get("message_id")), active_origin_id,
+            }:
+                continue
+            source_topic = " ".join((
+                search_topic_label(source_row), search_subject_text(source_row),
+                _compact_memory_summary(source_row),
+                _text(source_row.get("user_text") or source_row.get("user")),
+                _text(source_row.get("april_text") or source_row.get("april")),
+            ))
+            topic_fit = _topic_query_overlap(query, source_topic)
+            if topic_fit < 0.18 or topic_fit < active_fit + 0.10:
+                continue
+            scored_source = candidate_match_by_id.get(source_id) or _candidate_score(
+                query, source_row,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+            )
+            # Topic/condition overlap dominates generic turn similarity; the latter
+            # only breaks ties between two candidates that mention the requested task.
+            score = topic_fit + 0.05 * float(scored_source.get("score") or 0)
+            historical_options.append((score, topic_fit, source_row, scored_source))
+        if historical_options:
+            historical_options.sort(key=lambda item: (
+                item[0], item[1], float(item[2].get("created_at") or 0),
+                int(item[2].get("turn_index") or 0),
+            ), reverse=True)
+            _, best_historical_fit, historical_row, historical_candidate = historical_options[0]
+            if best_historical_fit >= active_fit + 0.10:
+                historical_task_override = True
+                historical_task_source_id = _text(historical_row.get("message_id"))
+                historical_task_anchor = historical_candidate
+
+                # Reactivate the source selected from history. Without this step the
+                # answer may be grounded correctly once, but the next turn snaps back
+                # to the newer task. Keep this state inside the existing dialogue row.
+                historical_profile = _infer_active_work_branch(historical_row)
+                if not historical_profile.get("active"):
+                    historical_user = _text(historical_row.get("user_text") or historical_row.get("user"))
+                    historical_answer = _text(historical_row.get("april_text") or historical_row.get("april"))
+                    historical_kind = "problem_solving" if re.search(
+                        r"(?:загадк|головолом|riddle|puzzle|quiz|задач|пример|решени|уравнен|формул)",
+                        " ".join((historical_user, historical_answer)).lower(),
+                    ) else "active_task"
+                    historical_profile = {
+                        "active": True, "priority": "HOT_TASK_FIRST", "kind": historical_kind,
+                        "work_id": "work:" + historical_task_source_id,
+                        "topic": _topic_label(historical_row) or historical_user[:240],
+                        "goal": historical_user[:500],
+                        "state_summary": _text(historical_row.get("memory_summary") or historical_answer)[:800],
+                        "last_action": historical_user[:240],
+                        "expects_choice": _assistant_expects_user_input(historical_answer),
+                        "source_message_id": historical_task_source_id,
+                        "origin_message_id": historical_task_source_id,
+                        "last_message_id": historical_task_source_id,
+                        "dialog_id": _text(historical_row.get("dialog_id")),
+                        "conversation_id": _text(historical_row.get("conversation_id")),
+                    }
+                historical_kind = _text(historical_profile.get("kind") or "active_task")
+                historical_origin_id = _text(historical_profile.get("origin_message_id"))
+                historical_origin_row = next((row for row in all_rows if _text(row.get("message_id")) == historical_origin_id), None)
+                historical_origin_profile = _infer_active_work_branch(historical_origin_row) if historical_origin_row else {}
+                historical_origin_valid = bool(
+                    historical_origin_row
+                    and _is_active_work_root_candidate(historical_origin_row, historical_origin_profile, historical_kind)
+                )
+                if not historical_origin_valid:
+                    historical_index = next((i for i, row in enumerate(scoped_work_rows)
+                                              if _text(row.get("message_id")) == historical_task_source_id), -1)
+                    recovered_historical_root = None
+                    if historical_index >= 0:
+                        for root_row in scoped_work_rows[historical_index + 1:]:
+                            root_profile = _infer_active_work_branch(root_row)
+                            if _is_active_work_root_candidate(root_row, root_profile, historical_kind):
+                                root_id = _text(root_row.get("message_id"))
+                                root_text = " ".join((search_topic_label(root_row), search_subject_text(root_row)))
+                                if root_id and _topic_query_overlap(query, root_text) >= 0.12:
+                                    recovered_historical_root = root_row
+                                    break
+                    if recovered_historical_root is not None:
+                        historical_origin_id = _text(recovered_historical_root.get("message_id"))
+                        historical_root_user = _text(recovered_historical_root.get("user_text") or recovered_historical_root.get("user"))
+                        historical_root_topic = _topic_label(recovered_historical_root) or historical_root_user
+                        if historical_root_topic:
+                            historical_profile["topic"] = historical_root_topic[:240]
+                        if historical_root_user:
+                            historical_profile["goal"] = historical_root_user[:500]
+                    else:
+                        historical_origin_id = historical_task_source_id
+                historical_profile.update({
+                    "active": True,
+                    "priority": "HOT_TASK_FIRST",
+                    "work_id": "work:" + historical_origin_id,
+                    "origin_message_id": historical_origin_id,
+                    "source_message_id": historical_origin_id,
+                    "last_message_id": historical_task_source_id,
+                    "last_action": _text(historical_row.get("user_text") or historical_row.get("user"))[:240],
+                    "state_summary": _text(historical_row.get("memory_summary") or historical_row.get("april_text") or historical_row.get("april"))[:800],
+                    "dialog_id": _text(historical_row.get("dialog_id")),
+                    "conversation_id": _text(historical_row.get("conversation_id")),
+                })
+                active_work_pair = historical_row
+                active_work_branch = historical_profile
+                hot_work_followup = True
+                hot_work_match_reason = "historical_task_reactivated"
+                hot_branch_candidate = True
+                semantic_active_branch_intent = True
+                decision_subject_switch = False
+                repair_active_branch = False
+    if (
+        named_option_reanchor_row
+        and repair_active_branch
+        and not history_request
+        and not new_topic_request
+        and (not closed_branch_barrier or explicit_closed_branch_reopen)
+    ):
+        # Replace a mistaken clarification/grammar branch with the actual earlier
+        # answer that offered the named choices. Re-anchor branch metadata and
+        # source selection together so Provider sees one coherent topic root.
+        named_id = _text(named_option_reanchor_row.get("message_id"))
+        named_user = _text(named_option_reanchor_row.get("user_text") or named_option_reanchor_row.get("user"))
+        named_answer = _text(
+            named_option_reanchor_row.get("april_text") or named_option_reanchor_row.get("april") or named_option_reanchor_row.get("assistant_text")
+        )
+        named_topic = _topic_label(named_option_reanchor_row) or named_user or "Previous answer options"
+        named_root_text = " ".join((named_topic, _row_subject_text(named_option_reanchor_row), named_answer[:1800]))
+        active_work_branch = {
+            "active": True,
+            "kind": "interactive_dialogue",
+            "priority": "NAMED_PREVIOUS_ANSWER_FIRST",
+            "work_id": "work:" + named_id,
+            "origin_message_id": named_id,
+            "source_message_id": named_id,
+            "last_message_id": named_id,
+            "topic": named_topic[:240],
+            "goal": (named_user or named_topic)[:500],
+            "last_action": named_user[:240],
+            "state_summary": (named_answer or named_topic)[:1000],
+            "expects_choice": False,
+            "dialog_id": _text(named_option_reanchor_row.get("dialog_id")),
+            "conversation_id": _text(named_option_reanchor_row.get("conversation_id")),
+            "reanchor_reason": "explicit_correction_matches_prior_option_list",
+        }
+        active_work_pair = named_option_reanchor_row
+        active_work_row_index = next((
+            idx for idx, row in enumerate(scoped_work_rows)
+            if _text(row.get("message_id")) == named_id
+        ), -1)
+        active_work_has_marker = True
+        active_work_origin_id = named_id
+        active_work_root_row = named_option_reanchor_row
+        active_work_root_text = named_root_text
+        active_work_root_subjects = _subject_tokens(named_root_text)
+        active_work_root_subject_overlap = _subject_overlap(query_subjects, active_work_root_subjects)
+        active_work_root_subject_conflict = False
+        active_work_root_topic_overlap = _topic_query_overlap(query, named_root_text)
+        active_work_root_match = True
+        active_work_topic_origin_mismatch = False
+        active_work_marker_is_from_another_topic = False
+        active_work_reanchored_to_origin = True
+        unrelated_active_work_topic = False
+        hot_work_followup = True
+        hot_work_match_reason = "named_option_reanchored_to_previous_answer"
+        hot_branch_candidate = True
+        semantic_active_branch_intent = True
+        decision_subject_switch = False
+
+    # A bare topic pointer such as “про стих” may continue only when the 24-hour
+    # database search found a matching source topic. Do not let recency attach it
+    # to an unrelated latest turn just because its wording is short.
+    if topic_reference_fragment and not topic_pointer_match:
+        hot_branch_candidate = False
     continuation = False
-    has_new_attachment = has_new_user_asset
-    explicit_attachment_followup = has_new_attachment and (reference_followup or assistant_requested_user_asset)
-    if pending_clarification and not new_topic_request:
+    if pending_clarification and not new_topic_request and not unrelated_active_work_topic:
         continuation = True
-    elif history_request or new_topic_request:
+    elif history_request or new_topic_request or (new_work_root_request and not selection_followup_confirmed) or (
+        unrelated_active_work_topic and not (selection_followup_confirmed or repair_active_branch)
+    ):
         continuation = False
-    elif assistant_requested_user_asset:
+    elif hot_work_followup:
+        # A confirmed in-task choice/action outranks the generic attachment gate.
+        # This allows voice replies and linked image/file edits to continue a saved
+        # task, while _hot_work_followup_candidate rejects unreferenced attachments.
         continuation = True
     elif has_new_attachment and not explicit_attachment_followup:
         continuation = False
+    elif explicit_followup_anchor is not None:
+        # Explicit addenda can supersede a noisy semantic NEW label only when
+        # ranking found a compatible source inside this same dialogue.
+        continuation = True
     elif _is_section_request(query) and _explicit_section_number(query) is not None and rows:
         # A numbered section reference is a history pointer even when it contains
         # no topic nouns (e.g. "пункт 8"). Search memory instead of classifying it NEW.
@@ -3467,25 +7897,39 @@ def search_dialogue_context(
         and _text(query_interpretation.get("topic_reference")) == "PREVIOUS_ASSISTANT_ANSWER"
     ):
         continuation = True
-    elif correction_turn and explicit_topic_hits:
+    elif selection_followup_confirmed and latest_same_dialog:
         continuation = True
-    elif answer_to_april_question and not semantic_subject_switch:
+    elif semantic_active_branch_intent and not decision_subject_switch:
+        # A context-dependent interpretation may suggest continuation, but an
+        # independently named, conflicting subject wins unless a grounded topic
+        # pointer or correction already resolved it to the prior branch.
         continuation = True
-    elif recent_named_topic_reentry and not semantic_subject_switch:
+    elif repair_active_branch:
+        # Corrections and bare acknowledgements are discourse moves attached to the
+        # active exchange. Do not let a rejected entity or a lexical score pull them
+        # into an unrelated older topic.
         continuation = True
-    elif hot_branch_candidate and not semantic_subject_switch:
+    elif hot_branch_candidate and not decision_subject_switch:
         # Only ambiguous turns that pass the hot-branch relevance check may continue
         # by default. Missing subject words alone are not enough to force CONTINUE.
         continuation = True
-    elif latest_same_dialog and reference_followup and not semantic_subject_switch:
+    elif latest_same_dialog and reference_followup and not decision_subject_switch:
         continuation = True
-    elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not semantic_subject_switch:
+    elif latest_same_dialog and marker and len(_tokens(query)) <= 14 and not decision_subject_switch:
         continuation = True
-    elif explicit_topic_hits and (reference_followup or _is_section_request(query) or _looks_like_topic_correction(query)):
+    elif explicit_topic_hits and not decision_subject_switch and (
+        reference_followup or _is_section_request(query) or _looks_like_topic_correction(query) or topic_reference_fragment
+    ):
         continuation = True
-    elif same_dialog_semantic and not semantic_subject_switch:
+    elif same_dialog_semantic and not decision_subject_switch and not (topic_reference_fragment and not topic_pointer_match):
         continuation = True
     relation = "CONTINUE" if continuation else "NEW"
+    if closed_branch_barrier and not explicit_closed_branch_reopen and not history_request:
+        # Do not re-import a topic the user has closed through generic anaphora,
+        # even if lexical ranking still finds a strong old match. A concrete new
+        # task remains NEW as it should; explicit history searches remain available.
+        relation = "NEW"
+        continuation = False
 
     # A detailed, self-contained NEW_INFORMATION request must not inherit a
     # previous turn merely because lexical ranking found the same entity.  This
@@ -3517,7 +7961,11 @@ def search_dialogue_context(
         and not marker
         and not _is_section_request(query)
         and not _looks_like_topic_correction(query)
+        and not repair_active_branch
+        and not semantic_active_branch_intent
         and not explicit_prior_pointer
+        and not hot_work_followup
+        and not explicit_followup_anchor
         and (bool(query_subjects) or not reference_followup)
     )
     if self_contained_new_information:
@@ -3526,42 +7974,71 @@ def search_dialogue_context(
         relation = "NEW"
         continuation = False
 
-    # Stage two: when the user asks to resume a topic, search inside the retained
-    # history by its named topic/subtopic/section instead of defaulting to the newest
-    # turn. Do not apply this to independent new-information requests or broad history
-    # listings; those keep the original routing rules.
-    topic_vector_hits: list[dict[str, Any]] = []
-    wants_topic_resume = bool(
-        not history_request
-        and not self_contained_new_information
-        and not new_topic_request
-        and (
-            interpreted_intent == "TOPIC_CONTINUATION"
-            or interpreted_direction == "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
-            or reference_followup
-            or correction_turn
-            or explicit_prior_pointer
-            or marker
-        )
-    )
-    topic_vector_query = retrieval_query
-    topic_vector_query_source = "current_request"
-    if wants_topic_resume:
-        # Short continuations such as “and then?” have no topic nouns. Ground their
-        # second-stage fuzzy lookup in the latest active topic before ranking.
-        # Explicit subject changes and named-subject requests stay on the literal query.
-        if not query_subjects and latest_same_dialog and not new_topic_request:
-            active_seed = _text((latest_same_dialog or {}).get("topic")) or _topic_label(latest_same_dialog)
-            if not active_seed:
-                active_seed = _row_subject_text(latest_same_dialog) or _compact_memory_summary(latest_same_dialog)
-            if active_seed:
-                topic_vector_query = f"{active_seed[:240]} {query}"
-                topic_vector_query_source = "active_topic_seed_plus_current_request"
-        topic_vector_hits = _rank_topic_vector_candidates(topic_vector_query, all_rows, limit=8)
-
-    # Resolve the anchor. Short referential requests with no explicit topic always
-    # begin at the latest active turn; section ranking happens inside that topic.
+    # A repair is anchored to evidence in the current dialog, not to an older
+    # cross-history topic that happens to share a named entity. Compare both USER
+    # and APRIL sides so the challenged answer can still be found when the user's
+    # message does not repeat the answer's subject; otherwise use the latest turn.
     anchor: dict[str, Any] | None = None
+    if historical_task_override and historical_task_anchor:
+        anchor = historical_task_anchor
+    elif selection_followup_confirmed and latest_same_dialog:
+        anchor = latest_same_dialog
+    elif hot_work_followup and active_work_pair:
+        # The work branch is chosen before generic score ordering. A high lexical
+        # score from an older topic must not replace the active task's live state.
+        active_work_id = _text(active_work_pair.get("message_id"))
+        anchor = candidate_match_by_id.get(active_work_id)
+        if anchor is None:
+            anchor = _candidate_score(
+                query, active_work_pair,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+            )
+    elif explicit_followup_anchor is not None:
+        # Use the exact same-dialog source selected for an explicit continuation.
+        anchor = explicit_followup_anchor
+    elif repair_active_branch and latest_same_dialog:
+        repair_candidates = []
+        for candidate in matches:
+            if not candidate.get("same_dialog"):
+                continue
+            candidate_text = " ".join((
+                _text(candidate.get("topic")),
+                _text(candidate.get("user") or candidate.get("user_text")),
+                _text(candidate.get("april") or candidate.get("april_text")),
+            ))
+            lexical_fit = _topic_query_overlap(query, candidate_text)
+            semantic_fit = max(
+                float(candidate.get("context") or 0),
+                float(candidate.get("entity_overlap") or 0),
+                float(candidate.get("answer_overlap") or 0),
+                float(candidate.get("user_overlap") or 0),
+                float(candidate.get("subject_overlap") or 0),
+            )
+            # A correction may name entities that were absent from the user's last
+            # message but present in April's answer (e.g. Paris after Constantinople).
+            # Compare both sides of the canonical pair; do not discard the exact
+            # challenged answer just because it conflicts with a newer unrelated turn.
+            row_subjects = set(_row_subject_tokens(candidate))
+            subject_evidence = _subject_overlap(query_subjects, row_subjects) if query_subjects else 0.0
+            evidence_fit = max(lexical_fit, semantic_fit, subject_evidence)
+            if evidence_fit > 0.0:
+                repair_candidates.append((
+                    evidence_fit, subject_evidence, semantic_fit,
+                    float(candidate.get("created_at") or 0), candidate,
+                ))
+        if query_subjects and repair_candidates:
+            repair_candidates.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]), reverse=True)
+            # Use same-dialog evidence only when it really mentions the challenge;
+            # otherwise remain on the newest active exchange instead of a weak hit.
+            if repair_candidates[0][0] >= 0.16 and (
+                repair_candidates[0][1] >= 0.10 or repair_candidates[0][0] >= 0.34
+            ):
+                anchor = repair_candidates[0][4]
+        if anchor is None:
+            anchor = latest_same_dialog
     forced_section: dict[str, Any] = {}
     clarification_resolution: dict[str, Any] = {}
     clarification_needed = False
@@ -3569,7 +8046,7 @@ def search_dialogue_context(
     pending_for_next_turn: dict[str, Any] = {}
 
     pending_rejected = bool(pending_clarification and _looks_like_clarification_rejection(query))
-    if pending_clarification and (not new_topic_request or pending_rejected):
+    if pending_clarification and (not new_topic_request or pending_rejected) and not closed_branch_barrier:
         original_pending_request = _text(pending_clarification.get("original_request"))
         if pending_resolved and not pending_rejected:
             # Number/title choice matched the offered clarification. An explicit
@@ -3579,7 +8056,7 @@ def search_dialogue_context(
             clarification_resolution = {
                 "status": "resolved_from_options",
                 "original_request": original_pending_request,
-                "clarification_reply": _text(query)[:240],
+                "clarification_reply": _text(query)[:480],
                 "selected_section": forced_section,
             }
             source_id = _text(forced_section.get("message_id"))
@@ -3594,7 +8071,7 @@ def search_dialogue_context(
         else:
             # Never re-emit an unresolved prompt verbatim. Treat the user's
             # reply as a search hint and search every stored topic/section in the
-            # authenticated 12-hour window, not just the three offered choices.
+            # authenticated 24-hour window, not just the three offered choices.
             recovery_query = _clarification_target_text(query)
             recovered = _rank_sections_across_history(recovery_query, all_rows, limit=16)
             top = recovered[0] if recovered else {}
@@ -3614,8 +8091,8 @@ def search_dialogue_context(
                 clarification_resolution = {
                     "status": "resolved_by_history_search",
                     "original_request": original_pending_request,
-                    "clarification_reply": _text(query)[:240],
-                    "search_query": recovery_query[:180],
+                    "clarification_reply": _text(query)[:480],
+                    "search_query": recovery_query[:360],
                     "selected_section": forced_section,
                 }
                 source_id = _text(forced_section.get("message_id"))
@@ -3636,8 +8113,8 @@ def search_dialogue_context(
                 clarification_resolution = {
                     "status": status,
                     "original_request": original_pending_request,
-                    "clarification_reply": _text(query)[:240],
-                    "search_query": recovery_query[:180],
+                    "clarification_reply": _text(query)[:480],
+                    "search_query": recovery_query[:360],
                     "selected_section": {},
                 }
                 non_pending_same_dialog = [
@@ -3656,55 +8133,53 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        underspecified_media_followup = bool(
-            latest_same_dialog
-            and len(_tokens(query)) <= 18
-            and re.search(r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)", _text(query).lower().replace("ё", "е"))
-            and re.search(r"(?:\bего\b|\bее\b|\bеё\b|\bих\b|(?:^|\b)а\s|где|пропал\w*|не\s+(?:показал\w*|прикрепил\w*)|\bhis\b|\bher\b|\btheir\b|\bwhere\b|missing)", _text(query).lower().replace("ё", "е"))
-            and not _looks_like_topic_correction(query)
-            and not new_topic_request
-        )
-        if topic_vector_hits and not underspecified_media_followup:
-            # A confidently named topic beats the most recent turn even when the
-            # latest turn was a history lookup or an unrelated side branch.
-            vector_row = topic_vector_hits[0].get("row")
-            if isinstance(vector_row, dict):
-                anchor = _candidate_score(
-                    query, vector_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
-                    reference_followup=True, query_modalities=query_modalities,
-                )
-        elif (not query_subjects or underspecified_media_followup) and latest_same_dialog:
-            # Elliptical media follow-ups ("А фото где?", "where is his photo?")
-            # belong to the just-active answer unless the user names another topic.
-            # Do not let generic photo/resource tokens jump to an unrelated older topic.
-            if underspecified_media_followup:
+        if repair_active_branch and latest_same_dialog:
+            if anchor is None:
                 anchor = latest_same_dialog
+        elif not query_subjects and latest_same_dialog:
+            # For an underspecified turn, prefer role-aligned evidence when available.
+            # Otherwise compare the actual topical evidence with the active turn; if
+            # neither gives a clear relative preference, stay on the active turn.
+            role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
+            if role_aligned:
+                anchor = role_aligned
             else:
-                # For other underspecified turns, prefer role-aligned evidence when available.
-                # Otherwise compare topical evidence with the active turn; if neither
-                # clearly wins, stay on the active turn.
-                role_aligned = best if best and int(best.get("participant_alignment") or 0) > 0 else None
-                if role_aligned:
-                    anchor = role_aligned
+                def _context_evidence(item: dict[str, Any] | None) -> float:
+                    if not isinstance(item, dict):
+                        return 0.0
+                    return max(
+                        float(item.get("context") or 0),
+                        float(item.get("entity_overlap") or 0),
+                        float(item.get("user_overlap") or 0),
+                        float(item.get("answer_overlap") or 0),
+                        float(item.get("subject_overlap") or 0),
+                        float(item.get("direction") or 0),
+                        float(item.get("numeric_anchor_overlap") or 0),
+                    )
+                best_evidence = _context_evidence(best)
+                active_evidence = _context_evidence(latest_same_dialog)
+                if best and best_evidence > active_evidence:
+                    anchor = best
                 else:
-                    def _context_evidence(item: dict[str, Any] | None) -> float:
-                        if not isinstance(item, dict):
-                            return 0.0
-                        return max(
-                            float(item.get("context") or 0),
-                            float(item.get("entity_overlap") or 0),
-                            float(item.get("user_overlap") or 0),
-                            float(item.get("answer_overlap") or 0),
-                            float(item.get("subject_overlap") or 0),
-                            float(item.get("direction") or 0),
-                            float(item.get("numeric_anchor_overlap") or 0),
-                        )
-                    best_evidence = _context_evidence(best)
-                    active_evidence = _context_evidence(latest_same_dialog)
-                    if best and best_evidence > active_evidence:
-                        anchor = best
-                    else:
-                        anchor = latest_same_dialog
+                    anchor = latest_same_dialog
+        elif explicit_topic_hits and topic_pointer_match:
+            chosen_global = explicit_topic_hits[0][1]
+            anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
+        elif semantic_active_branch_intent and latest_same_dialog:
+            # Active-branch continuation prefers a source from this same dialogue.
+            # Use a stronger matching same-dialog row when present; otherwise keep
+            # the latest active exchange rather than a weak unrelated archive hit.
+            same_dialog_candidates = [
+                item for item in matches
+                if item.get("same_dialog") and not item.get("is_pending_clarification")
+                and not item.get("subject_mismatch")
+            ]
+            same_dialog_best = max(
+                same_dialog_candidates,
+                key=lambda item: (float(item.get("score") or 0), float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+                default=None,
+            )
+            anchor = same_dialog_best or latest_same_dialog
         elif explicit_topic_hits:
             chosen_global = explicit_topic_hits[0][1]
             anchor = _candidate_score(query, chosen_global, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""), reference_followup=reference_followup, query_modalities=query_modalities)
@@ -3717,40 +8192,93 @@ def search_dialogue_context(
     else:
         anchor = best if relation == "NEW" else None
 
-    active_topic = _text((anchor or {}).get("topic")) or _text((latest_same_dialog or {}).get("topic")) or _text(query)[:140]
+    active_topic = (
+        _text(query)[:140]
+        if new_work_root_request
+        else _text((anchor or {}).get("topic")) or _text((latest_same_dialog or {}).get("topic")) or _text(query)[:140]
+    )
 
     selected_for_context: list[dict[str, Any]] = []
     history_selection_method = "not_history_request"
     history_matched_count = 0
-    history_time_search: dict[str, Any] = {}
     contextual_history_match = False
     if history_request:
-        time_spec = _parse_history_time_reference(
-            query,
-            now_ts=time.time(),
-            utc_offset_minutes=query_interpretation.get("user_utc_offset_minutes")
-            if isinstance(query_interpretation.get("user_utc_offset_minutes"), (int, float)) else None,
-        )
-        if time_spec:
-            selected_for_context, history_time_search, history_matched_count = _select_temporal_history_pairs(
-                query, matches, all_rows, time_spec, now_ts=time.time()
+        if dialogue_profile_request:
+            # A dialogue-based portrait needs a broad but bounded profile, not the
+            # last rendered object or a keyword-ranked single topic. Use recent
+            # authenticated Premium rows, exclude recall prompts/pending turns,
+            # and choose diverse topic representatives from the retained window.
+            eligible_profile_rows = [
+                row for row in all_rows
+                if isinstance(row, dict)
+                and not _row_is_pending_clarification(row)
+                and not _is_history_recall_question(_text(row.get("user_text") or row.get("user")))
+                and _text(row.get("user_text") or row.get("user") or row.get("april_text") or row.get("april"))
+            ]
+            eligible_profile_rows.sort(
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+                reverse=True,
             )
-            history_selection_method = "temporal_window" if history_time_search.get("status", "").startswith("matched") else "temporal_nearest_fallback"
-            _apr_timing_log(
-                "history_time_window_selection",
-                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
-                query_key=_apr_diag_ref(query), requested_phrase=history_time_search.get("requested_phrase"),
-                target_description=history_time_search.get("target_description"),
-                status=history_time_search.get("status"),
-                time_window_minutes=history_time_search.get("tolerance_minutes"),
-                dialogues_in_window=history_time_search.get("dialogues_in_window", 0),
-                selected_pairs=len(selected_for_context),
-                selected_relations=[x.get("relation") for x in (history_time_search.get("selected_dialogues") or [])],
-            )
+            profile_seen_topics: set[str] = set()
+            profile_seen_signatures: list[set[str]] = []
+            selected_for_context = []
+            for profile_row in eligible_profile_rows:
+                label = _topic_label_lightweight(profile_row) or _row_subject_text_lightweight(profile_row)[:140]
+                signature = re.sub(r"[^a-z0-9а-я]+", " ", _text(label).lower().replace("ё", "е")).strip()
+                subject_signature = _subject_tokens(_row_subject_text_lightweight(profile_row))
+                if signature and signature in profile_seen_topics and not subject_signature:
+                    continue
+                # Coarse labels such as "April" can cover several distinct turns.
+                # Deduplicate near-identical subject signatures, not every row that
+                # happens to share the same coarse topic label.
+                if subject_signature and any(
+                    _subject_overlap(subject_signature, seen) >= 0.82
+                    for seen in profile_seen_signatures
+                ):
+                    continue
+                if signature:
+                    profile_seen_topics.add(signature)
+                if subject_signature:
+                    profile_seen_signatures.append(subject_signature)
+                selected_for_context.append(_compact_pair(_candidate_score(
+                    query, profile_row, dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""), reference_followup=True,
+                    query_modalities=query_modalities,
+                )))
+                if len(selected_for_context) >= 8:
+                    break
+            history_selection_method = "dialogue_profile_recent_diverse"
+            history_matched_count = len(selected_for_context)
         else:
             selected_for_context, history_selection_method, history_matched_count = _select_history_context_pairs(
-                query, matches, topic_index, all_rows, requested_topic_count=history_limit
+                query, matches, topic_index, all_rows,
+                requested_topic_count=history_limit,
+                broad_overview=broad_history_overview,
             )
+        if (
+            not dialogue_profile_request
+            and not selected_for_context
+            and broad_history_overview
+            and not time_filter.get("applied")
+        ):
+            recent_rows = [
+                row for row in all_rows
+                if isinstance(row, dict)
+                and not _row_is_pending_clarification(row)
+                and not _is_history_recall_question(_text(row.get("user_text")))
+            ]
+            recent_rows.sort(
+                key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+                reverse=True,
+            )
+            for row in recent_rows[:4]:
+                selected_for_context.append(_compact_pair(_candidate_score(
+                    query, row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
+                    reference_followup=True, query_modalities=query_modalities,
+                )))
+            if selected_for_context:
+                history_selection_method = "recent_dialogue_fallback"
+                history_matched_count = max(history_matched_count, len(selected_for_context))
         _apr_timing_log(
             "history_pair_selection",
             user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -3759,241 +8287,351 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if topic_vector_hits and anchor:
-            # The best vector hit identifies the topic branch; it is not the whole
-            # conversational context. Expand from that anchor to the latest ten
-            # USER↔APRIL pairs belonging to the same topic and dialog/conversation.
-            # This preserves intervening questions, answers and assistant requests
-            # while avoiding unrelated topics that happen to share the same chat.
-            vector_row = topic_vector_hits[0].get("row") if isinstance(topic_vector_hits[0], dict) else None
-            if not isinstance(vector_row, dict):
-                vector_row = next((
-                    hit.get("row") for hit in topic_vector_hits
-                    if isinstance(hit, dict) and isinstance(hit.get("row"), dict)
-                ), None)
-            if not isinstance(vector_row, dict):
-                vector_row = {}
+        if hot_work_followup and active_work_pair:
+            # Hot-work selection is a separate first lane: never append a fuzzy
+            # neighbor from an older unrelated task (e.g. a previous game).
+            anchor_id = _text(active_work_pair.get("message_id"))
+            anchor = candidate_match_by_id.get(anchor_id) or anchor or _candidate_score(
+                query, active_work_pair, dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""), reference_followup=True,
+                query_modalities=query_modalities,
+            )
+            selected_for_context = []
+            selected_work_ids: set[str] = set()
 
-            branch_dialog_id = _text(vector_row.get("dialog_id")) or _text((anchor or {}).get("dialog_id"))
-            branch_conversation_id = _text(vector_row.get("conversation_id")) or _text((anchor or {}).get("conversation_id"))
-            branch_subjects = set(_row_subject_tokens(vector_row))
-            branch_subjects.update(_subject_tokens(_topic_label(vector_row)))
-            branch_subjects.update(_subject_tokens(_text(vector_row.get("april_text") or vector_row.get("april_text_en"))))
-            if not branch_subjects:
-                branch_subjects = _subject_tokens(" ".join((
-                    _text(vector_row.get("user_text")), _text(vector_row.get("april_text")),
-                    _row_attachment_evidence(vector_row),
-                )))
-
-            branch_pairs: list[dict[str, Any]] = []
-            for candidate_row in all_rows:
-                if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
-                    continue
-                candidate_id = _text(candidate_row.get("message_id"))
-                if not candidate_id:
-                    continue
-                same_branch_dialog = bool(branch_dialog_id and _text(candidate_row.get("dialog_id")) == branch_dialog_id)
-                same_branch_conversation = bool(
-                    branch_conversation_id and _text(candidate_row.get("conversation_id")) == branch_conversation_id
-                )
-                if not (same_branch_dialog or same_branch_conversation):
-                    continue
-
-                candidate_subjects = set(_row_subject_tokens(candidate_row))
-                candidate_subjects.update(_subject_tokens(_topic_label(candidate_row)))
-                candidate_subjects.update(_subject_tokens(_text(candidate_row.get("april_text") or candidate_row.get("april_text_en"))))
-                if not candidate_subjects:
-                    candidate_subjects = _subject_tokens(" ".join((
-                        _text(candidate_row.get("user_text")), _text(candidate_row.get("april_text")),
-                        _row_attachment_evidence(candidate_row),
-                    )))
-                if branch_subjects and candidate_subjects:
-                    branch_overlap = max(
-                        _subject_overlap(branch_subjects, candidate_subjects),
-                        _fuzzy_token_overlap(branch_subjects, candidate_subjects),
-                    )
-                    if branch_overlap < 0.34:
-                        continue
-                elif candidate_id != _text(vector_row.get("message_id")):
-                    # With no grounded subject signature, keep only the exact
-                    # vector hit rather than widening to an arbitrary same-chat span.
-                    continue
-
-                branch_pairs.append(_candidate_score(
-                    query, candidate_row, dialog_id=str(branch_dialog_id or dialog_id or ""),
-                    conversation_id=str(branch_conversation_id or conversation_id or ""),
-                    reference_followup=True, query_modalities=query_modalities,
+            def _append_work_source(source_row: dict[str, Any], candidate: dict[str, Any] | None = None) -> None:
+                if not isinstance(source_row, dict):
+                    return
+                source_id = _text(source_row.get("message_id"))
+                if not source_id or source_id in selected_work_ids:
+                    return
+                compact = _compact_pair(candidate or _candidate_score(
+                    query, source_row, dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""), reference_followup=True,
+                    query_modalities=query_modalities,
                 ))
+                raw_user = _text(source_row.get("user_text") or source_row.get("user"))
+                raw_april = _text(source_row.get("april_text") or source_row.get("april"))
+                if raw_user or raw_april:
+                    compact.update({
+                        "preserve_source_text": True,
+                        "active_work_source": True,
+                        "source_user_text": raw_user[:1800],
+                        "source_april_text": raw_april[:5200],
+                        "source_user_text_chars": len(raw_user),
+                        "source_april_text_chars": len(raw_april),
+                        "source_user_text_complete": len(raw_user) <= 1800,
+                        "source_april_text_complete": len(raw_april) <= 5200,
+                        "source_content_complete": len(raw_user) <= 1800 and len(raw_april) <= 5200,
+                        "source_text_origin": "dialogue_memory_active_work",
+                    })
+                selected_for_context.append(compact)
+                selected_work_ids.add(source_id)
 
-            # The exact semantic anchor remains available separately as DIALOGUE_ANCHOR.
-            # The context window contains the latest ten related pairs in chronology.
-            branch_pairs.sort(key=lambda value: (
-                float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
+            # Preserve the whole logical work unit in a bounded form: original
+            # specification first, selected intermediate turns next, and the live
+            # state last. A task may introduce its actual puzzle/rules in a middle
+            # turn, so root + latest alone is not enough for verification requests.
+            origin_id = _text(active_work_branch.get("origin_message_id"))
+            origin_row = next((
+                row for row in all_rows
+                if isinstance(row, dict) and _text(row.get("message_id")) == origin_id
+            ), None) if origin_id else None
+            if origin_row:
+                _append_work_source(origin_row)
+
+            # Resolve the task's bounded trace using persisted branch identity when
+            # available. For older rows without consistent markers, use only the
+            # interval between the active pair and its recovered root, never the
+            # entire history; this prevents nearby unrelated topics from leaking in.
+            pair_id = _text(active_work_pair.get("message_id"))
+            pair_pos = next((i for i, row in enumerate(all_rows)
+                             if isinstance(row, dict) and _text(row.get("message_id")) == pair_id), -1)
+            origin_pos = next((i for i, row in enumerate(all_rows)
+                               if isinstance(row, dict) and _text(row.get("message_id")) == origin_id), -1)
+            trace_rows: list[tuple[float, int, dict[str, Any], dict[str, Any] | None]] = []
+            work_id = _text(active_work_branch.get("work_id"))
+            branch_description = " ".join((
+                _text(active_work_branch.get("topic")),
+                _text(active_work_branch.get("goal")),
+                _text(active_work_branch.get("state_summary")),
             ))
-            selected_for_context = [_compact_pair(value) for value in branch_pairs[-10:]]
-            if not selected_for_context:
-                selected_for_context = [_compact_pair(anchor)] if anchor else []
-            history_selection_method = "named_topic_vector_branch_window"
-            contextual_history_match = True
-        else:
-            # A short follow-up often has almost no shared keywords with its
-            # subject ("which varieties?", "is it darker?", "show them"). When
-            # semantic preinterpretation says CONTINUE, use the recent same-dialogue
-            # exchange as the primary hot branch instead of requiring lexical
-            # overlap with every individual turn. The active anchor still identifies
-            # the branch; unrelated conversations/dialog IDs are never mixed.
-            recent_same_dialog: list[dict[str, Any]] = []
-            anchor_message_id = _text((anchor or {}).get("message_id"))
-            for candidate_row in all_rows:
-                if not isinstance(candidate_row, dict) or _row_is_pending_clarification(candidate_row):
+            bounded_indices: set[int] = set()
+            if pair_pos >= 0 and origin_pos > pair_pos:
+                bounded_indices.update(range(pair_pos + 1, origin_pos))
+
+            for row_index, trace_row in enumerate(all_rows):
+                if not isinstance(trace_row, dict):
                     continue
-                candidate_id = _text(candidate_row.get("message_id"))
-                if not candidate_id:
+                trace_id = _text(trace_row.get("message_id"))
+                if not trace_id or trace_id in selected_work_ids or trace_id in {pair_id, origin_id}:
                     continue
-                candidate_dialog_id = _text(candidate_row.get("dialog_id"))
-                candidate_conversation_id = _text(candidate_row.get("conversation_id"))
-                same_dialog = bool(dialog_id and candidate_dialog_id == str(dialog_id))
-                if not same_dialog and conversation_id and candidate_conversation_id == str(conversation_id):
-                    same_dialog = True
-                if not same_dialog:
+                if _row_is_pending_clarification(trace_row):
                     continue
-                scored_recent = _candidate_score(
-                    query, candidate_row, dialog_id=str(dialog_id or ""),
-                    conversation_id=str(conversation_id or ""),
-                    reference_followup=True, query_modalities=query_modalities,
+                # Topic provenance outranks a persisted work marker. A corrupted
+                # marker can claim that an unrelated turn belongs to this task;
+                # never copy that turn into the task trace when the topic index
+                # has independently identified a different origin.
+                trace_topic_origin_id = _text(trace_row.get("topic_origin_message_id"))
+                if origin_id and trace_topic_origin_id and trace_topic_origin_id != origin_id:
+                    continue
+                # Do not include a neighboring conversation/dialogue just because
+                # its words match. Missing identifiers are tolerated for old rows.
+                active_dialog = _text(active_work_pair.get("dialog_id"))
+                trace_dialog = _text(trace_row.get("dialog_id"))
+                active_conversation = _text(active_work_pair.get("conversation_id"))
+                trace_conversation = _text(trace_row.get("conversation_id"))
+                if active_dialog and trace_dialog and active_dialog != trace_dialog:
+                    continue
+                if active_conversation and trace_conversation and active_conversation != trace_conversation:
+                    continue
+
+                _, trace_response, trace_memory = _response_and_request_records(trace_row)
+                trace_meta = trace_response.get("metadata") if isinstance(trace_response.get("metadata"), dict) else {}
+                trace_marker = trace_response.get("active_work_branch")
+                if not isinstance(trace_marker, dict):
+                    trace_marker = trace_meta.get("active_work_branch")
+                if not isinstance(trace_marker, dict):
+                    trace_marker = trace_memory.get("active_work_branch")
+                trace_marker = trace_marker if isinstance(trace_marker, dict) else {}
+                marker_same_work = bool(
+                    trace_marker.get("active") and (
+                        (origin_id and _text(trace_marker.get("origin_message_id")) == origin_id)
+                        or (work_id and _text(trace_marker.get("work_id")) == work_id)
+                    )
                 )
-                recent_same_dialog.append(scored_recent)
-            recent_same_dialog.sort(key=lambda value: (
-                float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
-            ))
-            recent_same_dialog = recent_same_dialog[-10:]
-            # A dialog can contain several independent topics. Keep the chosen
-            # anchor's subject branch, plus the immediately adjacent turns only
-            # when they do not explicitly belong to a conflicting subject. This
-            # preserves short replies and April's just-issued correction while
-            # preventing an old cherry/apple branch from leaking into a pear turn.
-            anchor_subjects_for_window = set((anchor or {}).get("subject_terms") or [])
-            query_anchor_subjects = anchor_subjects_for_window & set(query_subjects)
-            # Prefer the exact subject named in this turn when it is also present
-            # in the anchor. This removes incidental verbs from the anchor signature
-            # (for example "пообщаемся") without losing an April answer branch when
-            # the user names one of its listed examples rather than its parent topic.
-            branch_subjects_for_window = query_anchor_subjects or anchor_subjects_for_window
-            if branch_subjects_for_window:
-                branch_rows = []
-                for item in recent_same_dialog:
-                    item_subjects = set(item.get("subject_terms") or [])
-                    if item_subjects and _subject_overlap(branch_subjects_for_window, item_subjects) < 0.45:
-                        continue
-                    branch_rows.append(item)
-                # Preserve at most two adjacent context pairs (latest user/April
-                # exchange) when the row itself carries no independent subject.
-                for item in recent_same_dialog[-2:]:
-                    item_subjects = set(item.get("subject_terms") or [])
-                    if not item_subjects or _subject_overlap(branch_subjects_for_window, item_subjects) >= 0.45:
-                        if all(_text(existing.get("message_id")) != _text(item.get("message_id")) for existing in branch_rows):
-                            branch_rows.append(item)
-                recent_same_dialog = sorted(branch_rows, key=lambda value: (
-                    float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
-                ))[-10:]
-            if anchor_message_id and all(_text(item.get("message_id")) != anchor_message_id for item in recent_same_dialog):
-                anchor_row = next((row for row in all_rows if _text(row.get("message_id")) == anchor_message_id), None)
-                if anchor_row is not None:
-                    recent_same_dialog = (recent_same_dialog + [_candidate_score(
-                        query, anchor_row, dialog_id=str(dialog_id or ""),
-                        conversation_id=str(conversation_id or ""),
-                        reference_followup=True, query_modalities=query_modalities,
-                    )])[-10:]
-                    recent_same_dialog.sort(key=lambda value: (
-                        float(value.get("created_at") or 0), int(value.get("turn_index") or value.get("turn") or 0)
-                    ))
-            selected_for_context = [_compact_pair(item) for item in recent_same_dialog]
-            if not selected_for_context and anchor:
-                selected_for_context.append(_compact_pair(anchor))
-            history_selection_method = "recent_same_dialog_hot_branch" if selected_for_context else "active_anchor_fallback"
-        # Retain up to ten complete USER↔APRIL pairs from the same active topic.
-        # Include April's reply because it may contain the question/action that the
-        # next user message is answering.
-        anchor_subjects = set((anchor or {}).get("subject_terms") or [])
-        anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
-        related_candidates = []
-        # A role-aligned factual record is sufficient for a participant-centered
-        # lookup. Do not dilute it with neighboring turns that may only report a
-        # prior failure to recall that fact (e.g. "I don't see your name").
-        related_context_candidates = [] if (
-            topic_vector_hits or int((anchor or {}).get("participant_alignment") or 0) > 0
-        ) else matches
-        for item in related_context_candidates:
-            if item.get("is_pending_clarification"):
-                continue
-            if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
-                continue
-            if bool(query_subjects and item.get("subject_mismatch")):
-                continue
-            if bool(item.get("same_dialog")) is False and _text(item.get("dialog_id")) != _text(dialog_id):
-                continue
-            topic_similarity = fuzz.token_set_ratio(
-                _text((anchor or {}).get("topic")).casefold(), _text(item.get("topic")).casefold()
-            ) / 100.0 if _text((anchor or {}).get("topic")) and _text(item.get("topic")) else 0.0
-            item_subjects = set(item.get("subject_terms") or [])
-            subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
-            structured_richness = int(item.get("structured_data_richness") or 0)
-            item_source_alignment = float(item.get("source_data_alignment") or 0)
-            # Once the anchor contains the user's original constraints and matching
-            # structured values, do not attach a later value-bearing derivative whose
-            # own request supplied no numbers. It may represent a mistaken reformatting
-            # and otherwise reintroduce the very values the active source corrected.
-            if (
-                anchor_has_values
-                and float((anchor or {}).get("source_data_alignment") or 0) >= 0.60
-                and structured_richness >= 8
-                and item_source_alignment < 0.20
-                and int(item.get("turn_index") or 0) > int((anchor or {}).get("turn_index") or 0)
-            ):
-                continue
-            same_context = (topic_similarity >= 0.65 or subject_similarity >= 0.60
-                            or _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50)
-            if reference_followup and anchor_subjects and item_subjects and subject_similarity >= 0.60:
-                same_context = True
-            if same_context:
-                # If the anchor is a text-only derivative, prefer its nearest source
-                # with the original structured values; otherwise retain relevance rank.
-                provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
-                related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
-        if related_candidates:
-            # Keep recency within the already matched branch; ranking is only used
-            # to decide membership. Preserve pair chronology after selection.
-            related_candidates.sort(key=lambda pair: (
-                float(pair[1].get("created_at") or 0), int(pair[1].get("turn_index") or 0)
-            ), reverse=True)
-            seen_pair_ids = {
-                _text(value.get("message_id")) for value in selected_for_context
-                if isinstance(value, dict) and _text(value.get("message_id"))
-            }
-            for _rank, candidate in related_candidates:
-                candidate_id = _text(candidate.get("message_id"))
-                if candidate_id and candidate_id in seen_pair_ids:
+                in_root_interval = row_index in bounded_indices
+                if not marker_same_work and not in_root_interval:
                     continue
-                selected_for_context.append(_compact_pair(candidate))
-                if candidate_id:
-                    seen_pair_ids.add(candidate_id)
-                if len(selected_for_context) >= 10:
+
+                trace_user = _text(trace_row.get("user_text") or trace_row.get("user"))
+                trace_answer = _text(trace_row.get("april_text") or trace_row.get("april"))
+                trace_text = " ".join((trace_user, trace_answer, _topic_label(trace_row)))
+                # A distinct self-contained work root marks a boundary. Do not
+                # smuggle another task into this trace just because it sits between
+                # a stale marker and the recovered origin; only retain such a row
+                # when its own marker proves it is the same task.
+                trace_profile = _infer_active_work_branch(trace_row)
+                distinct_root = bool(
+                    trace_id != origin_id
+                    and _is_active_work_root_candidate(
+                        trace_row, trace_profile, _text(active_work_branch.get("kind"))
+                    )
+                )
+                if distinct_root:
+                    # If this row is itself a self-contained root other than the
+                    # selected origin, treat it as a hard task boundary even when
+                    # an older/corrupt marker says it belongs to the same work.
+                    continue
+                query_fit = _topic_query_overlap(query, trace_text)
+                branch_fit = _topic_query_overlap(trace_text, branch_description)
+                # Keep useful intermediate evidence, especially a question or set
+                # of alternatives that the user is now asking April to evaluate.
+                score = (0.70 * query_fit) + (0.22 * branch_fit) + (0.08 if marker_same_work else 0.0)
+                if marker_same_work or query_fit >= 0.08 or branch_fit >= 0.16:
+                    candidate = candidate_match_by_id.get(trace_id)
+                    trace_rows.append((score, row_index, trace_row, candidate))
+
+            # Always retain one recent turn from the same task, then add the two
+            # strongest query-relevant turns. This captures intermediate conditions
+            # while keeping token use bounded and avoiding a history-wide prompt.
+            trace_rows.sort(key=lambda item: item[1])  # newest-first, as all_rows is
+            chosen_trace: dict[str, tuple[float, int, dict[str, Any], dict[str, Any] | None]] = {}
+            if trace_rows:
+                recent = trace_rows[0]
+                chosen_trace[_text(recent[2].get("message_id"))] = recent
+            for item in sorted(trace_rows, key=lambda entry: (entry[0], -entry[1]), reverse=True):
+                chosen_trace[_text(item[2].get("message_id"))] = item
+                if len(chosen_trace) >= 3:
                     break
-            selected_for_context.sort(key=lambda value: (
-                float(value.get("created_at") or 0), int(value.get("turn") or value.get("turn_index") or 0)
+            # Reverse to chronological order between root and live state.
+            chronological_trace = sorted(chosen_trace.values(), key=lambda item: item[1], reverse=True)
+            for _, _, trace_row, candidate in chronological_trace:
+                _append_work_source(trace_row, candidate)
+
+            # Keep the most recent state as the final context item even when the
+            # answer-verification logic selected a prior source row as its anchor.
+            _append_work_source(active_work_pair, anchor)
+            history_selection_method = (
+                "hot_work_branch_root_trace_and_state" if len(selected_for_context) > 2
+                else "hot_work_branch_state_and_origin" if len(selected_for_context) > 1
+                else "hot_work_branch_state"
+            )
+        elif repair_active_branch:
+            # A correction needs factual evidence, not only the selected topic summary.
+            # Start from the best matching answer and add a small same-branch window.
+            dialog_candidates = [
+                item for item in matches
+                if item.get("same_dialog")
+                and _text(item.get("dialog_id")) == _text(dialog_id)
+                and not item.get("is_pending_clarification")
+            ]
+            dialog_candidates.sort(key=lambda item: (
+                float(item.get("created_at") or 0), int(item.get("turn_index") or 0)
             ))
-            selected_for_context = selected_for_context[-10:]
+            anchor_id = _text((anchor or {}).get("message_id"))
+            anchor_topic_id = _text((anchor or {}).get("topic_id"))
+            anchor_topic_text = _text((anchor or {}).get("topic"))
+            anchor_position = next((i for i, item in enumerate(dialog_candidates)
+                                    if _text(item.get("message_id")) == anchor_id), -1)
+
+            evidence_items: list[dict[str, Any]] = []
+            if anchor:
+                evidence_items.append(anchor)
+
+            # Exact topic identity is the strongest neighborhood signal. For older
+            # rows without topic IDs, combine semantic overlap with nearby turns in
+            # the active exchange. Keep the set bounded so repair does not lock the
+            # conversation onto a whole historical branch.
+            related_candidates = []
+            anchor_subjects = set((anchor or {}).get("subject_terms") or [])
+            for item in dialog_candidates:
+                item_id = _text(item.get("message_id"))
+                if not item_id or item_id == anchor_id:
+                    continue
+                item_topic_id = _text(item.get("topic_id"))
+                item_topic_text = _text(item.get("topic"))
+                topic_similarity = (
+                    fuzz.token_set_ratio(anchor_topic_text.casefold(), item_topic_text.casefold()) / 100.0
+                    if anchor_topic_text and item_topic_text else 0.0
+                )
+                subject_similarity = _subject_overlap(anchor_subjects, set(item.get("subject_terms") or []))
+                query_overlap = _topic_query_overlap(query, " ".join((
+                    item_topic_text, _text(item.get("user") or item.get("user_text")),
+                    _text(item.get("april") or item.get("april_text")),
+                )))
+                same_topic_id = bool(anchor_topic_id and item_topic_id and anchor_topic_id == item_topic_id)
+                # Time adjacency alone is not evidence of belonging to this task:
+                # an unrelated self-contained turn may sit between two related turns.
+                # Keep a conflicting row only when topic identity/text or query evidence
+                # independently links it back to the repair target.
+                if item.get("subject_mismatch") and not same_topic_id and topic_similarity < 0.48 and query_overlap < 0.16:
+                    continue
+                is_neighbor = False
+                if anchor_position >= 0:
+                    item_position = next((i for i, candidate in enumerate(dialog_candidates)
+                                          if _text(candidate.get("message_id")) == item_id), -1000)
+                    if abs(item_position - anchor_position) <= 2:
+                        try:
+                            delta = abs(float(item.get("created_at") or 0) - float((anchor or {}).get("created_at") or 0))
+                        except (TypeError, ValueError):
+                            delta = float("inf")
+                        is_neighbor = delta <= 20 * 60
+                if same_topic_id or topic_similarity >= 0.48 or subject_similarity >= 0.42 or query_overlap >= 0.16 or is_neighbor:
+                    relevance = (
+                        1.0 * int(same_topic_id)
+                        + 0.65 * topic_similarity
+                        + 0.55 * subject_similarity
+                        + 0.55 * query_overlap
+                        + 0.18 * int(is_neighbor)
+                    )
+                    related_candidates.append((relevance, float(item.get("created_at") or 0), item))
+            related_candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+            for _score, _created_at, item in related_candidates:
+                if _text(item.get("message_id")) not in {_text(x.get("message_id")) for x in evidence_items}:
+                    evidence_items.append(item)
+                if len(evidence_items) >= 4:
+                    break
+
+            # If a selected answer directly matches the user's named correction,
+            # retain its exact canonical text as evidence (bounded, with completeness
+            # flags). A summary alone must not replace what April actually said.
+            evidence_items = evidence_items[:4]
+            evidence_items.sort(key=lambda item: (
+                float(item.get("created_at") or 0), int(item.get("turn_index") or 0)
+            ))
+            preserve_budget = 3
+            for item in evidence_items:
+                pair = _compact_pair(item)
+                source_user = _text(item.get("user_text") or item.get("user"))
+                source_april = _text(item.get("april_text") or item.get("april"))
+                if preserve_budget > 0 and source_user and source_april:
+                    # These are source excerpts, not summaries. Truncation is explicit.
+                    user_cap, april_cap = 1800, 5200
+                    pair.update({
+                        "preserve_source_text": True,
+                        "source_user_text": source_user[:user_cap],
+                        "source_april_text": source_april[:april_cap],
+                        "source_user_text_chars": len(source_user),
+                        "source_april_text_chars": len(source_april),
+                        "source_user_text_complete": len(source_user) <= user_cap,
+                        "source_april_text_complete": len(source_april) <= april_cap,
+                        "source_content_complete": len(source_user) <= user_cap and len(source_april) <= april_cap,
+                        "source_text_origin": "dialogue_memory",
+                    })
+                    preserve_budget -= 1
+                selected_for_context.append(pair)
+            history_selection_method = "active_branch_repair_evidence"
+        else:
+            if anchor:
+                selected_for_context.append(_compact_pair(anchor))
+            # At most one corroborating pair; never forward a pile of unrelated turns.
+            anchor_subjects = set((anchor or {}).get("subject_terms") or [])
+            anchor_has_values = bool(int((anchor or {}).get("structured_data_richness") or 0) >= 8)
+            related_candidates = []
+            # A role-aligned factual record is sufficient for a participant-centered
+            # lookup. Do not dilute it with neighboring turns that may only report a
+            # prior failure to recall that fact (e.g. "I don't see your name").
+            related_context_candidates = [] if int((anchor or {}).get("participant_alignment") or 0) > 0 else matches
+            for item in related_context_candidates:
+                if item.get("is_pending_clarification"):
+                    continue
+                if not item.get("message_id") or _text(item.get("message_id")) == _text((anchor or {}).get("message_id")):
+                    continue
+                if bool(query_subjects and item.get("subject_mismatch")):
+                    continue
+                if bool(item.get("same_dialog")) is False and _text(item.get("dialog_id")) != _text(dialog_id):
+                    continue
+                topic_similarity = fuzz.token_set_ratio(
+                    _text((anchor or {}).get("topic")).casefold(), _text(item.get("topic")).casefold()
+                ) / 100.0 if _text((anchor or {}).get("topic")) and _text(item.get("topic")) else 0.0
+                item_subjects = set(item.get("subject_terms") or [])
+                subject_similarity = _subject_overlap(anchor_subjects, item_subjects)
+                structured_richness = int(item.get("structured_data_richness") or 0)
+                item_source_alignment = float(item.get("source_data_alignment") or 0)
+                # Once the anchor contains the user's original constraints and matching
+                # structured values, do not attach a later value-bearing derivative whose
+                # own request supplied no numbers. It may represent a mistaken reformatting
+                # and otherwise reintroduce the very values the active source corrected.
+                if (
+                    anchor_has_values
+                    and float((anchor or {}).get("source_data_alignment") or 0) >= 0.60
+                    and structured_richness >= 8
+                    and item_source_alignment < 0.20
+                    and int(item.get("turn_index") or 0) > int((anchor or {}).get("turn_index") or 0)
+                ):
+                    continue
+                same_context = (topic_similarity >= 0.65 or subject_similarity >= 0.60
+                                or _topic_query_overlap(query, _text(item.get("topic"))) >= 0.50)
+                if reference_followup and anchor_subjects and item_subjects and subject_similarity >= 0.60:
+                    same_context = True
+                if same_context:
+                    # If the anchor is a text-only derivative, prefer its nearest source
+                    # with the original structured values; otherwise retain relevance rank.
+                    provenance_bonus = 0.10 if (not anchor_has_values and structured_richness >= 8) else 0.0
+                    related_candidates.append((float(item.get("score") or 0) + provenance_bonus, item))
+            if related_candidates:
+                related_candidates.sort(key=lambda pair: pair[0], reverse=True)
+                selected_for_context.append(_compact_pair(related_candidates[0][1]))
 
     # A NEW request may still name a topic retained from an earlier dialogue.
     # Keep relation=NEW (no forced continuation), but pass one grounded pair when
     # the topic index confirms a strong topical match.
-    if relation == "NEW" and not history_request and not selected_for_context and topic_index:
+    if (
+        relation == "NEW"
+        and not history_request
+        and not selected_for_context
+        and topic_index
+        and not new_work_root_request
+        and not closed_branch_barrier
+        and (explicit_historical_work_reference or topic_pointer_match)
+    ):
         lookup_tokens = _history_query_topic_tokens(query)
         top_topic = topic_index[0]
         topic_tokens = _semantic_tokens(_history_topic_text(top_topic))
-        topic_overlap = _fuzzy_token_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
+        topic_overlap = _history_topic_overlap(lookup_tokens, topic_tokens) if lookup_tokens else 0.0
         has_distinctive_query = len(lookup_tokens) >= 2 or any(len(token) >= 7 for token in lookup_tokens)
-        if topic_overlap >= 0.50 and has_distinctive_query:
+        if topic_overlap >= 0.50 and (has_distinctive_query or topic_reference_fragment):
             topic_message_id = _text(top_topic.get("message_id"))
             source_row = next((row for row in all_rows if _text(row.get("message_id")) == topic_message_id), None)
             if source_row is not None:
@@ -4023,15 +8661,15 @@ def search_dialogue_context(
             requested_section_number = _explicit_section_number(section_query)
             if requested_section_number is not None:
                 # Section numbers are structural identifiers. Search the active
-                # answer first, then the full 12-hour user history; never suggest
+                # answer first, then the full 24-hour user history; never suggest
                 # a nearby numbered section when the requested number is absent.
                 exact_local = [item for item in ranked_sections if int(item.get("order") or 0) == requested_section_number]
                 if not exact_local and source_row:
                     exact_local = [
                         {
                             "topic": _topic_label(source_row),
-                            "heading": _text(section.get("heading"))[:90],
-                            "summary": _text(section.get("summary"))[:180],
+                            "heading": _text(section.get("heading"))[:180],
+                            "summary": _text(section.get("summary"))[:360],
                             "order": section.get("order"),
                             "message_id": _text(section.get("message_id") or source_row.get("message_id")),
                             "dialog_id": _text(source_row.get("dialog_id")),
@@ -4109,8 +8747,8 @@ def search_dialogue_context(
                 choice_records = [
                     {
                         "topic": _topic_label(source_row),
-                        "heading": _text(item.get("heading"))[:90],
-                        "summary": _text(item.get("summary"))[:180],
+                        "heading": _text(item.get("heading"))[:180],
+                        "summary": _text(item.get("summary"))[:360],
                         "order": item.get("order"),
                         "message_id": _text(item.get("message_id") or source_row.get("message_id")),
                         "dialog_id": _text(source_row.get("dialog_id")),
@@ -4149,7 +8787,7 @@ def search_dialogue_context(
                     if topic_correction and previous_user_request:
                         clarification_resolution = {
                             "original_request": previous_user_request[:500],
-                            "clarification_reply": _text(query)[:240],
+                            "clarification_reply": _text(query)[:480],
                             "selected_section": selected_section,
                         }
                 elif len(ranked_sections) >= 2 and float(top.get("score") or 0) >= 0.34:
@@ -4169,7 +8807,7 @@ def search_dialogue_context(
     if resume_anchor_row:
         # A deliberate History-card click is authoritative for this turn. Preserve
         # the exact clicked message as the anchor, then attach only rows belonging
-        # to its topic vector. A broad dialog_id may cover the entire 12-hour window
+        # to its topic vector. A broad dialog_id may cover the entire 24-hour window
         # and must never be treated as proof that every row is relevant.
         anchor = _candidate_score(
             query,
@@ -4185,7 +8823,7 @@ def search_dialogue_context(
         anchor_topic = _text(anchor.get("topic")) or _topic_label(resume_anchor_row)
         related_vector = []
         anchor_message_id = _text(anchor.get("message_id"))
-        # Re-score the 12-hour memory against the selected topic itself, not only
+        # Re-score the 24-hour memory against the selected topic itself, not only
         # against the next short user input (which may be just "continue" or "draw").
         for candidate_row in all_rows:
             candidate_message_id = _text(candidate_row.get("message_id"))
@@ -4227,52 +8865,1226 @@ def search_dialogue_context(
         pending_for_next_turn = {}
         clarification_resolution = {}
         # Keep the chosen pair first in the candidate list while leaving the
-        # remaining 12-hour candidates available for normal cross-topic recall.
+        # remaining 24-hour candidates available for normal cross-topic recall.
         matches = [anchor] + [item for item in matches if _text(item.get("message_id")) != anchor_message_id]
 
     if section_anchor_overridden and anchor:
         active_topic = _text(anchor.get("topic")) or active_topic
         selected_for_context = [_compact_pair(anchor)]
 
-    topic_table_lines = ["| # | Тема | Последний запрос | Ходы |", "|---:|---|---|---:|"]
-    for item in (history_topics or topic_index[:min(3, len(topic_index))]):
-        topic_table_lines.append(f"| {item['number']} | {str(item['topic']).replace('|', '/')} | {str(item['last_question']).replace('|', '/')} | {item['turns']} |")
+    def _attach_topic_provenance(record: Any) -> Any:
+        """Bind a selected pair/section to the topic and source message it came from."""
+        if not isinstance(record, dict):
+            return record
+        source_id = _text(record.get("source_message_id") or record.get("message_id"))
+        matching_topic = None
+        matching_section = None
+        for topic in topic_index:
+            if not isinstance(topic, dict):
+                continue
+            topic_message_ids = {_text(item) for item in (topic.get("message_ids") or []) if _text(item)}
+            topic_message_ids.update({_text(topic.get("message_id")), _text(topic.get("origin_message_id"))})
+            section_match = next((section for section in (topic.get("sections") or [])
+                                  if isinstance(section, dict) and source_id and source_id in {
+                                      _text(section.get("source_message_id")), _text(section.get("message_id"))
+                                  }), None)
+            if (source_id and source_id in topic_message_ids) or section_match:
+                matching_topic, matching_section = topic, section_match
+                break
+        if matching_topic:
+            topic_id_value = _text(matching_topic.get("topic_id"))
+            origin_id_value = _text(matching_topic.get("origin_message_id"))
+            if topic_id_value and not _text(record.get("topic_id")):
+                record["topic_id"] = topic_id_value
+            # _compact_pair historically defaulted origin_message_id to the current
+            # message. Replace that fallback when the topic index knows the true root.
+            if origin_id_value and (not _text(record.get("origin_message_id")) or _text(record.get("origin_message_id")) == source_id):
+                record["origin_message_id"] = origin_id_value
+            if origin_id_value and (not _text(record.get("topic_origin_message_id")) or _text(record.get("topic_origin_message_id")) == source_id):
+                record["topic_origin_message_id"] = origin_id_value
+            if matching_topic.get("origin_turn") is not None and record.get("origin_turn") in (None, "", 0):
+                record["origin_turn"] = matching_topic.get("origin_turn")
+            if source_id and not _text(record.get("source_message_id")):
+                record["source_message_id"] = source_id
+            if matching_section:
+                record.setdefault("section_heading", matching_section.get("heading"))
+                record.setdefault("section_summary", matching_section.get("summary"))
+                record.setdefault("section_order", matching_section.get("order"))
+        nested_sections = record.get("sections")
+        if isinstance(nested_sections, list):
+            for section in nested_sections:
+                if not isinstance(section, dict):
+                    continue
+                section_source = _text(section.get("source_message_id") or section.get("message_id"))
+                for topic in topic_index:
+                    if not isinstance(topic, dict):
+                        continue
+                    found = next((source for source in (topic.get("sections") or [])
+                                  if isinstance(source, dict) and section_source and section_source in {
+                                      _text(source.get("source_message_id")), _text(source.get("message_id"))
+                                  }), None)
+                    if found:
+                        if not _text(section.get("topic_id")):
+                            section["topic_id"] = topic.get("topic_id")
+                        if not _text(section.get("topic_origin_message_id")):
+                            section["topic_origin_message_id"] = topic.get("origin_message_id")
+                        if not _text(section.get("source_message_id")):
+                            section["source_message_id"] = section_source
+                        if not _text(section.get("heading")):
+                            section["heading"] = found.get("heading")
+                        if not _text(section.get("summary")):
+                            section["summary"] = found.get("summary")
+                        break
+        return record
+
+    for selected_pair in selected_for_context:
+        _attach_topic_provenance(selected_pair)
+    _attach_topic_provenance(selected_section)
+
+    # Keep the actual PostgreSQL source pair for a selected poem/verse or other
+    # authored text when the user is referring to that branch. Compact summaries
+    # are useful for search, but cannot replace the source when discussing wording,
+    # reactions, edits, or whether a text was preserved correctly.
+    preserve_text_request = bool(re.search(
+        r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|текст\w*|строк\w*|"
+        r"дословн\w*|целиком|полностью|повтори|перечитай|как ты написал|что ты написал|"
+        r"poem\w*|poetr\w*|verse\w*|sonnet\w*|the text|word for word|verbatim|full text)",
+        _text(query).lower().replace("ё", "е"),
+    ))
+    source_sensitive_acts = {
+        "REFERENTIAL_CONTINUATION", "EXPLANATION_REQUEST", "CLARIFICATION_REQUEST",
+        "CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "REVISION_REQUEST",
+        "INFORMATION_QUESTION", "CONTINUATION_REQUEST",
+    }
+    needs_textual_evidence = bool(
+        preserve_text_request or topic_reference_fragment or reference_followup
+        or _text(query_interpretation.get("speech_act")).upper() in source_sensitive_acts
+    )
+    if (
+        relation == "CONTINUE" or contextual_history_match
+        or (history_request and (preserve_text_request or topic_reference_fragment or reference_followup))
+    ) and needs_textual_evidence:
+        source_by_id = {
+            _text(row.get("message_id")): row for row in all_rows
+            if isinstance(row, dict) and _text(row.get("message_id"))
+        }
+        for selected_pair in selected_for_context[:2]:
+            if not isinstance(selected_pair, dict):
+                continue
+            source_id = _text(selected_pair.get("source_message_id") or selected_pair.get("message_id"))
+            source = source_by_id.get(source_id)
+            if not source:
+                continue
+            topic_and_text = " ".join((
+                _text(selected_pair.get("topic")),
+                _text(source.get("user_text") or source.get("user")),
+                _text(source.get("april_text") or source.get("april")),
+            )).lower().replace("ё", "е")
+            is_authored_text = bool(re.search(
+                r"(?:стих\w*|поэм\w*|сонет\w*|лирик\w*|рифм\w*|куплет\w*|"
+                r"poem\w*|poetr\w*|verse\w*|sonnet\w*|lyrics)", topic_and_text
+            ))
+            # Require both a real selected DB source and a textual reference in
+            # either the query or that source. This is not a global history dump.
+            if not is_authored_text:
+                continue
+            raw_user = _text(source.get("user_text") or source.get("user"))
+            raw_april = _text(source.get("april_text") or source.get("april"))
+            selected_pair["preserve_source_text"] = True
+            selected_pair["source_user_text"] = raw_user[:1800]
+            selected_pair["source_april_text"] = raw_april[:5200]
+            selected_pair["source_user_text_chars"] = len(raw_user)
+            selected_pair["source_april_text_chars"] = len(raw_april)
+            selected_pair["source_user_text_complete"] = len(raw_user) <= 1800
+            selected_pair["source_april_text_complete"] = len(raw_april) <= 5200
+            selected_pair["source_content_complete"] = len(raw_user) <= 1800 and len(raw_april) <= 5200
+            selected_pair["source_text_origin"] = "dialogue_memory"
+    if clarification_options:
+        clarification_options = [_attach_topic_provenance(dict(option)) for option in clarification_options]
+
+    def _topic_time_label(value: Any) -> str:
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return "—"
+
+    topic_table_lines = [
+        "| # | Тема | Описание | Последний запрос | Обновлено (Киев) | Источник | Ходы |",
+        "|---:|---|---|---|---|---|---:|",
+    ]
+    topic_table_source = history_topics if history_request and history_topics else topic_index[:min(3, len(topic_index))]
+    for item in topic_table_source[:history_limit if history_request else 3]:
+        topic = str(item.get("topic") or "—").replace("|", "/").replace("\n", " ")
+        summary = str(item.get("summary") or "—").replace("|", "/").replace("\n", " ")[:180]
+        last_question = str(item.get("last_question") or "—").replace("|", "/").replace("\n", " ")[:140]
+        last_at = _topic_time_label(item.get("last_at"))
+        origin_turn = item.get("origin_turn") or "—"
+        topic_table_lines.append(
+            f"| {item.get('number', '—')} | {topic} | {summary} | {last_question} | {last_at} | ход {origin_turn} | {item.get('turns', '—')} |"
+        )
     topic_table_md = "\n".join(topic_table_lines)
+
+    # Recovery lane for an explicit edit/extension of a previously rendered artifact.
+    # The PostgreSQL dialogue pair already contains render_blocks/typed data; the bug
+    # was that NEW_INFORMATION overrode semantic continuity and returned zero pairs.
+    artifact_source_row: dict[str, Any] | None = None
+    artifact_source_candidate: dict[str, Any] | None = None
+    if explicit_artifact_followup and not resume_key and not time_filter.get("applied"):
+        # Never cross the authenticated conversation boundary: limit to the active
+        # dialogue/conversation before checking exact persisted renderer payloads.
+        artifact_scope = [
+            row for row in scoped_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and (
+                # Prefer the exact active dialogue. A matching conversation_id alone
+                # must not let a graph from another dialogue/tab override the hot item.
+                (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+                or (
+                    not _text(row.get("dialog_id"))
+                    and _text(conversation_id)
+                    and _text(row.get("conversation_id")) == _text(conversation_id)
+                )
+                or (
+                    not _text(dialog_id)
+                    and _text(conversation_id)
+                    and _text(row.get("conversation_id")) == _text(conversation_id)
+                )
+            )
+        ]
+        # For subject-bearing edits, use the query's real topic terms and reject
+        # semantically disjoint artifact rows; for elliptical edits, recency is valid
+        # only inside this same dialogue and only among rows with an actual artifact.
+        # Remove action, artifact-format and range words from the candidate subject
+        # before collision checks. Without this, generic phrasing such as "add
+        # intermediate points to the graph" incorrectly treats "intermediate" as
+        # a new entity and rejects the only saved graph in the active dialogue.
+        artifact_subject_query = re.sub(
+            r"(?:\b(?:graph|chart|plot|table|formula|equation|diagram|code|script|image|photo|picture|file|document)\w*\b|"
+            r"\b(?:график|диаграмм|таблиц|формул|уравнен|схем|чертеж|код|скрипт|картинк|изображен|фото|файл|документ)\w*\b|"
+            r"\b(?:данн|значен|точк|проме|добав|допол|исправ|измен|обнов|перестро|передел|редакт|улучш|замен|убер|восстанов|верни|пришл|выдай|вывед|отобраз|представ|покаж|сдела|постро|созда)\w*\b|"
+            r"\b(?:день|дня|дней|днями|недел|месяц|года|год|за)\w*\b|"
+            r"\b(?:daily|weekly|monthly|intermediate|estimated|points?|data|values?|days?|weeks?|months?|price|prices|growth)\w*\b|"
+            r"\b(?:грн|руб|рубл|доллар|евро|uah|usd)\w*\b|\b\d+(?:[.,]\d+)?\b)",
+            " ", _text(query).lower().replace("ё", "е"), flags=re.IGNORECASE,
+        )
+        artifact_query_subjects = set(_subject_tokens(artifact_subject_query))
+        if explicit_artifact_kind == "image":
+            source_subjects = _image_source_subject_tokens(query)
+            # Never let the requested addition (e.g. "caravan/camels") outrank
+            # the source scene (e.g. "desert") when resolving an image edit.
+            artifact_query_subjects = source_subjects
+        # "Give me the whole/full code" is a reference to the saved artifact,
+        # not a new subject. Mixed-language voice requests often add filler such
+        # as "thank you", "when it writes welcome", or "put it there"; those
+        # words must not make us reject the only same-dialog CodeBlock.
+        whole_code_request = bool(
+            explicit_artifact_kind == "code"
+            and re.search(
+                r"(?:\b(?:весь|всю|все|полный|полную|целиком|полностью|исходный|исходн\w*)\b.{0,36}\b(?:код|скрипт|code|script)\b|"
+                r"\b(?:код|скрипт|code|script)\b.{0,24}\b(?:целиком|полностью|entire|whole|full|complete|all)\b|"
+                r"\b(?:full|entire|whole|complete|all)\s+(?:source\s+)?(?:code|script)\b)",
+                _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+            )
+        )
+        if whole_code_request:
+            artifact_query_subjects = set()
+        artifact_options: list[tuple[float, float, int, dict[str, Any], dict[str, Any]]] = []
+        for source_row in artifact_scope:
+            if not _row_has_value_bearing_artifact(source_row, explicit_artifact_kind):
+                continue
+            row_subjects = _row_subject_tokens(source_row)
+            subject_overlap = _subject_overlap(artifact_query_subjects, row_subjects)
+            subject_mismatch = _subject_conflicts(artifact_query_subjects, row_subjects)
+            if artifact_query_subjects and row_subjects and subject_mismatch:
+                continue
+            if artifact_query_subjects and row_subjects and subject_overlap <= 0.0:
+                continue
+            scored = _candidate_score(
+                query, source_row,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=True,
+                query_modalities=query_modalities,
+                structured_evidence_required=True,
+            )
+            # Subject match and typed exact data outrank a newer generic artifact.
+            exact_subject = 1.0 if not artifact_query_subjects else float(subject_overlap)
+            score = (
+                0.52 * exact_subject
+                + 0.23 * float(scored.get("source_data_alignment") or 0.0)
+                + 0.15 * min(1.0, float(scored.get("structured_data_richness") or 0) / 40.0)
+                + 0.10 * float(scored.get("recency") or 0.0)
+            )
+            artifact_options.append((score, exact_subject, int(source_row.get("turn_index") or 0), source_row, scored))
+        if artifact_options:
+            if explicit_artifact_kind == "image":
+                # For an image explicitly referenced in the current dialogue, first
+                # use the source-scene hint; among compatible rows, prefer the latest
+                # saved image. Structured-payload richness must not make yesterday's
+                # edited photo win over the image just generated a moment ago.
+                artifact_options.sort(
+                    key=lambda item: (
+                        item[1],
+                        float(item[3].get("created_at") or 0.0),
+                        item[2],
+                    ),
+                    reverse=True,
+                )
+            else:
+                artifact_options.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            _, _, _, artifact_source_row, artifact_source_candidate = artifact_options[0]
+            source_id = _text(artifact_source_row.get("message_id"))
+            # Recover user-entered values from the originating turn when it belongs
+            # to the same topic; include at most one origin plus the exact artifact.
+            source_rows: list[dict[str, Any]] = []
+            origin_id = _text(artifact_source_row.get("topic_origin_message_id") or artifact_source_row.get("origin_message_id"))
+            if origin_id and origin_id != source_id:
+                origin_row = next((row for row in artifact_scope if _text(row.get("message_id")) == origin_id), None)
+                if origin_row is not None:
+                    origin_subjects = _row_subject_tokens(origin_row)
+                    if not artifact_query_subjects or not origin_subjects or not _subject_conflicts(artifact_query_subjects, origin_subjects):
+                        source_rows.append(origin_row)
+            if not source_rows:
+                # Legacy topic indexes may not expose an origin id. Pick the nearest
+                # earlier user turn with matching subject and data-like content.
+                source_at = float(artifact_source_row.get("created_at") or 0.0)
+                prior_rows = []
+                for row in artifact_scope:
+                    if _text(row.get("message_id")) == source_id or float(row.get("created_at") or 0.0) >= source_at:
+                        continue
+                    row_subjects = _row_subject_tokens(row)
+                    if artifact_query_subjects and row_subjects and _subject_conflicts(artifact_query_subjects, row_subjects):
+                        continue
+                    raw_user = _text(row.get("user_text") or row.get("user"))
+                    if not re.search(r"\d", raw_user) and not re.search(r"(?:цен\w*|данн\w*|по\s+дням|по\s+датам|price|data|value)", raw_user, re.IGNORECASE):
+                        continue
+                    prior_rows.append(row)
+                if prior_rows:
+                    source_rows.append(max(prior_rows, key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0))))
+
+            selected_for_context = []
+            selected_seen: set[str] = set()
+            for source_row in [*source_rows, artifact_source_row]:
+                source_id = _text(source_row.get("message_id"))
+                if not source_id or source_id in selected_seen:
+                    continue
+                candidate = artifact_source_candidate if source_id == _text(artifact_source_row.get("message_id")) else _candidate_score(
+                    query, source_row,
+                    dialog_id=str(dialog_id or ""),
+                    conversation_id=str(conversation_id or ""),
+                    reference_followup=True,
+                    query_modalities=query_modalities,
+                    structured_evidence_required=True,
+                )
+                compact = _compact_pair(candidate)
+                raw_user = _text(source_row.get("user_text") or source_row.get("user"))
+                raw_april = _text(source_row.get("april_text") or source_row.get("april"))
+                compact.update({
+                    "preserve_source_text": True,
+                    "active_work_source": True,
+                    "source_user_text": raw_user[:1800],
+                    "source_april_text": raw_april[:5200],
+                    "source_user_text_chars": len(raw_user),
+                    "source_april_text_chars": len(raw_april),
+                    "source_user_text_complete": len(raw_user) <= 1800,
+                    "source_april_text_complete": len(raw_april) <= 5200,
+                    "source_content_complete": len(raw_user) <= 1800 and len(raw_april) <= 5200,
+                    "source_text_origin": "dialogue_memory_artifact_recovery",
+                })
+                selected_for_context.append(compact)
+                selected_seen.add(source_id)
+
+            anchor = artifact_source_candidate
+            relation = "CONTINUE"
+            continuation = True
+            self_contained_new_information = False
+            hot_work_followup = True
+            hot_work_match_reason = "same_dialog_saved_artifact_recovered"
+            hot_branch_candidate = True
+            semantic_active_branch_intent = True
+            active_subject_conflict = False
+            semantic_subject_switch = False
+            decision_subject_switch = False
+            active_work_marker_is_from_another_topic = False
+            active_work_root_subject_conflict = False
+            active_work_topic_origin_mismatch = False
+            unrelated_active_work_topic = False
+            new_work_root_request = False
+            closed_branch_barrier = False
+            active_work_pair = artifact_source_row
+            active_work_row_index = 0
+            active_work_origin_id = origin_id or _text(artifact_source_row.get("message_id"))
+            latest_topic_origin_id = _text(artifact_source_row.get("topic_origin_message_id") or active_work_origin_id)
+            recovered_branch = _infer_active_work_branch(artifact_source_row)
+            if not recovered_branch.get("active"):
+                recovered_branch = {
+                    "active": True,
+                    "priority": "HOT_TASK_FIRST",
+                    "kind": f"{explicit_artifact_kind}_artifact_edit",
+                    "work_id": f"artifact:{_text(artifact_source_row.get('message_id'))}",
+                    "topic": _topic_label(artifact_source_row) or _text(artifact_source_row.get("user_text") or artifact_source_row.get("user"))[:240],
+                    "goal": _text(artifact_source_row.get("user_text") or artifact_source_row.get("user"))[:500],
+                    "state_summary": _compact_memory_summary(artifact_source_row)[:800],
+                    "origin_message_id": active_work_origin_id,
+                    "last_message_id": _text(artifact_source_row.get("message_id")),
+                }
+            active_work_branch = dict(recovered_branch)
+            # Keep the existing interpretation contract aligned with the recovered
+            # data source so the Provider emits an edited structured artifact, not a
+            # text-only response that asks the user to repeat already saved values.
+            query_interpretation["primary_intent"] = "TOPIC_CONTINUATION"
+            query_interpretation["direction"] = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+            query_interpretation["requires_memory"] = True
+            query_interpretation["relation_hint"] = "CONTINUE"
+            if explicit_artifact_kind == "graph":
+                requested_outputs = query_interpretation.get("requested_outputs")
+                requested_outputs = list(requested_outputs) if isinstance(requested_outputs, (list, tuple, set)) else []
+                if "graph" not in requested_outputs:
+                    requested_outputs.append("graph")
+                query_interpretation["requested_outputs"] = requested_outputs
+                query_interpretation["wants_graph"] = True
+            history_selection_method = "same_dialog_saved_artifact_recovery"
+            contextual_history_match = False
+            _apr_timing_log(
+                "saved_artifact_continuation_recovered",
+                search_started,
+                user_key=_apr_diag_ref(uid),
+                dialog_key=_apr_diag_ref(dialog_id),
+                source_message_key=_apr_diag_ref(artifact_source_row.get("message_id")),
+                artifact_kind=explicit_artifact_kind,
+                selected_pairs=len(selected_for_context),
+                has_exact_structured_data=bool((artifact_source_candidate or {}).get("protected_structured_data")),
+            )
+
+    # -------------------------------------------------------------------------
+    # Canonical route arbitration (the same policy emitted by Interpretation).
+    # 1) Test the latest hot branch in the authenticated dialogue.
+    # 2) If it does not fit a named-subject request, search all retained dialogue
+    #    rows for this authenticated user using semantic evidence, not recency alone.
+    # 3) If no historical topic matches, start a clean NEW topic.
+    # A persisted active-work marker alone never resurrects an old branch.
+    # -------------------------------------------------------------------------
+    routing_policy = query_interpretation.get("routing_policy") if isinstance(query_interpretation.get("routing_policy"), dict) else {}
+    route_policy_version = _text(routing_policy.get("version"))
+    route_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    route_pragmatic = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    route_is_repair = bool(
+        is_correction
+        or query_interpretation.get("active_branch_repair")
+        or query_interpretation.get("previous_answer_reference")
+        or route_features.get("active_branch_repair")
+        or route_pragmatic.get("active_branch_repair")
+    )
+    route_anaphoric_predicate = bool(
+        not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and re.search(
+            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
+            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|in\s+it|within\s+it|its)\b",
+            _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+        )
+        and re.search(
+            r"\b(?:нрав\w*|понрав\w*|особенн\w*|сюжет\w*|драматург\w*|"
+            r"флор\w*|фаун\w*|показан\w*|запомн\w*|сцен\w*|интересн\w*|"
+            r"красочн\w*|впечатл\w*|like\w*|enjoy\w*|especially|plot|story|shown)\b",
+            _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+        )
+    )
+    route_is_contextual = bool(
+        route_is_repair
+        or route_features.get("context_dependent_question")
+        or route_features.get("context_dependent_reaction")
+        or route_features.get("strong_anaphoric_reference")
+        or route_anaphoric_predicate
+        or route_features.get("continuation_action")
+        or route_features.get("answer_followup")
+        or route_features.get("topic_reference_fragment")
+        or query_interpretation.get("requires_memory")
+        or interpreted_intent in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+        or reference_followup
+    )
+    route_has_independent_payload = bool(
+        route_pragmatic.get("has_independent_payload")
+        or query_interpretation.get("explicit_topic_introduction")
+        or new_work_root_request
+        or query_modalities
+    )
+    route_blocked = bool(
+        history_request
+        or time_filter.get("applied")
+        or resume_key
+        or explicit_artifact_followup
+        or interpreted_topic_closure
+    )
+    current_dialog_rows = [
+        row for row in scoped_rows
+        if isinstance(row, dict)
+        and not _row_is_pending_clarification(row)
+        and not _is_failed_provider_row(row)
+        and (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )
+    ]
+    latest_route_row = max(
+        current_dialog_rows,
+        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        default=None,
+    )
+    # A correction like “you used green, I asked for red” changes an attribute of
+    # the active visual, not the topic. The exception is intentionally gated by
+    # both a revision act and an image annotation target plus a same-dialog anchor.
+    visual_edit_revision = bool(
+        latest_route_row
+        and re.search(r"\b(?:передел\w*|исправ\w*|поправ\w*|перерис\w*|замени\w*|я\s+(?:же\s+)?просил\w*|я\s+(?:же\s+)?просила\w*|не\s+так|wrong|redo|revise|i\s+asked|change\s+it)\b", query, re.I)
+        and re.search(r"(?:стрелк\w*|указател\w*|pointer|arrow|цвет\w*|красн\w*|зелен\w*|red|green|кнопк\w*|подсвет\w*|выдел\w*|куда\s+нажать|highlight|marker)", query, re.I)
+        and bool(re.search(r"(?:visual_creation_or_editing|image|картинк|изображен|screenshot|скриншот|стрелк|arrow)", _text(latest_route_row.get("active_work_kind") or latest_route_row.get("artifact_kind") or latest_route_row.get("user_text") or latest_route_row.get("user") or latest_route_row.get("topic")), re.I)
+                 or latest_route_row.get("render_blocks") or latest_route_row.get("artifacts"))
+    )
+    if visual_edit_revision:
+        route_is_repair = True
+        route_is_contextual = True
+    latest_route_subjects = _row_dialogue_content_subject_tokens(latest_route_row) if latest_route_row else set()
+    latest_answer_relation = _latest_answer_relation_vector(query, latest_route_row)
+    # If the user refers to the current subject by pronoun/deixis and does not
+    # introduce another subject, nouns naming the requested output or an attribute
+    # ("picture", "discoveries", "law") are not independent topic names. Keep those
+    # terms for answer generation, but do not use them to jump to an old branch.
+    route_query_subjects = set(query_subjects)
+    route_reference_terms = context_signature.get("reference_terms") if isinstance(context_signature.get("reference_terms"), list) else []
+    # A deictic/reference word must not erase concrete subject terms when the user
+    # explicitly repairs or continues an artifact request. In the affected logs,
+    # the parser found terms such as "автом", "калаш", and "схему", but this
+    # blanket reset reduced route_subject_overlap to zero and detached the hot branch.
+    route_artifact_revisit_signal = bool(
+        route_query_subjects
+        and re.search(
+            r"(?:созда\w*|нарис\w*|сгенерир\w*|изображен\w*|картинк\w*|схем\w*|draw|generate|diagram|image)",
+            query, re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:я\s+(?:же\s+)?(?:не\s+)?(?:просил\w*|просила|попросил\w*|попросила)|"
+            r"я\s+прошу|исправься|не\s+удалось|а\s+теперь|теперь|продолжи(?:те)?|"
+            r"продолжай(?:те)?|дальше|повтори|снова|continue|resume|try\s+again)",
+            query, re.IGNORECASE,
+        )
+        and not query_interpretation.get("explicit_topic_switch")
+        and not history_request
+        and not time_filter.get("applied")
+    )
+    if (
+        route_reference_terms
+        and not route_artifact_revisit_signal
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not query_interpretation.get("explicit_topic_switch")
+    ):
+        route_query_subjects = set()
+    # Do not use pronoun-stripped hot-branch subjects for the history fallback:
+    # those descriptive nouns are the only remaining semantic evidence once the
+    # immediate branch has genuinely failed to match.
+    route_history_subjects = set(route_query_subjects)
+    if route_anaphoric_predicate and query_subjects:
+        route_history_subjects = set(query_subjects)
+    route_subject_overlap = _subject_overlap(route_query_subjects, latest_route_subjects) if route_query_subjects and latest_route_subjects else 0.0
+    route_subject_conflict = _subject_conflicts(route_query_subjects, latest_route_subjects)
+    # An anaphoric question/repair may ask about an attribute whose noun differs
+    # from the topic entity ("Which law was he the author of?"). A new, explicitly
+    # introduced subject is not attached to the active branch.
+    contextual_antecedent = bool(
+        route_is_contextual
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            route_anaphoric_predicate
+            or not query_subjects
+            or not route_subject_conflict
+            or bool(route_features.get("context_dependent_question"))
+        )
+        and not (is_correction and bool(positive_replacement) and not visual_edit_revision)
+    )
+    underspecified_turn = bool(
+        not route_query_subjects
+        and not self_contained_new_information
+        and not route_has_independent_payload
+    )
+    # A self-contained artifact command can still be a continuation when it repeats
+    # the exact active subject: e.g. "I already asked you to draw the AK diagram. Continue"
+    # or "now draw the complete diagram" after a failed first render. Do not mistake
+    # this for a topic switch merely because it contains a fresh imperative.
+    same_subject_revisit_marker = bool(re.search(
+        r"\b(?:я\s+же\s+(?:просил\w*|просила|попросил\w*|попросила)|"
+        r"а\s+теперь|теперь\s+(?:нарис\w*|покаж\w*|сдела\w*|продолж\w*)|"
+        r"продолжи(?:те)?|продолжай(?:те)?|дальше|далее|"
+        r"почему\s+не\s+удал\w*|не\s+удал\w*\s+(?:созда\w*|показ\w*|получил\w*)|"
+        r"не\s+получил\w*|не\s+сработал\w*|повтори|снова|"
+        r"i\s+(?:already\s+)?asked|continue|resume|try\s+again|again)\b",
+        query, re.IGNORECASE,
+    ))
+    # The last assistant answer is the first continuation candidate even when
+    # the user does not say "continue" or use a pronoun. A strong subject match
+    # is enough to resume the current branch (for example, asking for the full
+    # periodic table after April has just explained Mendeleev). Explicit topic
+    # switches and history/time lookups still bypass this immediate branch.
+    same_subject_active_revisit = bool(
+        latest_route_row
+        and route_query_subjects
+        and latest_route_subjects
+        and (
+            route_subject_overlap >= 0.40
+            or bool(latest_answer_relation.get("matched"))
+        )
+        and not route_subject_conflict
+        and not bool(latest_answer_relation.get("answer_subject_conflict"))
+        and not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not history_request
+        and not time_filter.get("applied")
+    )
+    prefer_hot_branch = bool(
+        not hot_branch_probe_missed
+        and not route_blocked
+        and latest_route_row
+        and (
+            not query_modalities
+            or same_subject_active_revisit
+            or (
+                # Multimodal evidence does not cancel a semantic continuation.
+                # A compatible latest-answer match remains the first retrieval lane;
+                # otherwise anaphoric/contextual language can keep the branch active.
+                contextual_antecedent
+                and route_is_contextual
+                and not new_work_root_request
+                and not query_interpretation.get("explicit_topic_introduction")
+            )
+        )
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            (
+                not new_work_root_request
+                and (
+                    underspecified_turn
+                    or (contextual_antecedent and (route_anaphoric_predicate or not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
+                    or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
+                )
+            )
+            or same_subject_active_revisit
+        )
+    )
+    route_decision = "UNCHANGED"
+    if prefer_hot_branch:
+        latest_candidate = _candidate_score(
+            query, latest_route_row,
+            dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+            reference_followup=True,
+            query_modalities=query_modalities,
+            structured_evidence_required=needs_structured_search,
+        )
+        selected_for_context = [_compact_pair(latest_candidate)]
+        anchor = latest_candidate
+        active_topic = _text(latest_route_row.get("topic")) or _topic_label(latest_route_row) or _text(latest_route_row.get("user_text") or latest_route_row.get("user"))[:140]
+        relation = "CONTINUE"
+        continuation = True
+        contextual_history_match = False
+        history_selection_method = "latest_same_dialog_active_branch"
+        # Detach stale structured work from another topic. It remains in memory,
+        # but no longer controls this turn or its saved-asset restoration.
+        if active_work_branch:
+            active_origin = _text(active_work_branch.get("origin_message_id"))
+            # Prefer a persisted topic-origin marker. If it is missing, fall back
+            # to this row's id as before; only a guarded same-subject revisit may
+            # preserve the branch when that fallback appears to disagree.
+            latest_origin = _text(latest_route_row.get("topic_origin_message_id") or latest_route_row.get("message_id"))
+            if active_origin and latest_origin and active_origin != latest_origin:
+                active_branch_subjects = _subject_tokens(" ".join(
+                    _text(active_work_branch.get(key))
+                    for key in ("topic", "goal", "state_summary", "last_action", "last_user_text", "last_assistant_answer")
+                    if _text(active_work_branch.get(key))
+                ))
+                active_branch_matches_latest = bool(
+                    active_branch_subjects and latest_route_subjects
+                    and _subject_overlap(active_branch_subjects, latest_route_subjects) >= 0.30
+                    and not _subject_conflicts(active_branch_subjects, latest_route_subjects)
+                )
+                if active_branch_matches_latest:
+                    _apr_timing_log(
+                        "active_work_branch_preserved_on_latest_subject_match", None,
+                        active_origin=_apr_diag_ref(active_origin),
+                        latest_origin=_apr_diag_ref(latest_origin),
+                        branch_latest_overlap=round(_subject_overlap(active_branch_subjects, latest_route_subjects), 4),
+                    )
+                else:
+                    # A recent assistant message that matches the current request
+                    # outranks a detached active-work marker from an older subject.
+                    active_work_branch = {}
+                    active_work_pair = None
+                    active_work_row_index = -1
+                    active_work_has_marker = False
+                    hot_work_followup = False
+                    hot_work_match_reason = "detached_stale_work_branch_latest_topic_wins"
+        route_decision = "ACTIVE_BRANCH_FIRST"
+    elif (
+        not route_blocked
+        and (route_query_subjects or (hot_branch_probe_missed and route_history_subjects))
+    ):
+        # The active-branch test above has already failed. Search the user's full
+        # retained history even if the query subject does not mathematically conflict
+        # with the latest row; a standalone request can still resume an older topic.
+        # Matching is semantic, not recency-only. A miss creates a clean new topic.
+        named_history_candidates = []
+        # Important: `scoped_rows` is optimized for the current dialog. Once the
+        # active branch fails, the fallback must search every retained dialogue for
+        # this authenticated Premium user, not just the current dialog plus a small
+        # prefiltered subset. This is the second phase of the canonical route.
+        for historical_row in all_rows:
+            if not isinstance(historical_row, dict) or _row_is_pending_clarification(historical_row):
+                continue
+            latest_route_id = _text((latest_route_row or {}).get("message_id"))
+            if latest_route_id and _text(historical_row.get("message_id")) == latest_route_id:
+                continue
+            row_subject_text = search_subject_text(historical_row)
+            row_subjects = _subject_tokens(row_subject_text)
+            subject_score = _subject_overlap(route_history_subjects, row_subjects) if row_subjects else 0.0
+            topic_text = " ".join((row_subject_text, search_topic_label(historical_row)))
+            topic_score = _topic_query_overlap(query, topic_text) if topic_text.strip() else 0.0
+            # Accept either a grounded subject overlap or a strong topic-phrase hit.
+            # The second gate catches inflections and paraphrases without allowing
+            # recency alone to resurrect an unrelated branch.
+            if subject_score < 0.34 and topic_score < 0.50:
+                continue
+            historical_candidate = _candidate_score(
+                query, historical_row,
+                dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""),
+                reference_followup=False,
+                query_modalities=query_modalities,
+                structured_evidence_required=needs_structured_search,
+            )
+            recency = float(historical_candidate.get("recency") or 0.0)
+            named_history_candidates.append((subject_score, topic_score, float(historical_candidate.get("score") or 0.0), recency, historical_candidate, historical_row))
+        if named_history_candidates:
+            named_history_candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+            subject_score, topic_score, candidate_score, _, named_candidate, named_source_row = named_history_candidates[0]
+            selected_for_context = [_compact_pair(named_candidate)]
+            anchor = named_candidate
+            active_topic = _text(named_source_row.get("topic")) or _topic_label(named_source_row) or _text(named_source_row.get("user_text") or named_source_row.get("user"))[:140]
+            # A history hit is a true branch reactivation only when interpretation
+            # says this request continues/references prior context. A merely related
+            # standalone question keeps the legacy NEW-turn semantics.
+            semantic_profile = query_interpretation if isinstance(query_interpretation, dict) else {}
+            semantic_features = semantic_profile.get("features") if isinstance(semantic_profile.get("features"), dict) else {}
+            semantic_pragmatic = semantic_profile.get("pragmatic_features") if isinstance(semantic_profile.get("pragmatic_features"), dict) else {}
+            semantic_topic_reference = _text(semantic_profile.get("topic_reference")).upper()
+            historical_continuation_requested = bool(
+                not history_request
+                and not new_topic_request
+                and (
+                    not semantic_profile.get("explicit_topic_switch")
+                    or semantic_profile.get("explicit_closed_branch_reopen")
+                )
+                and (
+                    _text(semantic_profile.get("primary_intent")).upper() in _HOT_BRANCH_FAST_INTENTS
+                    or (
+                        semantic_profile.get("requires_memory")
+                        and semantic_topic_reference in _HOT_BRANCH_TOPIC_REFERENCES
+                    )
+                    or semantic_profile.get("previous_answer_reference")
+                    or semantic_profile.get("active_branch_repair")
+                    or semantic_pragmatic.get("previous_answer_reference")
+                    or semantic_pragmatic.get("active_branch_repair")
+                    or semantic_pragmatic.get("context_dependent_question")
+                    or semantic_pragmatic.get("context_dependent_reaction")
+                    or semantic_features.get("answer_followup")
+                    or semantic_features.get("topic_reference_fragment")
+                    or explicit_prior_pointer
+                    or _text(semantic_profile.get("relation_hint")).upper() == "CONTINUE"
+                )
+            )
+            confident_historical_continuation = bool(
+                historical_continuation_requested
+                and float(candidate_score or 0.0) >= 0.52
+                and (float(subject_score or 0.0) >= 0.40 or float(topic_score or 0.0) >= 0.62)
+            )
+            relation = "CONTINUE" if confident_historical_continuation else "NEW"
+            continuation = bool(confident_historical_continuation)
+            contextual_history_match = True
+            history_selection_method = (
+                "semantic_history_topic_branch_reactivation"
+                if confident_historical_continuation
+                else "named_subject_semantic_history_fallback"
+            )
+            active_work_branch = {}
+            active_work_pair = None
+            active_work_row_index = -1
+            active_work_has_marker = False
+            hot_work_followup = False
+            hot_work_match_reason = (
+                "historical_topic_reactivated" if confident_historical_continuation
+                else "named_subject_history_match"
+            )
+            route_decision = "MATCHED_HISTORY"
+        else:
+            selected_for_context = []
+            anchor = None
+            selected_section = {}
+            # A history miss must not leave the prior topic in the active-topic field.
+            active_topic = _text(query)[:140]
+            relation = "NEW"
+            continuation = False
+            contextual_history_match = False
+            active_work_branch = {}
+            active_work_pair = None
+            active_work_row_index = -1
+            active_work_has_marker = False
+            hot_work_followup = False
+            hot_work_match_reason = "named_subject_history_miss"
+            hot_branch_candidate = False
+            semantic_active_branch_intent = False
+            active_subject_conflict = True
+            semantic_subject_switch = True
+            decision_subject_switch = True
+            unrelated_active_work_topic = True
+            route_decision = "NEW_TOPIC"
+    elif (
+        not route_blocked
+        and not new_topic_request
+        and latest_route_row
+        and underspecified_turn
+        and route_policy_version == "hot_branch_then_semantic_history_v1"
+    ):
+        # A short, subjectless response belongs to the current exchange even when
+        # pragmatic labeling did not assign an explicit acknowledgement category.
+        latest_candidate = _candidate_score(
+            query, latest_route_row,
+            dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+            reference_followup=True,
+            query_modalities=query_modalities,
+            structured_evidence_required=False,
+        )
+        anchor = latest_candidate
+        selected_for_context = [_compact_pair(latest_candidate)]
+        active_topic = _text(latest_route_row.get("topic")) or _topic_label(latest_route_row) or _text(latest_route_row.get("user_text") or latest_route_row.get("user"))[:140]
+        relation = "CONTINUE"
+        continuation = True
+        contextual_history_match = False
+        history_selection_method = "underspecified_latest_same_dialog"
+        route_decision = "ACTIVE_BRANCH_FIRST"
+
+    # A route decision identifies the right topic, but a single selected pair often
+    # lacks the source turn containing the user's original constraints or a table,
+    # graph, code block, or generated asset. Expand only the identified topic branch.
+    # This is deliberately bounded and never falls back to unrelated recent history.
+    branch_context_expanded = False
+    branch_route_kind = (
+        "MATCHED_HISTORY" if contextual_history_match and selected_for_context and not history_request
+        else "ACTIVE_BRANCH_FIRST" if relation == "CONTINUE" and not history_request
+        else ""
+    )
+    if (
+        branch_route_kind
+        and selected_for_context
+        and not history_request
+        and not time_filter.get("applied")
+    ):
+        branch_seed_id = _text((anchor or {}).get("message_id") or selected_for_context[-1].get("message_id"))
+        branch_pool = current_dialog_rows if branch_route_kind == "ACTIVE_BRANCH_FIRST" else [
+            row for row in all_rows
+            if isinstance(row, dict)
+            and not _row_is_pending_clarification(row)
+            and not _is_failed_provider_row(row)
+        ]
+        branch_seed_row = next((row for row in branch_pool if _text(row.get("message_id")) == branch_seed_id), None)
+        if branch_seed_row:
+            seed_topic_id = _text(branch_seed_row.get("topic_id"))
+            seed_origin_id = _text(branch_seed_row.get("topic_origin_message_id"))
+            if not seed_origin_id and active_work_branch:
+                seed_origin_id = _text(active_work_branch.get("origin_message_id"))
+            seed_subjects = _row_subject_tokens(branch_seed_row)
+            seed_topic_text = " ".join((_row_subject_text_lightweight(branch_seed_row), _topic_label_lightweight(branch_seed_row)))
+            exact_branch_rows = []
+            semantic_branch_rows = []
+            for row in branch_pool:
+                if not isinstance(row, dict) or _row_is_pending_clarification(row) or _is_failed_provider_row(row):
+                    continue
+                row_id = _text(row.get("message_id"))
+                row_topic_id = _text(row.get("topic_id"))
+                row_origin_id = _text(row.get("topic_origin_message_id"))
+                same_topic_id = bool(seed_topic_id and row_topic_id and seed_topic_id == row_topic_id)
+                same_origin = bool(seed_origin_id and (row_origin_id == seed_origin_id or row_id == seed_origin_id))
+                row_subjects = _row_subject_tokens(row)
+                if row_id == branch_seed_id:
+                    exact_branch_rows.append(row)
+                    continue
+                if same_topic_id or same_origin:
+                    if seed_subjects and row_subjects and _subject_conflicts(seed_subjects, row_subjects):
+                        continue
+                    exact_branch_rows.append(row)
+                    continue
+                # Legacy rows may not have topic_id/origin metadata. Use conservative
+                # semantic similarity only when the subjects don't contradict each other.
+                subject_similarity = _subject_overlap(seed_subjects, row_subjects) if seed_subjects and row_subjects else 0.0
+                subject_conflict = _subject_conflicts(seed_subjects, row_subjects)
+                row_topic_text = " ".join((_row_subject_text_lightweight(row), _topic_label_lightweight(row)))
+                title_similarity = _topic_query_overlap(seed_topic_text, row_topic_text) if seed_topic_text and row_topic_text else 0.0
+                if not subject_conflict and (subject_similarity >= 0.52 or title_similarity >= 0.62):
+                    semantic_branch_rows.append(row)
+
+            # When the active branch has no persisted provenance (legacy rows), or
+            # the current branch is thin, search the full authenticated retained
+            # dialogue window for semantically matching source turns. A history row
+            # is eligible only when the subject does not conflict and the topic text
+            # independently aligns; recency alone is never enough to import it.
+            if branch_route_kind == "ACTIVE_BRANCH_FIRST":
+                exact_branch_ids = {_text(row.get("message_id")) for row in exact_branch_rows}
+                seed_subjects_for_history = seed_subjects or _subject_tokens(query)
+                seed_topic_for_history = seed_topic_text or _text(query)
+                for row in all_rows:
+                    if not isinstance(row, dict) or _row_is_pending_clarification(row) or _is_failed_provider_row(row):
+                        continue
+                    row_id = _text(row.get("message_id"))
+                    if not row_id or row_id in exact_branch_ids:
+                        continue
+                    row_subjects = _row_subject_tokens(row)
+                    if _subject_conflicts(seed_subjects_for_history, row_subjects):
+                        continue
+                    subject_similarity = _subject_overlap(seed_subjects_for_history, row_subjects) if row_subjects else 0.0
+                    row_topic_text = " ".join((_row_subject_text_lightweight(row), _topic_label_lightweight(row)))
+                    seed_topic_similarity = _topic_query_overlap(seed_topic_for_history, row_topic_text) if row_topic_text else 0.0
+                    query_topic_similarity = _topic_query_overlap(query, row_topic_text) if row_topic_text else 0.0
+                    if (
+                        (subject_similarity >= 0.46 and max(seed_topic_similarity, query_topic_similarity) >= 0.38)
+                        or seed_topic_similarity >= 0.60
+                        or query_topic_similarity >= 0.55
+                    ):
+                        semantic_branch_rows.append(row)
+
+            branch_rows = exact_branch_rows + [
+                row for row in semantic_branch_rows
+                if _text(row.get("message_id")) not in {_text(item.get("message_id")) for item in exact_branch_rows}
+            ]
+            if branch_rows:
+                root_row = next((row for row in branch_rows if seed_origin_id and _text(row.get("message_id")) == seed_origin_id), None)
+                if root_row is None and seed_topic_id:
+                    root_row = next((row for row in branch_rows if _text(row.get("topic_id")) == seed_topic_id), None)
+                scored_branch = []
+                seen_branch_ids = set()
+                for row in branch_rows:
+                    row_id = _text(row.get("message_id"))
+                    if not row_id or row_id in seen_branch_ids:
+                        continue
+                    seen_branch_ids.add(row_id)
+                    candidate = _candidate_score(
+                        query, row,
+                        dialog_id=str(dialog_id or ""),
+                        conversation_id=str(conversation_id or ""),
+                        reference_followup=(branch_route_kind == "ACTIVE_BRANCH_FIRST"),
+                        query_modalities=query_modalities,
+                        structured_evidence_required=needs_structured_search,
+                    )
+                    richness = int(candidate.get("structured_data_richness") or 0)
+                    has_saved_asset = bool(candidate.get("row_modalities")) or bool(candidate.get("attachment_evidence"))
+                    must_keep = row_id == branch_seed_id or (root_row and row_id == _text(root_row.get("message_id")))
+                    rank = float(candidate.get("score") or 0.0) + min(0.20, richness * 0.006) + (0.06 if has_saved_asset else 0.0) + (0.40 if must_keep else 0.0)
+                    scored_branch.append((rank, row, candidate, must_keep))
+                # Keep the topic root and selected anchor first, then the most useful
+                # related evidence. Return them chronologically for understandable context.
+                scored_branch.sort(key=lambda item: (item[0], float(item[1].get("created_at") or 0.0)), reverse=True)
+                chosen = [item for item in scored_branch if item[3]]
+                chosen_ids = {_text(item[1].get("message_id")) for item in chosen}
+                for item in scored_branch:
+                    item_id = _text(item[1].get("message_id"))
+                    if item_id not in chosen_ids and len(chosen) < 12:
+                        chosen.append(item)
+                        chosen_ids.add(item_id)
+                chosen = chosen[:12]
+                chosen.sort(key=lambda item: (float(item[1].get("created_at") or 0.0), int(item[1].get("turn_index") or 0)))
+                expanded_pairs = [_compact_pair(item[2]) for item in chosen]
+                if expanded_pairs:
+                    selected_for_context = expanded_pairs
+                    branch_context_expanded = len(expanded_pairs) > 1
+                    selected_from_prior_dialogue = any(
+                        _text(item[1].get("dialog_id")) and _text(item[1].get("dialog_id")) != _text(dialog_id)
+                        for item in chosen if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], dict)
+                    )
+                    if branch_route_kind == "ACTIVE_BRANCH_FIRST" and selected_from_prior_dialogue:
+                        history_selection_method = "active_branch_semantic_history_branch_context"
+                    elif branch_route_kind == "ACTIVE_BRANCH_FIRST":
+                        history_selection_method = "same_dialog_topic_branch_context"
+                    else:
+                        history_selection_method = "semantic_history_topic_branch_context"
+                    _apr_timing_log(
+                        "topic_branch_context_expanded",
+                        user_key=_apr_diag_ref(uid),
+                        route_decision=route_decision,
+                        branch_route_kind=branch_route_kind,
+                        branch_seed_message_key=_apr_diag_ref(branch_seed_id),
+                        branch_root_message_key=_apr_diag_ref(_text(root_row.get("message_id")) if root_row else seed_origin_id),
+                        candidate_rows=len(branch_rows),
+                        selected_pairs=len(expanded_pairs),
+                        structured_search=bool(needs_structured_search),
+                        method=history_selection_method,
+                    )
+
+    _apr_timing_log(
+        "route_arbitration",
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(dialog_id),
+        route_policy_version=route_policy_version or "legacy_missing_policy",
+        route_decision=route_decision,
+        same_subject_active_revisit=bool(same_subject_active_revisit),
+        latest_message_key=_apr_diag_ref((latest_route_row or {}).get("message_id")),
+        query_subject_count=len(route_query_subjects),
+        latest_subject_count=len(latest_route_subjects),
+        subject_overlap=round(route_subject_overlap, 4),
+        subject_conflict=bool(route_subject_conflict),
+        latest_answer_match=bool(latest_answer_relation.get("matched")),
+        latest_answer_subject_overlap=latest_answer_relation.get("answer_subject_overlap"),
+        latest_answer_token_overlap=latest_answer_relation.get("answer_overlap"),
+        latest_user_request_overlap=latest_answer_relation.get("user_request_overlap"),
+        latest_answer_expected_user_input=bool(latest_answer_relation.get("expects_user_input")),
+        latest_answer_message_key=_apr_diag_ref(latest_answer_relation.get("message_id")),
+        contextual_antecedent=bool(contextual_antecedent),
+        underspecified_turn=bool(underspecified_turn),
+        selected_pairs=len(selected_for_context),
+        history_scope="all_retained_dialogue_pairs_after_active_miss",
+        selected_message_keys=[_apr_diag_ref(item.get("message_id")) for item in selected_for_context if isinstance(item, dict)],
+    )
+
+    anchor_payload = _compact_pair(anchor) if relation == "CONTINUE" and anchor else {}
+    _attach_topic_provenance(anchor_payload)
+    # Source retrieval is tracked independently from the dialogue relation: a new
+    # operation may still retrieve a named historical source, and a continuation
+    # should cite only the branch-specific records actually selected above.
+    if history_request:
+        source_retrieval_strategy = "DIALOGUE_HISTORY_SEARCH"
+    elif selected_section:
+        source_retrieval_strategy = "EXACT_SOURCE_SECTION"
+    elif relation == "CONTINUE" and hot_work_followup:
+        source_retrieval_strategy = "HOT_WORK_BRANCH_SOURCE"
+    elif relation == "CONTINUE" and semantic_active_branch_intent:
+        source_retrieval_strategy = "ACTIVE_BRANCH_SOURCE"
+    elif relation == "CONTINUE" and selected_for_context:
+        source_retrieval_strategy = "RELEVANT_DIALOGUE_SOURCE"
+    elif contextual_history_match and selected_for_context:
+        source_retrieval_strategy = "NAMED_HISTORY_SOURCE_WITH_NEW_OPERATION"
+    elif selected_for_context:
+        source_retrieval_strategy = "RANKED_MEMORY_SOURCE"
+    else:
+        source_retrieval_strategy = "CURRENT_REQUEST_NO_MEMORY_SOURCE"
+
+    # Resolve durable identities against the same topic index used for retrieval.
+    # This also supplies stable IDs for legacy rows that predate dialogue_thread metadata.
+    # `latest_same_dialog` is the top *matching candidate*, not necessarily the
+    # newest topic in this dialog. Resolve the true hot topic from canonical rows,
+    # otherwise a good match to an older topic could be mistaken for the hot branch.
+    dialog_identity_rows = [
+        row for row in all_rows if isinstance(row, dict) and (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )
+    ]
+    latest_hot_source_row = max(
+        dialog_identity_rows,
+        key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        default=None,
+    )
+    latest_same_dialog_id = _text(
+        (latest_hot_source_row or {}).get("message_id")
+        or (latest_same_dialog or {}).get("message_id")
+    )
+    anchor_message_id = _text((anchor_payload or {}).get("message_id") or (anchor or {}).get("message_id"))
+    # Candidate rows are compact scoring records and may intentionally omit the
+    # full JSONB payload. Resolve stable IDs from the two canonical source rows only
+    # rather than parsing every row in a large history or replacing IDs with hashes.
+    latest_source_row = latest_hot_source_row or next(
+        (row for row in all_rows if isinstance(row, dict)
+         and _text(row.get("message_id")) == latest_same_dialog_id),
+        {},
+    )
+    anchor_source_row = next(
+        (row for row in all_rows if isinstance(row, dict)
+         and _text(row.get("message_id")) == anchor_message_id),
+        {},
+    )
+    latest_thread_meta = _dialogue_thread_metadata(latest_source_row) if latest_source_row else {}
+    anchor_thread_meta = _dialogue_thread_metadata(anchor_source_row) if anchor_source_row else {}
+    latest_topic_entry = next(
+        (
+            topic for topic in (topic_index or [])
+            if isinstance(topic, dict)
+            and latest_same_dialog_id
+            and (
+                latest_same_dialog_id in (topic.get("message_ids") or [])
+                or latest_same_dialog_id == _text(topic.get("message_id"))
+                or latest_same_dialog_id == _text(topic.get("origin_message_id"))
+            )
+        ),
+        {},
+    )
+    selected_topic_entry = next(
+        (
+            topic for topic in (topic_index or [])
+            if isinstance(topic, dict)
+            and anchor_message_id
+            and (
+                anchor_message_id in (topic.get("message_ids") or [])
+                or anchor_message_id == _text(topic.get("message_id"))
+                or anchor_message_id == _text(topic.get("origin_message_id"))
+            )
+        ),
+        {},
+    )
+    active_topic_id = _text(
+        latest_thread_meta.get("topic_id") or latest_source_row.get("topic_id")
+        or (latest_same_dialog or {}).get("topic_id") or latest_topic_entry.get("topic_id")
+    )
+    selected_topic_id = _text(
+        anchor_thread_meta.get("topic_id") or anchor_source_row.get("topic_id")
+        or (anchor or {}).get("topic_id") or (anchor_payload or {}).get("topic_id")
+        or selected_topic_entry.get("topic_id")
+    )
+    selected_branch_id = _text(
+        anchor_thread_meta.get("branch_id") or anchor_source_row.get("branch_id")
+        or anchor_thread_meta.get("work_id") or (anchor or {}).get("branch_id")
+        or (anchor_payload or {}).get("branch_id") or selected_topic_entry.get("active_branch_id")
+    )
+    # An unrelated *work marker* must not erase the distinct conversational topic
+    # when the current turn is a grounded same-dialog anaphoric continuation. Keep
+    # the dialogue branch addressable, while the unrelated artifact/work marker is
+    # still detached from active_work_branch above.
+    preserve_anaphoric_dialogue_branch = bool(
+        relation == "CONTINUE"
+        and latest_same_dialog
+        and contextual_antecedent
+        and route_anaphoric_predicate
+        and not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not new_work_root_request
+        and not history_request
+        and not current_topic_closure
+    )
+    detach_branch_descriptor = bool(
+        new_work_root_request
+        or (unrelated_active_work_topic and not preserve_anaphoric_dialogue_branch)
+    )
+    active_branch_descriptor = {
+        "active_topic_id": "" if detach_branch_descriptor else active_topic_id[:120],
+        "selected_topic_id": "" if detach_branch_descriptor else selected_topic_id[:120],
+        "branch_id": "" if detach_branch_descriptor else selected_branch_id[:120],
+        "parent_message_id": "" if detach_branch_descriptor else _text((anchor_payload or {}).get("parent_message_id") or anchor_thread_meta.get("parent_message_id"))[:120],
+        "status": "NONE" if detach_branch_descriptor else ("ACTIVE" if relation == "CONTINUE" and latest_same_dialog else ("AVAILABLE" if latest_same_dialog else "NONE")),
+        "topic": _text(query)[:240] if detach_branch_descriptor else _text((anchor or {}).get("topic") or (latest_same_dialog or {}).get("topic"))[:240],
+        "message_id": "" if detach_branch_descriptor else _text((anchor or {}).get("message_id") or (latest_same_dialog or {}).get("message_id"))[:120],
+        "dialog_id": "" if detach_branch_descriptor else _text((anchor or {}).get("dialog_id") or (latest_same_dialog or {}).get("dialog_id"))[:120],
+        "topic_id": "" if detach_branch_descriptor else _text(selected_topic_id or active_topic_id or (anchor or {}).get("topic_id") or (latest_same_dialog or {}).get("topic_id"))[:120],
+        "topic_origin_message_id": "" if detach_branch_descriptor else _text((anchor or {}).get("topic_origin_message_id") or anchor_thread_meta.get("topic_origin_message_id") or anchor_thread_meta.get("origin_message_id") or selected_topic_entry.get("origin_message_id") or (latest_same_dialog or {}).get("topic_origin_message_id") or latest_topic_entry.get("origin_message_id"))[:120],
+        "semantic_intent_match": bool(semantic_active_branch_intent),
+        "subject_conflict_detected": bool(active_subject_conflict),
+        "branch_preserved": bool(not detach_branch_descriptor and relation == "CONTINUE" and latest_same_dialog),
+        "hot_work_match": bool(hot_work_followup),
+        "hot_work_match_reason": _text(hot_work_match_reason)[:80],
+        "work_kind": _text(active_work_branch.get("kind"))[:60],
+        "work_id": _text(active_work_branch.get("work_id"))[:120] if hot_work_followup else "",
+    }
+    source_retrieval_descriptor = {
+        "strategy": source_retrieval_strategy,
+        "method": _text(history_selection_method or "unspecified")[:100],
+        "anchor_message_id": _text((anchor or {}).get("message_id"))[:120],
+        "selected_message_ids": [
+            _text(item.get("message_id"))[:120]
+            for item in selected_for_context[:8]
+            if isinstance(item, dict) and _text(item.get("message_id"))
+        ],
+        "contextual_history_match": bool(contextual_history_match),
+        "source_count": len(selected_for_context),
+    }
 
     semantic_retrieval_profile = query_interpretation.get("retrieval_profile") if isinstance(query_interpretation.get("retrieval_profile"), dict) else {}
     retrieval_profile = dict(semantic_retrieval_profile)
     retrieval_profile.update({
-        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if relation == "CONTINUE" else "NEW_TOPIC"),
+        "mode": (
+            "HISTORY_LOOKUP" if history_request
+            else "NAMED_HISTORY_SOURCE" if contextual_history_match and selected_for_context
+            else "ACTIVE_TOPIC_CONTINUATION" if relation == "CONTINUE"
+            else "NEW_TOPIC"
+        ),
         "primary_intent": _text(query_interpretation.get("primary_intent") or retrieval_profile.get("primary_intent") or "NEW_INFORMATION").upper(),
         "direction": _text(query_interpretation.get("direction") or retrieval_profile.get("direction")),
         "selection_method": _text(history_selection_method or ("topic_vector" if relation == "CONTINUE" else "current_request"))[:100],
         "active_topic_seed": _text(active_topic)[:240] if relation == "CONTINUE" else "",
         "prefer_active_branch": bool(relation == "CONTINUE" and not history_request and not new_topic_request and not query_interpretation.get("explicit_topic_switch")),
         "prefer_named_history": bool(history_request or contextual_history_match or (relation == "CONTINUE" and bool(selected_section))),
-        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:10 if relation == "CONTINUE" else 5] if isinstance(item, dict) and _text(item.get("message_id"))],
+        "selected_message_ids": [_text(item.get("message_id"))[:120] for item in (selected_for_context or [])[:8] if isinstance(item, dict) and _text(item.get("message_id"))],
         "avoid_cross_topic_injection": True,
         "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
-        "query_composition": topic_vector_query_source,
-        "search_method": "deterministic_lexical_fuzzy_topic_section_ranking",
+        "query_composition": "current_request_plus_interpreter_profile_and_active_branch" if relation == "CONTINUE" else "current_request_and_interpreter_profile",
+        "search_method": "deterministic_lexical_fuzzy_with_premium_active_branch_and_source_ranking",
     })
     if site_navigation_request and not history_request and not resume_anchor_row:
-        # An explicit product-navigation task should not inherit an unrelated hot topic.
+        # UI guidance is a new operation on the product interface, not a continuation
+        # of whichever old task happens to be marked hot. Never attach an unrelated
+        # active branch or old dialogue pair to this response.
         relation = "NEW"
+        continuation = False
         selected_for_context = []
         matches = []
         anchor = None
         active_topic = ""
         contextual_history_match = False
         history_selection_method = "site_navigation_no_memory_source"
-        topic_index = []
         history_topics = []
+        topic_index = []
         selected_section = {}
         clarification_needed = False
         pending_for_next_turn = {}
         clarification_resolution = {}
-        topic_vector_hits = []
-        history_time_search = {}
+        repair_active_branch = False
+        hot_work_followup = False
+        hot_work_match_reason = "site_navigation_is_independent_task"
+        active_work_branch = {}
+        active_work_pair = None
+        active_branch_descriptor = {}
+        named_option_reanchor_row = None
+        selection_followup_confirmed = False
+        hot_branch_candidate = False
+        historical_work_reactivated = False
+        source_retrieval_descriptor = {"strategy": "CURRENT_REQUEST_NO_MEMORY_SOURCE", "reason": "site_navigation_help"}
+        # Keep diagnostics and result metadata consistent with the navigation override;
+        # otherwise old active-work IDs can leak into downstream prompt construction.
+        source_retrieval_strategy = "CURRENT_REQUEST_NO_MEMORY_SOURCE"
+        active_work_origin_id = ""
+        latest_topic_origin_id = ""
+        user_operation = {"type": "EXPLAIN_SITE_NAVIGATION", "target": "verified_ui_control_or_route"}
         topic_table_md = ""
+        topics = []
+        best = None
+        anchor_payload = {}
+        active_branch_descriptor = {}
+        route_decision = "NEW_TOPIC"
+        latest_route_row = None
+        latest_route_subjects = set()
+        latest_answer_relation = _latest_answer_relation_vector(query, None)
+        route_subject_overlap = 0.0
+        route_subject_conflict = False
+        contextual_antecedent = False
+        underspecified_turn = False
+        semantic_active_branch_intent = False
+        branch_context_expanded = False
+        active_work_marker_is_from_another_topic = False
+        active_work_root_subject_conflict = False
+        active_work_root_subject_overlap = 0.0
+        active_work_root_topic_overlap = 0.0
+        active_work_root_match = False
+        active_work_topic_origin_mismatch = False
+        active_work_reanchored_to_origin = False
+        unrelated_active_work_topic = False
+        current_topic_closure = False
+        explicit_closed_branch_reopen = False
+        closed_branch_barrier = False
+        marker = ""
+        reference_followup = False
         self_contained_new_information = False
         retrieval_profile.update({
             "mode": "NEW_TOPIC", "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
@@ -4281,33 +10093,85 @@ def search_dialogue_context(
             "coverage_policy": "answer_new_request", "query_composition": "current_request_only",
         })
     result = {
-        "engine": "state_manager_topic_section_search_v9_named_topic_vector",
+        "hot_branch_first": bool(_hot_branch_only),
+        "history_scan_skipped": False,
+        "search_stage": "HOT_BRANCH_PROBE" if _hot_branch_only else "FULL_CONTEXT",
+        "hot_branch_window_count": len(rows or []) if _hot_branch_only else 0,
+        "engine": "premium_state_manager_topic_section_search_v13_last_answer_branch_link",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
         "conversation_id": str(conversation_id or ""),
         "query": str(query or ""),
         "context_signature": context_signature,
+        "routing_policy": routing_policy,
+        "routing_decision": route_decision,
+        "routing_evidence": {
+            "latest_message_id": _text((latest_route_row or {}).get("message_id"))[:120],
+            "anaphoric_predicate": bool(route_anaphoric_predicate),
+            "query_subjects": sorted(route_query_subjects)[:12],
+            "latest_subjects": sorted(latest_route_subjects)[:12],
+            "subject_overlap": round(float(route_subject_overlap), 4),
+            "subject_conflict": bool(route_subject_conflict),
+            "latest_answer_relation": dict(latest_answer_relation),
+            "contextual_antecedent": bool(contextual_antecedent),
+            "underspecified_turn": bool(underspecified_turn),
+        },
         "retrieval_profile": retrieval_profile,
-        "topic_vector_query_source": topic_vector_query_source,
         "active_subject_conflict": bool(active_subject_conflict),
         "semantic_subject_switch": bool(semantic_subject_switch),
-        "self_contained_new_information": bool(self_contained_new_information),
+        "decision_subject_switch": bool(decision_subject_switch),
+        "topic_reference_fragment": bool(topic_reference_fragment),
+        "topic_pointer_match": bool(topic_pointer_match),
+        "self_contained_subject_switch": bool(self_contained_subject_switch),
         "total_pairs": len(rows),
         "candidate_count": len(matches),
         "relation": relation,
+        "active_branch_repair": bool(repair_active_branch),
+        "active_branch": active_branch_descriptor,
+        "active_work_branch": ({
+            **active_work_branch,
+            "active": True,
+            "matched_this_turn": bool(hot_work_followup),
+            "match_reason": _text(hot_work_match_reason)[:80],
+            "candidate_message_id": _text(active_work_pair.get("message_id"))[:120] if active_work_pair else "",
+            "priority": _text(active_work_branch.get("priority") or "HOT_TASK_FIRST")[:60],
+        } if active_work_branch and hot_work_followup and relation == "CONTINUE" and not new_work_root_request else {}),
+        "hot_work_followup": bool(hot_work_followup),
+        "hot_work_match_reason": _text(hot_work_match_reason)[:80],
+        "named_option_reanchor": bool(named_option_reanchor_row),
+        "named_option_reanchor_score": round(float(named_option_reanchor_score), 6),
+        "named_option_reanchor_message_id": _text(named_option_reanchor_row.get("message_id") if isinstance(named_option_reanchor_row, dict) else "")[:120],
+        "selection_followup_candidate": bool(
+            (query_interpretation.get("features") or {}).get("selection_followup_candidate")
+            if isinstance(query_interpretation.get("features"), dict) else False
+        ),
+        "selection_followup_confirmed": bool(selection_followup_confirmed),
+        "selection_followup_reason": _text(selection_followup_reason)[:100],
+        "selection_followup_score": round(float(selection_followup_score), 6),
+        "topic_closure_barrier": bool(closed_branch_barrier),
+        "current_topic_closure": bool(current_topic_closure),
+        "explicit_closed_branch_reopen": bool(explicit_closed_branch_reopen),
+        "new_work_root_request": bool(new_work_root_request),
+        "historical_task_override": bool(historical_task_override),
+        "historical_task_source_id": _text(historical_task_source_id),
+        "user_operation": user_operation,
+        "source_retrieval": source_retrieval_descriptor,
+        "previous_answer_reference": bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
+        "factual_verification_request": bool(pragmatic_features.get("factual_verification_request") or query_interpretation.get("factual_verification_request")),
+        "explicit_topic_switch": bool(query_interpretation.get("explicit_topic_switch")),
         "reason": (
             "explicit_history_resume" if resume_anchor_row
             else "clarification_resolved" if clarification_resolution and _text(clarification_resolution.get("status")).startswith("resolved")
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
-            else "named_topic_vector_match" if history_selection_method == "named_topic_section_vector"
+            else "named_option_reanchored_to_previous_answer" if named_option_reanchor_row and hot_work_followup
+            else "hot_work_branch_first" if hot_work_followup
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
-            else "correction_reanchored_to_named_topic" if relation == "CONTINUE" and correction_turn and explicit_topic_hits
-            else "answer_to_april_question" if relation == "CONTINUE" and answer_to_april_question
-            else "recent_named_topic_reentry" if relation == "CONTINUE" and recent_named_topic_reentry
+            else "active_branch_repair_evidence" if relation == "CONTINUE" and anchor and repair_active_branch
+            else "semantic_active_branch_intent" if relation == "CONTINUE" and semantic_active_branch_intent
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
             else "underspecified_turn_context" if relation == "CONTINUE" and anchor and not query_subjects
@@ -4320,19 +10184,21 @@ def search_dialogue_context(
         "referential_followup": reference_followup,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
-        "history_selection_method": history_selection_method,
-        "continuation_context_limit": 10 if relation == "CONTINUE" else (5 if history_request else 2),
-        "topic_vector_candidate_count": len(topic_vector_hits),
+        "historical_topic_reactivated": bool(
+            contextual_history_match and relation == "CONTINUE"
+            and selected_for_context and branch_route_kind == "MATCHED_HISTORY"
+        ),
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
         "requested_topic_count": history_limit,
+        "minimum_topic_count": history_minimum if history_request else 0,
+        "time_window": parsed_window if parsed_window.get("has_constraint") else {},
+        "time_filter": time_filter,
         "active_topic": active_topic,
-        "anchor": _compact_pair(anchor) if relation == "CONTINUE" and anchor else {},
+        "anchor": anchor_payload,
+        "latest_assistant_anchor": (_compact_pair(latest_route_row) if latest_route_row else {}),
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:5 if (history_request or resume_anchor_row) else (
-            10 if relation == "CONTINUE" else (3 if history_selection_method == "named_topic_section_vector" else 2)
-        )],
+        "selected": selected_for_context[:12 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row) or branch_context_expanded) else 2],
         "history_topics": history_topics,
-        "history_time_search": history_time_search,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
         "topic_table_markdown": topic_table_md,
@@ -4350,7 +10216,24 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        user_operation=_text(user_operation.get("type")),
+        semantic_active_branch_intent=bool(semantic_active_branch_intent),
+        active_branch_preserved=bool(active_branch_descriptor.get("branch_preserved")),
+        source_retrieval_strategy=source_retrieval_strategy,
+        temporal_filter_applied=bool(time_filter.get("applied")),
+        temporal_filter_empty=bool(time_filter.get("empty")),
+        temporal_range_start=(time_filter.get("requested_start_at") if time_filter.get("empty") else time_filter.get("start_at")),
+        temporal_range_end=(time_filter.get("requested_end_at") if time_filter.get("empty") else time_filter.get("end_at")),
+        temporal_empty_reason=_text(time_filter.get("empty_reason")),
+        temporal_neighbor_sides=sum(1 for side in (time_filter.get("neighbors") or {}).values() if isinstance(side, dict)),
         contextual_history_match=contextual_history_match, history_selection_method=history_selection_method,
+        dialogue_act=speech_act or communicative_act or "UNSPECIFIED",
+        active_branch_repair=bool(repair_active_branch),
+        previous_answer_reference=bool(pragmatic_features.get("previous_answer_reference") or query_interpretation.get("previous_answer_reference")),
+        factual_verification_request=bool(pragmatic_features.get("factual_verification_request") or query_interpretation.get("factual_verification_request")),
+        active_repair_evidence_count=len(selected_for_context) if repair_active_branch else 0,
+        active_repair_selection_method=history_selection_method if repair_active_branch else "",
+        short_acknowledgement=bool(is_short_acknowledgement),
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
@@ -4359,17 +10242,37 @@ def search_dialogue_context(
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
+        explicit_followup_matched=bool(explicit_followup_anchor),
+        explicit_followup_anchor_key=_apr_diag_ref(explicit_followup_anchor.get("message_id") if isinstance(explicit_followup_anchor, dict) else ""),
         hot_branch_candidate=bool(hot_branch_candidate),
-        topic_vector_candidate_count=len(topic_vector_hits),
-        topic_vector_top=[{
-            "message_key": _apr_diag_ref(x.get("message_id")),
-            "topic": _text(x.get("topic"))[:80],
-            "score": x.get("score"),
-            "topic_overlap": x.get("topic_overlap"),
-            "section_overlap": x.get("section_overlap"),
-            "content_overlap": x.get("content_overlap"),
-            "subject_overlap": x.get("subject_overlap"),
-        } for x in topic_vector_hits[:3]],
+        selection_followup_candidate=bool(
+            (query_interpretation.get("features") or {}).get("selection_followup_candidate")
+            if isinstance(query_interpretation.get("features"), dict) else False
+        ),
+        selection_followup_confirmed=bool(selection_followup_confirmed),
+        selection_followup_reason=_text(selection_followup_reason),
+        selection_followup_score=round(float(selection_followup_score), 6),
+        named_option_reanchor=bool(named_option_reanchor_row),
+        named_option_reanchor_score=round(float(named_option_reanchor_score), 6),
+        named_option_reanchor_message_key=_apr_diag_ref(named_option_reanchor_row.get("message_id") if isinstance(named_option_reanchor_row, dict) else ""),
+        hot_work_followup=bool(hot_work_followup),
+        hot_work_match_reason=_text(hot_work_match_reason),
+        topic_closure_barrier=bool(closed_branch_barrier),
+        current_topic_closure=bool(current_topic_closure),
+        explicit_closed_branch_reopen=bool(explicit_closed_branch_reopen),
+        active_work_kind=_text(active_work_branch.get("kind")),
+        active_work_message_key=_apr_diag_ref(active_work_pair.get("message_id") if active_work_pair else ""),
+        active_work_origin_key=_apr_diag_ref(active_work_origin_id),
+        latest_topic_origin_key=_apr_diag_ref(latest_topic_origin_id),
+        active_work_root_subject_conflict=bool(active_work_root_subject_conflict),
+        active_work_root_subject_overlap=round(float(active_work_root_subject_overlap), 6),
+        active_work_root_topic_overlap=round(float(active_work_root_topic_overlap), 6),
+        active_work_root_match=bool(active_work_root_match),
+        historical_work_reactivated=bool(historical_work_reactivated),
+        active_work_topic_origin_mismatch=bool(active_work_topic_origin_mismatch),
+        active_work_reanchored_to_origin=bool(active_work_reanchored_to_origin),
+        active_work_marker_detached=bool(active_work_marker_is_from_another_topic),
+        unrelated_active_work_topic=bool(unrelated_active_work_topic),
         top_candidate_alignment=[{
             "message_key": _apr_diag_ref(x.get("message_id")), "score": x.get("score"),
             "subject_overlap": x.get("subject_overlap"), "subject_mismatch": x.get("subject_mismatch"),
@@ -4378,6 +10281,16 @@ def search_dialogue_context(
             "source_data_alignment": x.get("source_data_alignment"),
             "structured_data_richness": x.get("structured_data_richness"),
         } for x in matches[:3]])
+    if (
+        _text(result.get("relation")).upper() == "CONTINUE"
+        and not result.get("history_request")
+        and not result.get("clarification_needed")
+        and isinstance(result.get("anchor"), dict)
+    ):
+        result = _expand_hot_branch_to_topic(
+            result, uid, dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+        )
     return result
 
 def prepare_dialogue_context(
@@ -4409,26 +10322,46 @@ def prepare_dialogue_context(
     )
     result = {
         "window_hours": DIALOGUE_WINDOW_HOURS,
+        "hot_branch_first": bool(context.get("hot_branch_first")),
+        "history_scan_skipped": bool(context.get("history_scan_skipped")),
+        "search_stage": _text(context.get("search_stage") or "FULL_CONTEXT"),
+        "hot_branch_window_count": int(context.get("hot_branch_window_count") or 0),
         "relation": context["relation"],
         "relation_confidence": context["relation_confidence"],
         "retrieval_profile": deepcopy(context.get("retrieval_profile") or {}),
+        "active_branch_repair": bool(context.get("active_branch_repair")),
+        "active_branch": deepcopy(context.get("active_branch") or {}),
+        "active_work_branch": deepcopy(context.get("active_work_branch") or {}),
+        "hot_work_followup": bool(context.get("hot_work_followup")),
+        "hot_work_match_reason": _text(context.get("hot_work_match_reason"))[:80],
+        "user_operation": deepcopy(context.get("user_operation") or {}),
+        "source_retrieval": deepcopy(context.get("source_retrieval") or {}),
+        "previous_answer_reference": bool(context.get("previous_answer_reference")),
+        "factual_verification_request": bool(context.get("factual_verification_request")),
+        "explicit_topic_switch": bool(context.get("explicit_topic_switch")),
         "reason": context["reason"],
         "active_topic": context["active_topic"],
         "selected_pairs": deepcopy(context["selected"]),
         "candidates": deepcopy(context["matches"]),
         "history_topics": deepcopy(context.get("history_topics") or []),
         "topic_index": deepcopy(context.get("topic_index") or []),
+        "topic_context": deepcopy(context.get("topic_context") or {}),
+        "topic_context_expansion": deepcopy(context.get("topic_context_expansion") or {}),
         "known_topic_count": int(context.get("known_topic_count") or 0),
         "history_request": bool(context.get("history_request")),
-        "history_time_search": deepcopy(context.get("history_time_search") or {}),
         "contextual_history_match": bool(context.get("contextual_history_match")),
-        "history_selection_method": _text(context.get("history_selection_method")),
-        "continuation_context_limit": int(context.get("continuation_context_limit") or 2),
-        "topic_vector_candidate_count": int(context.get("topic_vector_candidate_count") or 0),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
-        "requested_topic_count": int(context.get("requested_topic_count") or 5),
+        "requested_topic_count": int(context.get("requested_topic_count") or 10),
+        "minimum_topic_count": int(context.get("minimum_topic_count") or 0),
+        "time_window": deepcopy(context.get("time_window") or {}),
+        "time_filter": deepcopy(context.get("time_filter") or {}),
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
+        "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
+        "latest_answer_relation": deepcopy(
+            ((context.get("routing_evidence") or {}).get("latest_answer_relation") or {})
+            if isinstance(context.get("routing_evidence"), dict) else {}
+        ),
         "selected_section": deepcopy(context.get("selected_section") or {}),
         "clarification_needed": bool(context.get("clarification_needed")),
         "clarification_prompt": _text(context.get("clarification_prompt")),
@@ -4438,7 +10371,10 @@ def prepare_dialogue_context(
     }
     _apr_timing_log("prepare_dialogue_context_total", prepare_started,
         relation=result.get("relation"), candidates=len(result.get("candidates") or []),
-        selected_pairs=len(result.get("selected_pairs") or []), topic_index_count=len(result.get("topic_index") or []))
+        selected_pairs=len(result.get("selected_pairs") or []), topic_index_count=len(result.get("topic_index") or []),
+        search_stage=result.get("search_stage"), hot_branch_first=bool(result.get("hot_branch_first")),
+        history_scan_skipped=bool(result.get("history_scan_skipped")),
+        hot_branch_window_count=int(result.get("hot_branch_window_count") or 0))
     return result
 
 
@@ -4448,6 +10384,14 @@ def initialize() -> None:
 
 
 __all__ = [
+    # Premium storage/access functions
+    "PREMIUM_MEMORY_WINDOW_HOURS",
+    "PREMIUM_MEMORY_WINDOW_SECONDS",
+    "init_db",
+    "is_authenticated_user",
+    "load_dialogue_pairs",
+    "save_dialogue_pair",
+    # Premium dialogue state/search functions
     "DIALOGUE_WINDOW_HOURS",
     "DIALOGUE_WINDOW_SECONDS",
     "get_state",
@@ -4463,5 +10407,6 @@ __all__ = [
     "set_relation",
     "search_dialogue_context",
     "prepare_dialogue_context",
+    "build_active_work_branch_record",
     "initialize",
 ]
