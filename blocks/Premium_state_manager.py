@@ -4009,9 +4009,25 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         seen_artifacts.add(key)
         descriptor = {
             name: _text(artifact.get(name))[:220]
-            for name in ("kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation")
+            for name in (
+                "kind", "type", "artifact_type", "output_type", "title", "label", "summary",
+                "description", "filename", "mime_type", "renderer", "viewer", "representation",
+                "asset_id", "artifact_id", "id", "message_id", "source_message_id",
+                "operation", "image_operation", "edit_operation", "edit_mode", "action",
+                "source_asset_id", "source_asset_message_id", "asset_role", "generation_model",
+                "quality", "request_anchor", "prompt_summary", "visual_operation",
+                "topic_id", "branch_id", "origin_message_id", "parent_message_id", "artifact_family",
+                "revision_of", "revision_chain_id", "revision_status", "supersedes",
+                "derived_from_artifact_id", "source_topic_id", "source_branch_id",
+            )
             if artifact.get(name) not in (None, "", [], {})
         }
+        for lineage_number in ("revision_number",):
+            if artifact.get(lineage_number) is not None:
+                try:
+                    descriptor[lineage_number] = max(1, int(artifact.get(lineage_number)))
+                except (TypeError, ValueError, OverflowError):
+                    pass
         for count_key in ("row_count", "column_count", "node_count", "edge_count", "width", "height", "size_bytes"):
             if artifact.get(count_key) is not None:
                 try:
