@@ -1832,6 +1832,46 @@ _HISTORY_MARKERS = (
     'gespreksgeschiedenis',
 )
 
+
+def _dialogue_history_intent_kind(text: Any) -> str:
+    """Classify implicit requests to inspect retained dialogue without mutating it.
+
+    The wording can be indirect ("where did we leave off?") or expressed as a
+    complaint that the conversation seems to be missing. These are memory-retrieval
+    intents, not fresh topical requests and not commands to regenerate an artifact.
+    """
+    low = re.sub(r"\s+", " ", _text(text).lower().replace("ё", "е")).strip()
+    if not low or _has_explicit_topic_switch(low):
+        return ""
+
+    resume_patterns = (
+        r"\b(?:на\s+чем|на\s+чём)\s+(?:мы\s+)?(?:остановил\w*|закончил\w*|прервал\w*|оборвал\w*)",
+        r"\bгде\s+(?:мы\s+)?(?:остановил\w*|закончил\w*|прервал\w*|оборвал\w*)",
+        r"\bс\s+какого\s+места\s+(?:мы\s+)?(?:остановил\w*|закончил\w*|прервал\w*|продолж\w*)",
+        r"\bна\s+каком\s+(?:этапе|месте|моменте)\s+(?:мы\s+)?(?:остановил\w*|закончил\w*|прервал\w*)",
+        r"\b(?:подними|восстанови|верни|найди)\s+(?:мне\s+)?(?:нашу\s+)?(?:последн\w*\s+|активн\w*\s+)?(?:ветк\w*|нить\w*|тему|обсуждени\w*|работ\w*)",
+        r"\b(?:вернись|возвращаемся|давай\s+вернемся|давай\s+вернёмся)\s+(?:к\s+)?(?:тому\s+)?(?:месту|моменту|ветке|теме)",
+        r"\bwhere\s+(?:did\s+we\s+)?(?:leave\s+off|stop|finish)\b",
+        r"\bwhere\s+were\s+we\b",
+        r"\b(?:pick\s+up|resume)\s+(?:where\s+we\s+)?left\s+off\b",
+        r"\bwhat\s+were\s+we\s+working\s+on\b",
+    )
+    if any(re.search(pattern, low, re.IGNORECASE) for pattern in resume_patterns):
+        return "RESUME_LATEST_BRANCH"
+
+    history_check_patterns = (
+        r"\b(?:о\s+чем|про\s+что)\s+(?:мы\s+)?(?:с\s+тобой\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
+        r"\b(?:вообще\s+)?(?:нету|нет)\s+(?:ни\s+)?(?:о\s+)?чем\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
+        r"\b(?:ничего|ничег\w*)\s+(?:не\s+)?(?:помню|помним|вижу|осталось)\b.{0,85}(?:о\s+чем|про\s+что|общал\w*|говорил\w*|обсуждал\w*|разговор\w*|диалог\w*)",
+        r"\bне\s+помн\w*\b.{0,65}(?:о\s+чем|про\s+что).{0,65}(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
+        r"\b(?:i\s+)?(?:don't|do\s+not)\s+(?:remember|recall|see)\b.{0,70}\b(?:our\s+)?(?:conversation|discussion|chat|history)\b",
+        r"\bwe\s+(?:talked|spoke|discussed)\b.{0,45}\b(?:before|earlier|already)\b",
+    )
+    if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in history_check_patterns):
+        return "CHECK_DIALOGUE_HISTORY"
+    return ""
+
+
 def _is_attachment_tutorial_request(text: Any) -> bool:
     """Recognize instructions for attaching a source image to the chat."""
     low = _text(text).lower().replace("ё", "е")
@@ -2106,7 +2146,7 @@ def _has_explicit_topic_switch(text: str) -> bool:
     explicit_switch = re.search(
         r"(?:^|[.!?;:\n]\s*)(?:новая\s+тема|другая\s+тема|другой\s+вопрос|"
         r"перейд[её]м\s+к(?:\s+новой\s+теме)?|"
-        r"давай(?:те)?\s+(?:сменим|сменить)\s+тему|"
+        r"(?:давай(?:те)?\s+)?(?:сменим|сменить|сменяем)\s+тему|"
         r"switch\s+to\s+(?:a\s+)?new\s+topic|new\s+topic|"
         r"let['’]?s\s+change\s+the\s+topic)(?:\b|\s*[:—-])",
         low,
@@ -3064,6 +3104,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         ))
     )
     explicit_discussion_question = dialogue_action and interrogative and explicit_dialogue_recall
+    dialogue_history_intent_kind = _dialogue_history_intent_kind(source)
     decision_recall = (decision_action or explicit_prior_decision_recall) and (interrogative or recall_action or explicit_prior_decision_recall) and (
         recall_action or temporal_past or explicit_prior_decision_recall
     )
@@ -3086,6 +3127,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         # “we discussed”, or another fixed recall marker: e.g. “list topics from
         # 14:00 to 16:00” or “show 5–10 conversations from the last 4 hours”.
         or history_inventory_request
+        or dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY"
     ) and not future_topic_question
     # Exact recall phrases activate history search even when grammar differs by language.
     if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
@@ -3175,8 +3217,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
 
     if explicit_topic_switch and not history_recall:
         # Explicitly changing branch overrides reaction/anaphora cues in the same
-        # wording. The state manager may still retrieve evidence, but must not keep
-        # the current hot branch active merely because an earlier answer is named.
+        # wording. A direct "where did we leave off?" request is different: it asks
+        # for a read-only branch lookup, and a named subject narrows that lookup
+        # rather than creating a new topic.
         primary_intent = "NEW_INFORMATION"
         direction = "ANSWER_NEW_REQUEST"
         topic_reference = "UNSPECIFIED"
@@ -3187,12 +3230,35 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 0
         relation_hint = "NEW"
         reason = "explicit_topic_switch"
-    elif history_recall and (not active_branch_repair or history_reference_words or history_inventory_request or has_explicit_time_window or today_reference or recent_reference):
+    elif dialogue_history_intent_kind == "RESUME_LATEST_BRANCH":
+        # Stage one is always the latest assistant turn and active branch. State
+        # Manager performs a bounded current-dialogue probe first; only a miss may
+        # expand into the authenticated retained-history window.
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "ACTIVE_BRANCH_THEN_HISTORY_FALLBACK"
+        topic_reference = "PREVIOUS_OR_ACTIVE_TOPIC"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "ACTIVE_BRANCH_THEN_HISTORY"
+        intent_score = 4
+        relation_hint = "CONTINUE"
+        reason = "implicit_resume_active_branch_then_history_fallback"
+    elif history_recall and (
+        not active_branch_repair or history_reference_words or history_inventory_request
+        or has_explicit_time_window or today_reference or recent_reference
+        or bool(dialogue_history_intent_kind)
+    ):
         requires_memory = True
         history_request = True
         search_scope = "ALL_DIALOGUE_HISTORY"
-        intent_score = 2 * int(dialogue_action) + 2 * int(recall_action) + 2 * int(decision_action) + 2 * int(plan_action) + int(self_reference) + int(temporal_past) + int(temporal_future) + int(interrogative)
-        if decision_recall and not plan_action:
+        intent_score = 2 * int(dialogue_action) + 2 * int(recall_action) + 2 * int(decision_action) + 2 * int(plan_action) + int(self_reference) + int(temporal_past) + int(temporal_future) + int(interrogative) + (3 if dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY" else 0)
+        if dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY":
+            primary_intent = "HISTORY_RECALL"
+            direction = "SEARCH_DIALOGUE_HISTORY"
+            topic_reference = "DIALOGUE_HISTORY"
+            reason = "implicit_dialogue_history_availability_check"
+        elif decision_recall and not plan_action:
             primary_intent = "PRIOR_DECISION_RECALL"
             direction = "SEARCH_PRIOR_DECISIONS"
             topic_reference = "PRIOR_DECISION"
@@ -3553,17 +3619,54 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
+    retrieval_mode = (
+        "RECALL_AND_RESUME_LATEST_BRANCH" if dialogue_history_intent_kind == "RESUME_LATEST_BRANCH" else
+        "READ_ONLY_DIALOGUE_HISTORY_INSPECTION" if dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY" else
+        "HISTORY_LOOKUP" if history_request else
+        ("ACTIVE_TOPIC_CONTINUATION" if requires_memory and not explicit_topic_switch and intent_upper in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} else "NEW_TOPIC")
+    )
     retrieval_profile = {
-        "mode": "HISTORY_LOOKUP" if history_request else ("ACTIVE_TOPIC_CONTINUATION" if requires_memory and not explicit_topic_switch and intent_upper in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} else "NEW_TOPIC"),
+        "mode": retrieval_mode,
         "primary_intent": intent_upper or "NEW_INFORMATION",
         "direction": _text(direction),
         "topic_reference": _text(topic_reference),
-        "prefer_active_branch": bool(requires_memory and not history_request and not explicit_topic_switch),
+        "prefer_active_branch": bool(requires_memory and not explicit_topic_switch),
         "prefer_named_history": bool(history_request or topic_reference in {"TOPIC_FRAGMENT", "PREVIOUS_OR_ACTIVE_TOPIC", "PREVIOUS_ASSISTANT_ANSWER"}),
         "previous_answer_reference": bool(previous_answer_reference or answer_followup),
         "active_branch_repair": bool(active_branch_repair),
         "avoid_cross_topic_injection": True,
-        "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if requires_memory and not explicit_topic_switch else "answer_new_request"),
+        "coverage_policy": (
+            "identify_last_active_branch_and_recap_only"
+            if dialogue_history_intent_kind == "RESUME_LATEST_BRANCH" else
+            "recall_requested_history" if history_request else
+            ("continue_uncovered_sections" if requires_memory and not explicit_topic_switch else "answer_new_request")
+        ),
+    }
+    dialogue_retrieval_plan = {
+        "version": "april_dialogue_retrieval_v1",
+        "mode": retrieval_mode,
+        "search_scope": search_scope,
+        "search_order": (
+            ["LATEST_ASSISTANT_TURN", "ACTIVE_BRANCH_IDENTITY", "MATCHED_RETAINED_HISTORY", "LATEST_RETAINED_TOPIC_FALLBACK"]
+            if dialogue_history_intent_kind == "RESUME_LATEST_BRANCH" else
+            ["LATEST_RETAINED_TOPIC_INDEX", "LATEST_RETAINED_DIALOGUE_PAIRS", "ASSOCIATED_BRANCH_SECTIONS_AND_ASSETS", "NEAREST_RETAINED_CONTEXT_IF_NO_MATCH"]
+            if dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY" else
+            ["MATCHED_RETAINED_HISTORY", "ASSOCIATED_BRANCH_SECTIONS_AND_ASSETS", "NEAREST_RETAINED_CONTEXT_IF_NO_MATCH"]
+            if history_request else
+            ["ACTIVE_BRANCH", "SEMANTIC_HISTORY_FALLBACK"] if requires_memory else []
+        ),
+        "operation": "READ_ONLY_ANALYSIS" if (history_request or dialogue_history_intent_kind in {"RESUME_LATEST_BRANCH", "CHECK_DIALOGUE_HISTORY"}) else ("CONTEXT_RETRIEVAL" if requires_memory else "NEW_REQUEST"),
+        "evidence_policy": "USE_ONLY_AUTHENTICATED_SELECTED_HISTORY_AND_PRESERVE_SOURCE_LINKS",
+        "side_effect_policy": "NO_USER_REQUESTED_ACTIONS_OR_ARTIFACT_MUTATIONS" if (history_request or dialogue_history_intent_kind in {"RESUME_LATEST_BRANCH", "CHECK_DIALOGUE_HISTORY"}) else "NORMAL_REQUEST_POLICY",
+        "answer_goal": (
+            "IDENTIFY_LAST_ACTIVE_TOPIC_AND_UNFINISHED_STEP_THEN_RECAP"
+            if dialogue_history_intent_kind == "RESUME_LATEST_BRANCH" else
+            "INSPECT_HISTORY_AND_REPORT_GROUNDED_FINDINGS"
+            if history_request else
+            "CONTINUE_MATCHED_BRANCH" if requires_memory else "ANSWER_CURRENT_REQUEST"
+        ),
+        "avoid_cross_topic_injection": True,
+        "do_not_invent_missing_history": True,
     }
     return {
         "schema": "april_request_semantics_v1",
@@ -3578,6 +3681,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "topic_reference": topic_reference,
         "requires_memory": bool(requires_memory),
         "history_request": bool(history_request),
+        "dialogue_history_intent_kind": dialogue_history_intent_kind,
+        "dialogue_retrieval_plan": dialogue_retrieval_plan,
         "dialogue_profile_request": bool(dialogue_profile_request),
         "search_scope": search_scope,
         "relation_hint": relation_hint,
