@@ -92,9 +92,9 @@ def _extract_payload(task: Dict[str, Any]) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {}
     for key in (
-        "title", "caption", "description", "columns", "headers",
+        "title", "caption", "description", "columns", "headers", "column_headers",
         "rows", "data", "column_roles", "cell_roles", "width_policy",
-        "wrap", "download", "metadata",
+        "wrap", "download", "metadata", "additional_sheets", "sheets",
     ):
         if key in task:
             payload[key] = deepcopy(task[key])
@@ -160,6 +160,56 @@ def _cell(value: Any, _depth: int = 0) -> Any:
     return str(value)
 
 
+
+
+def _column_spec(value: Any, index: int) -> tuple[str, str]:
+    """Return a stable row accessor and a human-readable Excel header."""
+    if isinstance(value, dict):
+        key = next((str(value.get(name)).strip() for name in ("key", "field", "accessor", "id", "name", "label", "title") if value.get(name) not in (None, "")), f"column_{index + 1}")
+        label = next((str(value.get(name)).strip() for name in ("label", "title", "name", "header", "key", "field", "id") if value.get(name) not in (None, "")), f"Column {index + 1}")
+        return key or f"column_{index + 1}", label or f"Column {index + 1}"
+    label = str(_cell(value) or f"Column {index + 1}").strip()
+    return label, label
+
+
+def _normalize_sheet(sheet: Any, index: int) -> Dict[str, Any] | None:
+    if not isinstance(sheet, dict):
+        return None
+    nested = sheet.get("payload") if isinstance(sheet.get("payload"), dict) else sheet
+    raw_columns = nested.get("headers") or nested.get("columns") or nested.get("column_headers") or []
+    if isinstance(raw_columns, str):
+        raw_columns = [part.strip() for part in raw_columns.split("|")] if "|" in raw_columns else [raw_columns.strip()]
+    specs = [_column_spec(column, position) for position, column in enumerate(_list(raw_columns))]
+    if not specs:
+        return None
+    keys = [key for key, _label in specs]
+    labels = [label for _key, label in specs]
+    raw_rows = nested.get("rows")
+    if raw_rows is None:
+        raw_rows = nested.get("data", nested.get("body", nested.get("values", [])))
+    source_rows = _list(raw_rows)
+    rows: List[List[Any]] = []
+    for row in source_rows[:10000]:
+        if isinstance(row, dict):
+            values = [row.get(key, row.get(labels[position], "")) for position, key in enumerate(keys)]
+        elif isinstance(row, (list, tuple)):
+            values = list(row[:len(labels)])
+        else:
+            values = [row]
+        values = [_cell(value) for value in values]
+        values = values[:len(labels)] + [""] * max(0, len(labels) - len(values))
+        rows.append(values)
+    if not rows:
+        return None
+    return {
+        **{key: deepcopy(value) for key, value in sheet.items() if key not in {"payload", "headers", "columns", "column_headers", "rows", "data", "body", "values"}},
+        "title": _text(nested.get("title") or nested.get("name") or sheet.get("title"), f"Data {index + 1}"),
+        "headers": labels,
+        "columns": labels,
+        "rows": rows,
+    }
+
+
 def _normalize_rows(raw_rows: Any, width: int) -> List[List[Any]]:
     rows = _list(raw_rows)
     result: List[List[Any]] = []
@@ -184,22 +234,24 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     source = _extract_payload(task)
     identity = _identity(task)
 
-    columns = source.get("columns") or source.get("headers") or []
-    if isinstance(columns, str):
-        columns = [part.strip() for part in columns.split("|")] if "|" in columns else [columns.strip()]
-    columns = [_cell(v) for v in _list(columns)]
+    raw_columns = source.get("columns") or source.get("headers") or source.get("column_headers") or []
+    if isinstance(raw_columns, str):
+        raw_columns = [part.strip() for part in raw_columns.split("|")] if "|" in raw_columns else [raw_columns.strip()]
+    column_specs = [_column_spec(value, index) for index, value in enumerate(_list(raw_columns))]
+    column_keys = [key for key, _label in column_specs]
+    columns = [label for _key, label in column_specs]
 
     raw_rows = source.get("rows")
     if raw_rows is None:
         raw_rows = source.get("data", [])
 
-    # Object rows are more useful when keyed by the canonical columns.
+    # Keep descriptor keys for object rows while exporting their readable labels.
     if _list(raw_rows) and isinstance(_list(raw_rows)[0], dict) and columns:
         normalized_rows: List[List[Any]] = []
         for row in _list(raw_rows):
             normalized_rows.append([
-                _cell(row.get(column, ""))
-                for column in columns
+                _cell(row.get(key, row.get(columns[index], "")))
+                for index, key in enumerate(column_keys)
             ])
     elif _list(raw_rows) and isinstance(_list(raw_rows)[0], dict):
         object_rows = _list(raw_rows)
@@ -208,9 +260,9 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
             for key in row:
                 if key not in discovered:
                     discovered.append(key)
-        columns = [_cell(v) for v in discovered]
+        columns = [str(_cell(value) or f"Column {index + 1}") for index, value in enumerate(discovered)]
         normalized_rows = [
-            [_cell(row.get(column, "")) for column in columns]
+            [_cell(row.get(key, row.get(str(key), ""))) for key in discovered]
             for row in object_rows
         ]
     else:
@@ -241,6 +293,10 @@ def _canonical_payload(task: Dict[str, Any]) -> Dict[str, Any]:
         "columns": columns,
         "headers": columns,
         "rows": normalized_rows,
+        "additional_sheets": [
+            normalized for index, sheet in enumerate(_list(source.get("additional_sheets") or source.get("sheets")))
+            if (normalized := _normalize_sheet(sheet, index)) is not None
+        ],
         "column_roles": deepcopy(source.get("column_roles") or []),
         "cell_roles": deepcopy(source.get("cell_roles") or []),
         "width_policy": _text(
