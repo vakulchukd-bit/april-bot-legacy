@@ -160,6 +160,7 @@ When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adja
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
 PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
+DIALOGUE_TRANSITION_ANALYSIS compares the selected prior user request, April's actual last answer, and the current request. Read these as one semantic transition: identify what was already answered, what is newly requested, and what remains unfinished. For TOPIC_CONTINUATION and HISTORICAL_TOPIC_REACTIVATION, begin with one brief, factual reminder of the prior discussion, then move directly to the new step; never repeat completed sections merely to prove memory. For ARTIFACT_REVISION, retrieve and modify the exact revision target, preserve its original topic_id/branch_id/origin_message_id, and append a revision linked by revision_chain_id/revision_of; do not create an unrelated replacement. Mentioning or referring to an artifact is not itself an edit instruction. For NEW_TOPIC, do not reuse unrelated prior answers or artifacts. Treat this analysis as supporting evidence; the current user request and selected canonical source remain authoritative.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
@@ -2249,7 +2250,44 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
             "waiting_acknowledgement": bool(raw_guidance.get("waiting_acknowledgement")),
             "active_task_policy": _text(raw_guidance.get("active_task_policy"))[:80],
+            "interpretive_classification": _text(raw_guidance.get("interpretive_classification"))[:48],
+            "response_strategy": _text(raw_guidance.get("response_strategy"))[:48],
+            "continuation_summary": _semantic_compress(raw_guidance.get("continuation_summary"), max(24, summary_budget)),
         }
+        raw_transition = data.get("DIALOGUE_TRANSITION_ANALYSIS") if isinstance(data.get("DIALOGUE_TRANSITION_ANALYSIS"), dict) else {}
+        raw_transition_previous = raw_transition.get("previous_exchange") if isinstance(raw_transition.get("previous_exchange"), dict) else {}
+        raw_transition_current = raw_transition.get("current_request") if isinstance(raw_transition.get("current_request"), dict) else {}
+        transition_min = {
+            "classification": _text(raw_transition.get("classification"))[:48],
+            "response_strategy": _text(raw_transition.get("response_strategy"))[:48],
+            "continuation_summary": _semantic_compress(raw_transition.get("continuation_summary"), max(28, summary_budget)),
+            "previous_exchange": {
+                "message_id": _text(raw_transition_previous.get("message_id"))[:120],
+                "topic_id": _text(raw_transition_previous.get("topic_id"))[:120],
+                "branch_id": _text(raw_transition_previous.get("branch_id"))[:120],
+                "user_request": _semantic_compress(raw_transition_previous.get("user_request"), max(18, summary_budget // 2)),
+                "april_answer_summary": _semantic_compress(raw_transition_previous.get("april_answer_summary"), max(24, summary_budget)),
+                "april_answer_excerpt": _semantic_compress(raw_transition_previous.get("april_answer_excerpt"), max(32, summary_budget)),
+                "answered_sections": [_semantic_compress(value, 14) for value in (raw_transition_previous.get("answered_sections") or [])[:5]],
+            },
+            "current_request": {
+                "artifact_family": _text(raw_transition_current.get("artifact_family"))[:32],
+                "artifact_edit_requested": bool(raw_transition_current.get("artifact_edit_requested")),
+                "references_previous_answer": bool(raw_transition_current.get("references_previous_answer")),
+                "explicit_topic_switch": bool(raw_transition_current.get("explicit_topic_switch")),
+            },
+            "revision_targets": [
+                {key: _text(item.get(key))[:120] if isinstance(item.get(key), str) else item.get(key)
+                 for key in ("family", "artifact_id", "source_message_id", "revision_chain_id", "revision_number")
+                 if item.get(key) not in (None, "", [], {})}
+                for item in (raw_transition.get("revision_targets") or [])[:3] if isinstance(item, dict)
+            ],
+            "response_rules": {key: bool(value) for key, value in (raw_transition.get("response_rules") or {}).items() if key in {
+                "begin_with_brief_context_summary", "do_not_repeat_completed_sections",
+                "develop_only_requested_or_unfinished_parts", "use_exact_source_artifact_for_revision",
+                "preserve_topic_branch_and_origin_ids", "new_topic_must_not_inherit_unrelated_assets",
+            }},
+        } if raw_transition else {}
         # Preserve request-scoped site-help knowledge even in the emergency/minimal prompt.
         # C_IT_ROOM already selects only relevant areas, so this keeps navigation usable
         # without forcing the full room map into every ordinary answer.
@@ -2539,6 +2577,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_RELATION": data.get("DIALOGUE_RELATION") or "NEW",
             "RECENT_LIMITATIONS": recent_limitations_min,
             "CONTINUATION_GUIDANCE": guidance_min,
+            "DIALOGUE_TRANSITION_ANALYSIS": transition_min,
             "SCENE_COMPLEMENTARITY_POLICY": renderer_policy_min,
             "ACTIVE_WORK_BRANCH": {
                 key: value for key, value in (data.get("ACTIVE_WORK_BRANCH") or {}).items()
@@ -2989,7 +3028,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
             "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
             "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
-            "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
+            "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
             "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
@@ -3111,7 +3150,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "mode", "semantic_intent", "search_direction", "topic_reference", "active_topic_seed",
                     "selection_method", "selected_message_ids", "covered_sections", "selected_section",
                     "coverage_policy", "avoid_cross_topic_injection", "do_not_repeat_completed_answer_or_artifact",
-                    "waiting_acknowledgement", "active_task_policy",
+                    "waiting_acknowledgement", "active_task_policy", "interpretive_classification",
+                    "response_strategy", "continuation_summary",
                 ) if key in guidance
             }
         # Strip verbose room prose while retaining each verified path and enough
@@ -3452,6 +3492,63 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     request_input = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
     structured_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+    request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    transition_raw = (
+        request_structure.get("dialogue_transition_analysis")
+        if isinstance(request_structure.get("dialogue_transition_analysis"), dict)
+        else memory.get("dialogue_transition_analysis")
+        if isinstance(memory.get("dialogue_transition_analysis"), dict)
+        else {}
+    )
+    transition_previous = transition_raw.get("previous_exchange") if isinstance(transition_raw.get("previous_exchange"), dict) else {}
+    transition_current = transition_raw.get("current_request") if isinstance(transition_raw.get("current_request"), dict) else {}
+    transition_alignment = transition_raw.get("alignment") if isinstance(transition_raw.get("alignment"), dict) else {}
+    transition_rules = transition_raw.get("response_rules") if isinstance(transition_raw.get("response_rules"), dict) else {}
+    transition_card = {
+        "classification": _clip(transition_raw.get("classification"), 48),
+        "response_strategy": _clip(transition_raw.get("response_strategy"), 48),
+        "confidence": transition_raw.get("confidence", 0),
+        "continuation_summary": _clip(transition_raw.get("continuation_summary"), 760),
+        "previous_exchange": {
+            "message_id": _clip(transition_previous.get("message_id"), 120),
+            "topic_id": _clip(transition_previous.get("topic_id"), 120),
+            "branch_id": _clip(transition_previous.get("branch_id"), 120),
+            "same_dialog": bool(transition_previous.get("same_dialog")),
+            "user_request": _clip(transition_previous.get("user_request"), 320),
+            "april_answer_summary": _clip(transition_previous.get("april_answer_summary"), 420),
+            "april_answer_excerpt": _clip(transition_previous.get("april_answer_excerpt"), 1500),
+            "answered_sections": [_clip(value, 90) for value in (transition_previous.get("answered_sections") or [])[:8]],
+        },
+        "current_request": {
+            "artifact_family": _clip(transition_current.get("artifact_family"), 32),
+            "artifact_edit_requested": bool(transition_current.get("artifact_edit_requested")),
+            "references_previous_answer": bool(transition_current.get("references_previous_answer")),
+            "explicit_topic_switch": bool(transition_current.get("explicit_topic_switch")),
+        },
+        "alignment": {
+            "subject_overlap": transition_alignment.get("subject_overlap", 0),
+            "matched_previous_answer": bool(transition_alignment.get("matched_previous_answer")),
+            "known_artifact_count": int(transition_alignment.get("known_artifact_count") or 0),
+            "matching_artifact_count": int(transition_alignment.get("matching_artifact_count") or 0),
+        },
+        "known_artifacts": [
+            {key: _clip(item.get(key), 140) if isinstance(item.get(key), str) else item.get(key)
+             for key in ("family", "artifact_id", "title", "source_message_id", "revision_chain_id", "revision_number")
+             if item.get(key) not in (None, "", [], {})}
+            for item in (transition_raw.get("known_artifacts") or [])[:8] if isinstance(item, dict)
+        ],
+        "revision_targets": [
+            {key: _clip(item.get(key), 140) if isinstance(item.get(key), str) else item.get(key)
+             for key in ("family", "artifact_id", "title", "source_message_id", "revision_chain_id", "revision_number")
+             if item.get(key) not in (None, "", [], {})}
+            for item in (transition_raw.get("revision_targets") or [])[:4] if isinstance(item, dict)
+        ],
+        "response_rules": {key: bool(value) for key, value in transition_rules.items() if key in {
+            "begin_with_brief_context_summary", "do_not_repeat_completed_sections",
+            "develop_only_requested_or_unfinished_parts", "use_exact_source_artifact_for_revision",
+            "preserve_topic_branch_and_origin_ids", "new_topic_must_not_inherit_unrelated_assets",
+        }},
+    } if transition_raw else {}
 
     # Keep source wording intact here; the token-budget allocator performs
     # semantic compression only when the combined prompt requires it.
@@ -3599,7 +3696,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "assistant_last_message": _clip(item.get("assistant_last_message") or item.get("assistant_message") or item.get("april_text"), 3000),
                 "assistant_artifact_index": [
                     {key: value for key, value in artifact.items()
-                     if key in {"kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation"}}
+                     if key in {"kind", "type", "artifact_type", "output_type", "artifact_family", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation", "topic_id", "branch_id", "origin_message_id", "parent_message_id", "revision_of", "revision_chain_id", "revision_number", "revision_status", "supersedes", "source_topic_id", "source_branch_id"}}
                     for artifact in (item.get("assistant_artifact_index") or [])
                     if isinstance(artifact, dict)
                 ][:8],
@@ -3787,6 +3884,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "active_task_policy": "resume_latest_unfinished_same_dialogue_task_without_reasking" if relation == "CONTINUE" else "answer_current_request",
         "avoid_cross_topic_injection": True,
         "do_not_repeat_completed_answer_or_artifact": relation == "CONTINUE" and not history_request,
+        "interpretive_classification": _clip(transition_card.get("classification"), 48),
+        "response_strategy": _clip(transition_card.get("response_strategy"), 48),
+        "continuation_summary": _clip(transition_card.get("continuation_summary"), 480),
     }
     scene_complementarity_policy = {
         "enabled": True,
@@ -3854,6 +3954,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "DIALOGUE_RELATION": relation,
         "RECENT_LIMITATIONS": dialogue.get("recent_limitations") if isinstance(dialogue.get("recent_limitations"), dict) else {"has_recent_limitation": False, "count": 0, "events": []},
         "CONTINUATION_GUIDANCE": continuation_guidance,
+        "DIALOGUE_TRANSITION_ANALYSIS": transition_card,
         "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
         "ACTIVE_WORK_BRANCH": active_work_branch,
         "ACTIVE_TOPIC_CONTEXT": memory.get("topic_context") if isinstance(memory.get("topic_context"), dict) else {},
