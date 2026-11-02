@@ -1328,7 +1328,23 @@ def _has_explicit_topic_introduction(text: str) -> bool:
         r"[а-яa-z0-9]",
         flags=re.IGNORECASE | re.DOTALL,
     )
-    return bool(pattern.search(low))
+    if pattern.search(low):
+        return True
+    # Explicitly requested deliverables introduce a new subject even when the
+    # user adds anaphoric wording such as "пришли мне это в файле" afterwards.
+    # This prevents a new table/app/code task from inheriting an unrelated hot branch.
+    creation_action = bool(re.search(
+        r"\b(?:сделай|создай|составь|напиши|построй|сгенерируй|подготовь|разработай|" 
+        r"приведи|перечисли|make|create|build|generate|write|prepare|produce)\b", low,
+    ))
+    deliverable = bool(re.search(
+        r"\b(?:таблиц\w*|спис\w*|код\w*|файл\w*|приложен\w*|сайт\w*|" 
+        r"график\w*|диаграмм\w*|формул\w*|стихотворен\w*|текст\w*|отчет\w*|" 
+        r"менделеев\w*|periodic\s+table|table|list|code|file|app|website|graph|chart|diagram|formula)\b",
+        low,
+    ))
+    has_subject_detail = len([token for token in re.findall(r"[a-zа-я0-9]+", low) if len(token) > 3]) >= 5
+    return bool(creation_action and deliverable and has_subject_detail)
 
 
 def _is_short_continuation_preface(text: str) -> bool:
