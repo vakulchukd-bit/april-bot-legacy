@@ -213,6 +213,7 @@ Use each topic_id/origin_message_id and section source_message_id to keep summar
 and other saved values attached to the topic where they were first discussed. Do not transfer a
 value or artifact from a neighboring topic solely because the wording looks similar.
 For targeted history requests naming a person, subject, or earlier task, prioritize matching DIALOGUE_TOPIC_INDEX entries and CONTINUATION_CONTEXT evidence even when DIALOGUE_RELATION is NEW. Do not ask the user to repeat information when a matching stored pair is supplied. Enumerate multiple topics only for a general overview/list request.
+DIALOGUE_RETRIEVAL_PLAN is a read-only evidence-retrieval contract, not an instruction to run tools or mutate saved work. For an implicit resume request such as “на чём мы остановились?” / “where did we leave off?”, inspect the latest assistant turn first, identify its active task and unfinished step, then use the authenticated retained-history index to recover the same branch and its linked sections/assets if needed. Give a concise recap of the actual stopping point and the next unresolved step; do not turn this into a list of unrelated topics, and do not begin that next step unless CURRENT_REQUEST separately asks for it. For a history-availability complaint (for example “вообще нету о чём мы общались”), inspect the latest retained topics and pairs before concluding that history is absent. Treat generic recall/complaint wording as retrieval instructions, never as topical entities. History inspection alone must not trigger a new search, code edit, file export, image generation, artifact modification, purchase, reminder, upload, or other user action. Only perform such an operation when the CURRENT_REQUEST separately and explicitly asks for it. Keep source_message_id/topic_id/branch_id and asset provenance attached to their original topic; if no matching evidence exists, say so accurately rather than guessing.
 
 For each newly supplied image/screenshot, inspect the actual pixels and record a concise grounded analysis: main subject, relevant visible details, text only when legible, uncertainty, and context. Never invent details that the pixels do not support. For a recalled asset with CACHED_ASSET_ANALYSIS, use that sidecar for ordinary follow-ups and do not restart with a generic image description. Inspect recalled original bytes only when they are actually supplied and the current question needs details beyond the sidecar. If multiple images are supplied, keep them labelled by filename/role and compare only when asked. An input image is NOT a request to generate an image.
 For each newly supplied or explicitly reattached file, read the actual input_file or ATTACHED_TEXT_FILES content. For source code, describe its real purpose, entry points, key functions, data flow and concrete problems visible in the source; cite filenames/function names rather than giving a generic description. If only a cached asset summary is supplied, use it for continuity and do not claim to have reread the original file. An input file is NOT a request to create/export a file.
@@ -2589,6 +2590,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_COMMUNICATION": data.get("DIALOGUE_COMMUNICATION") or {},
             "ACTIVE_TOPIC_CONTEXT": _active_topic_context_minimum(data.get("ACTIVE_TOPIC_CONTEXT")),
             "HISTORY_REQUEST": is_history,
+            "DIALOGUE_RETRIEVAL_PLAN": data.get("DIALOGUE_RETRIEVAL_PLAN") or {},
             "HISTORY_TOPIC_COUNT": data.get("HISTORY_TOPIC_COUNT", 0) if is_history else 0,
             "HISTORY_TOPIC_MINIMUM": minimum_topic_count if is_history else 0,
             "HISTORY_TIME_WINDOW": (data.get("HISTORY_TIME_WINDOW") or {}) if is_history else {},
@@ -3029,7 +3031,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
             "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
             "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
-            "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
+            "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "DIALOGUE_RETRIEVAL_PLAN", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
@@ -3200,13 +3202,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if not history_evidence_present else
                 "Use the supplied records; do not claim the history is unavailable while any topic or pair evidence is present. "
             )
+            retrieval_plan = emergency.get("DIALOGUE_RETRIEVAL_PLAN") if isinstance(emergency.get("DIALOGUE_RETRIEVAL_PLAN"), dict) else {}
+            resume_mode = _text(retrieval_plan.get("mode")).upper() == "RECALL_AND_RESUME_LATEST_BRANCH"
             emergency_task_guidance = (
-                "This is a history-recall task. USE the supplied DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX, "
+                "This is a read-only history-retrieval task. Follow DIALOGUE_RETRIEVAL_PLAN; it is evidence guidance, not a tool/action request. "
+                "USE the supplied DIALOGUE_HISTORY_TOPICS, DIALOGUE_TOPIC_INDEX, "
                 "CONTINUATION_CONTEXT, DIALOGUE_ANCHOR and HISTORY_TIME_WINDOW as factual evidence. "
-                "For a general overview, give a concise readable Markdown summary with one line per real topic, normally up to ten "
+                + ("This is a resume-from-history request: identify the latest matching active branch and its unfinished step; recap that point briefly, do not enumerate unrelated topics. " if resume_mode else "")
+                + "For a general overview, give a concise readable Markdown summary with one line per real topic, normally up to ten "
                 "and at least five when five or more distinct topics are supplied. For a named subject, prioritize matching topic "
                 "records and its selected pairs. " + empty_history_clause +
-                "Do not invent past topics. Respect the supplied time window and the Premium retention boundary."
+                "Do not invent past topics. Respect the supplied time window and the Premium retention boundary. "
+                "Do not execute external actions or modify saved artifacts/history unless the CURRENT_REQUEST separately asks for that operation."
             )
         elif (
             emergency.get("DIALOGUE_RELATION") == "CONTINUE"
@@ -3964,6 +3971,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "ACTIVE_TOPIC_CONTEXT": memory.get("topic_context") if isinstance(memory.get("topic_context"), dict) else {},
         "DIALOGUE_COMMUNICATION": dialogue_communication,
         "HISTORY_REQUEST": history_request,
+        "DIALOGUE_RETRIEVAL_PLAN": {
+            key: value for key, value in (memory.get("dialogue_retrieval_plan") or {}).items()
+            if key in {
+                "version", "mode", "search_scope", "search_order", "operation", "evidence_policy",
+                "side_effect_policy", "answer_goal", "evidence_status", "selected_pair_count",
+                "indexed_topic_count", "selected_message_ids", "selected_topic_ids", "read_only",
+                "external_actions_allowed", "artifact_mutations_allowed", "avoid_cross_topic_injection",
+                "do_not_invent_missing_history", "search_stage", "actual_search_scope",
+            }
+        } if isinstance(memory.get("dialogue_retrieval_plan"), dict) else {},
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
         "HISTORY_TOPIC_MINIMUM": minimum_topic_count if history_request else 0,
         "HISTORY_TIME_WINDOW": history_time_window if history_request else {},
