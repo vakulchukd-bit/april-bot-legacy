@@ -9441,6 +9441,26 @@ def search_dialogue_context(
         and not history_request
         and not time_filter.get("applied")
     )
+    # Answer-led continuation handles short, unnamed replies to April's last
+    # topical answer (e.g. yes, that suits me, choose the second option).
+    # It requires both a real subject vector and an open input slot. Therefore
+    # a generic greeting cannot capture a later independent user request.
+    short_reply = len(_text(query).split()) <= 24
+    answer_has_topic_vector = bool(latest_route_subjects)
+    answer_invitation_reply = bool(
+        latest_route_row
+        and answer_has_topic_vector
+        and bool(latest_answer_relation.get("expects_user_input"))
+        and (underspecified_turn or route_anaphoric_predicate or bool(route_reference_terms) or short_reply)
+        and not route_subject_conflict
+        and not bool(latest_answer_relation.get("answer_subject_conflict"))
+        and not query_interpretation.get("explicit_topic_switch")
+        and not query_interpretation.get("explicit_topic_introduction")
+        and not history_request
+        and not time_filter.get("applied")
+        and not new_work_root_request
+        and not route_blocked
+    )
     prefer_hot_branch = bool(
         not hot_branch_probe_missed
         and not route_blocked
@@ -9464,6 +9484,7 @@ def search_dialogue_context(
                 not new_work_root_request
                 and (
                     underspecified_turn
+                    or answer_invitation_reply
                     or (contextual_antecedent and (route_anaphoric_predicate or not route_subject_conflict or route_is_repair or route_features.get("context_dependent_question")))
                     or (route_is_contextual and route_subject_overlap >= 0.20 and not route_subject_conflict)
                 )
@@ -9844,6 +9865,8 @@ def search_dialogue_context(
         latest_answer_token_overlap=latest_answer_relation.get("answer_overlap"),
         latest_user_request_overlap=latest_answer_relation.get("user_request_overlap"),
         latest_answer_expected_user_input=bool(latest_answer_relation.get("expects_user_input")),
+        answer_invitation_reply=bool(answer_invitation_reply),
+        answer_topic_vector_present=bool(answer_has_topic_vector),
         latest_answer_message_key=_apr_diag_ref(latest_answer_relation.get("message_id")),
         contextual_antecedent=bool(contextual_antecedent),
         underspecified_turn=bool(underspecified_turn),
