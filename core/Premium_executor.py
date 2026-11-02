@@ -46,6 +46,7 @@ from blocks.Premium_interpretation_identity import (
     build_interpretation,
     build_question_sequence,
     interpret_request_semantics,
+    analyze_dialogue_transition,
     _has_explicit_topic_introduction,
     _detect_image_modification,
     _detect_contextual_image_edit,
@@ -65,7 +66,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v7_last_answer_branch_link"
+PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v8_interpretive_transition_artifact_lineage"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -590,7 +591,10 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
         "graph_type", "asset_role", "source_type", "source_message_id", "asset_message_id",
         "asset_id", "artifact_id", "id", "ref", "url", "path", "size_bytes", "sequence_index",
         "series_count", "point_count", "row_count", "column_count", "dimensions", "checksum",
-        "topic_id", "branch_id", "parent_message_id", "description", "summary", "data_summary",
+        "topic_id", "branch_id", "parent_message_id", "origin_message_id", "artifact_family",
+        "revision_of", "revision_chain_id", "revision_number", "revision_status",
+        "supersedes", "derived_from_artifact_id", "source_topic_id", "source_branch_id",
+        "operation", "description", "summary", "data_summary",
         "preview", "alt", "caption", "label", "format", "language",
     )
     item: dict[str, Any] = {}
@@ -619,7 +623,7 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
             if summary.lower().startswith(("data:", "blob:")):
                 continue
             item[key] = summary[:280]
-        elif key in {"series_count", "point_count", "row_count", "column_count", "sequence_index", "size_bytes"}:
+        elif key in {"series_count", "point_count", "row_count", "column_count", "sequence_index", "size_bytes", "revision_number"}:
             try:
                 item[key] = max(0, int(value_part))
             except (TypeError, ValueError):
@@ -630,6 +634,102 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
         item["asset_role"] = default_role[:40]
     if not any(item.get(key) for key in ("filename", "name", "title", "asset_id", "artifact_id", "id", "ref", "url", "path", "kind", "type", "artifact_type", "output_type")):
         return {}
+    return item
+
+
+
+def _dialogue_artifact_family(value: Any) -> str:
+    low = _text(value).lower().replace("-", "_").replace(" ", "_")
+    if not low:
+        return ""
+    aliases = (
+        ("graph", ("graph", "chart", "plot")),
+        ("table", ("table", "spreadsheet", "xlsx", "csv")),
+        ("formula", ("formula", "equation", "math")),
+        ("diagram", ("diagram", "flowchart", "schema", "drawing")),
+        ("code", ("code", "script", "source_code")),
+        ("image", ("image", "photo", "picture", "gallery", "screenshot")),
+        ("file", ("file", "document", "pdf", "presentation", "text_file")),
+    )
+    for family, markers in aliases:
+        if any(marker in low for marker in markers):
+            return family
+    return ""
+
+
+def _apply_artifact_revision_lineage(
+    descriptor: dict[str, Any],
+    *,
+    transition_analysis: dict[str, Any],
+    dialogue_thread: dict[str, Any],
+    identity: dict[str, Any],
+    current_request: str,
+) -> dict[str, Any]:
+    """Attach a new output version to the exact prior artifact and dialogue root."""
+    item = dict(descriptor)
+    if _text(item.get("asset_role")).lower() == "user_input":
+        return item
+    current_family = _dialogue_artifact_family(" ".join(
+        _text(item.get(key)) for key in (
+            "artifact_family", "kind", "type", "artifact_type", "output_type",
+            "mime_type", "filename", "title",
+        ) if _text(item.get(key))
+    ))
+    # Every output is born inside a stable topic/branch, including a first version.
+    # Revisions add a parent/version chain without moving that artifact to a new chat.
+    item.update({
+        "artifact_family": current_family,
+        "topic_id": _text(dialogue_thread.get("topic_id"))[:120],
+        "branch_id": _text(dialogue_thread.get("branch_id"))[:120],
+        "origin_message_id": _text(
+            dialogue_thread.get("origin_message_id") or dialogue_thread.get("topic_origin_message_id")
+            or identity.get("message_id")
+        )[:120],
+        "source_topic_id": _text(dialogue_thread.get("topic_id"))[:120],
+        "source_branch_id": _text(dialogue_thread.get("branch_id"))[:120],
+        "source_message_id": _text(identity.get("message_id"))[:120],
+    })
+    if _text(transition_analysis.get("classification")).upper() != "ARTIFACT_REVISION":
+        return item
+    requested_family = _text((transition_analysis.get("current_request") or {}).get("artifact_family")).lower()
+    if not requested_family or current_family != requested_family:
+        return item
+    targets = transition_analysis.get("revision_targets") if isinstance(transition_analysis.get("revision_targets"), list) else []
+    target = next((row for row in targets if isinstance(row, dict) and _text(row.get("family")) == requested_family), {})
+    if not target:
+        return item
+    old_artifact_id = _text(target.get("artifact_id") or target.get("source_message_id"))[:140]
+    old_message_id = _text(target.get("source_message_id") or (transition_analysis.get("previous_exchange") or {}).get("message_id"))[:120]
+    root_message_id = _text(
+        dialogue_thread.get("origin_message_id") or dialogue_thread.get("topic_origin_message_id")
+        or target.get("origin_message_id") or old_message_id
+    )[:120]
+    prior_chain = _text(target.get("revision_chain_id"))
+    chain_seed = "|".join((
+        _text(dialogue_thread.get("topic_id")), requested_family,
+        old_artifact_id or old_message_id, root_message_id,
+    ))
+    revision_chain_id = prior_chain or ("artifact-chain-" + hashlib.sha256(chain_seed.encode("utf-8")).hexdigest()[:20])
+    try:
+        revision_number = max(1, int(target.get("revision_number") or 1) + 1)
+    except (TypeError, ValueError):
+        revision_number = 2
+    item.update({
+        "topic_id": _text(dialogue_thread.get("topic_id") or target.get("topic_id"))[:120],
+        "branch_id": _text(dialogue_thread.get("branch_id") or target.get("branch_id"))[:120],
+        "origin_message_id": root_message_id,
+        "source_topic_id": _text(target.get("topic_id") or dialogue_thread.get("topic_id"))[:120],
+        "source_branch_id": _text(target.get("branch_id") or dialogue_thread.get("branch_id"))[:120],
+        "source_message_id": _text(identity.get("message_id"))[:120],
+        "parent_message_id": old_message_id,
+        "revision_of": old_artifact_id or old_message_id,
+        "derived_from_artifact_id": old_artifact_id,
+        "supersedes": old_artifact_id or old_message_id,
+        "revision_chain_id": revision_chain_id,
+        "revision_number": revision_number,
+        "revision_status": "revised",
+        "operation": _text(current_request)[:180],
+    })
     return item
 
 
@@ -4083,6 +4183,12 @@ async def execute(
     )
 
     interpretation_started = time.perf_counter()
+    transition_analysis = analyze_dialogue_transition(
+        current_request=original or current_text,
+        dialogue_context=dialogue_context,
+        semantic_interpretation=semantic_interpretation,
+    )
+    dialogue_context["dialogue_transition_analysis"] = transition_analysis
     dialogue_thread_context = _build_dialogue_thread_context(
         user_id=uid,
         user_text=original or current_text,
@@ -4091,7 +4197,14 @@ async def execute(
         identity=identity,
         attachments=attachments or [],
     )
+    dialogue_thread_context["transition_analysis"] = transition_analysis
+    last_turn_link = dialogue_thread_context.get("last_turn_link")
+    if isinstance(last_turn_link, dict):
+        last_turn_link["interpretive_classification"] = _text(transition_analysis.get("classification"))[:48]
+        last_turn_link["response_strategy"] = _text(transition_analysis.get("response_strategy"))[:48]
+        last_turn_link["continuation_summary"] = _text(transition_analysis.get("continuation_summary"))[:760]
     interpretation_memory = dict(dialogue_context)
+    interpretation_memory["dialogue_transition_analysis"] = transition_analysis
     interpretation_memory["dialogue_thread_context"] = dialogue_thread_context
     # The inline data URI is private to the renderer/reuse branch and must never
     # enter the model prompt, structured card, or response metadata.
@@ -4114,7 +4227,9 @@ async def execute(
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v4_last_answer_branch_link"
     request_structure["semantic_interpretation"] = semantic_interpretation
-    request_structure["semantic_interpretation_version"] = "april_request_semantics_v5_last_answer_branch_link"
+    request_structure["dialogue_transition_analysis"] = transition_analysis
+    request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
+    request_structure["semantic_interpretation_version"] = "april_request_semantics_v6_transition_analysis"
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
@@ -4164,6 +4279,7 @@ async def execute(
             "relation": dialogue_context["relation"],
             "relation_confidence": dialogue_context["relation_confidence"],
             "dialogue_thread_context": dict(dialogue_thread_context),
+            "dialogue_transition_analysis": dict(transition_analysis),
             "latest_assistant_anchor": dict(dialogue_context.get("latest_assistant_anchor") or {}),
             "latest_answer_relation": dict(dialogue_context.get("latest_answer_relation") or {}),
             "topic_context": dict(dialogue_context.get("topic_context") or {}),
@@ -6231,15 +6347,24 @@ async def execute(
     for item in (output_asset_refs or [])[:12]:
         descriptor = _dialogue_thread_asset_descriptor(item, "april_output")
         if descriptor:
-            artifact_index.append(descriptor)
+            artifact_index.append(_apply_artifact_revision_lineage(
+                descriptor, transition_analysis=transition_analysis, dialogue_thread=dialogue_thread,
+                identity=identity, current_request=original or current_text,
+            ))
     for item in (response.artifacts or [])[:12]:
         descriptor = _dialogue_thread_asset_descriptor(item, "april_output")
         if descriptor:
-            artifact_index.append(descriptor)
+            artifact_index.append(_apply_artifact_revision_lineage(
+                descriptor, transition_analysis=transition_analysis, dialogue_thread=dialogue_thread,
+                identity=identity, current_request=original or current_text,
+            ))
     for item in (response.render_blocks or [])[:12]:
         descriptor = _dialogue_thread_asset_descriptor(item, "render_block")
         if descriptor:
-            artifact_index.append(descriptor)
+            artifact_index.append(_apply_artifact_revision_lineage(
+                descriptor, transition_analysis=transition_analysis, dialogue_thread=dialogue_thread,
+                identity=identity, current_request=original or current_text,
+            ))
     unique_artifacts = []
     seen_artifacts = set()
     for item in artifact_index:
@@ -6306,6 +6431,7 @@ async def execute(
         "recent_steps": recent_steps[-6:],
         "artifact_index": unique_artifacts[-12:],
         "topic_context_manifest": dict(dialogue_thread.get("topic_context_manifest") or {}),
+        "dialogue_transition_analysis": transition_analysis,
         "dialogue_thread": dialogue_thread,
     })
     structured_request = _strip_inline_binary({
@@ -6349,6 +6475,7 @@ async def execute(
         },
         "dialogue_memory_record": response_memory_record,
         "dialogue_thread": dialogue_thread,
+        "dialogue_transition_analysis": transition_analysis,
         **({"active_work_branch": active_work_record} if active_work_record else {}),
     })
 
