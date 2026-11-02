@@ -1126,6 +1126,26 @@ def _detect_portrait_request(text: str) -> bool:
     ))
     return final_slot or possessive or explicit_photo_of or missing_or_elliptical or appearance
 
+def _has_explicit_historical_artifact_reference(text: str) -> bool:
+    """True only when a concrete saved artifact is explicitly located in prior history."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    artifact = _explicit_saved_artifact_followup_kind(low)
+    if not artifact:
+        return False
+    return bool(re.search(
+        r"(?:из\s+(?:прошл\w*|предыдущ\w*|стар\w*|истори\w*)\s*(?:тем\w*|диалог\w*|ветк\w*|разговор\w*)?|"
+        r"в\s+(?:прошл\w*|предыдущ\w*|стар\w*)\s+(?:диалог\w*|ветк\w*|разговор\w*|тем\w*)|"
+        r"по\s+истори\w*|из\s+истори\w*|вернись\s+к\s+(?:стар\w*|прошл\w*)|"
+        r"котор\w*\s+(?:мы|ты)\s+(?:делал\w*|создавал\w*|создал\w*|исправлял\w*|писал\w*)|"
+        r"\b(?:previous|earlier|old|prior)\s+(?:chat|thread|conversation|branch|topic|table|graph|image|photo|picture|code|script|link|document|file)\b|"
+        r"from\s+(?:history|the\s+previous\s+conversation|another\s+chat)|"
+        r"in\s+(?:our\s+)?previous\s+(?:chat|thread|conversation)|earlier\s+(?:chat|thread|conversation))",
+        low, re.IGNORECASE,
+    ))
+
+
 def _explicit_saved_artifact_followup_kind(text: str) -> str:
     """Recognize edits to an existing structured artifact before the fast path.
 
@@ -1141,6 +1161,8 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
         ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
         ("diagram", r"(?:\bсхем\w*\b|\bdiagram\b|\bdrawing\b|\bчертеж\w*\b)"),
+        ("link", r"(?:\bссылк\w*\b|\burl\b|\blinks?\b|\bгиперссылк\w*\b)"),
+        ("copy", r"(?:\bcopyable\s+text\b|\bcopy\s+block\b|\bкопируем\w*\s+текст\w*\b|\bкопи(?:руем\w*)?\s+блок\w*\b|\bтекст\s+из\s+(?:прошл\w*|предыдущ\w*|истори\w*)|\bтекст\s+котор\w*\s+(?:ты|мы)\s+(?:создал\w*|сделал\w*|написал\w*))"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
         ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
@@ -1159,7 +1181,8 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         return ""
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
-        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|продолж\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
+        r"найди\w*|открой\w*|вытащи\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
@@ -1170,7 +1193,10 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
     # saved-item reference or a clear edit/extension operation.
     saved_reference = bool(re.search(
         r"(?:\bэтот\b|\bэта\b|\bэту\b|\bэтой\b|\bэти\b|"
-        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|из\s+истори\w*|"
+        r"\bснова\b|еще\s+раз|ещё\s+раз|предыдущ\w*|последн\w*|стар\w*|из\s+истори\w*|"
+        r"из\s+(?:прошл\w*|предыдущ\w*)\s+(?:тем\w*|диалог\w*|ветк\w*)|"
+        r"в\s+(?:прошл\w*|предыдущ\w*)\s+(?:диалог\w*|ветк\w*)|"
+        r"котор\w*\s+(?:мы|ты)\s+(?:делал\w*|создавал\w*|создал\w*|исправлял\w*|писал\w*)|"
         r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
         low, re.IGNORECASE,
     ))
@@ -3282,7 +3308,13 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     # explicit edits/extensions or demonstrative references; a fresh "build a graph"
     # request remains NEW and does not pull unrelated history.
     saved_artifact_followup_kind = _explicit_saved_artifact_followup_kind(source)
-    if saved_artifact_followup_kind and not explicit_topic_introduction and not explicit_topic_switch and not history_request:
+    explicit_historical_artifact_reference = _has_explicit_historical_artifact_reference(source)
+    if (
+        saved_artifact_followup_kind
+        and not explicit_topic_introduction
+        and not explicit_topic_switch
+        and (not history_request or explicit_historical_artifact_reference)
+    ):
         primary_intent = "TOPIC_CONTINUATION"
         direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
         topic_reference = "TOPIC_FRAGMENT"
@@ -3596,6 +3628,8 @@ def _transition_artifact_family(value: Any) -> str:
         ("formula", ("formula", "equation", "math")),
         ("diagram", ("diagram", "flowchart", "schema", "drawing")),
         ("code", ("code", "script", "source_code")),
+        ("link", ("link", "url", "uri", "hyperlink")),
+        ("copy", ("copy", "copy_block", "copyable_text", "text_copy_block")),
         ("image", ("image", "photo", "picture", "gallery", "screenshot")),
         ("file", ("file", "document", "pdf", "presentation", "text_file")),
     )
@@ -3674,7 +3708,7 @@ def analyze_dialogue_transition(
     same_dialog = bool(source_pair.get("same_dialog", relation == "CONTINUE" and not historical_match))
 
     artifacts: list[dict[str, Any]] = []
-    artifact_positions: dict[tuple[str, str], int] = {}
+    artifact_positions: dict[tuple[str, str, str, str], int] = {}
     candidates: list[Any] = []
     for key in ("assistant_artifact_index", "artifact_index"):
         value = source_pair.get(key)
@@ -3685,13 +3719,51 @@ def analyze_dialogue_transition(
         branch_assets = branch.get("artifact_index")
         if isinstance(branch_assets, list):
             candidates.extend(branch_assets[:80])
-    for pair in selected[:6]:
-        if not isinstance(pair, dict):
+    artifact_source_pairs = [source_pair, *(item for item in selected[:6] if isinstance(item, dict))]
+    seen_source_pairs: set[str] = set()
+    for pair in artifact_source_pairs:
+        pair_id = _text(pair.get("message_id") or pair.get("source_message_id"))
+        if pair_id and pair_id in seen_source_pairs:
             continue
+        if pair_id:
+            seen_source_pairs.add(pair_id)
         for key in ("assistant_artifact_index", "artifact_index"):
             value = pair.get(key)
             if isinstance(value, list):
                 candidates.extend(value[:80])
+        # Some legacy/renderer outputs exist only in the exact protected
+        # structured payload. Include their metadata as revision targets too.
+        protected = pair.get("protected_structured_data")
+        protected_items = protected.get("items") if isinstance(protected, dict) and isinstance(protected.get("items"), list) else []
+        for protected_item in protected_items[:80]:
+            if not isinstance(protected_item, dict):
+                continue
+            data = protected_item.get("data") if isinstance(protected_item.get("data"), dict) else {}
+            nested = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            metadata = {**nested, **data}
+            source_path = protected_item.get("index")
+            if isinstance(source_path, (list, tuple)):
+                source_path = ".".join(str(part) for part in source_path[:8])
+            candidates.append({
+                "kind": _text(protected_item.get("kind")),
+                "artifact_family": _text(metadata.get("artifact_family")),
+                "artifact_id": _text(metadata.get("artifact_id") or metadata.get("asset_id") or metadata.get("id")),
+                "ref": _text(metadata.get("ref")),
+                "url": _text(metadata.get("url") or metadata.get("href") or metadata.get("uri")),
+                "title": _text(metadata.get("title") or metadata.get("label") or metadata.get("filename") or metadata.get("name")),
+                "filename": _text(metadata.get("filename")),
+                "mime_type": _text(metadata.get("mime_type") or metadata.get("content_type")),
+                "renderer": _text(metadata.get("renderer") or metadata.get("viewer")),
+                "source_message_id": pair_id or source_message_id,
+                "source_item_path": _text(source_path),
+                "topic_id": _text(pair.get("topic_id") or source_topic_id),
+                "branch_id": _text(pair.get("branch_id") or source_branch_id),
+                "revision_of": _text(metadata.get("revision_of")),
+                "revision_chain_id": _text(metadata.get("revision_chain_id")),
+                "revision_number": metadata.get("revision_number"),
+                "revision_status": _text(metadata.get("revision_status")),
+                "operation": _text(metadata.get("operation") or metadata.get("image_operation") or metadata.get("edit_operation") or metadata.get("visual_operation")),
+            })
     for item in candidates:
         if not isinstance(item, dict):
             continue
@@ -3701,19 +3773,32 @@ def analyze_dialogue_transition(
             ) if _text(item.get(key))
         ))
         artifact_id = _text(
-            item.get("artifact_id") or item.get("asset_id") or item.get("id")
-            or item.get("ref") or item.get("filename") or item.get("title")
+            item.get("artifact_id") or item.get("asset_id") or item.get("id") or item.get("ref")
         )[:140]
-        dedupe = (family, artifact_id or _text(item.get("source_message_id")))
-        if dedupe == ("", ""):
+        item_source_id = _text(item.get("source_message_id") or item.get("message_id") or source_message_id)[:120]
+        item_source_path = _text(item.get("source_item_path"))[:120]
+        title = _text(item.get("title") or item.get("filename") or item.get("label") or item.get("name"))[:140]
+        dedupe_identity = artifact_id or title or item_source_path or item_source_id
+        dedupe = (
+            family,
+            dedupe_identity,
+            item_source_id,
+            _text(item.get("revision_chain_id") or item.get("revision_number"))[:120],
+        )
+        if dedupe == ("", "", "", ""):
             continue
         descriptor = {
             "family": family,
             "artifact_id": artifact_id,
-            "title": _text(item.get("title") or item.get("filename") or item.get("label"))[:140],
-            "source_message_id": _text(item.get("source_message_id") or item.get("message_id") or source_message_id)[:120],
+            "title": title,
+            "source_message_id": item_source_id,
+            "source_item_path": item_source_path,
+            "topic_id": _text(item.get("topic_id") or source_topic_id)[:120],
+            "branch_id": _text(item.get("branch_id") or source_branch_id)[:120],
             "revision_chain_id": _text(item.get("revision_chain_id"))[:120],
             "revision_number": item.get("revision_number"),
+            "revision_status": _text(item.get("revision_status"))[:40],
+            "operation": _text(item.get("operation"))[:180],
         }
         descriptor = {key: value for key, value in descriptor.items() if value not in (None, "", [], {})}
         if dedupe in artifact_positions:
@@ -3857,8 +3942,10 @@ def analyze_dialogue_transition(
                 "COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS",
                 "COMPARE_CURRENT_REQUEST_WITH_LATEST_APRIL_ANSWER",
                 "CHECK_CURRENT_BRANCH_AND_UNFINISHED_STEPS",
-                "IF_NO_CURRENT_MATCH_SEARCH_AUTHENTICATED_HISTORY",
-                "RESTORE_MATCHED_BRANCH_AND_RELEVANT_ARTIFACT_LINEAGE",
+                "IF_NO_CURRENT_MATCH_SEARCH_AUTHENTICATED_HISTORY_BY_TOPIC_TIME_AND_ARTIFACT",
+                "MATCH_ARTIFACT_FAMILY_AND_TOPIC_WITHIN_AUTHENTICATED_RETENTION",
+                "RESTORE_MATCHED_BRANCH_AND_ALL_RELEVANT_ARTIFACT_VERSIONS",
+                "DISTINGUISH_RETRIEVAL_FROM_EDIT_EXTENSION_OR_NEW_ARTIFACT_CREATION",
                 "DISTINGUISH_RECALL_FROM_CONTINUATION_OR_ARTIFACT_REVISION",
                 "ANSWER_ONLY_AFTER_SOURCE_AND_TASK_ALIGNMENT_CHECK",
             ],
@@ -3866,6 +3953,10 @@ def analyze_dialogue_transition(
             "selected_topic_id": source_topic_id,
             "selected_branch_id": source_branch_id,
             "history_branch_selected": bool(historical_match or (history_request and source_message_id)),
+            "historical_artifact_branch_selected": bool(context.get("historical_artifact_reactivation")),
+            "artifact_recovery_status": _text((context.get("artifact_recovery") or {}).get("status")) if isinstance(context.get("artifact_recovery"), dict) else "",
+            "artifact_recovery_family": _text((context.get("artifact_recovery") or {}).get("family")) if isinstance(context.get("artifact_recovery"), dict) else saved_followup_kind,
+            "artifact_source_message_id": _text((context.get("artifact_recovery") or {}).get("source_message_id")) if isinstance(context.get("artifact_recovery"), dict) else source_message_id,
             "current_branch_selected": bool(relation == "CONTINUE" and source_message_id and not historical_match),
             "latest_answer_is_primary_discourse_vector": bool(relation == "CONTINUE" and source_message_id and not historical_match),
             "latest_answer_expects_user_input": bool((context.get("latest_answer_relation") or {}).get("expects_user_input")) if isinstance(context.get("latest_answer_relation"), dict) else False,
