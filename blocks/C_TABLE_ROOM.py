@@ -30,7 +30,9 @@ def _obj(value: Any) -> Dict[str, Any]:
 def _text(value: Any, default: str = "") -> str:
     if value is None:
         return default
-    return str(value).strip()
+    normalized = _cell(value)
+    text = str(normalized).strip() if normalized is not None else ""
+    return text or default
 
 
 def _list(value: Any) -> List[Any]:
@@ -99,9 +101,62 @@ def _extract_payload(task: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _cell(value: Any) -> Any:
+def _cell(value: Any, _depth: int = 0) -> Any:
+    """Convert structured cell values into readable text, never Python dict repr."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if _depth >= 5:
+        return ""
+
+    if isinstance(value, (list, tuple)):
+        parts = [_cell(item, _depth + 1) for item in value]
+        return " · ".join(str(part).strip() for part in parts if part is not None and str(part).strip())
+
+    if isinstance(value, dict):
+        # Prefer user-facing fields over implementation metadata.
+        preferred = (
+            "display", "display_text", "rendered_text", "text", "markdown",
+            "description", "explanation", "summary", "label", "title",
+            "name", "symbol", "formula", "content", "value",
+        )
+        selected = None
+        for key in preferred:
+            candidate = value.get(key)
+            if candidate is not None and candidate != "":
+                selected = _cell(candidate, _depth + 1)
+                break
+
+        unit = value.get("unit")
+        ignored = {
+            "id", "key", "type", "kind", "renderer", "viewer", "metadata",
+            "scene", "signals", "layout", "role", "priority", "source",
+            "source_id", "artifact_type", "artifactType",
+        }
+        if selected is not None:
+            unit_text = _cell(unit, _depth + 1) if unit not in (None, "") else ""
+            primary_text = str(selected).strip()
+            if unit_text:
+                primary_text = f"{primary_text} {str(unit_text).strip()}".strip()
+            parts = [primary_text]
+            preferred_keys = set(preferred)
+            for key, item in value.items():
+                if str(key) in ignored or str(key) in preferred_keys or key == "unit" or item is None or item == "":
+                    continue
+                rendered = _cell(item, _depth + 1)
+                if rendered is not None and str(rendered).strip():
+                    parts.append(f"{str(key).replace('_', ' ')}: {rendered}")
+            return " · ".join(part for part in parts if part)
+
+        parts = []
+        for key, item in value.items():
+            if str(key) in ignored or item is None or item == "":
+                continue
+            rendered = _cell(item, _depth + 1)
+            if rendered is None or not str(rendered).strip():
+                continue
+            parts.append(f"{str(key).replace('_', ' ')}: {rendered}")
+        return " · ".join(parts)
+
     return str(value)
 
 
