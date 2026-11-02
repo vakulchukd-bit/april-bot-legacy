@@ -889,6 +889,7 @@ def _semantic_tokens(value: Any) -> set[str]:
 # subject signature prevents different datasets (oil, bananas, cabbage, etc.) from
 # being merged just because they all discuss prices, tables or graphs.
 _CONTEXT_GENERIC_TERMS = {
+    "вообще", "вообщ", "нету", "ничего", "ничег", "общались", "общал", "остановились", "остановил",
     # Dialog participant references, self-corrections and memory operations are
     # conversational relations, not topical entities. Their words remain available
     # to retrieval; only the subject-conflict calculation ignores them.
@@ -3693,7 +3694,10 @@ def _candidate_score(
     answer_overlap = _concept_overlap(query_tokens, answer_tokens)
     user_overlap = _concept_overlap(query_tokens, user_tokens)
     entity_overlap = _explicit_entity_overlap(query, row, max_chars=None if needs_structured_evidence else 6000)
-    query_subjects = _subject_tokens(query)
+    history_operator_only = bool(
+        _is_history_recall_question(q) and not _history_query_topic_tokens(q)
+    )
+    query_subjects = set() if history_operator_only else _subject_tokens(query)
     row_subjects = (
         _row_subject_tokens(row) if needs_structured_evidence
         else _subject_tokens(_row_subject_text_lightweight(row))
@@ -4130,6 +4134,8 @@ _SECTION_TOPIC_NOISE = _SECTION_QUERY_NOISE | {
 # Keeping this separate from the general stop-word list prevents names and subject nouns
 # from being removed when selecting relevant memories.
 _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
+    "вообще", "вообщ", "нету", "ничего", "ничег", "остановились", "остановил", "закончили", "прервались",
+    "насчет", "насчёт", "касательно", "относительно", "дон", "remember", "earlier", "what", "did", "were", "where", "we", "our", "about", "conversation", "discussion", "history", "talked", "talking", "discuss", "discussed", "discussing", "leave", "left", "off", "pick", "resume",
     "говор", "говорил", "говорила", "говорили", "говорились", "общались", "обсуждали",
     "обсуждение", "обсуждении", "разговор", "разговора", "разговоре", "речь",
     "история", "истории", "диалог", "диалога", "диалоге", "общение", "общения",
@@ -4245,12 +4251,19 @@ def _is_broad_history_overview_query(query: str) -> bool:
     if named_subject:
         return False
     patterns = (
+        r"(?:^|\b)(?:на\s+чем|на\s+чём|где)\s+(?:мы\s+)?(?:в\s+последний\s+раз\s+)?(?:остановил\w*|закончил\w*|прервал\w*|оборвал\w*)",
+        r"(?:^|\b)с\s+какого\s+места\s+(?:мы\s+)?(?:остановил\w*|закончил\w*|прервал\w*|продолж\w*)",
+        r"(?:^|\b)(?:подними|восстанови|верни|найди)\s+(?:мне\s+)?(?:нашу\s+)?(?:последн\w*\s+|активн\w*\s+)?(?:ветк\w*|нить\w*|тему|обсуждени\w*|работ\w*)",
         r"(?:^|\b)(?:о чем|о чём) (?:мы\s+)?(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:говорили|обсуждали|общались|разговаривали)(?:\s+(?:сегодня|вчера|недавно))?",
         r"(?:^|\b)(?:что мы\s+(?:(?:сегодня|вчера|недавно|за\s+последнее\s+время)\s+)?(?:обсуждали|говорили|делали|решили|успели))",
         r"(?:^|\b)(?:напомни|вспомни|покажи|перечисли|суммируй|резюмируй)\w*.{0,55}(?:разговор|переписк|обсуждени|истори|темы|диалог)",
         r"(?:^|\b)(?:покажи|суммируй|резюмируй)\w*.{0,35}(?:истори\w* диалог|истори\w* переписк|наши темы)",
         r"(?:^|\b)(?:what did we (?:talk|discuss) about|what have we discussed|what were we talking about|summari[sz]e our conversation|recap our conversation|what did we do today)",
+        r"(?:^|\b)(?:where did we leave off|where were we|pick up where we left off|resume where we left off|what were we working on)",
+        r"(?:^|\b)(?:i\s+)?(?:don't|do\s+not)\s+(?:remember|see)\b.{0,70}\b(?:what\s+we\s+)?(?:discussed|talked\s+about|our\s+)?(?:conversation|discussion|history|what\s+we\s+discussed)",
         r"(?:^|\b)(?:remind me what we (?:said|discussed|worked on)|show me our conversation history)",
+        r"(?:^|\b)(?:вообще\s+)?(?:нету|нет)\s+(?:ни\s+)?(?:о\s+)?чем\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
+        r"(?:^|\b)(?:ничего|ничег\w*)\s+(?:не\s+)?(?:помню|помним|вижу|осталось)\b.{0,85}(?:о\s+чем|про\s+что|общал\w*|говорил\w*|обсуждал\w*|разговор\w*|диалог\w*)",
     )
     if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in patterns):
         return True
@@ -5141,6 +5154,8 @@ def _should_probe_hot_branch_first(
     pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
     time_window = profile.get("time_window") if isinstance(profile.get("time_window"), dict) else {}
 
+    if profile.get("explicit_topic_switch"):
+        return False
     if (
         profile.get("history_request")
         or profile.get("history_inventory_request")
@@ -5155,6 +5170,7 @@ def _should_probe_hot_branch_first(
 
     low = _text(query).lower().replace("ё", "е")
     explicit_reopen = bool(profile.get("explicit_closed_branch_reopen"))
+    resume_latest_branch = _text(profile.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
     # Recognize anaphora even when the semantic classifier called the turn
     # NEW_INFORMATION. Adjectives, domain nouns and modality flags must not erase
     # this evidence (e.g. “в нём всё нравится: сюжет, флора и фауна”).
@@ -5188,7 +5204,7 @@ def _should_probe_hot_branch_first(
     # A real topic switch must remain a boundary. But if the classifier's switch
     # marker was inferred from nouns in a clearly anaphoric sentence, let the
     # recent-pair probe decide from the actual preceding exchange.
-    if explicit_boundary and not reference_signal and not explicit_reopen:
+    if explicit_boundary and not reference_signal and not explicit_reopen and not resume_latest_branch:
         return False
 
     continuation = bool(
@@ -6542,7 +6558,21 @@ def search_dialogue_context(
     resume_key = _text(resume_message_id)
     reference_followup = _looks_like_referential_followup(query)
     dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
-    history_request = dialogue_profile_request or bool(query_interpretation.get("history_request")) or _is_history_request(query)
+    resume_latest_branch = _text(query_interpretation.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
+    history_request = (
+        dialogue_profile_request
+        or bool(query_interpretation.get("history_request"))
+        or (_is_history_request(query) and not resume_latest_branch)
+    )
+    # Resume requests follow a strict two-stage, read-only route: first the latest
+    # assistant turn and active branch (the bounded probe above); only after a miss,
+    # or when no dialogue identity exists to probe, inspect retained Premium history.
+    resume_history_fallback = bool(
+        resume_latest_branch
+        and (hot_branch_probe_missed or not (_text(dialog_id) or _text(conversation_id)))
+    )
+    if resume_history_fallback:
+        history_request = True
     # In normal Premium routing the interpretation result is authoritative.
     # The lexical helper remains only as compatibility fallback for direct legacy callers.
     new_topic_request = (
@@ -6615,6 +6645,11 @@ def search_dialogue_context(
     query_subjects = set(_subject_tokens(subject_query)) if subject_query != query else (
         set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
     )
+    # A subjectless request to inspect/resume the conversation is an operation on
+    # dialogue history, not a topical entity such as "вообще" or "нету". Keeping
+    # those words as subjects made the candidate scorer reject the newest branch.
+    if history_request and not _history_query_topic_tokens(query):
+        query_subjects = set()
     if targeted_active_repair and all_rows:
         # The authenticated source task is the semantic anchor; do not let reaction
         # wording introduce unrelated entities into the branch selection.
