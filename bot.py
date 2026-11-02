@@ -68,6 +68,7 @@ from storage import (
     claim_april_referral, confirm_april_referral_on_first_use,
     prepare_april_referral_share, finish_april_referral_share,
     get_user_language, set_user_language, normalize_user_language,
+    create_public_shared_asset, get_public_shared_asset,
 )
 
 # Railway private DNS in legacy environments can be IPv6-only. Bind a dual-stack
@@ -2202,6 +2203,33 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, status)
                 return
+            if mode == "shared_artifact":
+                # Public bearer links are unguessable and expire; only the Web
+                # bridge may reach this Bot route, while the recipient needs no APRIL login.
+                if not self._service_authorized():
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
+                token = _text(query.get("token", [""])[0])
+                shared = get_public_shared_asset(token)
+                if not shared:
+                    self._send_json(404, {"success": False, "error": "SHARED_ASSET_NOT_FOUND_OR_EXPIRED"})
+                    return
+                content = shared["content"]
+                filename = _text(shared.get("filename") or "april-file.bin").replace("\\", "/").split("/")[-1]
+                filename = "".join(ch for ch in filename if ch.isprintable() and ch not in "\r\n\x00")[:180] or "april-file.bin"
+                fallback = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "april-file.bin"
+                mime = _text(shared.get("mime_type") or "application/octet-stream")
+                if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime.split(";", 1)[0].lower()):
+                    mime = "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Content-Disposition", f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "private, no-store, max-age=0")
+                self.end_headers()
+                self.wfile.write(content)
+                return
             if mode == "artifact":
                 # Binary output recovery is scoped to the authenticated owner,
                 # exact message ID, persisted output role and verified SHA-256.
@@ -2331,6 +2359,61 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
+        if parsed_path == "/api/artifacts/share":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error_code": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 8 * 1024 * 1024 + 128 * 1024:
+                    self._send_json(413, {"success": False, "error_code": "SHARED_ASSET_SIZE_INVALID"})
+                    return
+                content_type = str(self.headers.get("Content-Type", ""))
+                if not content_type.lower().startswith("multipart/form-data"):
+                    self._send_json(415, {"success": False, "error_code": "MULTIPART_REQUIRED"})
+                    return
+                raw = self.rfile.read(length)
+                from email.parser import BytesParser
+                from email.policy import default as email_policy_default
+                message = BytesParser(policy=email_policy_default).parsebytes(
+                    b"MIME-Version: 1.0\r\nContent-Type: " + content_type.encode("latin-1", "replace") + b"\r\n\r\n" + raw
+                )
+                if not message.is_multipart():
+                    self._send_json(400, {"success": False, "error_code": "INVALID_MULTIPART"})
+                    return
+                file_bytes = None
+                filename = "april-file.bin"
+                mime_type = "application/octet-stream"
+                for part in message.iter_parts():
+                    field_name = part.get_param("name", header="content-disposition") or ""
+                    if field_name != "file":
+                        continue
+                    file_bytes = part.get_payload(decode=True) or b""
+                    filename = str(part.get_filename() or filename)
+                    mime_type = str(part.get_content_type() or mime_type)
+                    break
+                if not file_bytes or len(file_bytes) > 8 * 1024 * 1024:
+                    self._send_json(413 if file_bytes else 400, {"success": False, "error_code": "SHARED_ASSET_FILE_INVALID"})
+                    return
+                result = create_public_shared_asset(canonical_user_id, filename, mime_type, file_bytes)
+                if result.get("success") is True:
+                    self._send_json(200, result)
+                else:
+                    code = _text(result.get("error_code") or "SHARED_ASSET_SAVE_FAILED")
+                    status = 401 if code == "AUTHENTICATED_USER_REQUIRED" else 413 if code == "SHARED_ASSET_INVALID" else 503
+                    self._send_json(status, result)
+            except (ValueError, UnicodeDecodeError):
+                self._send_json(400, {"success": False, "error_code": "INVALID_SHARE_REQUEST"})
+            except Exception as exc:
+                print(f"[APRIL_SHARE] upload_route_failed type={type(exc).__name__}", flush=True)
+                self._send_json(503, {"success": False, "error_code": "SHARED_ASSET_UNAVAILABLE"})
+            return
         if parsed_path == "/api/users/language":
             if not self._service_authorized():
                 self.close_connection = True
