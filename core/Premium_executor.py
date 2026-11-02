@@ -3820,6 +3820,8 @@ async def execute(
             "topic_reference": semantic_interpretation.get("topic_reference"),
             "requires_memory": semantic_interpretation.get("requires_memory"),
             "history_request": semantic_interpretation.get("history_request"),
+            "dialogue_history_intent_kind": semantic_interpretation.get("dialogue_history_intent_kind", ""),
+            "dialogue_retrieval_plan": dict(semantic_interpretation.get("dialogue_retrieval_plan") or {}),
             "dialogue_profile_request": bool(semantic_interpretation.get("dialogue_profile_request")),
             "history_inventory_request": semantic_interpretation.get("history_inventory_request"),
             "has_explicit_time_window": semantic_interpretation.get("has_explicit_time_window"),
@@ -4263,6 +4265,61 @@ async def execute(
     search_result = dialogue_context.get("search") if isinstance(dialogue_context.get("search"), dict) else {}
     anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
     selected_pairs = dialogue_context.get("selected_pairs") or []
+    # Convert interpretation intent into an auditable, evidence-aware retrieval plan
+    # after State Manager has completed its authenticated, read-only history search.
+    dialogue_retrieval_plan = dict(semantic_interpretation.get("dialogue_retrieval_plan") or {})
+    if dialogue_context.get("history_request"):
+        dialogue_retrieval_plan.setdefault("version", "april_dialogue_retrieval_v1")
+        dialogue_retrieval_plan.setdefault("mode", "READ_ONLY_DIALOGUE_HISTORY_INSPECTION")
+        dialogue_retrieval_plan.setdefault("search_scope", "ALL_RETAINED_PREMIUM_HISTORY")
+        dialogue_retrieval_plan.setdefault("operation", "READ_ONLY_ANALYSIS")
+        dialogue_retrieval_plan.setdefault("side_effect_policy", "NO_USER_REQUESTED_ACTIONS_OR_ARTIFACT_MUTATIONS")
+        dialogue_retrieval_plan.setdefault("answer_goal", "INSPECT_HISTORY_AND_REPORT_GROUNDED_FINDINGS")
+    selected_message_ids = [
+        _text(item.get("message_id"))[:120]
+        for item in selected_pairs if isinstance(item, dict) and _text(item.get("message_id"))
+    ][:8]
+    selected_topic_ids = list(dict.fromkeys(
+        _text(item.get("topic_id"))[:120]
+        for item in selected_pairs if isinstance(item, dict) and _text(item.get("topic_id"))
+    ))[:8]
+    history_topics_for_plan = dialogue_context.get("history_topics") or dialogue_context.get("topic_index") or []
+    indexed_topic_ids = list(dict.fromkeys(
+        _text(item.get("topic_id"))[:120]
+        for item in history_topics_for_plan if isinstance(item, dict) and _text(item.get("topic_id"))
+    ))[:10]
+    if isinstance(anchor, dict) and _text(anchor.get("message_id")):
+        anchor_id = _text(anchor.get("message_id"))[:120]
+        if anchor_id not in selected_message_ids:
+            selected_message_ids.insert(0, anchor_id)
+    dialogue_retrieval_plan.update({
+        "evidence_status": (
+            "SELECTED_HISTORY_EVIDENCE" if selected_pairs else
+            "TOPIC_INDEX_ONLY" if indexed_topic_ids else
+            "NO_MATCH_IN_RETAINED_WINDOW"
+        ),
+        "selected_pair_count": len(selected_pairs),
+        "indexed_topic_count": int(dialogue_context.get("known_topic_count") or len(indexed_topic_ids) or 0),
+        "selected_message_ids": selected_message_ids[:8],
+        "selected_topic_ids": selected_topic_ids or indexed_topic_ids[:8],
+        "read_only": bool(
+            dialogue_context.get("history_request")
+            or semantic_interpretation.get("dialogue_history_intent_kind") in {"RESUME_LATEST_BRANCH", "CHECK_DIALOGUE_HISTORY"}
+        ),
+        "external_actions_allowed": not bool(
+            dialogue_context.get("history_request")
+            or semantic_interpretation.get("dialogue_history_intent_kind") in {"RESUME_LATEST_BRANCH", "CHECK_DIALOGUE_HISTORY"}
+        ),
+        "artifact_mutations_allowed": not bool(
+            dialogue_context.get("history_request")
+            or semantic_interpretation.get("dialogue_history_intent_kind") in {"RESUME_LATEST_BRANCH", "CHECK_DIALOGUE_HISTORY"}
+        ),
+        "avoid_cross_topic_injection": True,
+        "do_not_invent_missing_history": True,
+        "search_stage": _text(search_result.get("search_stage") or ("HISTORY_FALLBACK_AFTER_ACTIVE_BRANCH_MISS" if dialogue_context.get("history_request") and semantic_interpretation.get("dialogue_history_intent_kind") == "RESUME_LATEST_BRANCH" else "HISTORY_LOOKUP" if dialogue_context.get("history_request") else "ACTIVE_BRANCH_OR_CURRENT_CONTEXT")),
+        "actual_search_scope": "ALL_RETAINED_PREMIUM_HISTORY" if dialogue_context.get("history_request") else "ACTIVE_DIALOGUE_OR_SELECTED_BRANCH",
+    })
+    semantic_interpretation["dialogue_retrieval_plan"] = dialogue_retrieval_plan
     _apr_timing_log(
         "dialogue_context_ready", memory_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(identity.get("dialog_id")),
@@ -4377,6 +4434,7 @@ async def execute(
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v4_last_answer_branch_link"
     request_structure["semantic_interpretation"] = semantic_interpretation
+    request_structure["dialogue_retrieval_plan"] = dict(dialogue_retrieval_plan)
     request_structure["dialogue_transition_analysis"] = transition_analysis
     request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
     request_structure["semantic_interpretation_version"] = "april_request_semantics_v6_transition_analysis"
@@ -4435,6 +4493,7 @@ async def execute(
             "topic_context": dict(dialogue_context.get("topic_context") or {}),
             "topic_context_expansion": dict(dialogue_context.get("topic_context_expansion") or {}),
             "retrieval_profile": dict(dialogue_context.get("retrieval_profile") or {}),
+            "dialogue_retrieval_plan": dict(dialogue_retrieval_plan),
             "active_branch": dict(dialogue_context.get("active_branch") or {}),
             "active_work_branch": (
                 dict(dialogue_context.get("active_work_branch") or {})
@@ -4517,6 +4576,7 @@ async def execute(
                 "hot_work_match_reason": _text(dialogue_context.get("hot_work_match_reason"))[:80],
                 "user_operation": dict(dialogue_context.get("user_operation") or {}),
                 "source_retrieval": dict(dialogue_context.get("source_retrieval") or {}),
+                "dialogue_retrieval_plan": dict(dialogue_retrieval_plan),
                 "selected_dialogue_chain": (
                     dialogue_context.get("selected_pairs") or []
                     if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
