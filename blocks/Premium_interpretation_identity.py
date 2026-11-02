@@ -3679,19 +3679,19 @@ def analyze_dialogue_transition(
     for key in ("assistant_artifact_index", "artifact_index"):
         value = source_pair.get(key)
         if isinstance(value, list):
-            candidates.extend(value[:16])
+            candidates.extend(value[:80])
     branch = context.get("active_work_branch") if isinstance(context.get("active_work_branch"), dict) else {}
     if relation == "CONTINUE" and not historical_match:
         branch_assets = branch.get("artifact_index")
         if isinstance(branch_assets, list):
-            candidates.extend(branch_assets[:12])
+            candidates.extend(branch_assets[:80])
     for pair in selected[:6]:
         if not isinstance(pair, dict):
             continue
         for key in ("assistant_artifact_index", "artifact_index"):
             value = pair.get(key)
             if isinstance(value, list):
-                candidates.extend(value[:8])
+                candidates.extend(value[:80])
     for item in candidates:
         if not isinstance(item, dict):
             continue
@@ -3723,8 +3723,6 @@ def analyze_dialogue_transition(
         else:
             artifact_positions[dedupe] = len(artifacts)
             artifacts.append(descriptor)
-        if len(artifacts) >= 16:
-            break
 
     saved_followup_kind = _text(
         semantics.get("saved_artifact_followup_kind") or _explicit_saved_artifact_followup_kind(request)
@@ -3846,8 +3844,37 @@ def analyze_dialogue_transition(
             "known_artifact_count": len(artifacts),
             "matching_artifact_count": len(matching_artifacts),
         },
-        "known_artifacts": artifacts[:12],
-        "revision_targets": matching_artifacts[:6],
+        "known_artifacts": artifacts[:80],
+        "revision_targets": matching_artifacts[:12],
+        "artifact_inventory": {
+            "indexed_count": len(artifacts),
+            "families": sorted({str(item.get("family")) for item in artifacts if item.get("family")}),
+            "revision_chains": sorted({str(item.get("revision_chain_id")) for item in artifacts if item.get("revision_chain_id")})[:40],
+            "source_message_ids": list(dict.fromkeys(str(item.get("source_message_id")) for item in artifacts if item.get("source_message_id")))[:80],
+        },
+        "pre_response_analysis": {
+            "sequence": [
+                "COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS",
+                "COMPARE_CURRENT_REQUEST_WITH_LATEST_APRIL_ANSWER",
+                "CHECK_CURRENT_BRANCH_AND_UNFINISHED_STEPS",
+                "IF_NO_CURRENT_MATCH_SEARCH_AUTHENTICATED_HISTORY",
+                "RESTORE_MATCHED_BRANCH_AND_RELEVANT_ARTIFACT_LINEAGE",
+                "DISTINGUISH_RECALL_FROM_CONTINUATION_OR_ARTIFACT_REVISION",
+                "ANSWER_ONLY_AFTER_SOURCE_AND_TASK_ALIGNMENT_CHECK",
+            ],
+            "selected_source_message_id": source_message_id,
+            "selected_topic_id": source_topic_id,
+            "selected_branch_id": source_branch_id,
+            "history_branch_selected": bool(historical_match or (history_request and source_message_id)),
+            "current_branch_selected": bool(relation == "CONTINUE" and source_message_id and not historical_match),
+            "latest_answer_is_primary_discourse_vector": bool(relation == "CONTINUE" and source_message_id and not historical_match),
+            "latest_answer_expects_user_input": bool((context.get("latest_answer_relation") or {}).get("expects_user_input")) if isinstance(context.get("latest_answer_relation"), dict) else False,
+            "latest_answer_has_topic_vector": bool(_context_signature(previous_answer).get("subject_terms")),
+            "request_task_count": int(semantics.get("task_count") or semantics.get("request_count") or 1),
+            "request_vector": _text(semantics.get("primary_intent") or semantics.get("intent") or "UNRESOLVED")[:80],
+            "must_verify_artifact_lineage": bool(artifacts),
+            "must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
+        },
         "continuation_summary": recap,
         "response_rules": {
             "begin_with_brief_context_summary": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION", "ARTIFACT_REVISION"},
