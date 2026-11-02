@@ -1146,6 +1146,7 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> di
             "matched": False, "answer_overlap": 0.0, "user_request_overlap": 0.0,
             "answer_subject_overlap": 0.0, "user_subject_overlap": 0.0,
             "answer_subject_conflict": False, "expects_user_input": False,
+            "implicit_history_resume": False, "anchor_role": "NONE",
             "message_id": "", "topic_id": "", "branch_id": "",
         }
     user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
@@ -1154,6 +1155,14 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> di
     answer_tokens = _semantic_tokens(answer_text[:5200])
     user_tokens = _semantic_tokens(user_text[:1800])
     query_subjects = _subject_tokens(query)
+    # "What were we talking about?" has no subject of its own. It must be
+    # anchored to the immediately preceding April answer, not compared with a
+    # vocative such as "Эппл" that happens to appear in a voice transcript.
+    implicit_history_resume = bool(
+        _is_history_recall_question(query) and not _history_query_topic_tokens(query)
+    )
+    if implicit_history_resume:
+        query_subjects = set()
     answer_subjects = _subject_tokens(answer_text[:5200])
     user_subjects = _subject_tokens(user_text[:1800])
     answer_subject_overlap = _subject_overlap(query_subjects, answer_subjects)
@@ -1180,6 +1189,8 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> di
         "user_subject_overlap": round(float(user_subject_overlap), 4),
         "answer_subject_conflict": bool(answer_subject_conflict),
         "expects_user_input": bool(_assistant_expects_user_input(answer)),
+        "implicit_history_resume": implicit_history_resume,
+        "anchor_role": "LATEST_ASSISTANT_TURN" if implicit_history_resume else "SEMANTIC_RELATION",
         "message_id": _text(row.get("message_id"))[:120],
         "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
         "branch_id": _text(row.get("branch_id") or row.get("active_branch_id"))[:120],
@@ -4154,6 +4165,7 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "назад", "хоть", "примерно", "около", "время", "времени", "помни", "помниш", "помнишь", "вспоминаешь",
     "list", "topic", "topics", "show", "history", "conversation", "conversations", "talked", "talking", "discuss", "discussed",
     "тем", "темами", "темах", "топик", "топика", "топики", "топиков", "диалогов", "разговоров", "обсуждении", "обсуждение",
+    "список", "списка", "поводу", "проект", "проекта", "проекту", "проекте", "проектов", "project", "содержание", "содержания",
     "сегодняшний", "утром", "вечером", "ночью", "период", "периода", "время", "времени",
     "октября", "ноября", "декабря", "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "monday", "tuesday", "wednesday", "thursday", "friday",
@@ -4265,28 +4277,62 @@ def _is_broad_history_overview_query(query: str) -> bool:
         r"(?:^|\b)(?:вообще\s+)?(?:нету|нет)\s+(?:ни\s+)?(?:о\s+)?чем\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)",
         r"(?:^|\b)(?:ничего|ничег\w*)\s+(?:не\s+)?(?:помню|помним|вижу|осталось)\b.{0,85}(?:о\s+чем|про\s+что|общал\w*|говорил\w*|обсуждал\w*|разговор\w*|диалог\w*)",
     )
-    if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in patterns):
-        return True
+    broad_match = any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in patterns)
     # Compact generic phrasings such as "история диалога за сегодня" and
     # "наши темы за день" are overview requests too.
-    return bool(re.search(
+    broad_match = broad_match or bool(re.search(
         r"(?:истори\w* (?:диалог\w*|переписк\w*)|наши темы|темы разговора).{0,35}(?:сегодня|вчера|за день|за неделю|today|yesterday|this week)?$",
         low,
         re.IGNORECASE,
     ))
+    if not broad_match:
+        return False
+    # A direct object after "what did we discuss?" is a named-topic lookup, not
+    # a broad inventory request. For example, "Что мы обсуждали API?".
+    residual = _strip_history_operation_words(low)
+    residual_tokens = _semantic_tokens(residual) - _HISTORY_QUERY_NOISE
+    return not bool({token for token in residual_tokens if not token.isdigit() and len(token) > 2})
+
+
+def _strip_history_assistant_vocative(query: Any) -> str:
+    """Strip April's name only when punctuation makes it a direct address."""
+    value = re.sub(r"\s+", " ", _text(query)).strip()
+    if not value:
+        return ""
+    return re.sub(
+        r"(?i)(^|[,;!?]\s*)(?:эппл|эпл|эйприл|април+|april)(?=\s*[,;!?]|$)",
+        r"\1 ",
+        value,
+    )
+
+
+def _strip_history_operation_words(query: Any) -> str:
+    """Leave the named subject, if any, after removing the history operation."""
+    low = _strip_history_assistant_vocative(query).lower().replace("ё", "е")
+    for pattern in (
+        r"\b(?:так\s+)?(?:о\s+ч[её]м|про\s+что)\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?"
+        r"(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)\b",
+        r"\b(?:что|какие\s+темы|какую\s+тему|что\s+именно)\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?"
+        r"(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b",
+        r"\b(?:напомни|вспомни|расскажи|перескажи|резюмируй|суммируй|пожалуйста|"
+        r"вообще|нету|ничего|мне|нам|мы|тобой|так|покажи|перечисли|список)\w*\b",
+    ):
+        low = re.sub(pattern, " ", low, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", low).strip(" ,;:.!?-")
 
 
 def _is_history_recall_question(query: str) -> bool:
-    """Return true for user turns whose purpose is to recall earlier dialogue.
+    """Return true for subjectless or subject-specific requests to recall dialogue.
 
-    Subject-specific recall still searches for its named topic, but the recall
-    question itself must not become a new topic in the dialogue index.
+    Subject-specific recall still searches its named topic. A subjectless request
+    is routed to the latest assistant answer first by the Premium intent classifier.
     """
     if _is_broad_history_overview_query(query):
         return True
     low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
     return bool(re.search(
         r"(?:\bчто\s+(?:мы\s+)?(?:сегодня\s+|вчера\s+|раньше\s+)?(?:говорили|обсуждали|решили|делали)\b|"
+        r"\b(?:о\s+ч[её]м|про\s+что)\s+(?:мы\s+)?(?:с\s+тобой\s+)?(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*)\b|"
         r"\b(?:напомни|вспомни|резюмируй|суммируй)\b.{0,90}(?:мы\s+)?(?:говорили|обсуждали|делали|решили|проекта|разговор|переписк|тему|темы|истори)\b|"
         r"\bwhat did we (?:talk|discuss|decide|work on)\b|\bwhat have we discussed\b|"
         r"\b(?:recap|summari[sz]e)\b.{0,50}\b(?:our conversation|what we discussed|our discussion)\b|"
@@ -4296,11 +4342,11 @@ def _is_history_recall_question(query: str) -> bool:
 
 
 def _history_query_topic_tokens(query: str) -> set[str]:
-    """Extract subject-bearing words from a history request, excluding recall wording and times."""
-    if _is_broad_history_overview_query(query):
-        return set()
+    """Extract a named subject while excluding recall wording and assistant vocatives."""
+    residual = _strip_history_operation_words(query)
+    tokens = _semantic_tokens(residual) - _HISTORY_QUERY_NOISE
     return {
-        token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
+        token for token in tokens
         if not token.isdigit() and len(token) > 2
     }
 
@@ -5153,6 +5199,7 @@ def _should_probe_hot_branch_first(
     features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
     pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
     time_window = profile.get("time_window") if isinstance(profile.get("time_window"), dict) else {}
+    resume_latest_branch = _text(profile.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
 
     if profile.get("explicit_topic_switch"):
         return False
@@ -5160,7 +5207,7 @@ def _should_probe_hot_branch_first(
         profile.get("history_request")
         or profile.get("history_inventory_request")
         or intent in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
-        or _is_history_request(query)
+        or (_is_history_request(query) and not resume_latest_branch)
         or profile.get("has_explicit_time_window")
         or time_window.get("has_constraint")
         or _text(profile.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
@@ -5170,7 +5217,6 @@ def _should_probe_hot_branch_first(
 
     low = _text(query).lower().replace("ё", "е")
     explicit_reopen = bool(profile.get("explicit_closed_branch_reopen"))
-    resume_latest_branch = _text(profile.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
     # Recognize anaphora even when the semantic classifier called the turn
     # NEW_INFORMATION. Adjectives, domain nouns and modality flags must not erase
     # this evidence (e.g. “в нём всё нравится: сюжет, флора и фауна”).
@@ -5444,6 +5490,10 @@ def _hot_branch_result_is_clear(result: dict[str, Any] | None) -> bool:
             or result.get("contextual_antecedent")
             or result.get("previous_answer_reference")
             or result.get("hot_work_followup")
+            # This is an explicit, classified request to use the latest assistant
+            # answer as the retrieval anchor. Lexical overlap is not required because
+            # the user deliberately did not repeat the topic name.
+            or result.get("implicit_latest_branch_resume")
         )
         and not result.get("explicit_topic_switch")
         and not result.get("explicit_topic_introduction")
@@ -6645,10 +6695,13 @@ def search_dialogue_context(
     query_subjects = set(_subject_tokens(subject_query)) if subject_query != query else (
         set(supplied_subjects) if isinstance(supplied_subjects, list) else _subject_tokens(query)
     )
-    # A subjectless request to inspect/resume the conversation is an operation on
-    # dialogue history, not a topical entity such as "вообще" or "нету". Keeping
-    # those words as subjects made the candidate scorer reject the newest branch.
-    if history_request and not _history_query_topic_tokens(query):
+    implicit_latest_branch_resume = bool(
+        resume_latest_branch and not _history_query_topic_tokens(query)
+    )
+    # A generic history reference has no topic entity: the immediately preceding
+    # April answer is its anchor. This also removes a punctuated assistant vocative
+    # ("Эппл") from subject conflict and prevents an unnecessary archive search.
+    if implicit_latest_branch_resume or (history_request and not _history_query_topic_tokens(query)):
         query_subjects = set()
     if targeted_active_repair and all_rows:
         # The authenticated source task is the semantic anchor; do not let reaction
@@ -6828,6 +6881,8 @@ def search_dialogue_context(
     # Search the whole user's 24-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
     topic_bearing = _semantic_tokens(subject_query if is_correction and subject_query != query else query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    if implicit_latest_branch_resume:
+        topic_bearing = set()
     # A pure correction such as "I wasn't asking about Mendeleev" rejects that
     # entity; searching the archive for the rejected name would repeat the mistake.
     if is_correction and not subject_query.strip():
@@ -8540,6 +8595,30 @@ def search_dialogue_context(
             if selected_for_context:
                 history_selection_method = "recent_dialogue_fallback"
                 history_matched_count = max(history_matched_count, len(selected_for_context))
+        requested_history_subjects = _history_query_topic_tokens(query)
+        if (
+            not dialogue_profile_request
+            and requested_history_subjects
+            and not selected_for_context
+            and not broad_history_overview
+        ):
+            # A named history lookup miss is not proof that the user has no history.
+            # Ask for a better label or approximate time instead of inventing a topic
+            # or returning unrelated recent dialogue.
+            clarification_needed = True
+            history_selection_method = "named_topic_history_miss_clarification"
+            pending_for_next_turn = {
+                "active": True,
+                "type": "history_topic_lookup_miss",
+                "original_request": _text(query)[:500],
+                "requested_topic_terms": sorted(requested_history_subjects)[:12],
+                "active_topic": "Уточнение поиска по истории",
+                "prompt": (
+                    "Не удалось надёжно найти сохранённый разговор по указанной теме. "
+                    "Уточни, пожалуйста, название объекта или проекта либо примерное время, "
+                    "когда мы это обсуждали. Я проверю связанные сообщения и материалы."
+                ),
+            }
         _apr_timing_log(
             "history_pair_selection",
             user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -10539,6 +10618,7 @@ def search_dialogue_context(
         "continuation_marker": marker,
         "referential_followup": reference_followup,
         "history_request": history_request,
+        "implicit_latest_branch_resume": bool(resume_latest_branch and not history_request),
         "contextual_history_match": contextual_history_match,
         "historical_artifact_reactivation": bool(historical_artifact_reactivation),
         "artifact_recovery": ({
@@ -10580,6 +10660,7 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
         selected_pairs=len(selected_for_context), topic_index_count=len(topic_index),
+        implicit_latest_branch_resume=bool(resume_latest_branch and not history_request),
         user_operation=_text(user_operation.get("type")),
         semantic_active_branch_intent=bool(semantic_active_branch_intent),
         active_branch_preserved=bool(active_branch_descriptor.get("branch_preserved")),
