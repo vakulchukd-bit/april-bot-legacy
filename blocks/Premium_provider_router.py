@@ -160,7 +160,7 @@ When PROTECTED_CURRENT_INPUT is present, its metadata identifies a separate adja
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
 PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
-DIALOGUE_TRANSITION_ANALYSIS compares the selected prior user request, April's actual last answer, and the current request. Read these as one semantic transition: identify what was already answered, what is newly requested, and what remains unfinished. For TOPIC_CONTINUATION and HISTORICAL_TOPIC_REACTIVATION, begin with one brief, factual reminder of the prior discussion, then move directly to the new step; never repeat completed sections merely to prove memory. For ARTIFACT_REVISION, retrieve and modify the exact revision target, preserve its original topic_id/branch_id/origin_message_id, and append a revision linked by revision_chain_id/revision_of; do not create an unrelated replacement. Mentioning or referring to an artifact is not itself an edit instruction. For NEW_TOPIC, do not reuse unrelated prior answers or artifacts. Treat this analysis as supporting evidence; the current user request and selected canonical source remain authoritative.
+DIALOGUE_TRANSITION_ANALYSIS is a mandatory pre-response analysis stage, not decorative metadata. Before drafting, privately execute its ordered pre_response_analysis.sequence: count and classify every current subtask; compare the current request with April's actual latest answer; check the active branch, its unresolved steps and exact answer direction; only if the current branch does not match, use the authenticated history-selected branch; restore the matched branch's relevant artifact inventory and revision lineage; distinguish a request to recall, continue, revise, or start a new topic; then verify that every answer part is grounded in the selected source. Use request_task_count and request_vector as routing evidence, but let the actual current request remain authoritative. Never expose hidden reasoning or internal analysis. Read these as one semantic transition: identify what was already answered, what is newly requested, and what remains unfinished. For TOPIC_CONTINUATION and HISTORICAL_TOPIC_REACTIVATION, begin with one brief, factual reminder of the prior discussion, then move directly to the new step; never repeat completed sections merely to prove memory. For ARTIFACT_REVISION, retrieve and modify the exact revision target, preserve its original topic_id/branch_id/origin_message_id, and append a revision linked by revision_chain_id/revision_of; do not create an unrelated replacement. Mentioning or referring to an artifact is not itself an edit instruction. For NEW_TOPIC, do not reuse unrelated prior answers or artifacts. Treat this analysis as supporting evidence; the current user request and selected canonical source remain authoritative.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
@@ -2280,8 +2280,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 {key: _text(item.get(key))[:120] if isinstance(item.get(key), str) else item.get(key)
                  for key in ("family", "artifact_id", "source_message_id", "revision_chain_id", "revision_number")
                  if item.get(key) not in (None, "", [], {})}
-                for item in (raw_transition.get("revision_targets") or [])[:3] if isinstance(item, dict)
+                for item in (raw_transition.get("revision_targets") or [])[:8] if isinstance(item, dict)
             ],
+            "artifact_inventory": raw_transition.get("artifact_inventory") if isinstance(raw_transition.get("artifact_inventory"), dict) else {},
+            "pre_response_analysis": raw_transition.get("pre_response_analysis") if isinstance(raw_transition.get("pre_response_analysis"), dict) else {},
             "response_rules": {key: bool(value) for key, value in (raw_transition.get("response_rules") or {}).items() if key in {
                 "begin_with_brief_context_summary", "do_not_repeat_completed_sections",
                 "develop_only_requested_or_unfinished_parts", "use_exact_source_artifact_for_revision",
@@ -3535,14 +3537,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             {key: _clip(item.get(key), 140) if isinstance(item.get(key), str) else item.get(key)
              for key in ("family", "artifact_id", "title", "source_message_id", "revision_chain_id", "revision_number")
              if item.get(key) not in (None, "", [], {})}
-            for item in (transition_raw.get("known_artifacts") or [])[:8] if isinstance(item, dict)
+            for item in (transition_raw.get("known_artifacts") or [])[:24] if isinstance(item, dict)
         ],
         "revision_targets": [
             {key: _clip(item.get(key), 140) if isinstance(item.get(key), str) else item.get(key)
              for key in ("family", "artifact_id", "title", "source_message_id", "revision_chain_id", "revision_number")
              if item.get(key) not in (None, "", [], {})}
-            for item in (transition_raw.get("revision_targets") or [])[:4] if isinstance(item, dict)
+            for item in (transition_raw.get("revision_targets") or [])[:12] if isinstance(item, dict)
         ],
+        "artifact_inventory": transition_raw.get("artifact_inventory") if isinstance(transition_raw.get("artifact_inventory"), dict) else {},
+        "pre_response_analysis": transition_raw.get("pre_response_analysis") if isinstance(transition_raw.get("pre_response_analysis"), dict) else {},
         "response_rules": {key: bool(value) for key, value in transition_rules.items() if key in {
             "begin_with_brief_context_summary", "do_not_repeat_completed_sections",
             "develop_only_requested_or_unfinished_parts", "use_exact_source_artifact_for_revision",
