@@ -893,7 +893,7 @@ def _build_dialogue_thread_context(
         if not isinstance(pair, dict):
             continue
         artifacts = pair.get("artifact_index") if isinstance(pair.get("artifact_index"), list) else []
-        for artifact in artifacts[:6]:
+        for artifact in artifacts[:80]:
             descriptor = _dialogue_thread_asset_descriptor(artifact)
             if descriptor:
                 artifact_index.append(descriptor)
@@ -947,7 +947,7 @@ def _build_dialogue_thread_context(
         "request_summary": _text(user_text)[:320],
         "recent_steps": steps[-24:],
         "question_sequence": question_steps,
-        "artifact_index": deduped_artifacts[-12:],
+        "artifact_index": deduped_artifacts[-80:],
         "topic_context_manifest": ({
             "schema": _text(topic_context.get("schema") or "april_active_topic_context_v1")[:60],
             "topic_id": _text(topic_context.get("topic_id") or topic_id)[:120],
@@ -4188,6 +4188,36 @@ async def execute(
         dialogue_context=dialogue_context,
         semantic_interpretation=semantic_interpretation,
     )
+    # The request sequence is the authoritative task count after decomposition;
+    # enrich the pre-response analysis without changing the existing routing result.
+    pre_response_analysis = transition_analysis.setdefault("pre_response_analysis", {})
+    if isinstance(pre_response_analysis, dict):
+        pre_response_analysis["request_task_count"] = max(1, len(question_sequence))
+        pre_response_analysis["analysis_mode"] = "SYNCHRONOUS_LOCAL_NO_EXTRA_MODEL_CALL"
+        pre_response_analysis["routing_order"] = [
+            "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH",
+            "AUTHENTICATED_HISTORICAL_BRANCH_SEARCH",
+            "NEW_TOPIC",
+        ]
+        latest_answer_relation = dialogue_context.get("latest_answer_relation") if isinstance(dialogue_context.get("latest_answer_relation"), dict) else {}
+        pre_response_analysis["latest_answer_expects_user_input"] = bool(latest_answer_relation.get("expects_user_input"))
+        pre_response_analysis["latest_answer_match"] = bool(latest_answer_relation.get("matched"))
+        pre_response_analysis["latest_answer_message_id"] = _text(latest_answer_relation.get("message_id"))[:120]
+        pre_response_analysis["request_vector"] = _text(
+            semantic_interpretation.get("primary_intent")
+            or semantic_interpretation.get("intent")
+            or pre_response_analysis.get("request_vector")
+            or "UNRESOLVED"
+        )[:80]
+        pre_response_analysis["request_task_vectors"] = [
+            {
+                "step_index": item.get("step_index"),
+                "intent": _text(item.get("semantic_intent") or item.get("intent"))[:80],
+                "relation": _text((item.get("dialogue_search") or {}).get("relation") if isinstance(item.get("dialogue_search"), dict) else item.get("relation"))[:32],
+                "output_types": [_text(value)[:32] for value in (item.get("output_types") or [])[:6]],
+            }
+            for item in question_sequence[:12] if isinstance(item, dict)
+        ]
     dialogue_context["dialogue_transition_analysis"] = transition_analysis
     dialogue_thread_context = _build_dialogue_thread_context(
         user_id=uid,
@@ -6412,7 +6442,7 @@ async def execute(
         "response_summary": response_summary[:480],
         "recent_steps": recent_steps[-6:],
         "question_sequence": list(dialogue_thread.get("question_sequence") or [])[:8],
-        "artifact_index": unique_artifacts[-12:],
+        "artifact_index": unique_artifacts[-80:],
         "topic_context_manifest": dict(dialogue_thread.get("topic_context_manifest") or {}),
     })
     # The response record is copied before enrichment so the provider's raw
@@ -6429,7 +6459,7 @@ async def execute(
         "last_message_id": dialogue_thread["last_message_id"],
         "last_action": last_action,
         "recent_steps": recent_steps[-6:],
-        "artifact_index": unique_artifacts[-12:],
+        "artifact_index": unique_artifacts[-80:],
         "topic_context_manifest": dict(dialogue_thread.get("topic_context_manifest") or {}),
         "dialogue_transition_analysis": transition_analysis,
         "dialogue_thread": dialogue_thread,
