@@ -35,6 +35,8 @@ from psycopg2.extras import RealDictCursor
 # These values belong to the existing storage contract; the ZIP does not contain
 # a separate tariffs_config module, so storage must not import a missing file.
 ADMIN_ID = os.getenv("APRIL_ADMIN_ID", "")
+# Must match the fixed April ID used by app/settings/page.tsx Admin Profile.
+COMMUNITY_SUPERADMIN_APRIL_ID = "APR-WMBS-8W4Y"
 FREE_MESSAGES_LIMIT = int(os.getenv("APRIL_FREE_MESSAGES_LIMIT", "20"))
 FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
 LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
@@ -4907,9 +4909,11 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                     str(profile.get("plan") or "free").lower() == "premium"
                     and float(profile.get("subscription_until") or 0) > now().timestamp()
                 )
-                configured_admin_id = str(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y") or "").strip().lower()
-                current_april_id = str(profile.get("april_id") or "").strip().lower()
-                is_admin = bool(configured_admin_id and configured_admin_id in {current_april_id, uid.lower()})
+                # Use the same fixed identity as the Web Admin Profile. Do not let
+                # an unrelated/misconfigured Railway env override hide admin controls.
+                configured_admin_id = COMMUNITY_SUPERADMIN_APRIL_ID.casefold()
+                current_april_id = str(profile.get("april_id") or "").strip().casefold()
+                is_admin = configured_admin_id in {current_april_id, uid.casefold()}
                 return {
                     "success": True,
                     "messages": messages,
@@ -5173,11 +5177,9 @@ def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
 
 
 def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[str, Any]:
-    """Delete any public community message, but only for the configured superadmin."""
+    """Delete any public community message, but only for the Admin Profile ID."""
     admin_uid = _community_canonical_user(admin_user_id)
-    configured_admin_id = str(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y") or "").strip()
-    configured_admin_uid = resolve_user_id(configured_admin_id) if configured_admin_id else None
-    if not admin_uid or not configured_admin_uid or admin_uid != configured_admin_uid:
+    if not admin_uid:
         return {"success": False, "error": "SUPERADMIN_REQUIRED"}
     try:
         mid = int(message_id)
@@ -5191,6 +5193,13 @@ def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[
     try:
         with conn:
             with conn.cursor() as cur:
+                # Resolve the logged-in canonical user back to their public April ID.
+                # Authorization is enforced here, not by the visibility of the UI button.
+                cur.execute("SELECT april_id FROM users WHERE user_id = %s LIMIT 1", (admin_uid,))
+                admin_row = cur.fetchone() or {}
+                public_admin_id = str(admin_row.get("april_id") or "").strip().casefold()
+                if COMMUNITY_SUPERADMIN_APRIL_ID.casefold() not in {public_admin_id, admin_uid.casefold()}:
+                    return {"success": False, "error": "SUPERADMIN_REQUIRED"}
                 cur.execute(
                     """UPDATE community_messages
                        SET is_deleted = TRUE, message = '', attachment_name = NULL,
