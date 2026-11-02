@@ -57,7 +57,7 @@ from storage import (
     mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
     get_community_snapshot, save_community_display_name, reset_community_display_name, create_community_message,
-    get_community_file, delete_community_message, report_community_message,
+    get_community_file, delete_community_message, admin_delete_community_message, report_community_message,
     submit_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
     remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
@@ -2581,6 +2581,8 @@ class AprilHandler(BaseHTTPRequestHandler):
                 result = reset_community_display_name(canonical_user_id)
             elif action == "delete_message":
                 result = delete_community_message(canonical_user_id, fields.get("message_id"))
+            elif action == "admin_delete_message":
+                result = admin_delete_community_message(canonical_user_id, fields.get("message_id"))
             elif action == "report_message":
                 result = report_community_message(canonical_user_id, fields.get("message_id"), fields.get("reason"))
             elif action in {"send_message", ""}:
@@ -2599,7 +2601,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 self._send_json(200, result)
                 return
             error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
-            status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 403 if error in {"ATTACHMENT_TYPE_BLOCKED", "RESERVED_DISPLAY_NAME", "FRIENDS_REQUIRED"} else 404 if error in {"MESSAGE_ID_INVALID", "MESSAGE_NOT_FOUND_OR_NOT_OWNED", "MESSAGE_NOT_FOUND", "COMMUNITY_USER_NOT_FOUND", "FRIEND_REQUEST_NOT_FOUND"} else 413 if error in {"ATTACHMENT_TOO_LARGE_OR_EMPTY", "MESSAGE_TOO_LONG", "COMMUNITY_ATTACHMENT_QUOTA_REACHED"} else 429 if error == "RATE_LIMITED" else 400 if error in {"INVALID_DISPLAY_NAME", "MESSAGE_OR_FILE_REQUIRED"} else 503
+            status = 401 if error == "AUTHENTICATED_USER_REQUIRED" else 403 if error in {"ATTACHMENT_TYPE_BLOCKED", "RESERVED_DISPLAY_NAME", "FRIENDS_REQUIRED", "SUPERADMIN_REQUIRED"} else 404 if error in {"MESSAGE_ID_INVALID", "MESSAGE_NOT_FOUND_OR_NOT_OWNED", "MESSAGE_NOT_FOUND", "COMMUNITY_USER_NOT_FOUND", "FRIEND_REQUEST_NOT_FOUND"} else 413 if error in {"ATTACHMENT_TOO_LARGE_OR_EMPTY", "MESSAGE_TOO_LONG", "COMMUNITY_ATTACHMENT_QUOTA_REACHED"} else 429 if error == "RATE_LIMITED" else 400 if error in {"INVALID_DISPLAY_NAME", "MESSAGE_OR_FILE_REQUIRED"} else 503
             self._send_json(status, result or {"success": False, "error": error})
             return
 
