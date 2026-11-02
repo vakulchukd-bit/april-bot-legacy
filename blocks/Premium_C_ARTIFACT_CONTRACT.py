@@ -203,23 +203,42 @@ def _extract_text_candidate(value: Any, *, allow_topic: bool = False) -> str:
 
 
 def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize table cells without selecting a route or changing semantics."""
+    """Normalize table columns/rows while preserving descriptor keys and Excel sheets."""
     payload = dict(payload or {})
-    columns = payload.get("columns") or payload.get("headers") or []
-    if isinstance(columns, str):
-        columns = [x.strip() for x in columns.split("|")] if "|" in columns else [columns.strip()]
-    columns = [x for x in columns if x is not None]
+    raw_columns = payload.get("columns") or payload.get("headers") or []
+    if isinstance(raw_columns, str):
+        raw_columns = [part.strip() for part in raw_columns.split("|")] if "|" in raw_columns else [raw_columns.strip()]
 
-    rows = payload.get("rows") or []
-    if isinstance(rows, dict):
-        rows = list(rows.values())
-    elif not isinstance(rows, (list, tuple)):
-        rows = [rows]
+    specs = []
+    for index, column in enumerate(raw_columns if isinstance(raw_columns, (list, tuple)) else []):
+        if isinstance(column, dict):
+            key = next((str(column.get(name)).strip() for name in ("key", "field", "accessor", "id", "name", "label", "title") if column.get(name) not in (None, "")), f"column_{index + 1}")
+            label = next((str(column.get(name)).strip() for name in ("label", "title", "name", "header", "key", "field", "id") if column.get(name) not in (None, "")), f"Column {index + 1}")
+        else:
+            label = str(column if column is not None else f"Column {index + 1}").strip()
+            key = label
+        specs.append((key or f"column_{index + 1}", label or f"Column {index + 1}"))
+
+    keys = [key for key, _label in specs]
+    columns = [label for _key, label in specs]
+    raw_rows = payload.get("rows")
+    if raw_rows is None:
+        raw_rows = payload.get("data", [])
+    if isinstance(raw_rows, dict):
+        raw_rows = list(raw_rows.values())
+    elif not isinstance(raw_rows, (list, tuple)):
+        raw_rows = [raw_rows] if raw_rows not in (None, "") else []
 
     normalized_rows = []
-    for row in rows:
+    for row in raw_rows:
         if isinstance(row, dict):
-            values = [row.get(column, "") for column in columns] if columns else list(row.values())
+            if not specs:
+                for key in row:
+                    if key not in keys:
+                        keys.append(str(key))
+                        columns.append(str(key))
+                specs = list(zip(keys, columns))
+            values = [row.get(key, row.get(columns[index], "")) for index, key in enumerate(keys)]
         elif isinstance(row, (list, tuple)):
             values = list(row)
         elif isinstance(row, str):
@@ -235,16 +254,70 @@ def _normalize_table_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     width = len(columns) or max((len(row) for row in normalized_rows), default=0)
     if not columns and width:
-        columns = [f"Column {i + 1}" for i in range(width)]
+        columns = [f"Column {index + 1}" for index in range(width)]
     for row in normalized_rows:
         if len(row) < width:
             row.extend([""] * (width - len(row)))
         elif len(row) > width:
             del row[width:]
 
+    def normalize_extra_sheet(sheet: Any, index: int) -> Optional[Dict[str, Any]]:
+        if not isinstance(sheet, dict):
+            return None
+        nested = sheet.get("payload") if isinstance(sheet.get("payload"), dict) else sheet
+        raw_headers = nested.get("headers") or nested.get("columns") or nested.get("column_headers") or []
+        if isinstance(raw_headers, str):
+            raw_headers = [part.strip() for part in raw_headers.split("|")] if "|" in raw_headers else [raw_headers.strip()]
+        sheet_specs = []
+        for column_index, column in enumerate(raw_headers if isinstance(raw_headers, (list, tuple)) else []):
+            if isinstance(column, dict):
+                key = next((str(column.get(name)).strip() for name in ("key", "field", "accessor", "id", "name", "label", "title") if column.get(name) not in (None, "")), f"column_{column_index + 1}")
+                label = next((str(column.get(name)).strip() for name in ("label", "title", "name", "header", "key", "field", "id") if column.get(name) not in (None, "")), f"Column {column_index + 1}")
+            else:
+                label = str(column if column is not None else f"Column {column_index + 1}").strip()
+                key = label
+            sheet_specs.append((key, label))
+        if not sheet_specs:
+            return None
+        sheet_keys = [key for key, _label in sheet_specs]
+        sheet_headers = [label for _key, label in sheet_specs]
+        sheet_rows = nested.get("rows")
+        if sheet_rows is None:
+            sheet_rows = nested.get("data", nested.get("body", nested.get("values", [])))
+        if isinstance(sheet_rows, dict):
+            sheet_rows = list(sheet_rows.values())
+        elif not isinstance(sheet_rows, (list, tuple)):
+            sheet_rows = [sheet_rows] if sheet_rows not in (None, "") else []
+        output_rows = []
+        for row in list(sheet_rows)[:10000]:
+            if isinstance(row, dict):
+                values = [row.get(key, row.get(sheet_headers[position], "")) for position, key in enumerate(sheet_keys)]
+            elif isinstance(row, (list, tuple)):
+                values = list(row[:len(sheet_headers)])
+            else:
+                values = [row]
+            values = values[:len(sheet_headers)] + [""] * max(0, len(sheet_headers) - len(values))
+            output_rows.append(values)
+        if not output_rows:
+            return None
+        return {
+            "title": str(nested.get("title") or nested.get("name") or sheet.get("title") or f"Data {index + 1}"),
+            "headers": sheet_headers,
+            "columns": sheet_headers,
+            "rows": output_rows,
+        }
+
+    raw_extra_sheets = payload.get("additional_sheets") or payload.get("sheets") or []
+    if isinstance(raw_extra_sheets, dict):
+        raw_extra_sheets = list(raw_extra_sheets.values())
+    payload["additional_sheets"] = [
+        normalized for index, sheet in enumerate(raw_extra_sheets if isinstance(raw_extra_sheets, (list, tuple)) else [])
+        if (normalized := normalize_extra_sheet(sheet, index)) is not None
+    ][:8]
     payload["columns"] = columns
+    payload["headers"] = columns
     payload["rows"] = normalized_rows
-    payload["table_schema"] = "april.table.canonical.v2"
+    payload["table_schema"] = "april.table.canonical.v3"
     payload["presentation"] = {
         **dict(payload.get("presentation") or {}),
         "renderer": "TableBlock",
