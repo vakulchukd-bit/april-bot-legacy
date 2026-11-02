@@ -588,14 +588,17 @@ def _dialogue_thread_asset_descriptor(value: Any, default_role: str = "") -> dic
     allowed = (
         "filename", "name", "title", "kind", "type", "artifact_type", "output_type",
         "mime_type", "content_type", "media_type", "renderer", "viewer", "chart_type",
+        "href", "uri", "target_url", "destination", "copy_action", "language",
         "graph_type", "asset_role", "source_type", "source_message_id", "asset_message_id",
         "asset_id", "artifact_id", "id", "ref", "url", "path", "size_bytes", "sequence_index",
         "series_count", "point_count", "row_count", "column_count", "dimensions", "checksum",
         "topic_id", "branch_id", "parent_message_id", "origin_message_id", "artifact_family",
         "revision_of", "revision_chain_id", "revision_number", "revision_status",
-        "supersedes", "derived_from_artifact_id", "source_topic_id", "source_branch_id",
-        "operation", "description", "summary", "data_summary",
-        "preview", "alt", "caption", "label", "format", "language",
+        "supersedes", "derived_from_artifact_id", "source_topic_id", "source_branch_id", "source_item_path",
+        "operation", "image_operation", "edit_operation", "edit_mode", "visual_operation", "action",
+        "request_anchor", "prompt_summary", "source_asset_id", "source_asset_message_id",
+        "generation_model", "quality", "description", "summary", "data_summary",
+        "preview", "alt", "caption", "label", "format", "language", "topic_origin_message_id",
     )
     item: dict[str, Any] = {}
     for key in allowed:
@@ -648,6 +651,8 @@ def _dialogue_artifact_family(value: Any) -> str:
         ("formula", ("formula", "equation", "math")),
         ("diagram", ("diagram", "flowchart", "schema", "drawing")),
         ("code", ("code", "script", "source_code")),
+        ("link", ("link", "url", "uri", "hyperlink")),
+        ("copy", ("copy", "copy_block", "copyable_text", "text_copy_block")),
         ("image", ("image", "photo", "picture", "gallery", "screenshot")),
         ("file", ("file", "document", "pdf", "presentation", "text_file")),
     )
@@ -892,10 +897,86 @@ def _build_dialogue_thread_context(
     for pair in selected[-12:]:
         if not isinstance(pair, dict):
             continue
-        artifacts = pair.get("artifact_index") if isinstance(pair.get("artifact_index"), list) else []
-        for artifact in artifacts[:80]:
-            descriptor = _dialogue_thread_asset_descriptor(artifact)
+        artifacts = []
+        for artifact_field in ("artifact_index", "assistant_artifact_index"):
+            field_items = pair.get(artifact_field) if isinstance(pair.get(artifact_field), list) else []
+            artifacts.extend(field_items[:80])
+        protected = pair.get("protected_structured_data") if isinstance(pair.get("protected_structured_data"), dict) else {}
+        protected_items = protected.get("items") if isinstance(protected.get("items"), list) else []
+        for protected_item in protected_items[:80]:
+            if not isinstance(protected_item, dict):
+                continue
+            protected_data = protected_item.get("data") if isinstance(protected_item.get("data"), dict) else {}
+            raw_source_path = protected_item.get("index")
+            if isinstance(raw_source_path, (list, tuple)):
+                source_item_path = ".".join(str(part) for part in raw_source_path[:8])
+            else:
+                source_item_path = _text(raw_source_path)[:120]
+            artifact_descriptor = {
+                "kind": _text(protected_item.get("kind")),
+                "title": _text(protected_data.get("title") or protected_data.get("label") or protected_data.get("filename")),
+                "summary": _text(protected_data.get("description") or protected_data.get("context") or protected_data.get("summary"))[:260],
+                "url": _text(protected_data.get("url") or protected_data.get("href") or protected_data.get("uri")),
+                "filename": _text(protected_data.get("filename")),
+                "language": _text(protected_data.get("language")),
+                "source_message_id": _text(pair.get("message_id") or pair.get("source_message_id")),
+                "source_item_path": source_item_path,
+                "topic_id": _text(pair.get("topic_id")),
+                "branch_id": _text(pair.get("branch_id")),
+            }
+            # The protected block may wrap its canonical payload one level deeper.
+            # Copy only compact identifiers, lineage and operation metadata into
+            # the topic index; never copy table rows, chart points, code or base64.
+            protected_metadata_keys = (
+                "artifact_id", "asset_id", "id", "ref", "url", "href", "uri", "path",
+                "filename", "name", "title", "label", "kind", "type", "renderer", "viewer",
+                "mime_type", "content_type", "media_type", "format", "artifact_type",
+                "output_type", "artifact_family", "asset_role", "source_type", "language",
+                "revision_of", "revision_chain_id", "revision_number", "revision_status",
+                "supersedes", "derived_from_artifact_id", "source_topic_id", "source_branch_id",
+                "source_message_id", "asset_message_id", "origin_message_id", "parent_message_id",
+                "topic_origin_message_id", "operation", "image_operation", "edit_operation",
+                "edit_mode", "visual_operation", "action", "request_anchor", "prompt_summary",
+                "source_asset_id", "source_asset_message_id", "generation_model", "quality",
+                "chart_type", "graph_type", "copy_action", "row_count", "column_count",
+                "series_count", "point_count", "size_bytes", "checksum", "alt", "caption",
+                "preview", "description", "summary", "data_summary",
+            )
+            metadata_sources = [protected_data]
+            for nested_key in ("payload", "metadata", "artifact", "asset"):
+                nested = protected_data.get(nested_key)
+                if isinstance(nested, dict):
+                    metadata_sources.append(nested)
+            for metadata_source in metadata_sources:
+                for metadata_key in protected_metadata_keys:
+                    metadata_value = metadata_source.get(metadata_key)
+                    if metadata_value in (None, "", [], {}):
+                        continue
+                    if metadata_key in {"url", "href", "uri", "path", "ref"}:
+                        locator = _text(metadata_value)
+                        if locator.lower().startswith(("data:", "blob:")) or len(locator) > 480:
+                            continue
+                        artifact_descriptor[metadata_key] = locator[:480]
+                    elif metadata_key in {"revision_number", "row_count", "column_count", "series_count", "point_count", "size_bytes"}:
+                        try:
+                            artifact_descriptor[metadata_key] = max(0, int(metadata_value))
+                        except (TypeError, ValueError):
+                            continue
+                    elif metadata_key in {"description", "summary", "data_summary", "preview", "caption", "alt", "prompt_summary"}:
+                        compact_value = _text(metadata_value)
+                        if compact_value.lower().startswith(("data:", "blob:")):
+                            continue
+                        artifact_descriptor[metadata_key] = compact_value[:280]
+                    else:
+                        artifact_descriptor[metadata_key] = _text(metadata_value)[:180]
+            artifacts.append(artifact_descriptor)
+        for artifact in artifacts[:160]:
+            default_role = "april_output" if artifact in (pair.get("assistant_artifact_index") or []) else ""
+            descriptor = _dialogue_thread_asset_descriptor(artifact, default_role)
             if descriptor:
+                descriptor.setdefault("source_message_id", _text(pair.get("message_id") or pair.get("source_message_id"))[:120])
+                descriptor.setdefault("topic_id", _text(pair.get("topic_id"))[:120])
+                descriptor.setdefault("branch_id", _text(pair.get("branch_id"))[:120])
                 artifact_index.append(descriptor)
     for attachment in (attachments or [])[:12]:
         descriptor = _dialogue_thread_asset_descriptor(attachment, "user_input")
@@ -905,12 +986,20 @@ def _build_dialogue_thread_context(
     deduped_artifacts = []
     seen_artifacts = set()
     for item in artifact_index:
-        key = (
-            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
-                  or item.get("asset_message_id") or item.get("filename") or item.get("name")),
-            _text(item.get("asset_role") or item.get("kind") or item.get("type")),
+        artifact_identity = _text(
+            item.get("asset_id") or item.get("artifact_id") or item.get("id")
+            or item.get("ref") or item.get("url") or item.get("path")
+            or item.get("filename") or item.get("name") or item.get("title")
         )
-        if key != ("", "") and key not in seen_artifacts:
+        source_identity = _text(item.get("source_message_id") or item.get("asset_message_id"))
+        key = (
+            artifact_identity or source_identity,
+            source_identity,
+            _text(item.get("source_item_path")),
+            _text(item.get("artifact_family") or item.get("kind") or item.get("type") or item.get("artifact_type")),
+            _text(item.get("revision_chain_id") or item.get("revision_number")),
+        )
+        if key != ("", "", "", "", "") and key not in seen_artifacts:
             seen_artifacts.add(key)
             deduped_artifacts.append(item)
     return {
@@ -971,6 +1060,11 @@ def _build_dialogue_thread_context(
                 if isinstance(item, dict)
             ],
             "artifact_count": max(0, int(topic_context.get("artifact_count") or 0)),
+            "artifact_index": [
+                _dialogue_thread_asset_descriptor(item, "april_output")
+                for item in (topic_context.get("artifact_index") or [])[:80]
+                if isinstance(item, dict)
+            ],
             "source_message_ids": [_text(value)[:120] for value in (topic_context.get("source_message_ids") or [])[:160] if _text(value)],
         } if continuing and topic_context else {}),
     }
@@ -2668,8 +2762,22 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     sources = list(dialogue_context.get("candidates") or [])
-    sources.extend(dialogue_context.get("selected_pairs") or [])
+    selected_pairs = dialogue_context.get("selected_pairs") or []
+    sources.extend(selected_pairs)
     anchor = dialogue_context.get("anchor")
+    selected_message_ids = {
+        _text(item.get("message_id") or item.get("source_message_id"))
+        for item in selected_pairs if isinstance(item, dict)
+        and _text(item.get("message_id") or item.get("source_message_id"))
+    }
+    if isinstance(anchor, dict):
+        anchor_id = _text(anchor.get("message_id") or anchor.get("source_message_id"))
+        if anchor_id:
+            selected_message_ids.add(anchor_id)
+    allow_selected_historical = bool(
+        dialogue_context.get("contextual_history_match")
+        or dialogue_context.get("historical_artifact_reactivation")
+    )
     if isinstance(anchor, dict):
         sources.append(anchor)
 
@@ -2687,9 +2795,15 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
         return False
 
     for source in sources:
-        if not isinstance(source, dict) or not bool(source.get("same_dialog")):
+        if not isinstance(source, dict):
             continue
         message_id = _text(source.get("message_id") or source.get("source_message_id"))
+        same_dialog = bool(source.get("same_dialog"))
+        selected_historical_source = bool(
+            allow_selected_historical and message_id and message_id in selected_message_ids
+        )
+        if not same_dialog and not selected_historical_source:
+            continue
         if not message_id or message_id in seen:
             continue
         modalities = set(source.get("row_modalities") or [])
@@ -2703,6 +2817,7 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
             continue
         item = dict(source)
         item["message_id"] = message_id
+        item["selected_historical_source"] = bool(selected_historical_source)
         item["row_modalities"] = sorted(modalities | {"image"})
         if item.get("created_at") is None:
             item["created_at"] = item.get("topic_last_at") or item.get("topic_origin_at") or 0
@@ -2723,11 +2838,15 @@ def _select_active_image_candidate(
     *,
     now_ts: float | None = None,
 ) -> str:
-    """Choose one image from the authenticated active dialogue, not an old branch."""
+    """Choose one image from the active branch or an explicitly selected historical source."""
     now = float(now_ts if now_ts is not None else time.time())
     ranked: list[tuple[int, float, int, str]] = []
     for candidate in candidates or []:
-        if not isinstance(candidate, dict) or not bool(candidate.get("same_dialog")):
+        if not isinstance(candidate, dict):
+            continue
+        # Historical rows are admitted only when State Manager already selected
+        # their exact message as the matching topic/artifact; never scan old images broadly.
+        if not bool(candidate.get("same_dialog")) and not bool(candidate.get("selected_historical_source")):
             continue
         if "image" not in set(candidate.get("row_modalities") or []):
             continue
@@ -3142,7 +3261,8 @@ def _restore_selected_assets(
                 "source_terms": source_terms[:3],
                 "candidate_images": len(candidates),
                 "selected_message_key": selected_image_id[:48] if selected_image_id else "",
-                "same_dialog_only": True,
+                "same_dialog_only": not bool(dialogue_context.get("historical_artifact_reactivation") or dialogue_context.get("contextual_history_match")),
+                "historical_source_selected": bool(selected_image_id and selected_image_id in selected_message_ids and not next((bool(item.get("same_dialog")) for item in candidates if _text(item.get("message_id")) == selected_image_id), True)),
             }, ensure_ascii=False),
             flush=True,
         )
@@ -6398,14 +6518,20 @@ async def execute(
     unique_artifacts = []
     seen_artifacts = set()
     for item in artifact_index:
-        artifact_key = (
-            _text(item.get("asset_id") or item.get("artifact_id") or item.get("id")
-                  or item.get("asset_message_id") or item.get("filename") or item.get("name")
-                  or item.get("title") or item.get("ref")),
-            _text(item.get("asset_role") or item.get("kind") or item.get("type")
-                  or item.get("artifact_type") or item.get("output_type")),
+        artifact_identity = _text(
+            item.get("asset_id") or item.get("artifact_id") or item.get("id")
+            or item.get("ref") or item.get("url") or item.get("filename") or item.get("name") or item.get("title")
         )
-        if artifact_key != ("", "") and artifact_key not in seen_artifacts:
+        source_identity = _text(item.get("source_message_id") or item.get("asset_message_id"))
+        artifact_key = (
+            artifact_identity or source_identity,
+            source_identity,
+            _text(item.get("source_item_path")),
+            _text(item.get("artifact_family") or item.get("asset_role") or item.get("kind")
+                  or item.get("type") or item.get("artifact_type") or item.get("output_type")),
+            _text(item.get("revision_chain_id") or item.get("revision_number")),
+        )
+        if artifact_key != ("", "", "", "", "") and artifact_key not in seen_artifacts:
             seen_artifacts.add(artifact_key)
             unique_artifacts.append(item)
     prior_branch_summary = _text(dialogue_thread.get("branch_summary"))
