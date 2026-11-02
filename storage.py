@@ -455,6 +455,25 @@ def init_db() -> None:
                     CREATE INDEX IF NOT EXISTS idx_april_referral_target_inviter_created
                     ON april_referral_share_targets(inviter_user_id, created_at DESC)
                 """)
+                # Temporary public file links are stored in PostgreSQL, not process
+                # memory, so Railway restarts/replicas do not invalidate active shares.
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS april_public_shared_assets (
+                        id BIGSERIAL PRIMARY KEY,
+                        owner_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        filename TEXT NOT NULL,
+                        mime_type TEXT NOT NULL,
+                        content BYTEA NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMPTZ NOT NULL
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_april_public_shared_assets_expiry
+                    ON april_public_shared_assets(expires_at)
+                """)
 
                 # Settle legacy pending referrals under row locks. This migration is
                 # idempotent: each invite changes from pending to rewarded in the same
@@ -2756,6 +2775,9 @@ def prepare_april_referral_share(
                 )
                 self_warning = cur.fetchone()
                 if self_warning:
+                    # A previous attempt to open one's own link is a warning, not
+                    # a reason to prevent the owner from preparing a fresh link.
+                    # The actual claim path below still rejects self-invites.
                     if reveal_warnings:
                         cur.execute(
                             """UPDATE april_referral_share_targets
@@ -2763,12 +2785,7 @@ def prepare_april_referral_share(
                                WHERE id = %s AND self_warning_shown_at IS NULL""",
                             (current, int(self_warning.get("id") or 0)),
                         )
-                    print(
-                        "[APRIL_REFERRAL] event=prepare outcome=blocked reason=previous_self_claim "
-                        + ("warning=shown" if reveal_warnings else "warning=pending"),
-                        flush=True,
-                    )
-                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE", "warning_once": True, "warning_pending": not reveal_warnings}
+                    print("[APRIL_REFERRAL] event=prepare warning=previous_self_claim continue=true", flush=True)
 
                 # A claimed token has already been activated by one new account.
                 # Warn once before preparing a fresh link. The intended next
@@ -2785,6 +2802,9 @@ def prepare_april_referral_share(
                 )
                 repeat_warning = cur.fetchone()
                 if repeat_warning:
+                    # A previously claimed one-time token must not block a new
+                    # invitation for a different friend. Keep the reminder state,
+                    # but prepare the next token normally.
                     if reveal_warnings:
                         cur.execute(
                             """UPDATE april_referral_share_targets
@@ -2792,12 +2812,7 @@ def prepare_april_referral_share(
                                WHERE id = %s AND repeat_warning_shown_at IS NULL""",
                             (current, int(repeat_warning.get("id") or 0)),
                         )
-                    print(
-                        "[APRIL_REFERRAL] event=prepare outcome=blocked reason=previous_invite_claimed "
-                        + ("warning=shown" if reveal_warnings else "warning=pending"),
-                        flush=True,
-                    )
-                    return {"success": False, "error_code": "REFERRAL_PREVIOUS_INVITE_CLAIMED", "warning_once": True, "warning_pending": not reveal_warnings}
+                    print("[APRIL_REFERRAL] event=prepare warning=previous_invite_claimed continue=true", flush=True)
 
                 # Reuse the same current contact-free reservation across quick taps,
                 # reloads and React StrictMode effect replay. It avoids orphan tokens.
@@ -2985,6 +3000,80 @@ def finish_april_referral_share(
     except Exception as exc:
         print(f"[APRIL_REFERRAL] share_finish_failed type={type(exc).__name__}", flush=True)
         return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
+def create_public_shared_asset(owner_user_id: Any, filename: Any, mime_type: Any, content: Any) -> dict[str, Any]:
+    """Persist a short-lived public share asset owned by an authenticated account."""
+    owner = str(owner_user_id or "").strip()
+    raw = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else b""
+    if not owner or not raw or len(raw) > 8 * 1024 * 1024:
+        return {"success": False, "error_code": "SHARED_ASSET_INVALID"}
+    safe_name = str(filename or "april-file.bin").replace("\\", "/").split("/")[-1]
+    safe_name = "".join(ch for ch in safe_name if ch.isprintable() and ch not in "\r\n\x00")[:180] or "april-file.bin"
+    safe_mime = str(mime_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", safe_mime):
+        safe_mime = "application/octet-stream"
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error_code": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE", (owner,))
+                if not _is_authenticated_row(cur.fetchone()):
+                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
+                cur.execute("DELETE FROM april_public_shared_assets WHERE expires_at <= %s", (now(),))
+                expires = now() + timedelta(days=7)
+                cur.execute(
+                    """INSERT INTO april_public_shared_assets
+                       (owner_user_id, token_hash, filename, mime_type, content, sha256, expires_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (owner, token_hash, safe_name, safe_mime, psycopg2.Binary(raw), digest, expires),
+                )
+        return {"success": True, "token": token, "filename": safe_name, "mime_type": safe_mime,
+                "sha256": digest, "expires_at": expires.isoformat(), "size_bytes": len(raw)}
+    except Exception as exc:
+        print(f"[APRIL_SHARE] create_failed type={type(exc).__name__}", flush=True)
+        return {"success": False, "error_code": "SHARED_ASSET_SAVE_FAILED"}
+    finally:
+        conn.close()
+
+
+def get_public_shared_asset(token: Any) -> dict[str, Any] | None:
+    """Read a public file by its high-entropy bearer token; expires after seven days."""
+    raw_token = str(token or "").strip()
+    if len(raw_token) < 32 or len(raw_token) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", raw_token):
+        return None
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT filename, mime_type, content, sha256, expires_at
+                   FROM april_public_shared_assets
+                   WHERE token_hash = %s AND expires_at > %s
+                   LIMIT 1""",
+                (token_hash, now()),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            content = bytes(row.get("content") or b"")
+            digest = hashlib.sha256(content).hexdigest()
+            if not content or not hmac.compare_digest(digest, str(row.get("sha256") or "")):
+                return None
+            return {"filename": row.get("filename"), "mime_type": row.get("mime_type"),
+                    "content": content, "sha256": digest, "expires_at": row.get("expires_at")}
+    except Exception as exc:
+        print(f"[APRIL_SHARE] read_failed type={type(exc).__name__}", flush=True)
+        return None
     finally:
         conn.close()
 
