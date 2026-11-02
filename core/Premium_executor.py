@@ -6120,6 +6120,35 @@ async def execute(
             result["answer"] = notice
             result["content"] = notice
             result["summary"] = notice
+        # When a CSV is folded into a TableBlock's second XLSX worksheet,
+        # synchronize the top-level answer with the corrected visible text.
+        # This keeps the chat bubble, persisted answer, and SceneContract aligned.
+        has_table_details_sheet = False
+        for delivery_block in delivery_blocks:
+            block_type = str(delivery_block.get("type") or delivery_block.get("artifact_type") or "").lower()
+            if block_type != "table":
+                continue
+            table_payload = delivery_block.get("payload") if isinstance(delivery_block.get("payload"), dict) else {}
+            additional_sheets = delivery_block.get("additional_sheets")
+            if not isinstance(additional_sheets, list) or not additional_sheets:
+                additional_sheets = table_payload.get("additional_sheets")
+            if isinstance(additional_sheets, list) and additional_sheets:
+                has_table_details_sheet = True
+                break
+        if has_table_details_sheet:
+            text_block = next(
+                (b for b in delivery_blocks if str(b.get("type") or b.get("artifact_type") or "").lower() in {"text", "markdown", "message", "message_text", "answer"}),
+                {},
+            )
+            synchronized_text = str(text_block.get("content") or answer)
+            answer = synchronized_text
+            response.answer = synchronized_text
+            response.content = synchronized_text
+            response.summary = synchronized_text
+            response.response = synchronized_text
+            result["answer"] = synchronized_text
+            result["content"] = synchronized_text
+            result["summary"] = synchronized_text
     scene_meta = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
     scene_meta["dialogue_assets"] = {
         "user_inputs": attachment_refs,
