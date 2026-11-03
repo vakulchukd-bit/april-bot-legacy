@@ -2497,6 +2497,219 @@ def _is_file_delivery_followup(text: str) -> bool:
     )
 
 
+def analyze_dialogue_transition(
+    current_request: Any,
+    dialogue_context: dict[str, Any] | None = None,
+    semantic_interpretation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Synchronous local pre-response audit for Free dialogue continuity.
+
+    This compares the literal new turn with April's latest saved answer first,
+    then with the State Manager's selected authenticated history pair. It makes
+    no model/API call and never exposes private chain-of-thought.
+    """
+    request = _text(current_request)
+    context = dialogue_context if isinstance(dialogue_context, dict) else {}
+    semantics = semantic_interpretation if isinstance(semantic_interpretation, dict) else {}
+    relation = _text(context.get("relation") or "NEW").upper()
+    history_request = bool(context.get("history_request") or semantics.get("history_request"))
+    latest = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
+    selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
+    latest_relation = context.get("latest_answer_relation") if isinstance(context.get("latest_answer_relation"), dict) else {}
+    last_turn_link = context.get("last_turn_link") if isinstance(context.get("last_turn_link"), dict) else {}
+    latest_answer_match = bool(latest_relation.get("matched") or last_turn_link.get("latest_answer_match"))
+    history_method = _text(context.get("history_selection_method"))
+    anchor_message_id = _text(anchor.get("message_id"))
+    latest_message_id = _text(latest.get("message_id"))
+    # Same-dialog topic-vector expansion is an active thread, not a historical
+    # reactivation. Explicit history requests and genuinely older/cross-dialog
+    # sources remain historical.
+    historical_match = bool(
+        context.get("contextual_history_match")
+        and not latest_answer_match
+        and (
+            history_request
+            or history_method in {"named_topic_section_vector", "semantic_topic_index_match", "temporal_window", "temporal_nearest_fallback"}
+            # A matching source from another dialog is historical even when the
+            # new dialog has no saved assistant turn yet (latest_message_id="").
+            or bool(anchor_message_id and not anchor.get("same_dialog"))
+            # A named topic-vector hit may be an older branch in this same chat.
+            # The latest message remains the primary vector; a different selected
+            # message is historical reactivation even when both share dialog_id.
+            or bool(anchor_message_id and latest_message_id and anchor_message_id != latest_message_id)
+        )
+    )
+    explicit_switch = bool(
+        semantics.get("explicit_topic_switch")
+        or semantics.get("explicit_topic_introduction")
+        or _has_explicit_topic_introduction(request)
+        and relation == "NEW"
+        and not history_request
+    )
+
+    if history_request or historical_match:
+        source_pair = anchor or next((item for item in selected if isinstance(item, dict)), {})
+        source_kind = "AUTHENTICATED_HISTORICAL_BRANCH" if source_pair else "HISTORY_LOOKUP_NO_MATCH"
+    elif relation == "CONTINUE" and latest and (latest_answer_match or not anchor_message_id or anchor_message_id == latest_message_id):
+        source_pair = latest
+        source_kind = "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH"
+    elif relation == "CONTINUE" and anchor:
+        source_pair = anchor
+        source_kind = "SELECTED_ACTIVE_TOPIC_BRANCH"
+    else:
+        source_pair = {}
+        source_kind = "NEW_TOPIC"
+
+    previous_user = _text(
+        source_pair.get("user_request") or source_pair.get("user")
+        or source_pair.get("user_text")
+    )[:700]
+    previous_answer = _text(
+        source_pair.get("assistant_last_message") or source_pair.get("april")
+        or source_pair.get("april_text") or source_pair.get("april_summary")
+    )[:5200]
+    previous_summary = _text(source_pair.get("april_summary")) or previous_answer[:460]
+    source_message_id = _text(source_pair.get("message_id") or source_pair.get("source_message_id"))[:120]
+    source_topic_id = _text(source_pair.get("topic_id") or source_pair.get("selected_topic_id"))[:120]
+    source_branch_id = _text(source_pair.get("branch_id") or source_pair.get("active_branch_id"))[:120]
+    same_dialog = bool(source_pair.get("same_dialog", source_kind == "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH"))
+
+    previous_signature = _context_signature(" ".join((previous_user, previous_answer)))
+    current_signature = _context_signature(request)
+    previous_terms = set(previous_signature.get("subject_terms") or [])
+    current_terms = set(current_signature.get("subject_terms") or [])
+    subject_overlap = (
+        len(previous_terms & current_terms) / max(1, len(previous_terms | current_terms))
+        if previous_terms and current_terms else 0.0
+    )
+    latest_answer_expects_input = bool(
+        latest_relation.get("expects_user_input")
+        or last_turn_link.get("previous_answer_expects_user_input")
+    )
+    references_previous = bool(
+        semantics.get("previous_answer_reference")
+        or semantics.get("active_branch_repair")
+        or semantics.get("requires_memory")
+        or semantics.get("relation_hint") == "CONTINUE"
+        or current_signature.get("reference_strength", 0) >= 0.18
+        or latest_answer_match
+        or (latest_answer_expects_input and len(request.split()) <= 7)
+    )
+
+    section_headings: list[str] = []
+    for section in (source_pair.get("sections") or [])[:12]:
+        if isinstance(section, dict):
+            heading = _text(section.get("heading") or section.get("h"))
+            if heading and heading.casefold() not in {value.casefold() for value in section_headings}:
+                section_headings.append(heading[:100])
+    if not section_headings and previous_answer:
+        for heading in re.findall(r"(?m)^\s{0,3}#{1,4}\s+(.+)$", previous_answer):
+            heading = _text(heading)
+            if heading and heading.casefold() not in {value.casefold() for value in section_headings}:
+                section_headings.append(heading[:100])
+            if len(section_headings) >= 10:
+                break
+
+    if explicit_switch:
+        classification = "NEW_TOPIC"
+        strategy = "ANSWER_NEW_TOPIC"
+    elif historical_match or (history_request and source_message_id):
+        classification = "HISTORICAL_TOPIC_REACTIVATION"
+        strategy = "RESUME_HISTORICAL_BRANCH"
+    elif relation == "CONTINUE" and source_message_id:
+        classification = "TOPIC_CONTINUATION"
+        strategy = "CONTINUE_WITH_NEW_INFORMATION"
+    elif references_previous and source_message_id and (subject_overlap >= 0.12 or not current_terms):
+        classification = "HISTORICAL_TOPIC_REACTIVATION" if not same_dialog else "TOPIC_CONTINUATION"
+        strategy = "RESUME_HISTORICAL_BRANCH" if classification == "HISTORICAL_TOPIC_REACTIVATION" else "CONTINUE_WITH_NEW_INFORMATION"
+    else:
+        classification = "NEW_TOPIC"
+        strategy = "ANSWER_NEW_TOPIC"
+
+    if classification == "NEW_TOPIC":
+        recap = "Новая тема: отвечать на текущий запрос самостоятельно, не переносить посторонний контекст."
+    else:
+        recap = "До этого: " + (previous_user[:180] if previous_user else "в выбранной ветке")
+        if previous_summary:
+            recap += "; April ответила: " + previous_summary[:420]
+        if classification == "HISTORICAL_TOPIC_REACTIVATION":
+            recap += "; пользователь возвращается к ранее обсуждавшейся ветке."
+        else:
+            recap += "; продолжить с незакрытого или запрошенного шага, не повторяя завершённое."
+    recap = recap[:900]
+
+    task_count = semantics.get("task_count") or semantics.get("request_count") or 1
+    try:
+        task_count = max(1, min(20, int(task_count)))
+    except (TypeError, ValueError):
+        task_count = 1
+
+    transition = {
+        "schema": "april_dialogue_transition_v1",
+        "classification": classification,
+        "response_strategy": strategy,
+        "source_relation": relation,
+        "source_kind": source_kind,
+        "confidence": round(min(1.0, 0.42 + (0.22 if source_message_id else 0.0) + (0.20 if latest_answer_match else 0.0) + min(0.16, subject_overlap * 0.32)), 3),
+        "previous_exchange": {
+            "message_id": source_message_id,
+            "topic_id": source_topic_id,
+            "branch_id": source_branch_id,
+            "same_dialog": same_dialog,
+            "user_request": previous_user[:360],
+            "april_answer_summary": previous_summary[:460],
+            "april_answer_excerpt": previous_answer[:1800],
+            "answered_sections": section_headings[:10],
+        },
+        "current_request": {
+            "text": request[:700],
+            "references_previous_answer": references_previous,
+            "explicit_topic_switch": explicit_switch,
+            "subject_terms": list(current_signature.get("subject_terms") or [])[:10],
+        },
+        "alignment": {
+            "subject_overlap": round(subject_overlap, 3),
+            "latest_answer_match": latest_answer_match,
+            "latest_answer_subject_overlap": round(float(latest_relation.get("answer_subject_overlap") or 0.0), 3),
+            "latest_answer_expects_user_input": latest_answer_expects_input,
+            "history_match": historical_match,
+        },
+        "pre_response_analysis": {
+            "sequence": [
+                "COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS",
+                "COMPARE_CURRENT_REQUEST_WITH_LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH",
+                "CHECK_IF_PREVIOUS_ANSWER_EXPECTS_USER_INPUT_OR_CONFIRMATION",
+                "IF_NO_RELIABLE_CURRENT_BRANCH_MATCH_SEARCH_AUTHENTICATED_HISTORY_BY_TOPIC_AND_TIME",
+                "RESTORE_ONLY_THE_MATCHED_HISTORY_BRANCH_AND_RELEVANT_SOURCE_ASSETS",
+                "DISTINGUISH_TOPIC_CONTINUATION_HISTORY_RECALL_CORRECTION_AND_NEW_TOPIC",
+                "ANSWER_ONLY_AFTER_SOURCE_AND_TASK_ALIGNMENT_CHECK",
+            ],
+            "analysis_mode": "SYNCHRONOUS_LOCAL_NO_EXTRA_MODEL_CALL",
+            "request_task_count": task_count,
+            "request_vector": _text(semantics.get("primary_intent") or semantics.get("intent") or "UNRESOLVED")[:80],
+            "selected_source_message_id": source_message_id,
+            "selected_topic_id": source_topic_id,
+            "selected_branch_id": source_branch_id,
+            "current_branch_selected": bool(classification == "TOPIC_CONTINUATION" and source_message_id),
+            "latest_answer_is_primary_discourse_vector": bool(classification == "TOPIC_CONTINUATION" and source_message_id),
+            "latest_answer_expects_user_input": latest_answer_expects_input,
+            "latest_answer_match": latest_answer_match,
+            "history_branch_selected": bool(classification == "HISTORICAL_TOPIC_REACTIVATION" and source_message_id),
+            "must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
+        },
+        "continuation_summary": recap,
+        "response_rules": {
+            "begin_with_brief_context_summary": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION"},
+            "do_not_repeat_completed_sections": True,
+            "develop_only_requested_or_unfinished_parts": True,
+            "preserve_topic_branch_and_origin_ids": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION"},
+            "new_topic_must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
+        },
+    }
+    return transition
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -2797,6 +3010,10 @@ def build_interpretation(
                 "confidence": float(memory.get("relation_confidence") or 0.0),
                 "selected_pairs": selected_pairs,
                 "anchor": continuation_anchor,
+                "latest_assistant_anchor": dict(memory.get("latest_assistant_anchor") or {}),
+                "latest_answer_relation": dict(memory.get("latest_answer_relation") or {}),
+                "last_turn_link": dict(memory.get("last_turn_link") or {}),
+                "dialogue_transition_analysis": dict(memory.get("dialogue_transition_analysis") or {}),
                 "selected_section": dict(memory.get("selected_section") or {}),
                 "clarification_needed": bool(memory.get("clarification_needed")),
                 "pending_clarification": dict(memory.get("pending_clarification") or {}),
@@ -2882,6 +3099,9 @@ def build_interpretation(
             "output_plan": requested_outputs,
             "semantic_interpretation": request_semantics,
             "semantic_interpretation_version": "april_request_semantics_v1",
+            "last_turn_link": dict(memory.get("last_turn_link") or {}),
+            "dialogue_transition_analysis": dict(memory.get("dialogue_transition_analysis") or {}),
+            "dialogue_transition_analysis_version": "april_dialogue_transition_v1",
         },
     }
     if image_edit_restricted:
