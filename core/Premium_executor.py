@@ -17,6 +17,7 @@ No alternate route, room register or second memory store is created here.
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 import asyncio
 import ast
 import base64
@@ -68,6 +69,313 @@ from blocks.Premium_state_manager import (
 
 PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v8_interpretive_transition_artifact_lineage"
 CANONICAL_ROUTE = "/api/v1/chat"
+
+
+_PERIODIC_GROUPS = {
+    # Main-body group placements for the conventional 18-column periodic layout.
+    1: 1, 2: 18, 3: 1, 4: 2, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17, 10: 18,
+    11: 1, 12: 2, 13: 13, 14: 14, 15: 15, 16: 16, 17: 17, 18: 18,
+}
+for _z in range(19, 37):
+    _PERIODIC_GROUPS[_z] = _z - 18
+for _z in range(37, 55):
+    _PERIODIC_GROUPS[_z] = _z - 36
+_PERIODIC_GROUPS.update({55: 1, 56: 2, 87: 1, 88: 2})
+for _z in range(72, 87):
+    _PERIODIC_GROUPS[_z] = _z - 68
+for _z in range(104, 119):
+    _PERIODIC_GROUPS[_z] = _z - 100
+
+
+def _period_for_atomic_number(number: int) -> int:
+    if number <= 2:
+        return 1
+    if number <= 10:
+        return 2
+    if number <= 18:
+        return 3
+    if number <= 36:
+        return 4
+    if number <= 54:
+        return 5
+    if number <= 86:
+        return 6
+    return 7
+
+
+def _normalize_saved_periodic_table(block: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Turn a legacy period→semicolon-list table into validated, cell-level data.
+
+    Nothing is invented: every element number, symbol and name must be present in
+    the saved TableBlock, each number 1..118 must occur exactly once, and every
+    entry must belong to the period stated in its source row.
+    """
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else block
+    headers = payload.get("headers") or payload.get("columns")
+    rows = payload.get("rows") or payload.get("data")
+    # Older saved TableBlocks can carry their only source representation as
+    # Markdown. Parse the real two-column cells rather than exporting the prose
+    # representation as a generic text file.
+    if not (isinstance(headers, list) and len(headers) == 2 and isinstance(rows, list) and rows):
+        markdown_source = next((
+            str(payload.get(key) or "") for key in ("markdown", "content", "text")
+            if isinstance(payload.get(key), str) and payload.get(key).strip()
+        ), "")
+        lines = markdown_source.replace("\r", "").splitlines()
+        parsed_headers: list[str] = []
+        parsed_rows: list[list[str]] = []
+
+        def _markdown_cells(line: str) -> list[str]:
+            value = line.strip()
+            if value.startswith("|"):
+                value = value[1:]
+            if value.endswith("|"):
+                value = value[:-1]
+            return [cell.strip().replace("\\|", "|") for cell in value.split("|")]
+
+        for index in range(max(0, len(lines) - 1)):
+            candidate_headers = _markdown_cells(lines[index]) if "|" in lines[index] else []
+            separator = _markdown_cells(lines[index + 1]) if "|" in lines[index + 1] else []
+            if len(candidate_headers) != 2 or len(separator) != 2:
+                continue
+            if not all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator):
+                continue
+            candidate_rows: list[list[str]] = []
+            for line in lines[index + 2:]:
+                if not line.strip():
+                    if candidate_rows:
+                        break
+                    continue
+                cells = _markdown_cells(line) if "|" in line else []
+                if len(cells) != 2:
+                    break
+                candidate_rows.append(cells)
+            if candidate_rows:
+                parsed_headers, parsed_rows = candidate_headers, candidate_rows
+                break
+        if parsed_headers and parsed_rows:
+            headers, rows = parsed_headers, parsed_rows
+        else:
+            return None, "not_two_column_period_list"
+    header_text = " ".join(str(value or "").casefold() for value in headers)
+    if not ("период" in header_text or "period" in header_text) or not (
+        "элемент" in header_text or "element" in header_text
+    ):
+        return None, "not_period_elements_table"
+
+    elements: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            return None, "malformed_period_row"
+        try:
+            period = int(str(row[0]).strip())
+        except (TypeError, ValueError):
+            return None, "invalid_period_number"
+        if period < 1 or period > 7:
+            return None, "period_out_of_range"
+        raw_cell = str(row[1] or "")
+        entries = [part.strip().strip("•*- ") for part in re.split(r"[;；\n]+", raw_cell) if part.strip()]
+        if not entries:
+            return None, "empty_element_list"
+        for entry in entries:
+            match = re.match(
+                r"^(\d{1,3})\s+([A-Z][a-z]?)\s*(?:[—–−-]\s*)?(.+?)\s*$",
+                entry,
+            )
+            if not match:
+                return None, "unparsed_element_entry"
+            number = int(match.group(1))
+            symbol = match.group(2)
+            name = match.group(3).strip(" —–−-")
+            if number < 1 or number > 118 or not name:
+                return None, "invalid_element_fields"
+            if _period_for_atomic_number(number) != period:
+                return None, "period_number_conflict"
+            if number in elements:
+                return None, "duplicate_atomic_number"
+            elements[number] = {"number": number, "symbol": symbol, "name": name, "period": period}
+
+    if set(elements) != set(range(1, 119)):
+        return None, f"element_coverage_{len(elements)}_of_118"
+    symbols = [item["symbol"] for item in elements.values()]
+    if len(set(symbols)) != 118:
+        return None, "duplicate_element_symbol"
+
+    headers_out = ["Период"] + [f"Группа {index}" for index in range(1, 19)]
+    grid_rows: list[list[str]] = []
+    for period in range(1, 8):
+        row = [f"Период {period}"] + [""] * 18
+        for number, group in _PERIODIC_GROUPS.items():
+            item = elements[number]
+            if item["period"] == period:
+                row[group] = f'{number} {item["symbol"]} — {item["name"]}'
+        grid_rows.append(row)
+
+    all_elements_headers = ["Атомный номер", "Символ", "Название элемента", "Период", "Группа / блок"]
+    all_elements_rows = []
+    for number in range(1, 119):
+        item = elements[number]
+        if 57 <= number <= 71:
+            location = "Лантаноид"
+        elif 89 <= number <= 103:
+            location = "Актиноид"
+        else:
+            location = str(_PERIODIC_GROUPS[number])
+        all_elements_rows.append([number, item["symbol"], item["name"], item["period"], location])
+
+    def _series_sheet(start: int, end: int) -> dict[str, Any]:
+        return {
+            "title": "Лантаноиды" if start == 57 else "Актиноиды",
+            "headers": ["Атомный номер", "Символ", "Название элемента"],
+            "rows": [[n, elements[n]["symbol"], elements[n]["name"]] for n in range(start, end + 1)],
+        }
+
+    series_rows = []
+    for title, start, end in (("Лантаноиды", 57, 71), ("Актиноиды", 89, 103)):
+        row = [title, "", ""]
+        row.extend(f'{n} {elements[n]["symbol"]} — {elements[n]["name"]}' for n in range(start, end + 1))
+        row.append("")
+        series_rows.append(row)
+    grid_rows.extend(series_rows)
+
+    normalized = deepcopy(block)
+    normalized_payload = deepcopy(payload)
+    normalized_payload.update({
+        "title": "Периодическая таблица химических элементов",
+        "caption": "18 групп и 7 периодов; каждый элемент занимает отдельную ячейку. Полный алфавитно-числовой список и f-блоки находятся на дополнительных листах Excel.",
+        "headers": headers_out,
+        "columns": headers_out,
+        "rows": grid_rows,
+        "additional_sheets": [
+            {"title": "Все элементы", "headers": all_elements_headers, "rows": all_elements_rows},
+            _series_sheet(57, 71),
+            _series_sheet(89, 103),
+        ],
+        "table_schema": "april.table.scene.v3",
+        "periodic_table_recovery": {
+            "source": "saved_structured_table",
+            "source_element_count": 118,
+            "normalized_element_count": 118,
+            "layout": "18_groups_7_periods_with_f_block_sheets",
+        },
+    })
+    if isinstance(normalized.get("payload"), dict):
+        normalized["payload"] = normalized_payload
+    else:
+        normalized.update(normalized_payload)
+    normalized["type"] = "table"
+    normalized["artifact_type"] = "table"
+    normalized.setdefault("renderer", get_web_renderer_registration("table").get("renderer", "TableBlock"))
+    normalized.setdefault("viewer", get_web_renderer_registration("table").get("viewer", "TableBlock"))
+    normalized["explanation"] = "Все 118 элементов разложены по отдельным ячейкам: основная сетка показывает группы и периоды, дополнительные листы Excel содержат полный список и оба f-блока."
+    return normalized, "normalized_118_elements"
+
+
+def _restore_saved_renderer_blocks(
+    pair: dict[str, Any], requested_outputs: Any, current_request: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Restore selected, non-binary render blocks from the matched Premium DB pair."""
+    requested = {str(value).strip().lower() for value in (requested_outputs or []) if str(value).strip()}
+    explicit_kind = _explicit_artifact_followup_kind(current_request)
+    source_blocks = pair.get("assistant_structured_output")
+    if not isinstance(source_blocks, list):
+        return [], {"source_blocks": 0, "restored_blocks": 0, "restored_types": []}
+
+    aliases = {
+        "table_data": "table", "chart": "graph", "plot": "graph", "source_code": "code",
+        "equation": "formula", "math": "formula", "latex": "formula",
+        "hyperlink": "link", "links": "link", "url": "link", "svg": "diagram",
+        "flowchart": "diagram", "mermaid": "diagram", "image_gallery": "gallery",
+        "image_artifact": "image", "generated_image": "image",
+        "copy_block": "copy", "copyable_text": "copy", "text_copy_block": "copy",
+    }
+    allowed = {"table", "graph", "diagram", "formula", "code", "link", "copy", "image", "gallery", "audio", "video"}
+    if explicit_kind and explicit_kind not in {"file", ""}:
+        wanted = {explicit_kind}
+    elif "file" in requested:
+        # A file request with no named family can still recover the concrete
+        # saved tabular/source object, but does not attach unrelated visual media.
+        wanted = {"table", "code"}
+    else:
+        wanted = requested.intersection(allowed)
+        if not wanted:
+            wanted = allowed
+
+    restored: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for original in source_blocks:
+        if not isinstance(original, dict):
+            continue
+        raw_kind = str(original.get("type") or original.get("artifact_type") or original.get("kind") or "").strip().lower()
+        kind = aliases.get(raw_kind, raw_kind)
+        if kind not in allowed or kind not in wanted:
+            continue
+        payload = original.get("payload") if isinstance(original.get("payload"), dict) else original
+        # Do not revive image/video/audio shells after binary payloads were stripped
+        # from dialogue memory. They need the authenticated durable-asset path.
+        if kind in {"image", "gallery", "audio", "video"}:
+            source = payload.get("asset_ref") if isinstance(payload.get("asset_ref"), dict) else {}
+            safe_url = any(str(payload.get(key) or "").startswith(("https://", "http://")) for key in ("src", "url", "href"))
+            if not (source.get("message_id") and source.get("sha256") and safe_url):
+                continue
+        if kind == "table":
+            headers = payload.get("headers") or payload.get("columns")
+            rows = payload.get("rows") or payload.get("data")
+            markdown = any(isinstance(payload.get(key), str) and payload.get(key).strip() for key in ("markdown", "content", "text"))
+            if not ((isinstance(headers, list) and headers and isinstance(rows, list) and rows) or markdown):
+                continue
+        elif kind == "code":
+            if not any(str(payload.get(key) or "").strip() for key in ("code", "source_code", "content", "text")):
+                continue
+        elif kind == "graph":
+            if not any(payload.get(key) not in (None, "", [], {}) for key in ("series", "points", "nodes", "data", "values", "edges")):
+                continue
+        elif kind == "diagram":
+            if not any(payload.get(key) not in (None, "", [], {}) for key in ("svg", "mermaid", "elements", "nodes", "edges", "source")):
+                continue
+        elif kind == "formula":
+            if not any(str(payload.get(key) or "").strip() for key in ("latex", "formula", "expression", "math", "content")):
+                continue
+        elif kind == "link":
+            if not any(str(payload.get(key) or "").startswith(("https://", "http://")) for key in ("url", "href", "uri")) and not isinstance(payload.get("links"), list):
+                continue
+        elif kind == "copy":
+            if not any(str(payload.get(key) or "").strip() for key in ("content", "text", "code")):
+                continue
+        restored_block = deepcopy(original)
+        restored_block["type"] = kind
+        restored_block["artifact_type"] = kind
+        registration = get_web_renderer_registration(kind)
+        restored_block.setdefault("renderer", registration.get("renderer") or "MessageTextBlock")
+        restored_block.setdefault("viewer", registration.get("viewer") or restored_block["renderer"])
+        if kind == "table" and explicit_kind == "table":
+            # The active branch supplies the artifact identity; users often say
+            # only "Переделай таблицу" on follow-up turns. Validate the saved
+            # table's own headers and all 118 source rows instead of requiring
+            # them to repeat "periodic table" in every message.
+            normalized, status = _normalize_saved_periodic_table(restored_block)
+            if normalized is not None:
+                restored_block = normalized
+                periodic_status = status
+            else:
+                periodic_status = status
+        else:
+            periodic_status = "not_applicable"
+        key = (kind, str(restored_block.get("id") or payload.get("title") or payload.get("filename") or len(restored)))
+        if key in seen:
+            continue
+        seen.add(key)
+        restored.append(restored_block)
+        if len(restored) >= 8:
+            break
+
+    return restored, {
+        "source_blocks": len(source_blocks),
+        "restored_blocks": len(restored),
+        "restored_types": [str(block.get("type") or "") for block in restored],
+        "periodic_table_status": locals().get("periodic_status", "not_applicable"),
+        "explicit_artifact_kind": explicit_kind,
+    }
 
 
 def _parse_serialized_graph_answer(value: Any) -> dict[str, Any] | None:
@@ -5016,9 +5324,19 @@ async def execute(
             # If only the Provider/compaction layer fails, show that evidence locally
             # rather than returning HTTP 500 and an empty chat bubble. Ordinary NEW
             # questions still raise normally; this is not a generic model fallback.
+            selected_history_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+            selected_branch_is_authenticated = bool(
+                selected_history_pairs
+                and (
+                    _text(dialogue_context.get("relation")).upper() == "CONTINUE"
+                    or dialogue_context.get("hot_work_followup")
+                    or dialogue_context.get("contextual_history_match")
+                )
+            )
             history_fallback_allowed = bool(
                 dialogue_context.get("history_request")
                 or dialogue_context.get("contextual_history_match")
+                or selected_branch_is_authenticated
             )
             if not history_fallback_allowed:
                 raise
@@ -5073,15 +5391,44 @@ async def execute(
                     pair_summary = str(pair.get("memory_summary") or pair.get("summary") or "").strip()
                     anchor_summary = anchor_summary or pair_summary
                     user_line = str(pair.get("user") or pair.get("user_text") or "").strip()
-                    april_line = str(pair.get("april") or pair.get("april_text") or "").strip()
-                    body_parts = [f"Нашёл запись в истории по теме **{anchor_topic}**."]
-                    if user_line:
-                        body_parts.append(f"**Твой запрос:** {user_line}")
-                    if april_line:
-                        body_parts.append(f"**Ответ April:** {april_line}")
-                    elif anchor_summary:
-                        body_parts.append(anchor_summary)
-                    fallback_answer = "\n\n".join(body_parts)
+                    # Prefer April's exact saved answer over the compact 440-char
+                    # memory outline. The outline remains a fallback only.
+                    april_line = str(
+                        pair.get("assistant_last_message") or pair.get("april_text")
+                        or pair.get("april") or pair.get("assistant_message") or ""
+                    ).strip()
+                    restored_blocks, restore_stats = _restore_saved_renderer_blocks(
+                        pair,
+                        (interpretation.get("intent") or {}).get("requested_outputs") or request.requested_outputs,
+                        original or current_text,
+                    )
+                    if restored_blocks:
+                        restored_types = restore_stats.get("restored_types") or []
+                        if restore_stats.get("periodic_table_status") == "normalized_118_elements":
+                            fallback_answer = (
+                                "Нашла исходную периодическую таблицу в сохранённой ветке. Проверила, что в ней есть все "
+                                "118 атомных номеров, и разложила элементы по отдельным ячейкам стандартной сетки из "
+                                "18 групп и 7 периодов. В Excel также добавлены листы «Все элементы», «Лантаноиды» и "
+                                "«Актиноиды». Данные взяты из сохранённой таблицы; новые химические сведения не подставляла."
+                            )
+                        else:
+                            body_parts = [f"Нашла исходный артефакт из сохранённой ветки **{anchor_topic}**."]
+                            if user_line:
+                                body_parts.append(f"**Исходный запрос:** {user_line}")
+                            body_parts.append(
+                                "Модель не смогла завершить перестройку в этом запросе. Ниже восстановлена исходная "
+                                "структура артефакта без изменений; это не новая исправленная версия."
+                            )
+                            fallback_answer = "\n\n".join(body_parts)
+                    else:
+                        body_parts = [f"Нашёл запись в истории по теме **{anchor_topic}**."]
+                        if user_line:
+                            body_parts.append(f"**Твой запрос:** {user_line}")
+                        if april_line:
+                            body_parts.append(f"**Ответ April:** {april_line}")
+                        elif anchor_summary:
+                            body_parts.append(anchor_summary)
+                        fallback_answer = "\n\n".join(body_parts)
                 else:
                     fallback_answer = f"Нашёл связанную тему в истории: **{anchor_topic or 'тема без названия'}**."
                     if anchor_summary:
@@ -5093,12 +5440,12 @@ async def execute(
                 "answer": fallback_answer,
                 "content": fallback_answer,
                 "summary": fallback_answer[:180],
-                "render_blocks": [{
+                "render_blocks": ([{
                     "type": "text",
                     "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
                     "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
                     "content": fallback_answer,
-                }],
+                }] + (restored_blocks if found_pairs and "restored_blocks" in locals() else [])),
                 "artifacts": [],
                 "metadata": {
                     "identity": identity,
@@ -5111,6 +5458,14 @@ async def execute(
                     "local_history_fallback": True,
                     "provider_calls": 0,
                     "fallback_reason": type(exc).__name__,
+                    "restored_source_message_id": str((found_pairs[0].get("message_id") or found_pairs[0].get("source_message_id") or "") if found_pairs else "")[:120],
+                    "restored_renderer_stats": restore_stats if found_pairs and "restore_stats" in locals() else {},
+                    "local_history_fallback_notice": (
+                        "Сохранённая таблица восстановлена и подготовлена для Excel; исходные 118 элементов разложены по ячейкам."
+                        if found_pairs and "restore_stats" in locals() and restore_stats.get("periodic_table_status") == "normalized_118_elements"
+                        else "Восстановлен исходный артефакт из истории; его содержимое не было изменено, поскольку модель не завершила перестройку."
+                        if found_pairs and "restored_blocks" in locals() and restored_blocks else ""
+                    ),
                 },
                 "internal_answer_en": fallback_answer,
             }}
@@ -5118,6 +5473,10 @@ async def execute(
                 "history_fallback_ready", provider_started,
                 fallback_reason=type(exc).__name__, history_topics=len(found_topics),
                 selected_pairs=len(found_pairs), answer_chars=len(fallback_answer),
+                authenticated_branch_fallback=bool(selected_branch_is_authenticated),
+                restored_render_blocks=len(restored_blocks) if found_pairs and "restored_blocks" in locals() else 0,
+                restored_render_types=restore_stats.get("restored_types", []) if found_pairs and "restore_stats" in locals() else [],
+                periodic_table_status=restore_stats.get("periodic_table_status", "not_applicable") if found_pairs and "restore_stats" in locals() else "not_applicable",
             )
         provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
@@ -6438,6 +6797,12 @@ async def execute(
         if attached_file_blocks and str(plan_intent.get("file_delivery_mode") or "").lower() == "file_only":
             notice_block = next((b for b in delivery_blocks if str(b.get("type") or "").lower() == "text"), {})
             notice = str(notice_block.get("content") or "The file is ready.")
+            fallback_notice = _text(provider_metadata.get("local_history_fallback_notice"))
+            if fallback_notice:
+                notice = fallback_notice
+                if isinstance(notice_block, dict):
+                    notice_block["content"] = notice
+                    notice_block["text"] = notice
             answer = notice
             response.answer = notice
             response.content = notice
