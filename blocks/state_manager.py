@@ -708,6 +708,95 @@ def _subject_conflicts(query_subjects: set[str], row_subjects: set[str]) -> bool
     # indicate different contexts, even if the task vocabulary is almost identical.
     return bool(query_subjects and row_subjects and _subject_overlap(query_subjects, row_subjects) < 0.20)
 
+def _is_scalar_or_choice_reply(query: Any) -> bool:
+    """Recognize compact answers to a prior choice/question without treating nouns as choices."""
+    low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip(" .!?)").strip()
+    low = re.sub(r"^(?:да|ага|угу|верно|точно|yes|yeah|okay|ok)\s*[,—:-]?\s*", "", low)
+    if not low:
+        return False
+    return bool(re.fullmatch(
+        r"(?:(?:вариант|опция|пункт|номер|option|item)\s*)?(?:[1-9]|[а-гa-c]|"
+        r"перв(?:ый|ого|ому|ую|ое)|втор(?:ой|ого|ому|ую|ое)|треть(?:ий|его|емую|ю)|"
+        r"четверт(?:ый|ого|ому|ую)|пят(?:ый|ого|ому|ую)|шест(?:ой|ого|ому|ую)|"
+        r"седьм(?:ой|ого|ому|ую)|восьм(?:ой|ого|ому|ую)|девят(?:ый|ого|ому|ую)|десят(?:ый|ого|ому|ую))",
+        low,
+        re.IGNORECASE,
+    ))
+
+
+def _assistant_expects_user_input(answer_text: Any) -> bool:
+    """Detect whether April's actual previous answer leaves a user input slot open."""
+    text = _text(answer_text)
+    if not text:
+        return False
+    low = text.lower().replace("ё", "е")
+    if re.search(r"[?？](?:[\"'»”\)\]]*)\s*$", text):
+        return True
+    invitation = bool(re.search(
+        r"(?:выбери(?:те)?|выбирай|какой\s+(?:вариант|пункт|ход)|твой\s+ход|ваш\s+ход|"
+        r"ответь(?:те)?|напиши(?:те)?|пришли(?:те)?|загрузи(?:те)?|покажи(?:те)?|"
+        r"укажи(?:те)?|скажи(?:те)?|назови(?:те)?|опиши(?:те)?|перечисли(?:те)?|"
+        r"оцени(?:те)?|уточни(?:те)?|подтверди(?:те)?|сообщи(?:те)?|"
+        r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|"
+        r"specify|describe|name\s+(?:the|a)\b|tell\s+me)\b",
+        low,
+    ))
+    has_choices = bool(re.search(
+        r"(?:^|\n)\s*(?:[А-ЯA-C])\s*[.)—:：-].{0,160}(?:\n\s*(?:[А-ЯA-C])\s*[.)—:：-].{0,160})+",
+        text, re.IGNORECASE,
+    ))
+    return invitation and (has_choices or "?" in text or "？" in text or len(text) < 260)
+
+
+def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> dict[str, Any]:
+    """Compare the new user turn with the immediately preceding USER↔APRIL pair.
+
+    This is deterministic local routing evidence, not an LLM confidence score.
+    It deliberately compares the current request to April's answer separately
+    from the prior user request, so brief replies can answer an open question.
+    """
+    if not isinstance(row, dict):
+        return {
+            "matched": False, "answer_overlap": 0.0, "user_request_overlap": 0.0,
+            "answer_subject_overlap": 0.0, "user_subject_overlap": 0.0,
+            "answer_subject_conflict": False, "expects_user_input": False,
+            "implicit_history_resume": False, "message_id": "", "topic_id": "", "branch_id": "",
+        }
+    user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
+    answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("april") or row.get("assistant_last_message"))
+    implicit_history_resume = bool(
+        _is_history_request(query) and not _history_query_topic_tokens(query)
+    )
+    query_subjects = set() if implicit_history_resume else _subject_tokens(query)
+    answer_subjects = _subject_tokens(answer_text[:5200])
+    user_subjects = _subject_tokens(user_text[:1800])
+    answer_subject_overlap = _subject_overlap(query_subjects, answer_subjects)
+    user_subject_overlap = _subject_overlap(query_subjects, user_subjects)
+    answer_subject_conflict = _subject_conflicts(query_subjects, answer_subjects)
+    query_tokens = _semantic_tokens(query)
+    answer_tokens = _semantic_tokens(answer_text[:5200])
+    user_tokens = _semantic_tokens(user_text[:1800])
+    answer_overlap = _concept_overlap(query_tokens, answer_tokens)
+    user_overlap = _concept_overlap(query_tokens, user_tokens)
+    matched = bool(
+        query_subjects and answer_subjects and not answer_subject_conflict
+        and (answer_subject_overlap >= 0.34 or (answer_overlap >= 0.42 and answer_subject_overlap >= 0.20))
+    )
+    return {
+        "matched": matched,
+        "answer_overlap": round(float(answer_overlap), 4),
+        "user_request_overlap": round(float(user_overlap), 4),
+        "answer_subject_overlap": round(float(answer_subject_overlap), 4),
+        "user_subject_overlap": round(float(user_subject_overlap), 4),
+        "answer_subject_conflict": bool(answer_subject_conflict),
+        "expects_user_input": _assistant_expects_user_input(answer_text),
+        "implicit_history_resume": implicit_history_resume,
+        "message_id": _text(row.get("message_id"))[:120],
+        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id"))[:120],
+        "answer_chars": len(answer_text),
+    }
+
 def _numeric_anchors(value: Any) -> set[str]:
     found = set()
     for match in re.finditer(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])", _text(value)):
@@ -871,6 +960,15 @@ def _hot_branch_followup_candidate(
         conversation_id=conversation_id,
         reference_followup=reference_followup,
     )
+    # A recent open question must not pull a self-contained request about a
+    # different subject into the old branch. Choice fragments such as "second"
+    # are the exception: they can have low lexical overlap while still answering
+    # the explicit selection question in the previous assistant message.
+    subject_mismatch = bool(candidate.get("subject_mismatch"))
+    scalar_choice_reply = _is_scalar_or_choice_reply(text)
+    if subject_mismatch and not scalar_choice_reply:
+        return False
+
     semantic_fit = max(
         float(candidate.get("context") or 0),
         float(candidate.get("entity_overlap") or 0),
@@ -879,7 +977,7 @@ def _hot_branch_followup_candidate(
         float(candidate.get("subject_overlap") or 0),
     )
     if reference_followup or marker or pragmatic_followup:
-        return not bool(candidate.get("subject_mismatch")) and (semantic_fit > 0.0 or structurally_underspecified)
+        return not subject_mismatch and (semantic_fit > 0.0 or structurally_underspecified)
     if not structurally_underspecified:
         return False
 
@@ -899,7 +997,7 @@ def _hot_branch_followup_candidate(
     open_question = "?" in assistant_text or "？" in assistant_text
     # An unanswered assistant question is a strong discourse link even after a pause.
     if open_question and len(tokens) <= 8:
-        return True
+        return not subject_mismatch or scalar_choice_reply
     return semantic_fit >= 0.18 or proximity >= 0.58
 
 
@@ -1810,6 +1908,10 @@ def _candidate_score(
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
         "topic": _topic_label(row),
+        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id")),
+        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id")),
+        "selected_topic_id": _text(row.get("selected_topic_id")),
+        "active_branch_id": _text(row.get("active_branch_id")),
         "sections": _dialogue_section_map(row),
         "is_pending_clarification": _row_is_pending_clarification(row),
         "memory_summary": _compact_memory_summary(row),
@@ -2016,7 +2118,7 @@ def _compact_dialogue_assets(item: dict[str, Any]) -> dict[str, list[dict[str, A
 
 
 def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
-    sections = _dialogue_section_map(item)
+    sections = item.get("sections") if isinstance(item.get("sections"), list) else _dialogue_section_map(item)
     # Keep both the assistant's actual last reply (including a question/action
     # requested from the user) and its compact summary. The pair is the unit of
     # dialogue continuity; neither speaker is discarded.
@@ -2035,9 +2137,15 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "history_age_minutes": item.get("history_age_minutes"),
         "history_gap_minutes": item.get("history_gap_minutes"),
         "user": _text(item.get("user") or item.get("user_text"))[:240],
+        "user_request": _text(item.get("user_text") or item.get("user_text_en") or item.get("user"))[:700],
         "april": assistant_reply[:420] if assistant_reply else outline[:220],
+        "assistant_last_message": assistant_reply[:1800] if assistant_reply else outline[:420],
         "april_summary": outline[:220],
         "topic": _text(item.get("topic"))[:100],
+        "topic_id": _text(item.get("topic_id") or item.get("selected_topic_id"))[:120],
+        "branch_id": _text(item.get("branch_id") or item.get("active_branch_id"))[:120],
+        "dialog_id": _text(item.get("dialog_id"))[:120],
+        "conversation_id": _text(item.get("conversation_id"))[:120],
         "sections": sections,
         "score": item.get("score"),
         "same_dialog": bool(item.get("same_dialog")),
@@ -3281,8 +3389,29 @@ def search_dialogue_context(
             topic["history_age_minutes"] = age_minutes
             topic["history_age_label"] = f"примерно {_format_history_duration(age_minutes)} назад"
 
-    latest_same_dialog = max((item for item in matches if bool(item.get("same_dialog"))),
-        key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)), default=None)
+    current_dialog_rows = [row for row in all_rows if isinstance(row, dict) and not _row_is_pending_clarification(row) and (
+        (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
+        or (conversation_id and _text(row.get("conversation_id")) == _text(conversation_id))
+    )]
+    if not current_dialog_rows and not dialog_id and not conversation_id:
+        current_dialog_rows = list(all_rows)
+    latest_dialog_row = max(
+        current_dialog_rows,
+        key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+        default=None,
+    )
+    # The last assistant answer is selected by timestamp/turn order, never by
+    # lexical relevance. A low-overlap one-word reply must still be compared to it.
+    latest_same_dialog = _candidate_score(
+        query, latest_dialog_row, dialog_id=str(dialog_id or ""),
+        conversation_id=str(conversation_id or ""), reference_followup=True,
+        query_modalities=query_modalities,
+    ) if latest_dialog_row else max(
+        (item for item in matches if bool(item.get("same_dialog"))),
+        key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+        default=None,
+    )
+    latest_answer_relation = _latest_answer_relation_vector(query, latest_dialog_row)
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
@@ -3418,6 +3547,18 @@ def search_dialogue_context(
         and not has_new_user_asset
     )
     answer_to_april_question = answer_to_april_question or april_named_answer_followup
+    short_answer_to_open_slot = bool(
+        latest_answer_relation.get("expects_user_input")
+        and len(_tokens(query)) <= 7
+        and (
+            not latest_answer_relation.get("answer_subject_conflict")
+            or _is_scalar_or_choice_reply(query)
+        )
+        and not new_topic_request
+        and not history_request
+        and not has_new_user_asset
+    )
+    latest_answer_matched = bool(latest_answer_relation.get("matched") or short_answer_to_open_slot)
     # A brief named phrase can return to an earlier branch within this same chat.
     # Require a recent same-dialog match; a remote topic elsewhere in the 12h window
     # is not enough to hijack an otherwise independent request.
@@ -3444,7 +3585,7 @@ def search_dialogue_context(
     # These three signals are grounded in the current exchange or a recent named
     # branch. They outrank a lexical subject-conflict signal produced by words
     # such as "Conference" / "Williams" that April itself just introduced.
-    if correction_turn or answer_to_april_question or recent_named_topic_reentry:
+    if correction_turn or answer_to_april_question or recent_named_topic_reentry or short_answer_to_open_slot or latest_answer_relation.get("matched"):
         semantic_subject_switch = False
     continuation = False
     has_new_attachment = has_new_user_asset
@@ -3469,7 +3610,7 @@ def search_dialogue_context(
         continuation = True
     elif correction_turn and explicit_topic_hits:
         continuation = True
-    elif answer_to_april_question and not semantic_subject_switch:
+    elif (answer_to_april_question or short_answer_to_open_slot or latest_answer_relation.get("matched")) and not semantic_subject_switch:
         continuation = True
     elif recent_named_topic_reentry and not semantic_subject_switch:
         continuation = True
@@ -3656,6 +3797,10 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
+        if latest_same_dialog and (short_answer_to_open_slot or latest_answer_relation.get("matched")):
+            # The user's turn is tied to the answer April just gave; do not jump
+            # to a semantically similar older pair from another branch.
+            anchor = latest_same_dialog
         underspecified_media_followup = bool(
             latest_same_dialog
             and len(_tokens(query)) <= 18
@@ -3664,7 +3809,7 @@ def search_dialogue_context(
             and not _looks_like_topic_correction(query)
             and not new_topic_request
         )
-        if topic_vector_hits and not underspecified_media_followup:
+        if topic_vector_hits and not underspecified_media_followup and not (latest_same_dialog and (short_answer_to_open_slot or latest_answer_relation.get("matched"))):
             # A confidently named topic beats the most recent turn even when the
             # latest turn was a history lookup or an unrelated side branch.
             vector_row = topic_vector_hits[0].get("row")
@@ -3673,6 +3818,8 @@ def search_dialogue_context(
                     query, vector_row, dialog_id=str(dialog_id or ""), conversation_id=str(conversation_id or ""),
                     reference_followup=True, query_modalities=query_modalities,
                 )
+        elif anchor is not None:
+            pass
         elif (not query_subjects or underspecified_media_followup) and latest_same_dialog:
             # Elliptical media follow-ups ("А фото где?", "where is his photo?")
             # belong to the just-active answer unless the user names another topic.
@@ -4303,10 +4450,10 @@ def search_dialogue_context(
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
             else "named_topic_vector_match" if history_selection_method == "named_topic_section_vector"
+            else "answer_to_april_question" if relation == "CONTINUE" and (answer_to_april_question or short_answer_to_open_slot or latest_answer_relation.get("matched"))
             else "semantic_history_match" if contextual_history_match
             else "self_contained_new_information" if self_contained_new_information
             else "correction_reanchored_to_named_topic" if relation == "CONTINUE" and correction_turn and explicit_topic_hits
-            else "answer_to_april_question" if relation == "CONTINUE" and answer_to_april_question
             else "recent_named_topic_reentry" if relation == "CONTINUE" and recent_named_topic_reentry
             else "named_topic_match" if explicit_topic_hits and relation == "CONTINUE"
             else "hot_branch_ambiguous_followup" if relation == "CONTINUE" and anchor and hot_branch_candidate
@@ -4320,6 +4467,18 @@ def search_dialogue_context(
         "referential_followup": reference_followup,
         "history_request": history_request,
         "contextual_history_match": contextual_history_match,
+        "latest_assistant_anchor": _compact_pair(latest_same_dialog) if latest_same_dialog else {},
+        "latest_answer_relation": dict(latest_answer_relation),
+        "last_turn_link": {
+            "decision": "CONTINUE" if relation == "CONTINUE" else "NEW",
+            "current_request": _text(query)[:320],
+            "anchor_message_id": _text((anchor or {}).get("message_id"))[:120] if relation == "CONTINUE" else "",
+            "anchor_topic_id": _text((anchor or {}).get("topic_id") or (anchor or {}).get("selected_topic_id"))[:120] if relation == "CONTINUE" else "",
+            "anchor_branch_id": _text((anchor or {}).get("branch_id") or (anchor or {}).get("active_branch_id"))[:120] if relation == "CONTINUE" else "",
+            "latest_answer_match": bool(latest_answer_matched),
+            "answer_subject_overlap": float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
+            "previous_answer_expects_user_input": bool(latest_answer_relation.get("expects_user_input")),
+        },
         "history_selection_method": history_selection_method,
         "continuation_context_limit": 10 if relation == "CONTINUE" else (5 if history_request else 2),
         "topic_vector_candidate_count": len(topic_vector_hits),
@@ -4359,6 +4518,10 @@ def search_dialogue_context(
         query_subject_terms=sorted(query_subjects)[:10], active_subject_conflict=bool(active_subject_conflict),
         semantic_subject_switch=bool(semantic_subject_switch),
         self_contained_new_information=bool(self_contained_new_information),
+        latest_answer_match=bool(latest_answer_matched),
+        latest_answer_expects_user_input=bool(latest_answer_relation.get("expects_user_input")),
+        latest_answer_subject_overlap=float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
+        latest_answer_message_key=_apr_diag_ref(latest_answer_relation.get("message_id")),
         hot_branch_candidate=bool(hot_branch_candidate),
         topic_vector_candidate_count=len(topic_vector_hits),
         topic_vector_top=[{
@@ -4422,6 +4585,9 @@ def prepare_dialogue_context(
         "history_request": bool(context.get("history_request")),
         "history_time_search": deepcopy(context.get("history_time_search") or {}),
         "contextual_history_match": bool(context.get("contextual_history_match")),
+        "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
+        "latest_answer_relation": deepcopy(context.get("latest_answer_relation") or {}),
+        "last_turn_link": deepcopy(context.get("last_turn_link") or {}),
         "history_selection_method": _text(context.get("history_selection_method")),
         "continuation_context_limit": int(context.get("continuation_context_limit") or 2),
         "topic_vector_candidate_count": int(context.get("topic_vector_candidate_count") or 0),
