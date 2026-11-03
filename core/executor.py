@@ -85,6 +85,7 @@ from storage import (
     init_db,
     is_authenticated_user,
     load_dialogue_asset_payloads,
+    load_dialogue_history_details,
     save_dialogue_pair,
     get_user_plan,
     get_free_media_quota_status,
@@ -393,6 +394,7 @@ def _compact_question_search(
             "message_id": _text(section.get("message_id"))[:120],
         } if section else {},
         "selected_pairs": pairs,
+        "explicit_render_reference": dict(context.get("explicit_render_reference") or {}) if isinstance(context.get("explicit_render_reference"), dict) else {},
         "clarification_needed": bool(context.get("clarification_needed")),
         "clarification_prompt": _text(context.get("clarification_prompt"))[:280],
         "clarification_options": options,
@@ -1021,6 +1023,149 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
         "the file i sent", "the image i sent", "compare with", "compare to previous",
     )
     return any(marker.replace("ё", "е") in low for marker in markers)
+
+
+def _restore_referenced_table_render(
+    user_id: str,
+    identity: dict[str, Any],
+    dialogue_context: dict[str, Any],
+    render_blocks: Any,
+    requested_outputs: Any,
+) -> list[dict[str, Any]]:
+    """Rehydrate an explicitly referenced saved TableBlock for the XLSX room.
+
+    Dialogue indexes intentionally omit heavyweight SceneContract JSON. Once the
+    state manager has selected the exact source message, this second-stage read
+    restores only that authenticated, retained pair and reuses its original rows.
+    """
+    blocks = [dict(item) for item in (render_blocks or []) if isinstance(item, dict)]
+    requested = {str(item or "").strip().lower() for item in (requested_outputs or []) if str(item or "").strip()}
+    if "file" not in requested:
+        return blocks
+
+    reference = dialogue_context.get("explicit_render_reference") if isinstance(dialogue_context.get("explicit_render_reference"), dict) else {}
+    if str(reference.get("kind") or "").lower() != "table":
+        return blocks
+
+    source_ids: list[str] = []
+    for value in (
+        reference.get("message_id"),
+        (dialogue_context.get("anchor") or {}).get("message_id") if isinstance(dialogue_context.get("anchor"), dict) else "",
+        *[
+            pair.get("message_id") for pair in (dialogue_context.get("selected_pairs") or [])
+            if isinstance(pair, dict)
+        ],
+    ):
+        message_id = _text(value)
+        if message_id and message_id not in source_ids:
+            source_ids.append(message_id)
+    if not source_ids:
+        return blocks
+
+    try:
+        rows = load_dialogue_history_details(user_id, source_ids[:8])
+    except Exception as exc:
+        _apr_timing_log(
+            "explicit_render_restore_failed",
+            user_key=_apr_diag_ref(user_id),
+            message_key=_apr_diag_ref(source_ids[0]),
+            error_type=type(exc).__name__,
+        )
+        return blocks
+
+    expected_dialog = _text(identity.get("dialog_id"))
+    expected_conversation = _text(identity.get("conversation_id"))
+
+    def parse_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def table_payload(block: dict[str, Any]) -> dict[str, Any]:
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        merged = dict(block)
+        merged.update(payload)
+        headers = merged.get("headers") or merged.get("columns") or merged.get("column_headers")
+        table_rows = merged.get("rows") or merged.get("data") or merged.get("values")
+        if not isinstance(headers, list) or not headers or not isinstance(table_rows, list) or not table_rows:
+            return {}
+        normalized = dict(payload)
+        for key in ("title", "caption", "headers", "columns", "column_headers", "rows", "data", "values", "additional_sheets"):
+            if key in merged and key not in normalized:
+                normalized[key] = merged[key]
+        normalized.setdefault("headers", headers)
+        normalized.setdefault("rows", table_rows)
+        return normalized
+
+    row_by_id = {
+        _text(row.get("message_id")): row for row in (rows or [])
+        if isinstance(row, dict) and _text(row.get("message_id"))
+    }
+    # Use the order selected by State Manager, not whichever table happens to be
+    # newest in the full history window.
+    for source_id in source_ids:
+        saved_row = row_by_id.get(source_id)
+        if not isinstance(saved_row, dict):
+            continue
+        if expected_dialog and _text(saved_row.get("dialog_id")) != expected_dialog:
+            if not (expected_conversation and _text(saved_row.get("conversation_id")) == expected_conversation):
+                continue
+        response = parse_object(saved_row.get("structured_response"))
+        scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
+        root_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+        scene_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
+        # Read the root mirror and SceneContract source together. Some earlier
+        # responses stored only one of them, and an empty mirror is not evidence
+        # that the canonical saved table is absent.
+        saved_blocks = list(root_blocks)
+        seen_blocks = {id(item) for item in saved_blocks}
+        saved_blocks.extend(item for item in scene_blocks if id(item) not in seen_blocks)
+        for saved_block in saved_blocks:
+            if not isinstance(saved_block, dict):
+                continue
+            block_type = _text(saved_block.get("type") or saved_block.get("artifact_type") or "").lower()
+            renderer = _text(saved_block.get("renderer") or saved_block.get("viewer") or "").lower()
+            if block_type != "table" and renderer != "tableblock":
+                continue
+            payload = table_payload(saved_block)
+            if not payload:
+                continue
+            restored = dict(saved_block)
+            restored["type"] = "table"
+            restored["artifact_type"] = "table"
+            restored["renderer"] = "TableBlock"
+            restored["viewer"] = "TableBlock"
+            restored["payload"] = payload
+            restored["source_message_id"] = source_id
+            restored["source"] = "authenticated_dialogue_history"
+            # The referenced original values win over a model-generated derivative.
+            blocks = [item for item in blocks if _text(item.get("type") or item.get("artifact_type")).lower() != "table"]
+            blocks.append(restored)
+            _apr_timing_log(
+                "explicit_render_restored",
+                user_key=_apr_diag_ref(user_id),
+                source_message_key=_apr_diag_ref(source_id),
+                renderer="TableBlock",
+                header_count=len(payload.get("headers") or payload.get("columns") or []),
+                row_count=len(payload.get("rows") or payload.get("data") or []),
+                delivery="existing_file_delivery_room",
+            )
+            return blocks
+
+    _apr_timing_log(
+        "explicit_render_not_found",
+        user_key=_apr_diag_ref(user_id),
+        source_message_key=_apr_diag_ref(source_ids[0]),
+        renderer="TableBlock",
+        reason="selected_retained_pair_has_no_concrete_table_payload",
+    )
+    return blocks
 
 
 def _image_analysis_reference(value: Any) -> bool:
@@ -1813,6 +1958,7 @@ async def execute(
         )
     else:
         current_request_subject_context: dict[str, Any] | None = None
+        turn_level_memory_search_done = False
         # Use the same original-language clause that was classified. Equal list lengths
         # do not guarantee that separately split normalized text is aligned item by item.
         for index, question_item in enumerate(question_sequence):
@@ -1842,6 +1988,32 @@ async def execute(
                     "inherits_current_request_subject": inherits_subject,
                     "user_utc_offset_minutes": user_utc_offset_minutes,
                 }
+                task_direction = _text(task_semantics.get("direction")).upper()
+                task_intent = _text(task_semantics.get("primary_intent")).upper()
+                task_topic_reference = _text(task_semantics.get("topic_reference")).upper()
+                task_requires_history = bool(
+                    task_semantics.get("requires_memory")
+                    or task_semantics.get("history_request")
+                    or task_semantics.get("parent_context_dependency")
+                    or task_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_DIALOGUE_HISTORY"}
+                    or task_intent in {"TOPIC_CONTINUATION", "HISTORY_RECALL", "CONTEXTUAL_FOLLOWUP"}
+                    or task_topic_reference in {"PREVIOUS_ASSISTANT_ANSWER", "DIALOGUE_HISTORY", "ACTIVE_TOPIC"}
+                    or (inherits_subject and current_request_subject_context is None)
+                )
+                turn_requires_history = bool(
+                    semantic_interpretation.get("requires_memory")
+                    or semantic_interpretation.get("history_request")
+                )
+                use_turn_level_search = bool(turn_requires_history and not turn_level_memory_search_done)
+                # For a compound turn whose overall classifier says NEW, retain
+                # one semantic probe on its first explicit clause. The State
+                # Manager may still find a grounded historical topic even when
+                # lexical ranking does not justify CONTINUE. Do this once, not
+                # once per each decomposed subtask.
+                use_initial_turn_probe = bool(
+                    index == 0 and not turn_requires_history and not turn_level_memory_search_done
+                )
+
                 if inherits_subject and current_request_subject_context:
                     active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
                     task_context = {
@@ -1870,10 +2042,30 @@ async def execute(
                     task_search = _compact_question_search(task_context, search_query, task_semantics)
                     task_search["inherits_current_request_subject"] = True
                     task_search["reason"] = "pronoun_inherits_subject_from_current_request"
-                else:
+                elif task_requires_history or use_turn_level_search or use_initial_turn_probe:
+                    search_text = current_text if use_turn_level_search and not task_requires_history else search_query
+                    search_semantics = task_semantics
+                    if use_turn_level_search and not task_requires_history:
+                        search_semantics = {
+                            "schema": "april_request_semantics_v1",
+                            "primary_intent": semantic_interpretation.get("primary_intent"),
+                            "direction": semantic_interpretation.get("direction"),
+                            "time_scope": semantic_interpretation.get("time_scope"),
+                            "topic_reference": semantic_interpretation.get("topic_reference"),
+                            "requires_memory": semantic_interpretation.get("requires_memory"),
+                            "history_request": semantic_interpretation.get("history_request"),
+                            "search_scope": semantic_interpretation.get("search_scope"),
+                            "reason": semantic_interpretation.get("reason"),
+                            "pragmatic_features": semantic_interpretation.get("pragmatic_features", {}),
+                            "features": semantic_interpretation.get("features", {}),
+                            "user_utc_offset_minutes": user_utc_offset_minutes,
+                        }
+                        turn_level_memory_search_done = True
+                    elif use_initial_turn_probe:
+                        turn_level_memory_search_done = True
                     task_context = await asyncio.to_thread(
                         prepare_dialogue_context,
-                        uid, search_query, query_interpretation=task_semantics, **search_kwargs
+                        uid, search_text, query_interpretation=search_semantics, **search_kwargs
                     )
                     if question_item.get("introduces_current_request_subject"):
                         # Bind all anaphoric substeps to the first explicit topic clause.
@@ -1886,6 +2078,39 @@ async def execute(
                     task_search = _compact_question_search(task_context, search_query, task_semantics)
                     if inherits_subject:
                         task_search["inherits_current_request_subject"] = True
+                else:
+                    # A decomposed request is not 24 independent history lookups.
+                    # Self-contained NEW_INFORMATION steps inherit the current
+                    # request sequence only; they do not hydrate/search PostgreSQL.
+                    task_context = {
+                        "window_hours": 12,
+                        "relation": "NEW",
+                        "relation_confidence": 0.0,
+                        "reason": "self_contained_new_information_no_history_required",
+                        "active_topic": search_query[:140],
+                        "selected_pairs": [],
+                        "candidates": [],
+                        "matches": [],
+                        "history_topics": [],
+                        "topic_index": [],
+                        "known_topic_count": 0,
+                        "history_request": False,
+                        "requested_topic_count": 0,
+                        "topic_table_markdown": "",
+                        "anchor": {},
+                        "selected_section": {},
+                        "explicit_render_reference": {},
+                        "clarification_needed": False,
+                        "clarification_prompt": "",
+                        "pending_clarification": {},
+                        "clarification_resolution": {},
+                        "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+                    }
+                    task_search = _compact_question_search(task_context, search_query, task_semantics)
+                    task_search["status"] = "not_required"
+                    task_search["reason"] = "self_contained_new_information_no_history_required"
+                    if question_item.get("introduces_current_request_subject"):
+                        current_request_subject_context = task_context
             except Exception as exc:
                 # A task-search failure must not discard the whole user request.
                 # Keep order/identity and allow other tasks to proceed independently.
@@ -1918,7 +2143,12 @@ async def execute(
                 selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
-                context_source="current_request_subject" if question_item.get("inherits_current_request_subject") else "dialogue_memory",
+                context_source=(
+                    "current_request_subject" if question_item.get("inherits_current_request_subject")
+                    else "dialogue_memory" if task_requires_history or use_turn_level_search
+                    else "turn_level_semantic_probe" if use_initial_turn_probe
+                    else "current_request_semantics"
+                ),
                 semantic_intent=task_semantics.get("primary_intent"),
                 search_direction=task_semantics.get("direction"),
                 history_request=bool(task_context.get("history_request")) if isinstance(task_context, dict) else False,
@@ -3325,6 +3555,17 @@ async def execute(
     if plan_intent.get("wants_file") and "file" not in requested_for_delivery:
         requested_for_delivery.append("file")
     source_render_blocks = scene_contract.get("render_blocks") or result.get("render_blocks") or response.render_blocks or []
+    render_reference_context = dialogue_context
+    if not (isinstance(render_reference_context.get("explicit_render_reference"), dict) and render_reference_context.get("explicit_render_reference")):
+        render_reference_context = next((
+            context for context in question_contexts
+            if isinstance(context, dict)
+            and isinstance(context.get("explicit_render_reference"), dict)
+            and context.get("explicit_render_reference")
+        ), render_reference_context)
+    source_render_blocks = _restore_referenced_table_render(
+        uid, identity, render_reference_context, source_render_blocks, requested_for_delivery
+    )
     source_render_blocks = attach_copy_block(source_render_blocks, requested_for_delivery, answer)
     delivery_blocks, attached_file_blocks = attach_file_delivery_blocks(
         source_render_blocks,
