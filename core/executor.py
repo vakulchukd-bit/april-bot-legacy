@@ -45,6 +45,7 @@ from blocks import interpretation_identity as _interpretation_identity
 build_interpretation = _interpretation_identity.build_interpretation
 build_question_sequence = _interpretation_identity.build_question_sequence
 interpret_request_semantics = _interpretation_identity.interpret_request_semantics
+analyze_dialogue_transition = _interpretation_identity.analyze_dialogue_transition
 
 
 def build_interpretation_identity(**kwargs):
@@ -93,7 +94,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v11_semantic_context_gate"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v12_last_answer_pre_response_audit"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -2063,13 +2064,59 @@ async def execute(
     )
 
     interpretation_started = time.perf_counter()
+    # Free now performs the same mandatory pre-response dialogue audit as Premium:
+    # current request -> actual latest April answer/active branch -> authenticated
+    # history only when the current branch is not a reliable match -> new topic.
+    # This is synchronous local analysis; it adds no provider/API call.
+    transition_analysis = analyze_dialogue_transition(
+        current_request=original or current_text,
+        dialogue_context=dialogue_context,
+        semantic_interpretation=semantic_interpretation,
+    )
+    pre_response_analysis = transition_analysis.setdefault("pre_response_analysis", {})
+    if isinstance(pre_response_analysis, dict):
+        pre_response_analysis["request_task_count"] = max(1, len(question_sequence))
+        pre_response_analysis["request_task_vectors"] = [
+            {
+                "step_index": item.get("step_index"),
+                "request": _text(item.get("request"))[:220],
+                "semantic_intent": _text(item.get("semantic_intent"))[:60],
+                "relation": _text((item.get("dialogue_search") or {}).get("relation") or "NEW")[:24],
+                "history_request": bool((item.get("dialogue_search") or {}).get("history_request")),
+                "selected_message_ids": [
+                    _text(pair.get("message_id"))[:120]
+                    for pair in ((item.get("dialogue_search") or {}).get("selected_pairs") or [])[:3]
+                    if isinstance(pair, dict) and _text(pair.get("message_id"))
+                ],
+            }
+            for item in question_sequence[:20] if isinstance(item, dict)
+        ]
+        pre_response_analysis["routing_order"] = [
+            "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH",
+            "AUTHENTICATED_HISTORICAL_BRANCH_SEARCH_IF_CURRENT_BRANCH_MISSES",
+            "NEW_TOPIC_ONLY_AFTER_CURRENT_AND_HISTORY_MISS",
+        ]
+    dialogue_context["dialogue_transition_analysis"] = transition_analysis
+    # Preserve the compact linkage card emitted by State Manager and enrich it
+    # with the independent interpretation result for Provider.
+    last_turn_link = dialogue_context.get("last_turn_link")
+    if isinstance(last_turn_link, dict):
+        last_turn_link["interpretive_classification"] = _text(transition_analysis.get("classification"))[:48]
+        last_turn_link["response_strategy"] = _text(transition_analysis.get("response_strategy"))[:48]
+        last_turn_link["continuation_summary"] = _text(transition_analysis.get("continuation_summary"))[:760]
+    interpretation_memory = dict(dialogue_context)
+    interpretation_memory["dialogue_transition_analysis"] = transition_analysis
+    interpretation_memory["restored_assets"] = [
+        {key: value for key, value in item.items() if not str(key).startswith("_")}
+        for item in (restored_assets or []) if isinstance(item, dict)
+    ]
     active_plan_for_request = str(kwargs.get("active_plan") or "free").strip().lower()
     enforce_free_image_edit_policy = active_plan_for_request == "free"
     interpretation = build_interpretation(
         current_request=current_text,
         original_request=original,
         display_language=display_language,
-        memory=dialogue_context,
+        memory=interpretation_memory,
         attachments=attachments or [],
         visual_context=visual_context or [],
         source_image_reference_available=bool(kwargs.get("source_image_reference_available")),
@@ -2098,9 +2145,12 @@ async def execute(
     request_structure = interpretation.setdefault("request_structure", {})
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
-    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v2"
+    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_last_answer_relation"
     request_structure["semantic_interpretation"] = semantic_interpretation
     request_structure["semantic_interpretation_version"] = "april_request_semantics_v1"
+    request_structure["dialogue_transition_analysis"] = transition_analysis
+    request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
+    request_structure["last_turn_link"] = dict(dialogue_context.get("last_turn_link") or {})
     request_structure["question_search_count"] = len(question_sequence)
     request_structure["question_relations"] = [
         {
@@ -2111,6 +2161,19 @@ async def execute(
         }
         for item in question_sequence
     ]
+    _apr_timing_log(
+        "dialogue_transition_analysis_ready",
+        user_key=_apr_diag_ref(uid),
+        dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+        message_key=_apr_diag_ref(identity.get("message_id")),
+        classification=transition_analysis.get("classification"),
+        response_strategy=transition_analysis.get("response_strategy"),
+        source_message_key=_apr_diag_ref((transition_analysis.get("previous_exchange") or {}).get("message_id")),
+        latest_answer_match=bool((transition_analysis.get("alignment") or {}).get("latest_answer_match")),
+        latest_answer_expects_user_input=bool((transition_analysis.get("alignment") or {}).get("latest_answer_expects_user_input")),
+        history_branch_selected=bool((transition_analysis.get("pre_response_analysis") or {}).get("history_branch_selected")),
+        request_task_count=len(question_sequence),
+    )
     _apr_timing_log(
         "interpretation_ready", interpretation_started,
         relation=(interpretation.get("dialogue") or {}).get("relation"),
