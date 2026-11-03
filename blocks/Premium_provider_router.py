@@ -114,6 +114,7 @@ CURRENT-TURN SEMANTIC CONSISTENCY:
 - PREMIUM OUTPUT BUDGET: total generated output across the primary response, bounded retry, refusal adapter and diagram repair must not exceed 12000 tokens for one user request. Each recovery uses only the remaining headroom; when none remains, do not issue another provider call. Deterministic local rendering may still run at zero model-output cost. Do not try to fill the cap: finish valid JSON with room to spare, keep internal metadata concise, and compress duplicated prose before user-requested substance.
 - ADAPTIVE VISUALS: even when the user did not explicitly request a renderer, add a concrete table/diagram/graph/formula/code/link/image payload when it materially improves a substantial explanation. For an answer likely to exceed ~2000 tokens, consider an image spec only when an illustration materially clarifies the topic; it will be processed by C_APRIL_IMAGES_GENERATOR. Never call a generated illustration an authentic photograph.
 - TABLE INTEGRITY: never return an empty type="table" shell. Every table block needs populated columns/headers and at least one row. Prefer one record/entity per row and one fact per cell; never pack an entire multi-item list into a single cell when it can be structured as rows/cells. Keep tables readable on mobile.
+- PERIODIC TABLE SPECIAL CASE: when a complete chemical periodic table is requested, do not put each period and its semicolon-separated element list into one cell. Use a real 18-group by 7-period grid with one element per cell (atomic number, symbol and name); place lanthanoids and actinoids in their own rows and include a second Excel worksheet with all 118 elements as one element per row. If the source does not support a reliable complete layout, return the verified 118-row normalized dataset instead of guessing group positions.
 - COMPOSITE OUTPUTS: independent outputs in one request are cumulative, not alternatives. A request for a table and a photograph requires both the TableBlock payload and the image-generator specification; answer each request-sequence item in order.
 - Before returning, verify that no requested numbered step or required renderer was omitted.
 
@@ -6171,7 +6172,7 @@ async def generate_text(
 
     _inflight.add(key)
     started = time.perf_counter()
-    failure_code = "PROVIDER_EMPTY_ANSWER"
+    failure_code = ""
     contract: dict[str, Any] | None = None
     usage_data: dict[str, int] = {}
     input_diagnostics: dict[str, Any] = {}
@@ -6182,7 +6183,42 @@ async def generate_text(
         client = _client_get()
         _apr_timing_log("client_ready", client_started, request_fingerprint=key[:16], reused_client=client_was_initialized)
         input_build_started = time.perf_counter()
-        base_input = _build_input(request, diagnostics_out=input_diagnostics)
+        try:
+            base_input = _build_input(request, diagnostics_out=input_diagnostics)
+        except Exception as exc:
+            # _build_input runs before the Responses API call. Previously an
+            # exception here escaped while provider_total reported a stale default.
+            failure_code = str(exc).strip() or "APRIL_INPUT_BUILD_FAILED"
+            safe_match = re.match(r"[A-Z0-9_]+", failure_code.upper())
+            safe_code = safe_match.group(0) if safe_match else "APRIL_INPUT_BUILD_FAILED"
+            _apr_timing_log(
+                "prompt_build_failed", input_build_started,
+                request_fingerprint=key[:16], error_type=type(exc).__name__,
+                failure_code=safe_code, error_detail=failure_code[:180],
+                prompt_budget_tokens=MAX_PROMPT_TOKENS,
+                output_limit_tokens=PREMIUM_OUTPUT_TOKEN_LIMIT,
+                protected_batches=int(input_diagnostics.get("protected_structured_data_batches") or 0),
+                protected_external=bool(input_diagnostics.get("protected_structured_data_external")),
+                compression_stage=input_diagnostics.get("compression_stage"),
+                estimated_input_tokens=input_diagnostics.get("estimated_text_input_tokens_with_recovery_headroom"),
+            )
+            _log_json("INPUT_BUILD_ERROR", {
+                "request_fingerprint": key[:16], "model": MODEL,
+                "error_type": type(exc).__name__, "failure_code": safe_code,
+                "error_detail": failure_code[:180],
+                "prompt_budget_tokens": MAX_PROMPT_TOKENS,
+                "output_limit_tokens": PREMIUM_OUTPUT_TOKEN_LIMIT,
+                "diagnostics": {
+                    name: input_diagnostics.get(name) for name in (
+                        "compression_stage", "system_plus_card_token_estimate",
+                        "estimated_text_input_tokens_with_recovery_headroom",
+                        "protected_structured_data_batches", "protected_structured_data_items",
+                        "protected_structured_data_external", "external_text_payload_token_estimate",
+                        "prompt_budget_met_by_estimate", "input_text_parts",
+                    ) if name in input_diagnostics
+                },
+            })
+            raise
         input_build_ms = round((time.perf_counter() - input_build_started) * 1000, 1)
         conversation = request.conversation if isinstance(request.conversation, dict) else {}
         intent_data = request.intent if isinstance(request.intent, dict) else {}
