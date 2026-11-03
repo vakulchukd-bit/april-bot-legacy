@@ -1278,9 +1278,9 @@ def _detect_requested_outputs(text: str) -> list[str]:
     # Explicit requests to receive or export a deliverable as a file. A bare
     # mention of a file remains context; an action plus a file format/noun is required.
     file_delivery_request = bool(re.search(
-        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|приложи|приложите|прикрепи|прикрепите|сохрани|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать|сделай|создай|сгенерируй|напиши)\b.{0,100}\b(?:файл\w*|файлом|фвйл\w*|xlsx|excel|csv|pdf|docx)\b|"
+        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|приложи|приложите|прикрепи|прикрепите|сохрани|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать|сделай|создай|сгенерируй|напиши)\b.{0,100}\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b|"
         r"\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b.{0,80}\b(?:для\s+скачиван\w*|скачать|скачиван\w*)\b|"
-        r"\b(?:send|give|export|download|save|deliver|create|generate|write)\b.{0,100}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?(?:файл\w*|фвйл\w*)|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
+        r"\b(?:send|give|export|download|save|deliver|create|generate|write)\b.{0,100}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
         low, re.I | re.S,
     ))
     if file_delivery_request and "file" not in result:
@@ -1432,7 +1432,7 @@ def _file_delivery_mode(text: Any, requested_outputs: Any = None) -> str:
         low, re.I | re.S,
     ))
     file_as_primary = bool(re.search(
-        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|сохрани|сохранить|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать)\b.{0,90}(?:\bв\s+(?:файл\w*|фвйл\w*)|\bфайлом\b|\bфвйл\w*\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|\b(?:send|give|export|download|save|deliver)\b.{0,90}(?:\bas\s+(?:a\s+)?file|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?(?:файл\w*|фвйл\w*)|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bas\s+(?:a\s+)?file\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
+        r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|сохрани|сохранить|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать)\b.{0,90}(?:\bв\s+файл\w*|\bфайлом\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|\b(?:send|give|export|download|save|deliver)\b.{0,90}(?:\bas\s+(?:a\s+)?file|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b)|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bas\s+(?:a\s+)?file\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
         low, re.I | re.S,
     ))
     file_only = explicit_only or (file_as_primary and not explicit_both)
@@ -3877,7 +3877,13 @@ def analyze_dialogue_transition(
     # A historical search must use the matched historical anchor, not accidentally
     # the most recent unrelated message in the current chat.
     if historical_match or (history_request and anchor):
+        # Explicit history retrieval must stay anchored to the historical match.
         source_pair = anchor or (selected[0] if selected and isinstance(selected[0], dict) else {})
+    elif latest and not explicit_switch:
+        # Always audit the immediately preceding April answer before interpreting
+        # a new turn. State Manager still decides the route; this local comparison
+        # prevents a weak/empty route label from erasing the live discourse vector.
+        source_pair = latest
     elif relation == "CONTINUE" and latest:
         source_pair = latest
     else:
