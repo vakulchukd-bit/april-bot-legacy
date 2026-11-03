@@ -1093,7 +1093,10 @@ def _looks_like_referential_followup(query: str) -> bool:
         # current turn contains no new file/image bytes.
         "в этом файле", "в данном файле", "в прикрепленном файле",
         "в прикреплённом файле", "в файле который я прислал",
-        "в файле, который я прислал", "на этой картинке", "на картинке",
+        "в файле, который я прислал", "эту таблицу", "эту таблица",
+        "эта таблица", "в этой таблице", "из этой таблицы", "эту таблицу в файле",
+        "эту таблицу в excel", "пришли эту таблицу", "покажи эту таблицу",
+        "на этой картинке", "на картинке",
         "на этом фото", "на этой фотографии", "на изображении",
         "тот файл", "этот файл", "тот код", "этот код", "тот скриншот",
         "эту картинку", "эту фотографию", "картинку, которую я прислал",
@@ -1135,6 +1138,72 @@ def _looks_like_referential_followup(query: str) -> bool:
         return True
     return False
 
+
+def _explicit_render_reference_kind(query: str) -> str:
+    """Identify the renderer explicitly referenced by a prior-output pointer."""
+    low = _text(query).lower().replace("ё", "е")
+    if re.search(r"(?:таблиц\w*|spreadsheet|workbook|\btable\b)", low):
+        return "table"
+    if re.search(r"(?:график\w*|диаграмм\w*|\bchart\b|\bgraph\b)", low):
+        return "graph"
+    if re.search(r"(?:схем\w*|блок-схем\w*|\bdiagram\b|\bflowchart\b)", low):
+        return "diagram"
+    if re.search(r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b)", low):
+        return "formula"
+    if re.search(r"(?:\bкод\b|скрипт\w*|\bcode\b|\bscript\b)", low):
+        return "code"
+    if re.search(r"(?:фото\w*|картин\w*|изображен\w*|\bimage\b|\bphoto\b|\bpicture\b)", low):
+        return "image"
+    if re.search(r"(?:\bфайл\w*|документ\w*|\bpdf\b|\bfile\b|\bdocument\b)", low):
+        return "file"
+    return ""
+
+
+def _row_has_render_kind(row: dict[str, Any], expected_kind: str) -> bool:
+    """Check the canonical saved SceneContract for a concrete prior renderer."""
+    response = _parse_json(row.get("structured_response"))
+    scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
+    root_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
+    scene_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
+    # Some historical rows store the canonical renderer only inside the
+    # SceneContract while others also carry a top-level render_blocks mirror.
+    # Inspect both; an empty/partial mirror must not hide the saved renderer.
+    blocks = list(root_blocks)
+    seen_blocks = {id(item) for item in blocks}
+    blocks.extend(item for item in scene_blocks if id(item) not in seen_blocks)
+    if not blocks:
+        return False
+    expected = str(expected_kind or "").strip().lower()
+    aliases = {
+        "table": {"table", "tableblock"},
+        "graph": {"graph", "chart", "graphblock"},
+        "diagram": {"diagram", "diagramblock", "svg"},
+        "formula": {"formula", "formulablock"},
+        "code": {"code", "codeblock"},
+        "image": {"image", "gallery", "galleryblock"},
+        "file": {"file", "document", "filedeliveryblock"},
+    }
+    accepted = aliases.get(expected, {expected})
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower()
+        renderer = str(block.get("renderer") or block.get("viewer") or "").strip().lower()
+        if kind not in accepted and renderer not in accepted:
+            continue
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+        if expected == "table":
+            merged = dict(block)
+            merged.update(payload)
+            headers = merged.get("headers") or merged.get("columns") or merged.get("column_headers")
+            rows = merged.get("rows") or merged.get("data") or merged.get("values")
+            if isinstance(headers, list) and headers and isinstance(rows, list) and rows:
+                return True
+            continue
+        # For non-tabular renderers, the presence of a canonical block is enough;
+        # exact payload validation and restoration belong to the owning room.
+        return True
+    return False
 
 def _looks_like_asset_reference(query: str) -> bool:
     """Detect an explicit mention of a prior image/file/code artifact.
@@ -3645,6 +3714,24 @@ def search_dialogue_context(
         r"\bэту\s+задач\w*\b)",
         low_query,
     ))
+    explicit_render_kind = _explicit_render_reference_kind(query) if explicit_prior_pointer else ""
+    explicit_render_source_row: dict[str, Any] | None = None
+    if explicit_render_kind and not history_request:
+        # Pronouns such as "этую таблицу" point to the concrete saved renderer,
+        # not to a keyword-ranked derivative message about exporting it.
+        render_candidates = current_dialog_rows or rows
+        for candidate_row in sorted(
+            (item for item in render_candidates if isinstance(item, dict)),
+            key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
+            reverse=True,
+        ):
+            if _row_has_render_kind(candidate_row, explicit_render_kind):
+                explicit_render_source_row = candidate_row
+                break
+    if explicit_render_source_row is not None:
+        relation = "CONTINUE"
+        continuation = True
+        self_contained_new_information = False
     self_contained_new_information = bool(
         interpreted_intent == "NEW_INFORMATION"
         and not bool(query_interpretation.get("requires_memory"))
@@ -3687,7 +3774,7 @@ def search_dialogue_context(
     )
     topic_vector_query = retrieval_query
     topic_vector_query_source = "current_request"
-    if wants_topic_resume:
+    if wants_topic_resume and explicit_render_source_row is None:
         # Short continuations such as “and then?” have no topic nouns. Ground their
         # second-stage fuzzy lookup in the latest active topic before ranking.
         # Explicit subject changes and named-subject requests stay on the literal query.
@@ -3710,7 +3797,15 @@ def search_dialogue_context(
     pending_for_next_turn: dict[str, Any] = {}
 
     pending_rejected = bool(pending_clarification and _looks_like_clarification_rejection(query))
-    if pending_clarification and (not new_topic_request or pending_rejected):
+    if explicit_render_source_row is not None and not history_request:
+        anchor = _candidate_score(
+            query, explicit_render_source_row,
+            dialog_id=str(dialog_id or explicit_render_source_row.get("dialog_id") or ""),
+            conversation_id=str(conversation_id or explicit_render_source_row.get("conversation_id") or ""),
+            reference_followup=True, query_modalities=query_modalities,
+        )
+        relation = "CONTINUE"
+    elif pending_clarification and (not new_topic_request or pending_rejected):
         original_pending_request = _text(pending_clarification.get("original_request"))
         if pending_resolved and not pending_rejected:
             # Number/title choice matched the offered clarification. An explicit
@@ -4131,6 +4226,14 @@ def search_dialogue_context(
             ))
             selected_for_context = selected_for_context[-10:]
 
+    if explicit_render_source_row is not None and not history_request and anchor:
+        # The source renderer is the authoritative pair. Do not replace it with a
+        # later export-attempt message that has only a textual reference to the table.
+        selected_for_context = [_compact_pair(anchor)]
+        contextual_history_match = True
+        history_selection_method = "explicit_render_reference"
+        active_topic = _text(anchor.get("topic")) or active_topic
+
     # A NEW request may still name a topic retained from an earlier dialogue.
     # Keep relation=NEW (no forced continuation), but pass one grounded pair when
     # the topic index confirms a strong topical match.
@@ -4480,6 +4583,12 @@ def search_dialogue_context(
             "previous_answer_expects_user_input": bool(latest_answer_relation.get("expects_user_input")),
         },
         "history_selection_method": history_selection_method,
+        "explicit_render_reference": ({
+            "kind": explicit_render_kind,
+            "message_id": _text(explicit_render_source_row.get("message_id")),
+            "dialog_id": _text(explicit_render_source_row.get("dialog_id")),
+            "conversation_id": _text(explicit_render_source_row.get("conversation_id")),
+        } if explicit_render_source_row is not None else {}),
         "continuation_context_limit": 10 if relation == "CONTINUE" else (5 if history_request else 2),
         "topic_vector_candidate_count": len(topic_vector_hits),
         "matched_topic_count": len(topic_index) if (history_request or contextual_history_match or relation == "CONTINUE") else 0,
@@ -4589,6 +4698,7 @@ def prepare_dialogue_context(
         "latest_answer_relation": deepcopy(context.get("latest_answer_relation") or {}),
         "last_turn_link": deepcopy(context.get("last_turn_link") or {}),
         "history_selection_method": _text(context.get("history_selection_method")),
+        "explicit_render_reference": deepcopy(context.get("explicit_render_reference") or {}),
         "continuation_context_limit": int(context.get("continuation_context_limit") or 2),
         "topic_vector_candidate_count": int(context.get("topic_vector_candidate_count") or 0),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
