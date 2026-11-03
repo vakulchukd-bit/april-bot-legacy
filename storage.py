@@ -1,5330 +1,721 @@
-"""
-APRIL PostgreSQL storage — canonical minimal persistent storage.
+"use client";
 
-Persistent data policy:
-  1. users     -> permanent authenticated/account/subscription state.
-  2. payments  -> permanent payment history.
-  3. dialogue_memory -> authenticated USER↔APRIL pairs with per-pair retention.
-
-The retention lifetime is recorded when each pair is saved: Free = 12 hours,
-Premium = 24 hours. A later plan change does not extend or shorten an existing
-pair. Legacy rows default to 12 hours; rows from a currently verifiable active Premium
-grant are backfilled to 24 hours on the first migration. Reads enforce expiry immediately
-and a background worker physically removes expired rows approximately once a minute.
-The old feedback/knowledge/memory_states stores are intentionally removed.
-"""
-from __future__ import annotations
-
-import hashlib
-import hmac
-import math
-import os
-import random
-import re
-import secrets
-import threading
-import json
-import time
-from datetime import datetime, timezone, timedelta
-from urllib.parse import quote
-from typing import Any
-
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-# These values belong to the existing storage contract; the ZIP does not contain
-# a separate tariffs_config module, so storage must not import a missing file.
-ADMIN_ID = os.getenv("APRIL_ADMIN_ID", "")
-FREE_MESSAGES_LIMIT = int(os.getenv("APRIL_FREE_MESSAGES_LIMIT", "20"))
-FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
-LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
-PREMIUM_PRICE = int(os.getenv("APRIL_PREMIUM_PRICE", "69"))
-LITE_DAYS = int(os.getenv("APRIL_LITE_DAYS", "5"))
-PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "28"))
-
-FILE_PATH = "data/subscriptions.json"
-
-DIALOGUE_WINDOW_HOURS = 12
-DIALOGUE_SEED_HOURS = 1
-DIALOGUE_WINDOW_SECONDS = DIALOGUE_WINDOW_HOURS * 3600
-DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 3600
-PREMIUM_MEMORY_WINDOW_HOURS = 24
-PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
-PREMIUM_TEST_DURATION_HOURS = 28 * 24
-
-# Free media quota is a shared pack: image generation and input attachment
-# analysis draw from the same six-unit balance. Text and voice transcription
-# without attached media never consume this quota.
-FREE_MEDIA_PACK_UNITS = 6
-FREE_MEDIA_COOLDOWN_SECONDS = 5 * 60 * 60
-FREE_MEDIA_REFERRAL_REWARD_UNITS = 6
-FREE_MEDIA_RESERVATION_TTL_SECONDS = 30 * 60
-
-_USERS_COLUMNS = (
-    "user_id",
-    "april_id",
-    "email",
-    "name",
-    "provider",
-    "provider_user_id",
-    "plan",
-    "subscription_until",
-    "premium_id",
-    "warned",
-    "language",
-    "messages_today",
-    "images_today",
-    "last_reset",
-    "created_at",
-    "last_login_at",
-    "last_seen_at",
-)
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
+import { getLanguage, type Language } from "../lib/language";
 
 
+// Canonical public origin for Community invitation links.
+const APRIL_PUBLIC_SITE_ORIGIN = (() => {
+  const fallback = "https://aprill-web-production.up.railway.app";
+  const configured = String(process.env.NEXT_PUBLIC_APP_URL || fallback).trim();
+  try {
+    const parsed = new URL(configured);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password
+      ? parsed.origin
+      : fallback;
+  } catch {
+    return fallback;
+  }
+})();
 
-_ALLOWED_TABLE_COLUMNS = {
-    "users": set(_USERS_COLUMNS),
-    # Test grants are recorded for audit, but they are explicitly not paid payments.
-    "payments": {"id", "user_id", "plan", "amount", "premium_id", "payment_status", "payment_source", "created_at"},
-    "dialogue_memory": {"id", "user_id", "created_at", "retention_hours", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response", "asset_payloads"},
+type CommunityAttachment = { name: string; size: number; download_url: string };
+type CommunityMessage = {
+  id: number;
+  display_name: string;
+  plan: "free" | "premium";
+  message: string;
+  created_at: string | null;
+  is_deleted: boolean;
+  is_own: boolean;
+  author_april_id?: string;
+  attachment: CommunityAttachment | null;
+};
+type CommunityMember = {
+  april_id: string;
+  display_name: string;
+  plan: "free" | "premium";
+  relation: "none" | "friend" | "incoming" | "outgoing";
+  is_blocked?: boolean;
+};
+
+type CommunityResponse = {
+  success?: boolean;
+  error?: string;
+  messages?: CommunityMessage[];
+  members?: CommunityMember[];
+  profile?: { display_name?: string; is_custom?: boolean };
+  plan?: "free" | "premium";
+  max_message_chars?: number;
+  max_attachment_bytes?: number;
+  is_admin?: boolean;
+};
+
+const DISPLAY_NAME_STORAGE_PREFIX = "april_display_name:";
+const MAX_UPLOAD_BYTES = 3 * 1024 * 1024;
+const MAX_DISPLAY_MESSAGES = 30;
+// Community attachments are documents, source code, archives and other files —
+// not photos or videos. This is a UI guard; the server remains the security boundary.
+const MEDIA_FILE_EXTENSIONS = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|tiff?|webp|heic|heif|ico|mp4|m4v|mov|avi|mkv|webm|mpeg|mpg|3gp|wmv|flv|ogv)$/i;
+function isDisallowedMediaFile(file: File | null): boolean {
+  return Boolean(file && (/^(?:image|video)\//i.test(file.type) || MEDIA_FILE_EXTENSIONS.test(file.name)));
 }
 
-
-def _drop_unwanted_columns(cur, table: str) -> None:
-    """Keep only the canonical columns used by the current application contract."""
-    allowed = _ALLOWED_TABLE_COLUMNS.get(table, set())
-    cur.execute(
-        """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = current_schema() AND table_name = %s
-        ORDER BY ordinal_position
-        """,
-        (table,),
-    )
-    for row in cur.fetchall():
-        column = str(row["column_name"] if isinstance(row, dict) else row[0])
-        if column not in allowed:
-            cur.execute(
-                f'ALTER TABLE "{table}" DROP COLUMN IF EXISTS "{column}" CASCADE'
-            )
-
-_CLEANUP_LOCK = threading.RLock()
-_CLEANUP_WORKER_STARTED = False
-
-
-def get_conn():
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        return None
-    return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
-
-
-def now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def today() -> str:
-    return now().date().isoformat()
-
-
-def utc_cycle_start(timestamp: float | int | datetime | None = None) -> datetime:
-    """Return the fixed 00:00/12:00 UTC boundary containing timestamp."""
-    if timestamp is None:
-        stamp = now()
-    elif isinstance(timestamp, datetime):
-        stamp = timestamp.astimezone(timezone.utc)
-    else:
-        stamp = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    hour = 0 if stamp.hour < 12 else 12
-    return stamp.replace(hour=hour, minute=0, second=0, microsecond=0)
-
-
-def dialogue_window_bounds(timestamp: float | int | datetime | None = None) -> tuple[datetime, datetime]:
-    """Return [seed_start, now] for the authenticated dialogue store.
-
-    seed_start is one hour before the current fixed UTC cycle boundary. This is
-    precisely the retained continuity seed from the previous cycle.
-    """
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc)
-        if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    cycle = utc_cycle_start(current)
-    return cycle - timedelta(hours=DIALOGUE_SEED_HOURS), current
-
-
-def _is_authenticated_row(row: Any) -> bool:
-    if not isinstance(row, dict):
-        return False
-    return bool(
-        str(row.get("user_id") or "").strip()
-        and str(row.get("email") or "").strip()
-        and str(row.get("provider") or "").strip()
-    )
-
-
-def resolve_user_id(user_id: Any) -> str | None:
-    """Resolve either the internal user_id or public april_id to the DB key.
-
-    Legacy rows can have different values in these columns. Dialogue memory,
-    entitlements and payments are keyed by users.user_id, so all protected paths
-    must normalize to that key before reading or writing related records.
-    """
-    raw = str(user_id or "").strip()
-    if not raw:
-        return None
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT user_id
-                FROM users
-                WHERE user_id = %s OR april_id = %s
-                ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                LIMIT 1
-                """,
-                (raw, raw, raw),
-            )
-            row = cur.fetchone() or {}
-            resolved = str(row.get("user_id") or "").strip()
-            return resolved or None
-    except Exception:
-        return None
-    finally:
-        conn.close()
-
-
-def is_authenticated_user(user_id: Any) -> bool:
-    """Only a registered auth-backed row may own persistent dialogue memory.
-
-    Accept a public April ID at the API boundary, but check the matching DB row
-    rather than assuming april_id and user_id are always identical.
-    """
-    raw = str(user_id or "").strip()
-    if not raw:
-        return False
-    conn = get_conn()
-    if not conn:
-        return False
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, email, provider
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    """,
-                    (raw, raw, raw),
-                )
-                return _is_authenticated_row(cur.fetchone())
-    except Exception:
-        return False
-    finally:
-        conn.close()
-
-
-def _schema_cleanup(cur) -> None:
-    """Remove the old stores so the legacy writer cannot recreate pollution."""
-    cur.execute("DROP TABLE IF EXISTS feedback CASCADE")
-    cur.execute("DROP TABLE IF EXISTS knowledge CASCADE")
-    cur.execute("DROP TABLE IF EXISTS memory_states CASCADE")
-    # Remove the obsolete binary sidecar table; dialogue_memory remains untouched.
-    cur.execute("DROP TABLE IF EXISTS dialogue_assets")
-
-
-def init_db() -> None:
-    conn = get_conn()
-    if not conn:
-        return
-
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id TEXT PRIMARY KEY,
-                        april_id TEXT,
-                        email TEXT,
-                        name TEXT,
-                        provider TEXT,
-                        provider_user_id TEXT,
-                        plan TEXT NOT NULL DEFAULT 'free',
-                        subscription_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-                        premium_id TEXT,
-                        warned BOOLEAN NOT NULL DEFAULT FALSE,
-                        language TEXT,
-                        messages_today INTEGER NOT NULL DEFAULT 0,
-                        images_today INTEGER NOT NULL DEFAULT 0,
-                        last_reset TEXT NOT NULL DEFAULT CURRENT_DATE::TEXT,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        last_login_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                # Idempotent migration for installations that already have users.
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS april_id TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_user_id TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT 'free'")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_until DOUBLE PRECISION DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_id TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS warned BOOLEAN DEFAULT FALSE")
-                # NULL means the account has not migrated a language preference yet.
-                # April Web copies the user's existing per-account local preference on first load.
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS messages_today INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS images_today INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_reset TEXT DEFAULT CURRENT_DATE::TEXT")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-
-                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_april_id ON users(april_id) WHERE april_id IS NOT NULL AND april_id <> ''")
-                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL AND email <> ''")
-                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_premium_id ON users(premium_id) WHERE premium_id IS NOT NULL AND premium_id <> ''")
-
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS payments (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL,
-                        plan TEXT NOT NULL,
-                        amount INTEGER NOT NULL DEFAULT 0,
-                        premium_id TEXT,
-                        payment_status TEXT NOT NULL DEFAULT 'paid',
-                        payment_source TEXT NOT NULL DEFAULT 'legacy',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS id BIGSERIAL")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id TEXT")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan TEXT")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS premium_id TEXT")
-                # Existing payment rows remain historical paid records. Test grants are
-                # inserted explicitly as payment_status='test_grant' with amount=0.
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'paid'")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'legacy'")
-                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
-
-                # Free media quota and referral rewards are independent from
-                # dialogue_memory retention. Every row is keyed by the canonical
-                # authenticated users.user_id, never by a browser-provided ID.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS free_media_quota (
-                        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-                        used_units INTEGER NOT NULL DEFAULT 0 CHECK (used_units >= 0),
-                        bonus_units INTEGER NOT NULL DEFAULT 0 CHECK (bonus_units >= 0),
-                        cooldown_until TIMESTAMPTZ,
-                        period_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        referral_code TEXT NOT NULL UNIQUE,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS free_media_usage_events (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        message_id TEXT NOT NULL,
-                        operation TEXT NOT NULL,
-                        units INTEGER NOT NULL CHECK (units > 0),
-                        base_units INTEGER NOT NULL DEFAULT 0,
-                        bonus_units INTEGER NOT NULL DEFAULT 0,
-                        status TEXT NOT NULL DEFAULT 'reserved',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        committed_at TIMESTAMPTZ,
-                        UNIQUE(user_id, message_id, operation)
-                    )
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_free_media_events_user_created
-                    ON free_media_usage_events(user_id, created_at DESC)
-                """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS april_referral_invites (
-                        id BIGSERIAL PRIMARY KEY,
-                        inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        invitee_user_id TEXT NOT NULL UNIQUE REFERENCES users(user_id) ON DELETE CASCADE,
-                        referral_code TEXT NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'rewarded',
-                        reward_units INTEGER NOT NULL DEFAULT 6,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        rewarded_at TIMESTAMPTZ,
-                        CHECK (inviter_user_id <> invitee_user_id)
-                    )
-                """)
-                # A referral reward is granted immediately after a new authenticated
-                # account successfully claims the link. The friend does not need to
-                # make a first chat request. Keep older pending records compatible,
-                # but settle them once during this idempotent migration below.
-                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN status SET DEFAULT 'rewarded'")
-                cur.execute("ALTER TABLE april_referral_invites ALTER COLUMN rewarded_at DROP NOT NULL")
-                # Older deployed tables may have a CHECK constraint which only
-                # allowed the legacy statuses. Replace such a constraint once so
-                # immediate rewards can be inserted without breaking old rows.
-                cur.execute(
-                    """SELECT conname, pg_get_constraintdef(oid) AS definition
-                       FROM pg_constraint
-                       WHERE conrelid = 'april_referral_invites'::regclass
-                         AND contype = 'c'
-                         AND pg_get_constraintdef(oid) ILIKE '%status%'"""
-                )
-                referral_status_checks = cur.fetchall() or []
-                if not any("rewarded" in str(row.get("definition") or "").lower() for row in referral_status_checks):
-                    for constraint in referral_status_checks:
-                        constraint_name = str(constraint.get("conname") or "").replace('"', '""')
-                        if constraint_name:
-                            cur.execute(f'ALTER TABLE april_referral_invites DROP CONSTRAINT "{constraint_name}"')
-                    cur.execute(
-                        """ALTER TABLE april_referral_invites
-                           ADD CONSTRAINT april_referral_invites_status_check
-                           CHECK (status IN ('pending', 'accepted', 'rewarded'))"""
-                    )
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_april_referrals_inviter
-                    ON april_referral_invites(inviter_user_id, created_at DESC)
-                """)
-                # Share targets support legacy email-bound links and the current
-                # contact-picker flow. New rows store only a keyed HMAC of the
-                # selected contact phone set; raw contact details are not persisted.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS april_referral_share_targets (
-                        id BIGSERIAL PRIMARY KEY,
-                        inviter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        recipient_email_hash TEXT,
-                        recipient_contact_hash TEXT,
-                        invite_token TEXT NOT NULL UNIQUE,
-                        referral_code TEXT NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'reserved',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        sent_at TIMESTAMPTZ,
-                        share_channel TEXT NOT NULL DEFAULT 'system_share',
-                        claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
-                        claimed_at TIMESTAMPTZ,
-                        CHECK (status IN ('reserved', 'sent', 'claimed', 'cancelled', 'expired'))
-                    )
-                """)
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_channel TEXT NOT NULL DEFAULT 'system_share'")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_by_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ")
-                # A confirmed Free share unlocks the sender's six media operations
-                # immediately. These fields make that grant idempotent and prevent
-                # the later invitee claim from granting the same bonus a second time.
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_rewarded_at TIMESTAMPTZ")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS share_reward_units INTEGER NOT NULL DEFAULT 0")
-                # Remember rejected self-claims so the sender is warned on the next
-                # invitation attempt, before Android's share sheet opens. Also show
-                # one reminder after a previously shared link has been claimed.
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS self_claim_attempted_at TIMESTAMPTZ")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS self_warning_shown_at TIMESTAMPTZ")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS repeat_warning_shown_at TIMESTAMPTZ")
-                # New invitations are contact-free because Android's share sheet
-                # intentionally hides the selected recipient. Legacy hashed contact
-                # and email rows remain readable.
-                cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_email_hash DROP NOT NULL")
-                cur.execute("ALTER TABLE april_referral_share_targets ADD COLUMN IF NOT EXISTS recipient_contact_hash TEXT")
-                # Contact-free share rows must be insertable on databases that
-                # were migrated from an older NOT NULL contact-hash schema.
-                cur.execute("ALTER TABLE april_referral_share_targets ALTER COLUMN recipient_contact_hash DROP NOT NULL")
-                cur.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_april_referral_target_unique_active
-                    ON april_referral_share_targets(inviter_user_id, recipient_email_hash)
-                    WHERE status IN ('reserved', 'sent', 'claimed')
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_april_referral_target_contact_recent
-                    ON april_referral_share_targets(inviter_user_id, recipient_contact_hash, created_at DESC)
-                    WHERE recipient_contact_hash IS NOT NULL
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_april_referral_target_inviter_created
-                    ON april_referral_share_targets(inviter_user_id, created_at DESC)
-                """)
-                # Temporary public file links are stored in PostgreSQL, not process
-                # memory, so Railway restarts/replicas do not invalidate active shares.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS april_public_shared_assets (
-                        id BIGSERIAL PRIMARY KEY,
-                        owner_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        token_hash TEXT NOT NULL UNIQUE,
-                        filename TEXT NOT NULL,
-                        mime_type TEXT NOT NULL,
-                        content BYTEA NOT NULL,
-                        sha256 TEXT NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        expires_at TIMESTAMPTZ NOT NULL
-                    )
-                """)
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_april_public_shared_assets_expiry
-                    ON april_public_shared_assets(expires_at)
-                """)
-
-                # Settle legacy pending referrals under row locks. This migration is
-                # idempotent: each invite changes from pending to rewarded in the same
-                # transaction as the inviter's +6 balance update, so restarts cannot
-                # duplicate a bonus. Existing invitees are not required to use chat.
-                cur.execute("""
-                    SELECT id, inviter_user_id, reward_units
-                    FROM april_referral_invites
-                    WHERE status = 'pending'
-                    ORDER BY id
-                    FOR UPDATE
-                """)
-                for pending_invite in (cur.fetchall() or []):
-                    inviter_id = str(pending_invite.get("inviter_user_id") or "").strip()
-                    reward_units = max(1, int(pending_invite.get("reward_units") or FREE_MEDIA_REFERRAL_REWARD_UNITS))
-                    if not inviter_id:
-                        continue
-                    cur.execute("""
-                        UPDATE free_media_quota
-                        SET bonus_units = bonus_units + %s,
-                            cooldown_until = NULL,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE user_id = %s
-                    """, (reward_units, inviter_id))
-                    if cur.rowcount > 0:
-                        cur.execute("""
-                            UPDATE april_referral_invites
-                            SET status = 'rewarded', rewarded_at = CURRENT_TIMESTAMP
-                            WHERE id = %s AND status = 'pending'
-                        """, (int(pending_invite.get("id") or 0),))
-
-                # Detect whether read receipts existed before this migration.
-                # Only backfill historical rows once; never auto-clear a genuinely
-                # unread message simply because the Bot process restarts later.
-                cur.execute(
-                    """SELECT
-                         EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'admin_read_at') AS has_admin_read_at,
-                         EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'user_read_at') AS has_user_read_at"""
-                )
-                support_read_receipts_preexisting = cur.fetchone() or {}
-                had_admin_read_receipt = bool(support_read_receipts_preexisting.get("has_admin_read_at"))
-                had_user_read_receipt = bool(support_read_receipts_preexisting.get("has_user_read_at"))
-
-                # Premium support inbox. The cooldown is derived from the last
-                # ticket timestamp, so it survives browser/device changes and
-                # cannot be bypassed by clearing client storage.
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS premium_support_messages (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        message TEXT NOT NULL,
-                        language TEXT NOT NULL DEFAULT 'en',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        admin_reply TEXT,
-                        replied_at TIMESTAMPTZ,
-                        admin_id TEXT,
-                        image_data TEXT,
-                        image_mime TEXT,
-                        image_name TEXT,
-                        admin_reply_language TEXT NOT NULL DEFAULT 'en'
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_data TEXT")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_mime TEXT")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS image_name TEXT")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS admin_reply_language TEXT NOT NULL DEFAULT 'en'")
-                # One-time cleanup of the previous generic-file columns. Only image
-                # data URLs are migrated; PDFs, archives and other file payloads are
-                # intentionally discarded from the Premium support feature.
-                cur.execute("""
-                    DO $support_image_only_migration$
-                    BEGIN
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_data')
-                           AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_mime')
-                           AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_name') THEN
-                            EXECUTE $migrate_images$
-                                UPDATE premium_support_messages
-                                SET image_data = COALESCE(image_data, attachment_data),
-                                    image_mime = COALESCE(image_mime, attachment_mime),
-                                    image_name = COALESCE(image_name, attachment_name)
-                                WHERE image_data IS NULL
-                                  AND LOWER(COALESCE(attachment_mime, '')) IN ('image/jpeg', 'image/png', 'image/webp')
-                                  AND LOWER(COALESCE(attachment_data, '')) LIKE 'data:image/%'
-                            $migrate_images$;
-                        END IF;
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_data') THEN
-                            ALTER TABLE premium_support_messages DROP COLUMN attachment_data;
-                        END IF;
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_mime') THEN
-                            ALTER TABLE premium_support_messages DROP COLUMN attachment_mime;
-                        END IF;
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'premium_support_messages' AND column_name = 'attachment_name') THEN
-                            ALTER TABLE premium_support_messages DROP COLUMN attachment_name;
-                        END IF;
-                    END
-                    $support_image_only_migration$
-                """)
-                # Each administrator reply/addition is an independent text/image
-                # event tied to the original Premium request. Legacy summary fields
-                # remain for older clients and existing text-only records.
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS premium_support_replies (
-                        id BIGSERIAL PRIMARY KEY,
-                        support_message_id BIGINT NOT NULL REFERENCES premium_support_messages(id) ON DELETE CASCADE,
-                        reply TEXT NOT NULL DEFAULT '',
-                        reply_language TEXT NOT NULL DEFAULT 'en',
-                        admin_id TEXT,
-                        image_data TEXT,
-                        image_mime TEXT,
-                        image_name TEXT,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_data TEXT")
-                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_mime TEXT")
-                cur.execute("ALTER TABLE premium_support_replies ADD COLUMN IF NOT EXISTS image_name TEXT")
-                cur.execute("ALTER TABLE premium_support_replies ALTER COLUMN reply SET DEFAULT ''")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_replies_message ON premium_support_replies(support_message_id, created_at, id)")
-                # Read receipts are per side: opening a ticket clears only the
-                # corresponding badge. Existing tickets are treated as already
-                # seen on the admin side to avoid false unread badges after deploy.
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS admin_read_at TIMESTAMPTZ")
-                cur.execute("ALTER TABLE premium_support_messages ADD COLUMN IF NOT EXISTS user_read_at TIMESTAMPTZ")
-                if not had_admin_read_receipt:
-                    cur.execute("UPDATE premium_support_messages SET admin_read_at = created_at WHERE admin_read_at IS NULL")
-                if not had_user_read_receipt:
-                    cur.execute("UPDATE premium_support_messages SET user_read_at = COALESCE(replied_at, created_at) WHERE user_read_at IS NULL")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_created ON premium_support_messages(user_id, created_at DESC)")
-                cur.execute("DROP INDEX IF EXISTS idx_premium_support_pending")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_pending ON premium_support_messages(created_at ASC) WHERE replied_at IS NULL AND admin_reply IS NULL")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_admin_unread ON premium_support_messages(admin_read_at, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_premium_support_user_unread ON premium_support_messages(user_id, user_read_at, replied_at DESC)")
-
-                # Detect first-time retention migration before CREATE/ALTER adds the field.
-                # This lets us backfill currently-verifiable Premium rows once instead of
-                # running a correlated update on every request (init_db is called by both executors).
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_schema = current_schema()
-                          AND table_name = 'dialogue_memory'
-                          AND column_name = 'retention_hours'
-                    ) AS has_retention_hours
-                    """
-                )
-                retention_column_preexisting = bool((cur.fetchone() or {}).get("has_retention_hours"))
-
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS dialogue_memory (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        retention_hours INTEGER NOT NULL DEFAULT 12,
-                        turn_index INTEGER NOT NULL,
-                        user_text TEXT NOT NULL,
-                        april_text TEXT NOT NULL,
-                        user_text_en TEXT,
-                        april_text_en TEXT,
-                        language TEXT NOT NULL DEFAULT 'en',
-                        relation TEXT NOT NULL DEFAULT 'NEW',
-                        pair_hash TEXT NOT NULL UNIQUE,
-                        dialog_id TEXT,
-                        conversation_id TEXT,
-                        message_id TEXT,
-                        interpretation_id TEXT,
-                        asset_payloads JSONB NOT NULL DEFAULT '[]'::jsonb
-                    )
-                    """
-                )
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS id BIGSERIAL")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-                # Retention is attached to each saved pair, not to the user's
-                # current plan. Existing rows deliberately default to Free's 12h.
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS retention_hours INTEGER NOT NULL DEFAULT 12")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS turn_index INTEGER DEFAULT 0")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS user_text_en TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS april_text_en TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS relation TEXT DEFAULT 'NEW'")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS pair_hash TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS dialog_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS conversation_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS message_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS interpretation_id TEXT")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_request JSONB")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS structured_response JSONB")
-                cur.execute("ALTER TABLE dialogue_memory ADD COLUMN IF NOT EXISTS asset_payloads JSONB NOT NULL DEFAULT '[]'::jsonb")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_created ON dialogue_memory(user_id, created_at DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_dialogue_memory_user_dialog ON dialogue_memory(user_id, dialog_id, created_at DESC)")
-
-                # Required destructive sanitization: known legacy memory stores are
-                # no longer part of the schema and must not survive deployment.
-                _schema_cleanup(cur)
-
-                # Remove any columns that are not part of the canonical minimal schema.
-                _drop_unwanted_columns(cur, "users")
-                _drop_unwanted_columns(cur, "payments")
-                _drop_unwanted_columns(cur, "dialogue_memory")
-
-                # Public community is deliberately isolated from private dialogue_memory.
-                # Names are server-owned and keyed by canonical authenticated users.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_profiles (
-                        user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-                        display_name TEXT NOT NULL,
-                        is_custom BOOLEAN NOT NULL DEFAULT FALSE,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cur.execute("ALTER TABLE community_profiles ADD COLUMN IF NOT EXISTS is_custom BOOLEAN NOT NULL DEFAULT FALSE")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_messages (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        display_name TEXT NOT NULL,
-                        message TEXT NOT NULL DEFAULT '',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        attachment_name TEXT,
-                        attachment_mime TEXT,
-                        attachment_size BIGINT,
-                        attachment_data BYTEA,
-                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-                        CHECK (length(message) <= 4000),
-                        CHECK (attachment_size IS NULL OR attachment_size <= 3145728)
-                    )
-                """)
-                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_name TEXT")
-                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
-                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_size BIGINT")
-                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_data BYTEA")
-                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_created ON community_messages(created_at DESC, id DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_user_created ON community_messages(user_id, created_at DESC)")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_message_reports (
-                        id BIGSERIAL PRIMARY KEY,
-                        message_id BIGINT NOT NULL REFERENCES community_messages(id) ON DELETE CASCADE,
-                        reporter_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        reason TEXT NOT NULL DEFAULT 'inappropriate',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE (message_id, reporter_user_id)
-                    )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_reports_created ON community_message_reports(created_at DESC)")
-                # Friend circle and private 1:1 messages are separate from public
-                # community messages and from the private April↔user memory store.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_friendships (
-                        user_a TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        user_b TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        requested_by_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted')),
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (user_a, user_b),
-                        CHECK (user_a < user_b),
-                        CHECK (requested_by_user_id = user_a OR requested_by_user_id = user_b)
-                    )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_a ON community_friendships(user_a, status)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_friendships_user_b ON community_friendships(user_b, status)")
-                # User-controlled public-chat blocks. Blocking hides the target's public
-                # messages and attachments for the blocker; it does not delete records.
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_user_blocks (
-                        blocker_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        blocked_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (blocker_user_id, blocked_user_id),
-                        CHECK (blocker_user_id <> blocked_user_id)
-                    )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_user_blocks_blocked ON community_user_blocks(blocked_user_id, blocker_user_id)")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS community_direct_messages (
-                        id BIGSERIAL PRIMARY KEY,
-                        sender_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        recipient_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        message TEXT NOT NULL DEFAULT '',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        attachment_name TEXT,
-                        attachment_mime TEXT,
-                        attachment_size BIGINT,
-                        attachment_data BYTEA,
-                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-                        CHECK (sender_id <> recipient_id),
-                        CHECK (length(message) <= 4000),
-                        CHECK (attachment_size IS NULL OR attachment_size <= 3145728)
-                    )
-                """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_dm_pair_created ON community_direct_messages(sender_id, recipient_id, created_at DESC, id DESC)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_community_dm_recipient_created ON community_direct_messages(recipient_id, created_at DESC, id DESC)")
-
-                # Remove orphan dialogue rows before adding the authenticated-user FK.
-                cur.execute(
-                    """
-                    DELETE FROM dialogue_memory d
-                    WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.user_id = d.user_id)
-                    """
-                )
-                cur.execute(
-                    """
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1
-                            FROM pg_constraint
-                            WHERE conrelid = 'dialogue_memory'::regclass
-                              AND conname = 'fk_dialogue_memory_user'
-                        ) THEN
-                            ALTER TABLE dialogue_memory
-                            ADD CONSTRAINT fk_dialogue_memory_user
-                            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE;
-                        END IF;
-                    END $$;
-                    """
-                )
-
-                # Repair missing defaults/nulls left by old installations.
-                cur.execute("UPDATE users SET plan='free' WHERE plan IS NULL")
-                cur.execute("UPDATE users SET subscription_until=0 WHERE subscription_until IS NULL")
-                cur.execute("UPDATE users SET warned=FALSE WHERE warned IS NULL")
-                cur.execute("UPDATE users SET messages_today=0 WHERE messages_today IS NULL")
-                cur.execute("UPDATE users SET images_today=0 WHERE images_today IS NULL")
-                cur.execute("UPDATE users SET last_reset=%s WHERE last_reset IS NULL OR last_reset=''", (today(),))
-                cur.execute("UPDATE users SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
-                cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
-
-                # Backfill once, only when this deployment first adds retention_hours.
-                # Current Premium rows can be identified from the canonical payments ledger;
-                # all other historical rows keep the migration default of 12 hours.
-                if not retention_column_preexisting:
-                    cur.execute(
-                        """
-                        UPDATE dialogue_memory AS d
-                        SET retention_hours = 24
-                        FROM users AS u
-                        WHERE u.user_id = d.user_id
-                          AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                          AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                          AND d.retention_hours = 12
-                          AND d.created_at >= (
-                              SELECT MAX(p.created_at)
-                              FROM payments AS p
-                              WHERE p.user_id = d.user_id
-                                AND LOWER(COALESCE(p.plan, '')) = 'premium'
-                                AND LOWER(COALESCE(p.payment_status, '')) IN ('paid', 'test_grant')
-                          )
-                          AND d.created_at <= to_timestamp(u.subscription_until)
-                        """
-                    )
-
-        cleanup_dialogue_memory_utc()
-    finally:
-        conn.close()
-
-    # Existing installations may predate the authenticated April ID columns.
-    backfill_april_ids()
-    _start_cleanup_worker()
-
-
-def _start_cleanup_worker() -> None:
-    global _CLEANUP_WORKER_STARTED
-    with _CLEANUP_LOCK:
-        if _CLEANUP_WORKER_STARTED:
-            return
-        _CLEANUP_WORKER_STARTED = True
-
-    def worker() -> None:
-        while True:
-            try:
-                # Every pair expires relative to its own created_at and saved
-                # retention_hours. Reads enforce the same deadline immediately;
-                # this worker physically removes expired rows within ~5 minutes.
-                time.sleep(60.0)
-                expired_subscriptions = expire_subscriptions_utc()
-                deleted = cleanup_dialogue_memory_utc()
-                if expired_subscriptions:
-                    print(f"STATE: UTC SUBSCRIPTION EXPIRY switched_to_free={expired_subscriptions}")
-                if deleted:
-                    print(f"STATE: PER-MESSAGE DIALOGUE RETENTION CLEANUP removed={deleted}")
-            except Exception as exc:
-                print(f"STATE: UTC DIALOGUE CLEANUP ERROR: {exc}")
-                time.sleep(60.0)
-
-    threading.Thread(target=worker, name="april-dialogue-utc-cleanup", daemon=True).start()
-
-
-def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | int | datetime | None = None) -> int:
-    """Expire per-message memory; active Premium rows retain the full 24-hour window.
-
-    This backfills the retention field for still-live rows when a previously 12-hour
-    user becomes Premium or a deployment changes the plan without recreating the
-    retention column. It is conditional on active Premium entitlement and therefore
-    does not extend Free accounts' 12-hour memory.
-    """
-    conn = get_conn()
-    if not conn:
-        return 0
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    expired_pairs: list[tuple[str, str]] = []
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Preserve all still-live history for an active Premium user for
-                # 24 hours even when those rows were written before the Premium
-                # retention policy was applied. Do not revive already-expired rows.
-                if user_id is None:
-                    cur.execute(
-                        """UPDATE dialogue_memory AS d
-                           SET retention_hours = 24
-                           FROM users AS u
-                           WHERE (
-                               u.user_id = d.user_id
-                               OR (
-                                   u.april_id = d.user_id
-                                   AND NOT EXISTS (
-                                       SELECT 1 FROM users AS owner
-                                       WHERE owner.user_id = d.user_id
-                                         AND owner.user_id <> u.user_id
-                                   )
-                               )
-                           )
-                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
-                             AND COALESCE(d.retention_hours, 12) < 24
-                             AND d.created_at + INTERVAL '24 hours' > %s
-                             AND d.created_at <= %s""",
-                        (current, current, current),
-                    )
-                else:
-                    owner_ids = _dialogue_owner_ids_cursor(cur, str(user_id))
-                    if not owner_ids:
-                        return 0
-                    canonical_uid = owner_ids[0]
-                    cur.execute(
-                        """UPDATE dialogue_memory AS d SET retention_hours = 24
-                           WHERE d.user_id = ANY(%s)
-                             AND EXISTS (
-                               SELECT 1 FROM users AS u
-                               WHERE u.user_id = %s
-                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                                 AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
-                             )
-                             AND COALESCE(d.retention_hours, 12) < 24
-                             AND d.created_at + INTERVAL '24 hours' > %s
-                             AND d.created_at <= %s""",
-                        (owner_ids, canonical_uid, current, current, current),
-                    )
-                if user_id is None:
-                    cur.execute(
-                        """SELECT user_id, message_id FROM dialogue_memory AS d
-                           WHERE d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (current,),
-                    )
-                else:
-                    owner_ids = _dialogue_owner_ids_cursor(cur, str(user_id))
-                    if not owner_ids:
-                        return 0
-                    cur.execute(
-                        """SELECT user_id, message_id FROM dialogue_memory AS d
-                           WHERE d.user_id = ANY(%s)
-                             AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (owner_ids, current),
-                    )
-                expired_pairs = [
-                    (str(row.get("user_id") or ""), str(row.get("message_id") or ""))
-                    for row in cur.fetchall()
-                    if str(row.get("user_id") or "").strip() and str(row.get("message_id") or "").strip()
-                ]
-                if user_id is None:
-                    cur.execute(
-                        """DELETE FROM dialogue_memory AS d
-                           WHERE d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (current,),
-                    )
-                else:
-                    cur.execute(
-                        """DELETE FROM dialogue_memory AS d
-                           WHERE d.user_id = ANY(%s)
-                             AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                        (owner_ids, current),
-                    )
-                deleted = int(cur.rowcount or 0)
-        # Remove physical files only after the database transaction commits.
-        # Import lazily so Free's normal storage startup does not depend on Premium.
-        if expired_pairs:
-            try:
-                from blocks.premium_asset_store import delete_message_assets
-                for expired_uid, expired_mid in expired_pairs:
-                    delete_message_assets(expired_uid, expired_mid)
-            except Exception as exc:
-                print(f"STATE: PREMIUM ASSET CLEANUP ERROR: {exc}")
-        return deleted
-    except psycopg2.errors.UndefinedTable:
-        return 0
-    finally:
-        conn.close()
-
-
-def expire_subscriptions_utc(timestamp: float | int | datetime | None = None) -> int:
-    """Persist expired timed entitlements as Free, while retaining Premium ID."""
-    conn = get_conn()
-    if not conn:
-        return 0
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """UPDATE users SET plan = 'free'
-                       WHERE LOWER(COALESCE(plan, 'free')) IN ('lite', 'premium')
-                         AND COALESCE(subscription_until, 0) <= %s""",
-                    (current.timestamp(),),
-                )
-                return int(cur.rowcount or 0)
-    except psycopg2.errors.UndefinedTable:
-        return 0
-    finally:
-        conn.close()
-
-
-def cleanup_premium_dialogue_memory_utc(timestamp: float | int | datetime | None = None) -> int:
-    """Backward-compatible alias for the canonical per-row expiry cleanup."""
-    return cleanup_dialogue_memory_utc(timestamp=timestamp)
-
-
-def _is_authenticated_cursor(cur, uid: str) -> bool:
-    cur.execute(
-        "SELECT user_id, email, provider FROM users WHERE user_id = %s",
-        (uid,),
-    )
-    return _is_authenticated_row(cur.fetchone())
-
-
-def _dialogue_owner_ids_cursor(cur, user_id: Any) -> list[str]:
-    """Return internal/public IDs for exactly one authenticated account.
-
-    Older Web deployments could persist dialogue rows under public april_id.
-    Query both identifiers only after they resolve to the same authenticated row.
-    Never widen access through email, Google ID, or Premium ID aliases.
-    """
-    raw = str(user_id or "").strip()
-    if not raw:
-        return []
-    cur.execute(
-        """SELECT user_id, april_id, email, provider
-           FROM users
-           WHERE user_id = %s OR april_id = %s
-           ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-           LIMIT 1""",
-        (raw, raw, raw),
-    )
-    account = cur.fetchone()
-    if not _is_authenticated_row(account):
-        return []
-    canonical = str(account.get("user_id") or "").strip()
-    public = str(account.get("april_id") or "").strip()
-    if public and public != canonical:
-        # Do not include a public alias if it collides with another account's
-        # internal key; owner IDs must never cross account boundaries.
-        cur.execute(
-            "SELECT 1 FROM users WHERE user_id = %s AND user_id <> %s LIMIT 1",
-            (public, canonical),
-        )
-        if cur.fetchone():
-            public = ""
-    return list(dict.fromkeys(value for value in (canonical, public) if value))
-
-
-def _pair_hash(uid: str, created_ts: float, turn_index: int, user_text: str, april_text: str) -> str:
-    raw = f"{uid}|{int(created_ts * 1000)}|{int(turn_index)}|{user_text}|{april_text}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def save_dialogue_pair(
-    user_id: Any,
-    user_text: str,
-    april_text: str,
-    *,
-    created_at: float | int | datetime | None = None,
-    turn_index: int = 0,
-    user_en: str = "",
-    april_en: str = "",
-    language: str = "en",
-    relation: str = "NEW",
-    dialog_id: str = "",
-    conversation_id: str = "",
-    message_id: str = "",
-    interpretation_id: str = "",
-    structured_request: dict[str, Any] | None = None,
-    structured_response: dict[str, Any] | None = None,
-    asset_payloads: list[dict[str, Any]] | None = None,
-    retention_hours: int = DIALOGUE_WINDOW_HOURS,
-) -> bool:
-    """Persist one authenticated USER↔APRIL pair and nothing else."""
-    uid = str(user_id)
-    user_value = str(user_text or "").strip()
-    april_value = str(april_text or "").strip()
-    if not uid or not user_value or not april_value:
-        return False
-
-    conn = get_conn()
-    if not conn:
-        return False
-
-    if isinstance(created_at, datetime):
-        dt = created_at.astimezone(timezone.utc)
-    elif created_at is None:
-        dt = now()
-    else:
-        dt = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
-    created_ts = dt.timestamp()
-
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
-                    return False
-                # Purge against wall-clock now, not the browser's send timestamp.
-                # The new pair still keeps the validated send timestamp as created_at.
-                cleanup_now = now()
-                cur.execute(
-                    "SELECT LOWER(COALESCE(plan, 'free')) AS plan, COALESCE(subscription_until, 0) AS subscription_until FROM users WHERE user_id = %s",
-                    (uid,),
-                )
-                plan_row = cur.fetchone() or {}
-                active_premium = (
-                    str(plan_row.get("plan") or "free").lower() == "premium"
-                    and float(plan_row.get("subscription_until") or 0) > cleanup_now.timestamp()
-                ) if isinstance(plan_row, dict) else False
-                if active_premium:
-                    # Rows written by a previous 12-hour path may still be live
-                    # under the Premium 24-hour entitlement; promote before pruning.
-                    cur.execute(
-                        """UPDATE dialogue_memory AS d SET retention_hours = 24
-                           WHERE d.user_id = %s
-                             AND COALESCE(d.retention_hours, 12) < 24
-                             AND d.created_at + INTERVAL '24 hours' > %s
-                             AND d.created_at <= %s""",
-                        (uid, cleanup_now, cleanup_now),
-                    )
-                cur.execute(
-                    """DELETE FROM dialogue_memory AS d
-                       WHERE d.user_id = %s
-                         AND d.created_at + (GREATEST(12, LEAST(24, COALESCE(d.retention_hours, 12))) * INTERVAL '1 hour') <= %s""",
-                    (uid, cleanup_now),
-                )
-                row_retention_hours = 24 if active_premium or int(retention_hours or DIALOGUE_WINDOW_HOURS) >= 24 else 12
-                pair_hash = _pair_hash(uid, created_ts, int(turn_index or 0), user_value, april_value)
-                cur.execute(
-                    """
-                    INSERT INTO dialogue_memory
-                        (user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en, language, relation, pair_hash, dialog_id, conversation_id, message_id, interpretation_id, structured_request, structured_response, asset_payloads)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
-                    ON CONFLICT (pair_hash) DO UPDATE SET
-                        user_text_en = EXCLUDED.user_text_en,
-                        april_text_en = EXCLUDED.april_text_en,
-                        structured_request = EXCLUDED.structured_request,
-                        structured_response = EXCLUDED.structured_response,
-                        asset_payloads = CASE WHEN EXCLUDED.asset_payloads IS NOT NULL AND EXCLUDED.asset_payloads <> '[]'::jsonb THEN EXCLUDED.asset_payloads ELSE dialogue_memory.asset_payloads END,
-                        interpretation_id = EXCLUDED.interpretation_id
-                    """,
-                    (
-                        uid, dt, row_retention_hours, int(turn_index or 0), user_value, april_value,
-                        str(user_en or user_value), str(april_en or april_value),
-                        str(language or "en"), str(relation or "NEW"), pair_hash,
-                        str(dialog_id or ""), str(conversation_id or ""),
-                        str(message_id or ""), str(interpretation_id or ""),
-                        json.dumps(structured_request or {}, ensure_ascii=False, default=str),
-                        json.dumps(structured_response or {}, ensure_ascii=False, default=str),
-                        json.dumps(asset_payloads or [], ensure_ascii=False, default=str),
-                    ),
-                )
-                return True
-    except psycopg2.errors.UndefinedTable:
-        return False
-    finally:
-        conn.close()
-
-
-def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int | datetime | None = None) -> list[dict[str, Any]]:
-    """Load authenticated dialogue pairs whose own saved retention has not elapsed."""
-    uid = str(user_id)
-    conn = get_conn()
-    if not conn:
-        return []
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc) if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
-                if not owner_ids:
-                    return []
-                cur.execute(
-                    """
-                    SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en,
-                           language, relation, dialog_id, conversation_id, message_id, interpretation_id,
-                           structured_request, structured_response
-                    FROM dialogue_memory
-                    WHERE user_id = ANY(%s)
-                      AND created_at <= %s
-                      AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
-                    ORDER BY created_at ASC, turn_index ASC, id ASC
-                    """,
-                    (owner_ids, current, current),
-                )
-                rows = [dict(row) for row in cur.fetchall()]
-                for row in rows:
-                    # Present one canonical identity to downstream state/search code,
-                    # even when the underlying retained row used the old public alias.
-                    row["user_id"] = owner_ids[0]
-                    if isinstance(row.get("created_at"), datetime):
-                        row["created_at"] = row["created_at"].astimezone(timezone.utc).timestamp()
-                if limit and len(rows) > int(limit):
-                    rows = rows[-int(limit):]
-                return rows
-    except psycopg2.errors.UndefinedTable:
-        return []
-    finally:
-        conn.close()
-
-
-def load_dialogue_history_index(
-    user_id: Any,
-    *,
-    timestamp: float | int | datetime | None = None,
-) -> dict[str, Any] | None:
-    """Load the small history-list index without fetching large structured payloads.
-
-    The full ``structured_request`` / ``structured_response`` JSON can contain
-    expensive scene, table, graph and image metadata. The history screen only
-    needs short labels and message identity, so this query intentionally selects
-    only list fields and bounds the index scan to the maximum 24-hour retention.
-
-    Returns None when storage is unavailable, ``authenticated=False`` for an
-    unknown/unverified account, or the active plan and lightweight rows.
-    """
-    raw_uid = str(user_id or "").strip()
-    if not raw_uid:
-        return {"authenticated": False}
-    conn = get_conn()
-    if not conn:
-        return None
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc)
-        if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Resolve public April ID/internal user_id and entitlement with one
-                # indexed account lookup instead of separate auth/plan round-trips.
-                cur.execute(
-                    """
-                    SELECT user_id, april_id, email, provider, plan, subscription_until
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    """,
-                    (raw_uid, raw_uid, raw_uid),
-                )
-                account = cur.fetchone()
-                if not _is_authenticated_row(account):
-                    return {"authenticated": False}
-
-                uid = str(account.get("user_id") or raw_uid).strip()
-                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
-                if not owner_ids:
-                    return {"authenticated": False}
-                raw_plan = str(account.get("plan") or "free").strip().lower()
-                expiry = float(account.get("subscription_until") or 0)
-                plan = raw_plan if raw_plan in {"lite", "premium"} and expiry > current.timestamp() else "free"
-                if raw_plan in {"lite", "premium"} and plan == "free":
-                    cur.execute(
-                        "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
-                        (uid, raw_plan),
-                    )
-
-                # Retain the existing Premium rule: when an account is actively
-                # Premium, extend still-retained candidates to 24 h, but never
-                # revive anything older than the maximum 24-hour window.
-                if plan == "premium":
-                    cur.execute(
-                        """
-                        UPDATE dialogue_memory
-                        SET retention_hours = 24
-                        WHERE user_id = ANY(%s)
-                          AND COALESCE(retention_hours, 12) < 24
-                          AND created_at > %s - INTERVAL '24 hours'
-                          AND created_at + INTERVAL '24 hours' > %s
-                        """,
-                        (owner_ids, current, current),
-                    )
-
-                # The explicit 24-hour lower bound allows the existing
-                # (user_id, created_at DESC) index to limit work before checking
-                # each row's saved 12/24-hour expiry.
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        COALESCE(NULLIF(BTRIM(message_id), ''), 'legacy-memory-' || id::text) AS message_id,
-                        user_id,
-                        dialog_id,
-                        conversation_id,
-                        COALESCE(
-                            NULLIF(BTRIM(structured_request #>> '{goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{intent,user_goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{intent,goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
-                            NULLIF(LEFT(BTRIM(user_text), 140), ''),
-                            'Сохранённый диалог'
-                        ) AS title,
-                        COALESCE(
-                            NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic}'), ''),
-                            NULLIF(BTRIM(structured_response #>> '{metadata,dialogue_memory_record,topic}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{dialogue,continuation_context,active_topic}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
-                            NULLIF(LEFT(BTRIM(user_text), 140), ''),
-                            'Сохранённый диалог'
-                        ) AS topic_label,
-                        relation,
-                        LEFT(COALESCE(user_text, ''), 1200) AS user_text,
-                        LEFT(COALESCE(april_text, ''), 1000) AS april_text,
-                        EXTRACT(EPOCH FROM created_at) AS created_at,
-                        turn_index
-                    FROM dialogue_memory
-                    WHERE user_id = ANY(%s)
-                      AND created_at <= %s
-                      AND created_at > %s - INTERVAL '24 hours'
-                      AND created_at + (
-                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
-                          * INTERVAL '1 hour'
-                      ) > %s
-                    ORDER BY created_at ASC, turn_index ASC, id ASC
-                    """,
-                    (owner_ids, current, current, current),
-                )
-                rows = []
-                for source in cur.fetchall():
-                    row = dict(source)
-                    row["id"] = str(row.get("message_id") or row.get("id") or "")
-                    row["message_id"] = str(row.get("message_id") or "")
-                    row["user_id"] = str(row.get("user_id") or uid)
-                    row["dialog_id"] = str(row.get("dialog_id") or "")
-                    row["conversation_id"] = str(row.get("conversation_id") or "")
-                    row["title"] = str(row.get("title") or row.get("user_text") or "Сохранённый диалог")
-                    row["topic_label"] = str(row.get("topic_label") or row.get("title") or row.get("user_text") or "Сохранённый диалог")
-                    row["relation"] = str(row.get("relation") or "")
-                    row["user_text"] = str(row.get("user_text") or "")
-                    row["april_text"] = str(row.get("april_text") or "")
-                    row["created_at"] = float(row.get("created_at") or 0.0)
-                    row["turn_index"] = int(row.get("turn_index") or 0)
-                    rows.append(row)
-                return {
-                    "authenticated": True,
-                    "user_id": uid,
-                    "plan": plan,
-                    "window_hours": 24 if plan == "premium" else 12,
-                    "rows": rows,
-                }
-    except psycopg2.errors.UndefinedTable:
-        return None
-    finally:
-        conn.close()
-
-
-
-def dialogue_message_saved(
-    user_id: Any,
-    message_id: Any,
-    *,
-    timestamp: float | int | datetime | None = None,
-) -> bool:
-    """Check whether one authenticated turn has reached durable dialogue storage.
-
-    This is intentionally a tiny indexed existence query used by Web recovery
-    polling. It must not hydrate the history index, scene JSON, or binary assets.
-    """
-    uid = str(user_id or "").strip()
-    mid = str(message_id or "").strip()
-    if not uid or not mid:
-        return False
-    conn = get_conn()
-    if not conn:
-        return False
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc)
-        if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
-                    return False
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM dialogue_memory
-                        WHERE user_id = %s
-                          AND message_id = %s
-                          AND created_at <= %s
-                          AND created_at > %s - INTERVAL '24 hours'
-                          AND created_at + (
-                              GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
-                              * INTERVAL '1 hour'
-                          ) > %s
-                    ) AS saved
-                    """,
-                    (uid, mid, current, current),
-                )
-                row = cur.fetchone() or {}
-                return bool(row.get("saved")) if isinstance(row, dict) else bool(row[0])
-    except psycopg2.errors.UndefinedTable:
-        return False
-    except Exception:
-        # Status polling is advisory; a transient database issue must not crash
-        # the canonical Web history/recovery request.
-        return False
-    finally:
-        conn.close()
-
-
-def load_dialogue_asset_payloads(
-    user_id: Any,
-    message_ids: list[str],
-    *,
-    timestamp: float | int | datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Load saved output bytes only for the authenticated selected dialogue turns.
-
-    This is a narrow recovery path for rendered assets; normal memory search never
-    hydrates image payloads and therefore does not pay the binary-memory cost.
-    """
-    uid = str(user_id or "").strip()
-    ids = list(dict.fromkeys(str(value or "").strip() for value in (message_ids or []) if str(value or "").strip()))[:8]
-    if not uid or not ids:
-        return []
-    conn = get_conn()
-    if not conn:
-        return []
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc)
-        if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                if not _is_authenticated_cursor(cur, uid):
-                    return []
-                cur.execute(
-                    """
-                    SELECT message_id, asset_payloads
-                    FROM dialogue_memory
-                    WHERE user_id = %s
-                      AND message_id = ANY(%s)
-                      AND created_at <= %s
-                      AND created_at > %s - INTERVAL '24 hours'
-                      AND created_at + (
-                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
-                          * INTERVAL '1 hour'
-                      ) > %s
-                    ORDER BY created_at DESC, turn_index DESC, id DESC
-                    """,
-                    (uid, ids, current, current, current),
-                )
-                return [dict(row) for row in cur.fetchall() if isinstance(row, dict)]
-    except psycopg2.errors.UndefinedTable:
-        return []
-    finally:
-        conn.close()
-
-
-def load_dialogue_history_details(
-    user_id: Any,
-    message_ids: list[str],
-    *,
-    timestamp: float | int | datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Load heavyweight dialogue payloads only for selected, retained memory pairs.
-
-    History listing and topic matching use ``load_dialogue_history_index``. This
-    function is the second-stage read for the chosen topic and intentionally
-    fetches JSONB scene/render payloads only for the selected message IDs.
-    """
-    uid = str(user_id or "").strip()
-    ids = list(dict.fromkeys(str(value or "").strip() for value in (message_ids or []) if str(value or "").strip()))
-    if not uid or not ids:
-        return []
-    conn = get_conn()
-    if not conn:
-        return []
-    current = now() if timestamp is None else (
-        timestamp.astimezone(timezone.utc)
-        if isinstance(timestamp, datetime)
-        else datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-    )
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
-                if not owner_ids:
-                    return []
-                cur.execute(
-                    """
-                    SELECT id, user_id, created_at, retention_hours, turn_index,
-                           user_text, april_text, user_text_en, april_text_en,
-                           language, relation, dialog_id, conversation_id,
-                           message_id, interpretation_id,
-                           structured_request, structured_response, asset_payloads
-                    FROM dialogue_memory
-                    WHERE user_id = ANY(%s)
-                      AND created_at <= %s
-                      AND created_at > %s - INTERVAL '24 hours'
-                      AND created_at + (
-                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
-                          * INTERVAL '1 hour'
-                      ) > %s
-                      AND (
-                          message_id = ANY(%s)
-                          OR ('legacy-memory-' || id::text) = ANY(%s)
-                      )
-                    ORDER BY created_at ASC, turn_index ASC, id ASC
-                    """,
-                    (owner_ids, current, current, current, ids, ids),
-                )
-                rows = [dict(row) for row in cur.fetchall()]
-                for row in rows:
-                    created = row.get("created_at")
-                    if isinstance(created, datetime):
-                        row["created_at"] = created.astimezone(timezone.utc).timestamp()
-                    elif row.get("created_at") is not None:
-                        row["created_at"] = float(row["created_at"])
-                    row["message_id"] = str(row.get("message_id") or f"legacy-memory-{row.get('id')}")
-                return rows
-    except psycopg2.errors.UndefinedTable:
-        return []
-    finally:
-        conn.close()
-
-
-def search_dialogue_memory(user_id: Any, query: str, *, limit: int = 8) -> dict[str, Any]:
-    """Compatibility adapter that delegates dialogue retrieval to State Manager.
-
-    This function remains available for legacy callers, but it has no parallel
-    ranking algorithm and never queries a separate dialogue table.
-    """
-    from blocks.state_manager import get_dialogue_pairs, search_dialogue_context
-
-    result = search_dialogue_context(user_id, query, limit=max(1, int(limit or 8)))
-    candidates = result.get("matches") if isinstance(result, dict) else []
-    # search_dialogue_context has hydrated the canonical store; recover structured
-    # JSON fields from that same in-memory snapshot without a second DB query.
-    rows_by_message = {
-        str(row.get("message_id") or ""): row
-        for row in get_dialogue_pairs(user_id)
-        if isinstance(row, dict) and str(row.get("message_id") or "")
-    }
-    matches = []
-    for item in candidates or []:
-        if not isinstance(item, dict):
-            continue
-        source_row = rows_by_message.get(str(item.get("message_id") or ""), {})
-        matches.append({
-            "score": round(float(item.get("score") or 0.0), 6),
-            "turn_index": int(item.get("turn_index") or 0),
-            "created_at": float(item.get("created_at") or 0.0),
-            "user": str(item.get("user") or ""),
-            "april": str(item.get("april") or ""),
-            "user_text_en": str(item.get("user_en") or ""),
-            "april_text_en": str(item.get("april_en") or ""),
-            "structured_request": source_row.get("structured_request") or {},
-            "structured_response": source_row.get("structured_response") or {},
-            "message_id": str(item.get("message_id") or ""),
-            "dialog_id": str(item.get("dialog_id") or ""),
-            "conversation_id": str(item.get("conversation_id") or ""),
+const COPY: Record<Language, Record<string, string>> = {
+  ru: {
+    title: "Общий чат April", subtitle: "Сообщество пользователей Free и Premium",
+    circleTitle: "Друзья", membersTitle: "Поиск друзей", noMembers: "Пока нет друзей. Пригласите друга по ссылке.", inviteFriend: "Пригласить друга", inviteCopied: "Ссылка-приглашение скопирована.", inviteText: "Присоединяйся к сообществу April", addFriend: "Добавить друга", acceptFriend: "Принять", requestSent: "Запрос отправлен", incomingRequest: "Хочет дружить", openDirect: "Личный диалог", friend: "Друг",
+    back: "Назад в профиль", profile: "Ваш ник в сообществе", nickPlaceholder: "Введите ник от 2 до 32 символов",
+    saveNick: "Сохранить ник", saving: "Сохранение…", welcome: "Здесь можно задавать вопросы, помогать другим, делиться кодом и файлами.",
+    publicNotice: "Сообщения и прикреплённые файлы видны другим участникам сообщества. Не отправляйте пароли, ключи API и личные данные.",
+    loading: "Загружаем сообщения…", empty: "Пока сообщений нет. Начните обсуждение первым.",
+    placeholder: "Опишите вопрос или поделитесь решением…", attach: "Прикрепить файл", send: "Отправить", sending: "Отправка…",
+    fileLimit: "Файл до 3 МБ, хранилище вложений на пользователя — до 30 МБ. Исполняемые файлы запрещены.", download: "Скачать файл", report: "Пожаловаться", delete: "Удалить своё сообщение",
+    saved: "Ник сохранён на сервере.", deleted: "Сообщение удалено автором.", sent: "Сообщение опубликовано.", reported: "Жалоба зарегистрирована.",
+    error: "Не удалось выполнить действие. Попробуйте ещё раз.", signIn: "Войдите через Google, чтобы участвовать в сообществе.",
+    signInButton: "Войти через Google", free: "FREE", premium: "PREMIUM", chars: "символов",
+    invalidNick: "Ник должен содержать 2–32 буквы, цифры, пробелы, точки, дефисы или подчёркивания.",
+    tooLarge: "Файл превышает 3 МБ.", quota: "Лимит хранилища вложений достигнут. Удалите старые сообщения с файлами.", blocked: "Этот тип файла запрещён для безопасности.", rateLimit: "Слишком часто. Подождите минуту и попробуйте снова.",
+    deleteConfirm: "Удалить сообщение и прикреплённый файл?", reportConfirm: "Отправить жалобу на это сообщение?", nameReserved: "Этот ник зарезервирован.",
+  },
+  ua: {
+    title: "Спільний чат April", subtitle: "Спільнота користувачів Free та Premium",
+    circleTitle: "Друзі", membersTitle: "Пошук друзів", noMembers: "Поки немає друзів. Запросіть друга за посиланням.", inviteFriend: "Запросити друга", inviteCopied: "Посилання-запрошення скопійовано.", inviteText: "Приєднуйся до спільноти April", addFriend: "Додати друга", acceptFriend: "Прийняти", requestSent: "Запит надіслано", incomingRequest: "Хоче дружити", openDirect: "Особистий діалог", friend: "Друг",
+    back: "Назад до профілю", profile: "Ваш нік у спільноті", nickPlaceholder: "Введіть нік від 2 до 32 символів",
+    saveNick: "Зберегти нік", saving: "Збереження…", welcome: "Ставте запитання, допомагайте іншим, діліться кодом і файлами.",
+    publicNotice: "Повідомлення та файли бачать інші учасники спільноти. Не надсилайте паролі, ключі API та особисті дані.",
+    loading: "Завантажуємо повідомлення…", empty: "Повідомлень ще немає. Почніть обговорення першими.",
+    placeholder: "Опишіть питання або поділіться рішенням…", attach: "Додати файл", send: "Надіслати", sending: "Надсилання…",
+    fileLimit: "Файл до 3 МБ, сховище вкладень на користувача — до 30 МБ. Виконувані файли заборонено.", download: "Завантажити файл", report: "Поскаржитися", delete: "Видалити своє повідомлення",
+    saved: "Нік збережено на сервері.", deleted: "Повідомлення видалив автор.", sent: "Повідомлення опубліковано.", reported: "Скаргу зареєстровано.",
+    error: "Не вдалося виконати дію. Спробуйте ще раз.", signIn: "Увійдіть через Google, щоб долучитися до спільноти.",
+    signInButton: "Увійти через Google", free: "FREE", premium: "PREMIUM", chars: "символів",
+    invalidNick: "Нік має містити 2–32 літери, цифри, пробіли, крапки, дефіси або підкреслення.",
+    tooLarge: "Файл перевищує 3 МБ.", quota: "Ліміт сховища вкладень досягнуто. Видаліть старі повідомлення з файлами.", blocked: "Цей тип файлу заборонено з міркувань безпеки.", rateLimit: "Занадто часто. Зачекайте хвилину й спробуйте знову.",
+    deleteConfirm: "Видалити повідомлення та прикріплений файл?", reportConfirm: "Надіслати скаргу на це повідомлення?", nameReserved: "Цей нік зарезервовано.",
+  },
+  en: {
+    title: "April Community Chat", subtitle: "A shared space for Free and Premium users",
+    circleTitle: "Friends", membersTitle: "Search friends", noMembers: "No friends yet. Invite a friend using your link.", inviteFriend: "Invite a friend", inviteCopied: "Invitation link copied.", inviteText: "Join me in the April community", addFriend: "Add friend", acceptFriend: "Accept", requestSent: "Request sent", incomingRequest: "Friend request", openDirect: "Private chat", friend: "Friend",
+    back: "Back to profile", profile: "Your community nickname", nickPlaceholder: "Enter a nickname (2–32 characters)",
+    saveNick: "Save nickname", saving: "Saving…", welcome: "Ask questions, help other users, and share code and files.",
+    publicNotice: "Messages and attached files are visible to other community members. Do not share passwords, API keys, or personal data.",
+    loading: "Loading messages…", empty: "No messages yet. Start the discussion.",
+    placeholder: "Ask a question or share a solution…", attach: "Attach a file", send: "Send", sending: "Sending…",
+    fileLimit: "Files up to 3 MB; 30 MB of active attachments per user. Executable files are blocked.", download: "Download file", report: "Report", delete: "Delete your message",
+    saved: "Nickname saved on the server.", deleted: "Message deleted by its author.", sent: "Message posted.", reported: "Report registered.",
+    error: "The action failed. Please try again.", signIn: "Sign in with Google to join the community.",
+    signInButton: "Sign in with Google", free: "FREE", premium: "PREMIUM", chars: "characters",
+    invalidNick: "Use 2–32 letters, numbers, spaces, periods, hyphens, or underscores.",
+    tooLarge: "The file exceeds 3 MB.", quota: "Attachment storage limit reached. Delete older messages with files.", blocked: "This file type is blocked for safety.", rateLimit: "You are posting too quickly. Wait a minute and try again.",
+    deleteConfirm: "Delete this message and its attached file?", reportConfirm: "Report this message to moderation?", nameReserved: "That nickname is reserved.",
+  },
+  es: {
+    title: "Chat de la comunidad April", subtitle: "Comunidad de usuarios Free y Premium", circleTitle: "Amigos", membersTitle: "Buscar amigos", noMembers: "Aún no tienes amigos. Invita a alguien con tu enlace.", inviteFriend: "Invitar a un amigo", inviteCopied: "Enlace de invitación copiado.", inviteText: "Únete a mi comunidad April", addFriend: "Añadir amigo", acceptFriend: "Aceptar", requestSent: "Solicitud enviada", incomingRequest: "Solicitud de amistad", openDirect: "Chat privado", friend: "Amigo",
+    back: "Volver al perfil", profile: "Tu apodo en la comunidad", nickPlaceholder: "Apodo de 2 a 32 caracteres", saveNick: "Guardar apodo", saving: "Guardando…", welcome: "Haz preguntas, ayuda a otros y comparte código y archivos.", publicNotice: "Los mensajes y archivos son visibles para la comunidad. No compartas contraseñas, claves API ni datos personales.", loading: "Cargando mensajes…", empty: "Todavía no hay mensajes. Inicia la conversación.", placeholder: "Haz una pregunta o comparte una solución…", attach: "Adjuntar archivo", send: "Enviar", sending: "Enviando…", fileLimit: "Archivo de hasta 3 MB; máximo 30 MB de archivos activos por usuario. Se bloquean los ejecutables.", download: "Descargar archivo", report: "Denunciar", delete: "Eliminar tu mensaje", saved: "Apodo guardado en el servidor.", deleted: "Mensaje eliminado por su autor.", sent: "Mensaje publicado.", reported: "Denuncia registrada.", error: "No se pudo completar la acción. Inténtalo de nuevo.", signIn: "Inicia sesión con Google para participar.", signInButton: "Iniciar sesión con Google", free: "FREE", premium: "PREMIUM", chars: "caracteres", invalidNick: "Usa entre 2 y 32 letras, números, espacios, puntos, guiones o guiones bajos.", tooLarge: "El archivo supera los 3 MB.", quota: "Se alcanzó el límite de almacenamiento. Elimina mensajes antiguos con archivos.", blocked: "Este tipo de archivo está bloqueado por seguridad.", rateLimit: "Demasiados mensajes. Espera un minuto.", deleteConfirm: "¿Eliminar el mensaje y su archivo?", reportConfirm: "¿Denunciar este mensaje?", nameReserved: "Este apodo está reservado.",
+  },
+  de: {
+    title: "April Community-Chat", subtitle: "Gemeinschaft für Free- und Premium-Nutzer", circleTitle: "Freunde", membersTitle: "Freunde suchen", noMembers: "Noch keine Freunde. Lade jemanden über deinen Link ein.", inviteFriend: "Freund einladen", inviteCopied: "Einladungslink kopiert.", inviteText: "Komm in meine April-Community", addFriend: "Freund hinzufügen", acceptFriend: "Annehmen", requestSent: "Anfrage gesendet", incomingRequest: "Freundschaftsanfrage", openDirect: "Privater Chat", friend: "Freund",
+    back: "Zurück zum Profil", profile: "Dein Community-Spitzname", nickPlaceholder: "Spitzname (2–32 Zeichen)", saveNick: "Spitzname speichern", saving: "Speichern…", welcome: "Stelle Fragen, hilf anderen und teile Code und Dateien.", publicNotice: "Nachrichten und Dateien sind für Community-Mitglieder sichtbar. Keine Passwörter, API-Schlüssel oder persönlichen Daten teilen.", loading: "Nachrichten werden geladen…", empty: "Noch keine Nachrichten. Starte die Unterhaltung.", placeholder: "Frage stellen oder Lösung teilen…", attach: "Datei anhängen", send: "Senden", sending: "Wird gesendet…", fileLimit: "Dateien bis 3 MB; maximal 30 MB aktive Anhänge pro Nutzer. Ausführbare Dateien sind gesperrt.", download: "Datei herunterladen", report: "Melden", delete: "Eigene Nachricht löschen", saved: "Spitzname auf dem Server gespeichert.", deleted: "Nachricht vom Autor gelöscht.", sent: "Nachricht veröffentlicht.", reported: "Meldung registriert.", error: "Aktion fehlgeschlagen. Bitte erneut versuchen.", signIn: "Mit Google anmelden, um teilzunehmen.", signInButton: "Mit Google anmelden", free: "FREE", premium: "PREMIUM", chars: "Zeichen", invalidNick: "Verwende 2–32 Buchstaben, Zahlen, Leerzeichen, Punkte, Bindestriche oder Unterstriche.", tooLarge: "Datei ist größer als 3 MB.", quota: "Speicherlimit erreicht. Lösche ältere Nachrichten mit Dateien.", blocked: "Dieser Dateityp ist aus Sicherheitsgründen gesperrt.", rateLimit: "Zu viele Nachrichten. Warte eine Minute.", deleteConfirm: "Nachricht und Datei löschen?", reportConfirm: "Diese Nachricht melden?", nameReserved: "Dieser Spitzname ist reserviert.",
+  },
+  fr: {
+    title: "Chat communautaire April", subtitle: "Communauté des utilisateurs Free et Premium", circleTitle: "Amis", membersTitle: "Rechercher des amis", noMembers: "Pas encore d’amis. Invite quelqu’un avec ton lien.", inviteFriend: "Inviter un ami", inviteCopied: "Lien d’invitation copié.", inviteText: "Rejoins ma communauté April", addFriend: "Ajouter un ami", acceptFriend: "Accepter", requestSent: "Demande envoyée", incomingRequest: "Demande d’ami", openDirect: "Discussion privée", friend: "Ami",
+    back: "Retour au profil", profile: "Votre pseudo communautaire", nickPlaceholder: "Pseudo de 2 à 32 caractères", saveNick: "Enregistrer le pseudo", saving: "Enregistrement…", welcome: "Posez des questions, aidez les autres et partagez du code et des fichiers.", publicNotice: "Les messages et fichiers sont visibles par la communauté. Ne partagez ni mots de passe, ni clés API, ni données personnelles.", loading: "Chargement des messages…", empty: "Aucun message. Lancez la discussion.", placeholder: "Posez une question ou partagez une solution…", attach: "Joindre un fichier", send: "Envoyer", sending: "Envoi…", fileLimit: "Fichier jusqu’à 3 Mo ; 30 Mo de pièces jointes actives par utilisateur. Les fichiers exécutables sont bloqués.", download: "Télécharger le fichier", report: "Signaler", delete: "Supprimer votre message", saved: "Pseudo enregistré sur le serveur.", deleted: "Message supprimé par son auteur.", sent: "Message publié.", reported: "Signalement enregistré.", error: "Action impossible. Réessayez.", signIn: "Connectez-vous avec Google pour participer.", signInButton: "Connexion avec Google", free: "FREE", premium: "PREMIUM", chars: "caractères", invalidNick: "Utilisez 2 à 32 lettres, chiffres, espaces, points, tirets ou tirets bas.", tooLarge: "Le fichier dépasse 3 Mo.", quota: "Limite de stockage atteinte. Supprimez d’anciens messages avec fichiers.", blocked: "Ce type de fichier est bloqué pour des raisons de sécurité.", rateLimit: "Trop de messages. Attendez une minute.", deleteConfirm: "Supprimer le message et sa pièce jointe ?", reportConfirm: "Signaler ce message ?", nameReserved: "Ce pseudo est réservé.",
+  },
+  it: {
+    title: "Chat della community April", subtitle: "Community per utenti Free e Premium", circleTitle: "Amici", membersTitle: "Cerca amici", noMembers: "Non hai ancora amici. Invita qualcuno con il tuo link.", inviteFriend: "Invita un amico", inviteCopied: "Link d’invito copiato.", inviteText: "Unisciti alla mia community April", addFriend: "Aggiungi amico", acceptFriend: "Accetta", requestSent: "Richiesta inviata", incomingRequest: "Richiesta di amicizia", openDirect: "Chat privata", friend: "Amico",
+    back: "Torna al profilo", profile: "Il tuo nickname nella community", nickPlaceholder: "Nickname di 2–32 caratteri", saveNick: "Salva nickname", saving: "Salvataggio…", welcome: "Fai domande, aiuta gli altri e condividi codice e file.", publicNotice: "Messaggi e file sono visibili alla community. Non condividere password, chiavi API o dati personali.", loading: "Caricamento messaggi…", empty: "Nessun messaggio. Inizia la conversazione.", placeholder: "Fai una domanda o condividi una soluzione…", attach: "Allega file", send: "Invia", sending: "Invio…", fileLimit: "File fino a 3 MB; massimo 30 MB di allegati attivi per utente. I file eseguibili sono bloccati.", download: "Scarica file", report: "Segnala", delete: "Elimina il tuo messaggio", saved: "Nickname salvato sul server.", deleted: "Messaggio eliminato dall’autore.", sent: "Messaggio pubblicato.", reported: "Segnalazione registrata.", error: "Operazione non riuscita. Riprova.", signIn: "Accedi con Google per partecipare.", signInButton: "Accedi con Google", free: "FREE", premium: "PREMIUM", chars: "caratteri", invalidNick: "Usa 2–32 lettere, numeri, spazi, punti, trattini o underscore.", tooLarge: "Il file supera 3 MB.", quota: "Limite di archiviazione raggiunto. Elimina vecchi messaggi con file.", blocked: "Questo tipo di file è bloccato per sicurezza.", rateLimit: "Troppi messaggi. Attendi un minuto.", deleteConfirm: "Eliminare il messaggio e il file allegato?", reportConfirm: "Segnalare questo messaggio?", nameReserved: "Questo nickname è riservato.",
+  },
+  pl: {
+    title: "Czat społeczności April", subtitle: "Społeczność użytkowników Free i Premium", circleTitle: "Znajomi", membersTitle: "Szukaj znajomych", noMembers: "Nie masz jeszcze znajomych. Zaproś kogoś linkiem.", inviteFriend: "Zaproś znajomego", inviteCopied: "Skopiowano link zaproszenia.", inviteText: "Dołącz do mojej społeczności April", addFriend: "Dodaj znajomego", acceptFriend: "Akceptuj", requestSent: "Wysłano zaproszenie", incomingRequest: "Zaproszenie do znajomych", openDirect: "Prywatny czat", friend: "Znajomy",
+    back: "Powrót do profilu", profile: "Twój nick w społeczności", nickPlaceholder: "Nick od 2 do 32 znaków", saveNick: "Zapisz nick", saving: "Zapisywanie…", welcome: "Zadawaj pytania, pomagaj innym i udostępniaj kod oraz pliki.", publicNotice: "Wiadomości i pliki widzi społeczność. Nie udostępniaj haseł, kluczy API ani danych osobowych.", loading: "Ładowanie wiadomości…", empty: "Brak wiadomości. Rozpocznij dyskusję.", placeholder: "Zadaj pytanie lub podziel się rozwiązaniem…", attach: "Dołącz plik", send: "Wyślij", sending: "Wysyłanie…", fileLimit: "Pliki do 3 MB; maks. 30 MB aktywnych załączników na użytkownika. Pliki wykonywalne są blokowane.", download: "Pobierz plik", report: "Zgłoś", delete: "Usuń swoją wiadomość", saved: "Nick zapisano na serwerze.", deleted: "Wiadomość usunięta przez autora.", sent: "Wiadomość opublikowana.", reported: "Zgłoszenie zapisano.", error: "Nie udało się wykonać działania. Spróbuj ponownie.", signIn: "Zaloguj się przez Google, aby dołączyć.", signInButton: "Zaloguj przez Google", free: "FREE", premium: "PREMIUM", chars: "znaków", invalidNick: "Wpisz 2–32 litery, cyfry, spacje, kropki, myślniki lub podkreślenia.", tooLarge: "Plik przekracza 3 MB.", quota: "Osiągnięto limit. Usuń starsze wiadomości z plikami.", blocked: "Ten typ pliku jest zablokowany ze względów bezpieczeństwa.", rateLimit: "Wysyłasz zbyt często. Poczekaj minutę.", deleteConfirm: "Usunąć wiadomość i załącznik?", reportConfirm: "Zgłosić tę wiadomość?", nameReserved: "Ten nick jest zarezerwowany.",
+  },
+  pt: {
+    title: "Chat da comunidade April", subtitle: "Comunidade de utilizadores Free e Premium", circleTitle: "Amigos", membersTitle: "Procurar amigos", noMembers: "Ainda não tem amigos. Convide alguém pelo seu link.", inviteFriend: "Convidar amigo", inviteCopied: "Ligação de convite copiada.", inviteText: "Junta-te à minha comunidade April", addFriend: "Adicionar amigo", acceptFriend: "Aceitar", requestSent: "Pedido enviado", incomingRequest: "Pedido de amizade", openDirect: "Chat privado", friend: "Amigo",
+    back: "Voltar ao perfil", profile: "O seu nome na comunidade", nickPlaceholder: "Nome com 2–32 caracteres", saveNick: "Guardar nome", saving: "A guardar…", welcome: "Faça perguntas, ajude outros utilizadores e partilhe código e ficheiros.", publicNotice: "As mensagens e os ficheiros são visíveis para a comunidade. Não partilhe palavras-passe, chaves API ou dados pessoais.", loading: "A carregar mensagens…", empty: "Ainda não há mensagens. Inicie a conversa.", placeholder: "Faça uma pergunta ou partilhe uma solução…", attach: "Anexar ficheiro", send: "Enviar", sending: "A enviar…", fileLimit: "Ficheiros até 3 MB; máximo de 30 MB de anexos ativos por utilizador. Ficheiros executáveis bloqueados.", download: "Transferir ficheiro", report: "Denunciar", delete: "Eliminar a sua mensagem", saved: "Nome guardado no servidor.", deleted: "Mensagem eliminada pelo autor.", sent: "Mensagem publicada.", reported: "Denúncia registada.", error: "Não foi possível concluir. Tente novamente.", signIn: "Inicie sessão com Google para participar.", signInButton: "Iniciar sessão com Google", free: "FREE", premium: "PREMIUM", chars: "caracteres", invalidNick: "Use 2–32 letras, números, espaços, pontos, hífenes ou sublinhados.", tooLarge: "O ficheiro excede 3 MB.", quota: "Limite de armazenamento atingido. Elimine mensagens antigas com ficheiros.", blocked: "Este tipo de ficheiro está bloqueado por segurança.", rateLimit: "Demasiadas mensagens. Aguarde um minuto.", deleteConfirm: "Eliminar a mensagem e o ficheiro anexado?", reportConfirm: "Denunciar esta mensagem?", nameReserved: "Este nome está reservado.",
+  },
+  nl: {
+    title: "April-communitychat", subtitle: "Community voor Free- en Premium-gebruikers", circleTitle: "Vrienden", membersTitle: "Vrienden zoeken", noMembers: "Nog geen vrienden. Nodig iemand uit via je link.", inviteFriend: "Nodig een vriend uit", inviteCopied: "Uitnodigingslink gekopieerd.", inviteText: "Word lid van mijn April-community", addFriend: "Vriend toevoegen", acceptFriend: "Accepteren", requestSent: "Verzoek verzonden", incomingRequest: "Vriendschapsverzoek", openDirect: "Privéchat", friend: "Vriend",
+    back: "Terug naar profiel", profile: "Je community-naam", nickPlaceholder: "Naam van 2–32 tekens", saveNick: "Naam opslaan", saving: "Opslaan…", welcome: "Stel vragen, help anderen en deel code en bestanden.", publicNotice: "Berichten en bestanden zijn zichtbaar voor de community. Deel geen wachtwoorden, API-sleutels of persoonlijke gegevens.", loading: "Berichten laden…", empty: "Nog geen berichten. Begin het gesprek.", placeholder: "Stel een vraag of deel een oplossing…", attach: "Bestand toevoegen", send: "Verzenden", sending: "Verzenden…", fileLimit: "Bestanden tot 3 MB; maximaal 30 MB actieve bijlagen per gebruiker. Uitvoerbare bestanden zijn geblokkeerd.", download: "Bestand downloaden", report: "Melden", delete: "Eigen bericht verwijderen", saved: "Naam opgeslagen op de server.", deleted: "Bericht verwijderd door de auteur.", sent: "Bericht geplaatst.", reported: "Melding geregistreerd.", error: "Actie mislukt. Probeer het opnieuw.", signIn: "Log in met Google om deel te nemen.", signInButton: "Inloggen met Google", free: "FREE", premium: "PREMIUM", chars: "tekens", invalidNick: "Gebruik 2–32 letters, cijfers, spaties, punten, streepjes of underscores.", tooLarge: "Het bestand is groter dan 3 MB.", quota: "Opslaglimiet bereikt. Verwijder oudere berichten met bestanden.", blocked: "Dit bestandstype is om veiligheidsredenen geblokkeerd.", rateLimit: "Te veel berichten. Wacht een minuut.", deleteConfirm: "Bericht en bijlage verwijderen?", reportConfirm: "Dit bericht melden?", nameReserved: "Deze naam is gereserveerd.",
+  },
+};
+
+
+const UI_TEXT: Record<Language, { you: string; block: string; unblock: string; confirmBlock: string; confirmUnblock: string; blockDone: string; unblockDone: string; blocked: string }> = {
+  ru: { you: "Вы", block: "Блокировать", unblock: "Разблокировать", confirmBlock: "Скрыть сообщения этого пользователя в общем чате?", confirmUnblock: "Снова показывать сообщения этого пользователя?", blockDone: "Пользователь заблокирован — его сообщения скрыты.", unblockDone: "Пользователь разблокирован.", blocked: "Заблокирован" },
+  ua: { you: "Ви", block: "Заблокувати", unblock: "Розблокувати", confirmBlock: "Приховати повідомлення цього користувача у спільному чаті?", confirmUnblock: "Знову показувати повідомлення цього користувача?", blockDone: "Користувача заблоковано — його повідомлення приховано.", unblockDone: "Користувача розблоковано.", blocked: "Заблоковано" },
+  en: { you: "You", block: "Block", unblock: "Unblock", confirmBlock: "Hide this user's messages in the community chat?", confirmUnblock: "Show this user's messages again?", blockDone: "User blocked. Their public messages are hidden.", unblockDone: "User unblocked.", blocked: "Blocked" },
+  es: { you: "Tú", block: "Bloquear", unblock: "Desbloquear", confirmBlock: "¿Ocultar los mensajes de este usuario en la comunidad?", confirmUnblock: "¿Volver a mostrar sus mensajes?", blockDone: "Usuario bloqueado; sus mensajes están ocultos.", unblockDone: "Usuario desbloqueado.", blocked: "Bloqueado" },
+  de: { you: "Du", block: "Blockieren", unblock: "Entsperren", confirmBlock: "Nachrichten dieses Nutzers im Community-Chat ausblenden?", confirmUnblock: "Nachrichten dieses Nutzers wieder anzeigen?", blockDone: "Nutzer blockiert; Nachrichten werden ausgeblendet.", unblockDone: "Nutzer entsperrt.", blocked: "Blockiert" },
+  fr: { you: "Vous", block: "Bloquer", unblock: "Débloquer", confirmBlock: "Masquer les messages de cette personne dans le chat public ?", confirmUnblock: "Afficher à nouveau ses messages ?", blockDone: "Utilisateur bloqué ; ses messages sont masqués.", unblockDone: "Utilisateur débloqué.", blocked: "Bloqué" },
+  it: { you: "Tu", block: "Blocca", unblock: "Sblocca", confirmBlock: "Nascondere i messaggi di questo utente nella chat pubblica?", confirmUnblock: "Mostrare di nuovo i suoi messaggi?", blockDone: "Utente bloccato; i suoi messaggi sono nascosti.", unblockDone: "Utente sbloccato.", blocked: "Bloccato" },
+  pl: { you: "Ty", block: "Zablokuj", unblock: "Odblokuj", confirmBlock: "Ukryć wiadomości tego użytkownika na czacie społeczności?", confirmUnblock: "Ponownie pokazywać jego wiadomości?", blockDone: "Użytkownik zablokowany; jego wiadomości są ukryte.", unblockDone: "Użytkownik odblokowany.", blocked: "Zablokowany" },
+  pt: { you: "Você", block: "Bloquear", unblock: "Desbloquear", confirmBlock: "Ocultar as mensagens desta pessoa no chat da comunidade?", confirmUnblock: "Mostrar novamente as mensagens desta pessoa?", blockDone: "Utilizador bloqueado; mensagens ocultas.", unblockDone: "Utilizador desbloqueado.", blocked: "Bloqueado" },
+  nl: { you: "Jij", block: "Blokkeren", unblock: "Deblokkeren", confirmBlock: "Berichten van deze gebruiker in de communitychat verbergen?", confirmUnblock: "Berichten van deze gebruiker weer tonen?", blockDone: "Gebruiker geblokkeerd; berichten zijn verborgen.", unblockDone: "Gebruiker gedeblokkeerd.", blocked: "Geblokkeerd" },
+};
+
+
+const PROFILE_UI: Record<Language, { communityTitle: string; personalProfile: string; incomingRequests: string; noIncomingRequests: string; friends: string; noFriends: string; contacts: string; accept: string }> = {
+  ru: { communityTitle: "April · Сообщество", personalProfile: "Личный профиль", incomingRequests: "Запросы в друзья", noIncomingRequests: "Новых запросов в друзья нет.", friends: "Друзья", noFriends: "Пока нет подтверждённых друзей.", contacts: "Контакты", accept: "Добавить в друзья" },
+  ua: { communityTitle: "April · Спільнота", personalProfile: "Особистий профіль", incomingRequests: "Запити в друзі", noIncomingRequests: "Нових запитів у друзі немає.", friends: "Друзі", noFriends: "Поки немає підтверджених друзів.", contacts: "Контакти", accept: "Додати в друзі" },
+  en: { communityTitle: "April · Community", personalProfile: "Personal profile", incomingRequests: "Friend requests", noIncomingRequests: "No new friend requests.", friends: "Friends", noFriends: "No confirmed friends yet.", contacts: "Contacts", accept: "Accept friend" },
+  es: { communityTitle: "April · Comunidad", personalProfile: "Perfil personal", incomingRequests: "Solicitudes de amistad", noIncomingRequests: "No hay nuevas solicitudes de amistad.", friends: "Amigos", noFriends: "Aún no hay amigos confirmados.", contacts: "Contactos", accept: "Aceptar amistad" },
+  de: { communityTitle: "April · Community", personalProfile: "Persönliches Profil", incomingRequests: "Freundschaftsanfragen", noIncomingRequests: "Keine neuen Freundschaftsanfragen.", friends: "Freunde", noFriends: "Noch keine bestätigten Freunde.", contacts: "Kontakte", accept: "Freund hinzufügen" },
+  fr: { communityTitle: "April · Communauté", personalProfile: "Profil personnel", incomingRequests: "Demandes d’amitié", noIncomingRequests: "Aucune nouvelle demande d’amitié.", friends: "Amis", noFriends: "Aucun ami confirmé pour le moment.", contacts: "Contacts", accept: "Accepter" },
+  it: { communityTitle: "April · Community", personalProfile: "Profilo personale", incomingRequests: "Richieste di amicizia", noIncomingRequests: "Nessuna nuova richiesta di amicizia.", friends: "Amici", noFriends: "Non hai ancora amici confermati.", contacts: "Contatti", accept: "Accetta" },
+  pl: { communityTitle: "April · Społeczność", personalProfile: "Profil osobisty", incomingRequests: "Zaproszenia do znajomych", noIncomingRequests: "Brak nowych zaproszeń.", friends: "Znajomi", noFriends: "Brak potwierdzonych znajomych.", contacts: "Kontakty", accept: "Dodaj do znajomych" },
+  pt: { communityTitle: "April · Comunidade", personalProfile: "Perfil pessoal", incomingRequests: "Pedidos de amizade", noIncomingRequests: "Não há novos pedidos de amizade.", friends: "Amigos", noFriends: "Ainda não há amigos confirmados.", contacts: "Contactos", accept: "Aceitar amizade" },
+  nl: { communityTitle: "April · Community", personalProfile: "Persoonlijk profiel", incomingRequests: "Vriendschapsverzoeken", noIncomingRequests: "Geen nieuwe vriendschapsverzoeken.", friends: "Vrienden", noFriends: "Nog geen bevestigde vrienden.", contacts: "Contacten", accept: "Vriendschap accepteren" },
+};
+
+function formatSize(size: number, _language: Language): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatDate(value: string | null, language: Language): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const locales: Record<Language, string> = { ru: "ru-RU", ua: "uk-UA", en: "en-US", es: "es-ES", de: "de-DE", fr: "fr-FR", it: "it-IT", pl: "pl-PL", pt: "pt-PT", nl: "nl-NL" };
+  return date.toLocaleString(locales[language] || "en-US", {
+    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function errorText(error: string, t: Record<string, string>): string {
+  switch (error) {
+    case "INVALID_DISPLAY_NAME": return t.invalidNick;
+    case "RESERVED_DISPLAY_NAME": return t.nameReserved;
+    case "ATTACHMENT_TOO_LARGE":
+    case "ATTACHMENT_TOO_LARGE_OR_EMPTY":
+    case "REQUEST_BODY_TOO_LARGE": return t.tooLarge;
+    case "ATTACHMENT_TYPE_BLOCKED": return t.blocked;
+    case "COMMUNITY_ATTACHMENT_QUOTA_REACHED": return t.quota;
+    case "RATE_LIMITED": return t.rateLimit;
+    default: return t.error;
+  }
+}
+
+export default function CommunitySpacePage() {
+  const { data: session, status } = useSession();
+  const user = session?.user as ({ aprilId?: string | null; authenticated?: boolean; plan?: string; name?: string | null }) | undefined;
+  const aprilId = String(user?.aprilId ?? "").trim();
+  const authenticated = status === "authenticated" && user?.authenticated === true && Boolean(aprilId);
+  const [language, setLanguage] = useState<Language>("en");
+  const langKey = language;
+  const t = useMemo(() => COPY[langKey], [langKey]);
+  const [messages, setMessages] = useState<CommunityMessage[]>([]);
+  const [members, setMembers] = useState<CommunityMember[]>([]);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [nickname, setNickname] = useState("");
+  const [draftNickname, setDraftNickname] = useState("");
+  const [messageDraft, setMessageDraft] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [plan, setPlan] = useState<"free" | "premium">("free");
+  // The Bot snapshot is the single source of truth for the admin UI. Actual
+  // deletion remains independently authorized by the Bot against the DB user.
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [savingNick, setSavingNick] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollBoxRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const followLatestRef = useRef(true);
+  const nicknameDirtyRef = useRef(false);
+  const inviteHandledRef = useRef("");
+  const blockedIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    setLanguage(getLanguage(aprilId || null));
+    setIsAdmin(false);
+  }, [aprilId]);
+
+  useEffect(() => {
+    const field = composerRef.current;
+    if (!field) return;
+    field.style.height = "auto";
+    field.style.height = `${Math.min(180, Math.max(30, field.scrollHeight))}px`;
+  }, [messageDraft]);
+
+  const loadCommunity = useCallback(async (quiet = false) => {
+    if (!authenticated) return;
+    try {
+      const [response, membersResponse] = await Promise.all([
+        fetch("/api/community?limit=30", {
+          method: "GET", cache: "no-store", credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        }),
+        fetch("/api/community?view=members", {
+          method: "GET", cache: "no-store", credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        }).catch(() => null),
+      ]);
+      const payload = await response.json().catch(() => null) as CommunityResponse | null;
+      const memberPayload = membersResponse ? await membersResponse.json().catch(() => null) as CommunityResponse | null : null;
+      if (membersResponse?.ok && memberPayload?.success === true && Array.isArray(memberPayload.members)) {
+        const validMembers = memberPayload.members.filter((member) => member && typeof member.april_id === "string");
+        setMembers(validMembers);
+        // Client-side guard mirrors the server-side per-user block filter. A blocked
+        // author's messages disappear only for this viewer, not for other members.
+        blockedIdsRef.current = new Set(validMembers.filter((member) => member.is_blocked).map((member) => member.april_id.toLowerCase()));
+      }
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "COMMUNITY_LOAD_FAILED");
+      const nextMessages = (Array.isArray(payload.messages) ? payload.messages : [])
+        .filter((message) => {
+          const authorId = String(message?.author_april_id || "").trim().toLowerCase();
+          return !authorId || !blockedIdsRef.current.has(authorId);
         })
-    total_pairs = int(result.get("total_pairs") or 0) if isinstance(result, dict) else 0
-    return {
-        "engine": str(result.get("engine") or "state_manager_topic_section_search_v6_recovery"),
-        "authenticated": (
-            bool(result.get("authenticated")) if total_pairs > 0
-            else bool(is_authenticated_user(user_id))
-        ),
-        "window_hours": int(result.get("window_hours") or DIALOGUE_WINDOW_HOURS),
-        "seed_hours": DIALOGUE_SEED_HOURS,
-        "query": str(query or ""),
-        "total_pairs": total_pairs,
-        "relation": str(result.get("relation") or "NEW"),
-        "reason": str(result.get("reason") or ""),
-        "matches": matches,
+        .slice(-MAX_DISPLAY_MESSAGES);
+      setMessages((previous) => {
+        // Keep the same array reference when polling returns the same payload.
+        // This avoids needless list remounting and mobile scroll jitter.
+        if (previous.length === nextMessages.length && previous.every((item, index) =>
+          item.id === nextMessages[index]?.id &&
+          item.display_name === nextMessages[index]?.display_name &&
+          item.plan === nextMessages[index]?.plan &&
+          item.message === nextMessages[index]?.message &&
+          item.created_at === nextMessages[index]?.created_at &&
+          item.is_deleted === nextMessages[index]?.is_deleted &&
+          item.is_own === nextMessages[index]?.is_own &&
+          item.author_april_id === nextMessages[index]?.author_april_id &&
+          item.attachment?.name === nextMessages[index]?.attachment?.name &&
+          item.attachment?.size === nextMessages[index]?.attachment?.size &&
+          item.attachment?.download_url === nextMessages[index]?.attachment?.download_url
+        )) return previous;
+        return nextMessages;
+      });
+      setPlan(payload.plan === "premium" ? "premium" : "free");
+      setIsAdmin(payload.is_admin === true);
+      let serverName = String(payload.profile?.display_name || "").trim();
+      // Migrate a nickname saved by the previous profile page (localStorage) once,
+      // but never overwrite a nickname that is already authoritative on the server.
+      if (payload.profile?.is_custom !== true) {
+        try {
+          const legacyName = String(window.localStorage.getItem(`${DISPLAY_NAME_STORAGE_PREFIX}${aprilId}`) || "").trim();
+          if (legacyName && legacyName !== serverName && legacyName.length >= 2 && legacyName.length <= 32 && /^[\p{L}\p{N} _.'’\-]+$/u.test(legacyName)) {
+            const migrateResponse = await fetch("/api/community", {
+              method: "POST", cache: "no-store", credentials: "same-origin",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({ action: "save_profile", display_name: legacyName }),
+            });
+            const migrated = await migrateResponse.json().catch(() => null);
+            if (migrateResponse.ok && migrated?.success === true) serverName = String(migrated.profile?.display_name || legacyName).trim();
+          }
+        } catch { /* A failed nickname migration must not hide community messages. */ }
+      }
+      if (serverName) {
+        setNickname(serverName);
+        if (!nicknameDirtyRef.current) setDraftNickname(serverName);
+        try { window.localStorage.setItem(`${DISPLAY_NAME_STORAGE_PREFIX}${aprilId}`, serverName); } catch { /* Server remains authoritative. */ }
+      }
+      setError("");
+    } catch (caught) {
+      if (!quiet) setError(errorText(String((caught as Error)?.message || ""), t));
+    } finally {
+      setLoading(false);
     }
+  }, [authenticated, aprilId, t]);
 
+  useEffect(() => {
+    if (!authenticated) {
+      setLoading(status === "loading");
+      return;
+    }
+    void loadCommunity(false);
+    const timer = window.setInterval(() => void loadCommunity(true), 7000);
+    return () => window.clearInterval(timer);
+  }, [authenticated, loadCommunity, status]);
 
-# =========================================================
-# USER / SUBSCRIPTION / PAYMENTS API
-# =========================================================
-
-def generate_april_id() -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    def part(size: int) -> str:
-        return "".join(random.choice(alphabet) for _ in range(size))
-    return f"APR-{part(4)}-{part(4)}"
-
-
-def _ensure_user_defaults(cur, uid: str) -> None:
-    cur.execute(
-        """
-        INSERT INTO users (
-            user_id, plan, subscription_until, warned,
-            messages_today, images_today, last_reset,
-            created_at, last_login_at
-        )
-        VALUES (%s, 'free', 0, FALSE, 0, 0, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT (user_id) DO NOTHING
-        """,
-        (uid, today()),
-    )
-
-
-def ensure_user_db(user_id):
-    conn = get_conn()
-    if not conn:
-        return None
-    uid = str(user_id)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM users WHERE user_id = %s", (uid,))
-                user = cur.fetchone()
-                if user:
-                    return user
-                _ensure_user_defaults(cur, uid)
-                return None
-    finally:
-        conn.close()
-
-
-def find_user_by_email(email):
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM users WHERE LOWER(email) = %s", ((email or "").lower(),))
-                return cur.fetchone()
-    finally:
-        conn.close()
-
-
-def get_user_by_april_id(april_id):
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM users WHERE april_id = %s", (april_id,))
-                return cur.fetchone()
-    finally:
-        conn.close()
-
-
-def update_last_login(user_id):
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE user_id = %s", (str(user_id),))
-    finally:
-        conn.close()
-
-
-_SUPPORTED_USER_LANGUAGES = {"en", "ru", "ua", "es", "de", "fr", "it", "pl", "pt", "nl"}
-
-
-def normalize_user_language(language: Any) -> str | None:
-    raw = str(language or "").strip().lower().replace("_", "-").split("-", 1)[0]
-    if raw == "uk":
-        raw = "ua"
-    return raw if raw in _SUPPORTED_USER_LANGUAGES else None
-
-
-def get_user_language(user_id: Any) -> str | None:
-    """Return a saved UI/policy language for one canonical authenticated account."""
-    uid = str(user_id or "").strip()
-    if not uid:
-        return None
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT user_id, email, provider, language FROM users WHERE user_id = %s LIMIT 1",
-                (uid,),
-            )
-            row = cur.fetchone() or {}
-            if not _is_authenticated_row(row):
-                return None
-            return normalize_user_language(row.get("language"))
-    except Exception as exc:
-        print(f"[APRIL_USER_LANGUAGE] read_failed type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
-
-
-def set_user_language(user_id: Any, language: Any) -> str | None:
-    """Persist the language preference only for the authenticated canonical user row."""
-    uid = str(user_id or "").strip()
-    normalized = normalize_user_language(language)
-    if not uid or not normalized:
-        return None
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
-                    (uid,),
-                )
-                row = cur.fetchone()
-                if not _is_authenticated_row(row):
-                    return None
-                cur.execute(
-                    "UPDATE users SET language = %s WHERE user_id = %s",
-                    (normalized, uid),
-                )
-                return normalized if cur.rowcount == 1 else None
-    except Exception as exc:
-        print(f"[APRIL_USER_LANGUAGE] write_failed type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
-
-
-def backfill_april_ids():
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id FROM users WHERE april_id IS NULL OR april_id = ''")
-                for row in cur.fetchall():
-                    april_id = generate_april_id()
-                    cur.execute(
-                        "SELECT 1 FROM users WHERE april_id = %s",
-                        (april_id,),
-                    )
-                    while cur.fetchone():
-                        april_id = generate_april_id()
-                        cur.execute("SELECT 1 FROM users WHERE april_id = %s", (april_id,))
-                    cur.execute("UPDATE users SET april_id = %s WHERE user_id = %s", (april_id, row["user_id"]))
-    finally:
-        conn.close()
-
-
-def migrate_users_table_v1():
-    """Compatibility entry point; schema migration is folded into init_db()."""
-    init_db()
-    backfill_april_ids()
-
-
-def create_user(email, name="", provider="google", provider_user_id=None):
-    conn = get_conn()
-    if not conn:
-        return None
-    april_id = generate_april_id()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                while True:
-                    cur.execute("SELECT 1 FROM users WHERE april_id = %s", (april_id,))
-                    if not cur.fetchone():
-                        break
-                    april_id = generate_april_id()
-                cur.execute(
-                    """
-                    INSERT INTO users (
-                        user_id, april_id, email, name, provider, provider_user_id,
-                        plan, subscription_until, warned, messages_today, images_today,
-                        last_reset, created_at, last_login_at
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,'free',0,FALSE,0,0,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-                    RETURNING *
-                    """,
-                    (
-                        april_id,
-                        april_id,
-                        (email or "").strip().lower(),
-                        name or "",
-                        provider or "google",
-                        provider_user_id,
-                        today(),
-                    ),
-                )
-                return cur.fetchone()
-    finally:
-        conn.close()
-
-
-def find_or_create_user(email, name="", provider="google", provider_user_id=None):
-    """Create or restore an account only when the trusted provider identity matches."""
-    normalized_email = str(email or "").strip().lower()
-    normalized_provider = str(provider or "").strip().lower()
-    incoming_provider_id = str(provider_user_id or "").strip()
-    if not normalized_email or "@" not in normalized_email:
-        return None
-    if normalized_provider != "google" or not incoming_provider_id:
-        return None
-
-    existing = find_user_by_email(normalized_email)
-    if existing:
-        stored_provider = str(existing.get("provider") or "").strip().lower()
-        stored_provider_id = str(existing.get("provider_user_id") or "").strip()
-        # Never attach another provider identity to an existing email row.
-        if stored_provider != normalized_provider:
-            return None
-        if stored_provider_id and stored_provider_id != incoming_provider_id:
-            return None
-        if not stored_provider_id:
-            conn = get_conn()
-            if not conn:
-                return None
-            try:
-                with conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """UPDATE users SET provider_user_id = %s
-                               WHERE user_id = %s AND LOWER(provider) = %s
-                                 AND (provider_user_id IS NULL OR provider_user_id = '')""",
-                            (incoming_provider_id, str(existing.get("user_id") or ""), normalized_provider),
-                        )
-                existing = find_user_by_email(normalized_email)
-                if not existing or str(existing.get("provider_user_id") or "").strip() != incoming_provider_id:
-                    return None
-            finally:
-                conn.close()
-        update_last_login(existing["user_id"])
-        return existing
-
-    return create_user(
-        email=normalized_email,
-        name=name,
-        provider=normalized_provider,
-        provider_user_id=incoming_provider_id,
-    )
-
-
-
-def delete_april_account(user_id: Any) -> dict[str, Any]:
-    """Delete all April-side data linked to an authenticated account.
-
-    The lookup starts from the trusted April ID forwarded by April Web. We then
-    close over every identity value stored on the matched users row(s): internal
-    user_id, public april_id, Google provider_user_id, email and Premium ID.
-    Those aliases are used to remove legacy rows and file sidecars as well.
-    Google itself is never contacted and the user's Google account is untouched.
-    """
-    raw = str(user_id or "").strip()
-    if not raw:
-        return {"success": False, "error": "USER_ID_REQUIRED"}
-
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-
-    try:
-        identity_rows: dict[str, dict[str, Any]] = {}
-        owner_ids: set[str] = {raw}
-        email_ids: set[str] = set()
-        provider_ids: set[str] = set()
-        premium_ids: set[str] = set()
-
-        def absorb_identity(row: dict[str, Any]) -> bool:
-            """Add one linked account row and all of its identity aliases."""
-            changed = False
-            canonical = str(row.get("user_id") or "").strip()
-            if canonical and canonical not in identity_rows:
-                identity_rows[canonical] = dict(row)
-                changed = True
-            aliases = (
-                (owner_ids, row.get("user_id")),
-                (owner_ids, row.get("april_id")),
-                (owner_ids, row.get("provider_user_id")),
-                (owner_ids, row.get("email")),
-                (owner_ids, row.get("premium_id")),
-                (email_ids, str(row.get("email") or "").strip().lower()),
-                (provider_ids, row.get("provider_user_id")),
-                (premium_ids, row.get("premium_id")),
-            )
-            for target, value in aliases:
-                normalized = str(value or "").strip()
-                if target is email_ids:
-                    normalized = normalized.lower()
-                if normalized and normalized not in target:
-                    target.add(normalized)
-                    changed = True
-            return changed
-
-        with conn:
-            with conn.cursor() as cur:
-                # Resolve the signed-in account first. Do not delete by email or
-                # Google ID supplied by the client; the starting value must be a
-                # known April identity from the trusted server-to-server header.
-                cur.execute(
-                    """
-                    SELECT user_id, april_id, email, provider, provider_user_id, premium_id
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    FOR UPDATE
-                    """,
-                    (raw, raw, raw),
-                )
-                primary_row = cur.fetchone()
-                if not primary_row:
-                    return {"success": False, "error": "ACCOUNT_NOT_FOUND"}
-                if not _is_authenticated_row(primary_row):
-                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-                absorb_identity(dict(primary_row))
-
-                # Follow identity links until no additional user row is found.
-                # This also removes legacy duplicate registry rows, should an old
-                # deployment have stored the same Google identity under more than
-                # one April ID. The loop is bounded to fail closed on bad data.
-                for _ in range(20):
-                    before = (
-                        len(identity_rows), len(owner_ids), len(email_ids),
-                        len(provider_ids), len(premium_ids),
-                    )
-                    cur.execute(
-                        """
-                        SELECT user_id, april_id, email, provider, provider_user_id, premium_id
-                        FROM users
-                        WHERE user_id = ANY(%s)
-                           OR april_id = ANY(%s)
-                           OR LOWER(COALESCE(email, '')) = ANY(%s)
-                           OR provider_user_id = ANY(%s)
-                           OR premium_id = ANY(%s)
-                        FOR UPDATE
-                        """,
-                        (
-                            list(owner_ids), list(owner_ids), list(email_ids),
-                            list(provider_ids), list(premium_ids),
-                        ),
-                    )
-                    for linked_row in cur.fetchall():
-                        absorb_identity(dict(linked_row))
-                    after = (
-                        len(identity_rows), len(owner_ids), len(email_ids),
-                        len(provider_ids), len(premium_ids),
-                    )
-                    if after == before:
-                        break
-                else:
-                    raise RuntimeError("APRIL_ACCOUNT_IDENTITY_GRAPH_TOO_LARGE")
-
-                # All IDs remain internal to this transaction. These include the
-                # Google provider ID and email only as aliases inside April; no
-                # request is made to Google, and no Google-side data is changed.
-                account_ids = sorted(owner_ids)
-                all_user_ids = sorted(
-                    value for value in {
-                        str(row.get("user_id") or "").strip()
-                        for row in identity_rows.values()
-                    } if value
-                )
-                premium_id_values = sorted(premium_ids)
-
-                # Remove disk-backed Premium uploads/generated assets for every
-                # known alias before committing removal of the corresponding rows.
-                # If any deletion fails, the account row remains for a safe retry.
-                try:
-                    from blocks.premium_asset_store import delete_user_assets
-                    for asset_owner_id in account_ids:
-                        if not delete_user_assets(asset_owner_id):
-                            return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
-                except Exception as exc:
-                    print(
-                        f"[APRIL_ACCOUNT_DELETE] ASSET_CLEANUP_FAILED type={type(exc).__name__}",
-                        flush=True,
-                    )
-                    return {"success": False, "error": "ACCOUNT_ASSETS_DELETE_FAILED"}
-
-                # Every saved prompt/answer, dialogue and interpretation ID, and
-                # structured_request/structured_response (formulas, tables, charts,
-                # render contracts and metadata) lives on these owner rows. Delete
-                # expired and live rows alike; the 12/24-hour TTL does not apply to
-                # a deliberate account deletion.
-                cur.execute(
-                    "DELETE FROM dialogue_memory WHERE user_id = ANY(%s)",
-                    (account_ids,),
-                )
-                dialogue_rows = int(cur.rowcount or 0)
-
-                # Remove all account-side payment/entitlement records, including
-                # legacy rows keyed by an alias and rows tied to a Premium ID.
-                cur.execute(
-                    """
-                    DELETE FROM payments
-                    WHERE user_id = ANY(%s)
-                       OR premium_id = ANY(%s)
-                    """,
-                    (account_ids, premium_id_values),
-                )
-                payment_rows = int(cur.rowcount or 0)
-
-                # Deleting every linked registry row removes April IDs, Google
-                # provider mappings, emails, Premium IDs and subscription state.
-                cur.execute(
-                    "DELETE FROM users WHERE user_id = ANY(%s)",
-                    (all_user_ids,),
-                )
-                user_rows = int(cur.rowcount or 0)
-                if user_rows != len(all_user_ids):
-                    raise RuntimeError("APRIL_ACCOUNT_DELETE_ROW_COUNT_MISMATCH")
-
-        # PostgreSQL has committed. Drop Free and Premium process-local dialogue
-        # snapshots too, so the deleted structured memory is not retained in RAM.
-        cache_entries_removed = 0
-        try:
-            from blocks.state_manager import purge_user_state as purge_free_state
-            from blocks.Premium_state_manager import purge_user_state as purge_premium_state
-            cache_entries_removed += int(purge_free_state(account_ids) or 0)
-            cache_entries_removed += int(purge_premium_state(account_ids) or 0)
-        except Exception as exc:
-            # The database is already deleted; normal reads still require a live
-            # users row, but log cache invalidation failures for operational review.
-            print(
-                f"[APRIL_ACCOUNT_DELETE] CACHE_PURGE_FAILED type={type(exc).__name__}",
-                flush=True,
-            )
-
-        return {
-            "success": True,
-            "deleted": True,
-            "deleted_user_rows": user_rows,
-            "deleted_dialogue_rows": dialogue_rows,
-            "deleted_payment_rows": payment_rows,
-            "checked_asset_owner_ids": len(account_ids),
-            "purged_dialogue_cache_entries": cache_entries_removed,
-            "google_account_deleted": False,
+  useEffect(() => {
+    if (!authenticated || !aprilId || typeof window === "undefined") return;
+    const inviterId = String(new URLSearchParams(window.location.search).get("invite") || "").trim();
+    if (!inviterId || inviterId.toLowerCase() === aprilId.toLowerCase()) return;
+    const key = `${aprilId}:${inviterId}`;
+    if (inviteHandledRef.current === key) return;
+    inviteHandledRef.current = key;
+    void (async () => {
+      try {
+        const response = await fetch("/api/community", {
+          method: "POST", cache: "no-store", credentials: "same-origin",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ action: "send_friend_request", peer_id: inviterId }),
+        });
+        const payload = await response.json().catch(() => null);
+        if (response.ok && payload?.success === true) {
+          setNotice(payload?.relation === "friend" ? t.friend : payload?.relation === "incoming" ? t.incomingRequest : t.requestSent);
+          await loadCommunity(true);
         }
-    except Exception as exc:
-        print(f"[APRIL_ACCOUNT_DELETE] FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "ACCOUNT_DELETE_FAILED"}
-    finally:
-        conn.close()
+      } catch { /* A referral must never stop normal community access. */ }
+    })();
+  }, [authenticated, aprilId, loadCommunity, t]);
 
-def set_subscription(user_id, plan="premium"):
-    # Legacy/public April IDs are accepted at entry points, but the canonical
-    # subscription row is always keyed by users.user_id.
-    resolved_user_id = resolve_user_id(user_id)
-    user_id = resolved_user_id or str(user_id or "").strip()
-    if plan == "lite":
-        days = LITE_DAYS
-    elif plan == "premium":
-        days = PREMIUM_DAYS
-    else:
-        plan, days = "free", 0
-    expire = now().timestamp() + days * 86400 if days > 0 else 0
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO users (
-                        user_id, plan, subscription_until, warned,
-                        messages_today, images_today, last_reset, created_at, last_login_at
-                    )
-                    VALUES (%s,%s,%s,FALSE,0,0,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        plan=EXCLUDED.plan,
-                        subscription_until=EXCLUDED.subscription_until,
-                        warned=FALSE
-                    """,
-                    (str(user_id), plan, expire, today()),
-                )
-    finally:
-        conn.close()
+  useEffect(() => {
+    const box = scrollBoxRef.current;
+    if (!box || !followLatestRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length]);
 
-
-def save_payment(user_id, plan):
-    amount = LITE_PRICE if plan == "lite" else PREMIUM_PRICE if plan == "premium" else 0
-    user_id = resolve_user_id(user_id) or str(user_id or "").strip()
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT premium_id FROM users WHERE user_id = %s",
-                    (str(user_id),),
-                )
-                user = cur.fetchone() or {}
-                premium_id = str(user.get("premium_id") or "").strip() or None
-                cur.execute(
-                    """
-                    INSERT INTO payments
-                        (user_id, plan, amount, premium_id, payment_status, payment_source)
-                    VALUES (%s, %s, %s, %s, 'paid', 'provider')
-                    """,
-                    (str(user_id), plan, amount, premium_id),
-                )
-    finally:
-        conn.close()
-
-
-def get_user_plan(user_id):
-    conn = get_conn()
-    if not conn:
-        return "free"
-    uid = str(user_id)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, plan, subscription_until
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    """,
-                    (uid, uid, uid),
-                )
-                user = cur.fetchone()
-                if not user:
-                    _ensure_user_defaults(cur, uid)
-                    return "free"
-                uid = str(user.get("user_id") or uid).strip()
-                plan = str(user.get("plan") or "free").strip().lower()
-                expires_at = float(user.get("subscription_until") or 0)
-                current_seconds = now().timestamp()
-                if plan in {"lite", "premium"} and expires_at <= current_seconds:
-                    cur.execute(
-                        "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
-                        (uid, plan),
-                    )
-                    return "free"
-                # Entitlements are determined by the database, never by the
-                # client-supplied `package` field or an unrecognized DB value.
-                return plan if plan in {"lite", "premium"} else "free"
-    finally:
-        conn.close()
-
-
-def get_user_subscription_status(user_id):
-    """Return the database-backed entitlement details for an authenticated account.
-
-    Timestamps in storage are Unix seconds. The Web profile contract converts the
-    expiry to milliseconds because it compares it with Date.now(). Test activation
-    writes an auditable zero-value ``test_grant`` row to ``payments``; that row is
-    explicitly excluded from paid-payment history and never grants access by itself.
-    """
-    uid = str(user_id or "").strip()
-    if not uid:
-        return None
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id, language
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    """,
-                    (uid, uid, uid),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return None
-                # All linked records use the internal user_id as their key.
-                uid = str(user.get("user_id") or uid).strip()
-
-                now_seconds = now().timestamp()
-                until_seconds = float(user.get("subscription_until") or 0)
-                raw_plan = str(user.get("plan") or "free").strip().lower()
-                plan = raw_plan if raw_plan in {"lite", "premium"} and until_seconds > now_seconds else "free"
-                if raw_plan in {"lite", "premium"} and plan == "free":
-                    cur.execute("UPDATE users SET plan = 'free' WHERE user_id = %s", (uid,))
-
-                # A payment-history flag counts only paid transactions. Test-grant
-                # audit rows are intentionally excluded and never grant access by themselves.
-                cur.execute(
-                    "SELECT EXISTS(SELECT 1 FROM payments WHERE user_id = %s AND plan = 'premium' AND payment_status = 'paid') AS found",
-                    (uid,),
-                )
-                history_row = cur.fetchone() or {}
-                has_premium_history = bool(history_row.get("found"))
-
-                payload = {
-                    "user_id": uid,
-                    "april_id": str(user.get("april_id") or uid),
-                    "premium_id": str(user.get("premium_id") or "") or None,
-                    "language": normalize_user_language(user.get("language")) or "en",
-                    "plan": plan,
-                    "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
-                    "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
-                    "has_premium_history": has_premium_history,
-                }
-                if plan == "free":
-                    payload["free_media"] = get_free_media_quota_status(uid)
-                return payload
-    finally:
-        conn.close()
-
-
-# =========================================================
-# AUTHENTICATED FREE MEDIA QUOTA + REFERRAL REWARDS
-# =========================================================
-
-def _free_media_make_referral_code() -> str:
-    return secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12].upper()
-
-
-def _normalize_referral_recipient_email(value: Any) -> str | None:
-    email = str(value or "").strip().lower()
-    if len(email) > 254 or not re.fullmatch(r"[^@\s]{1,64}@[^@\s.]+(?:\.[^@\s.]+)+", email):
-        return None
-
-    # Gmail treats dots and the +tag suffix as aliases for the same mailbox.
-    # Normalize those aliases so a sender cannot bypass the one-invite rule by
-    # entering variants such as name+work@gmail.com or n.a.m.e@gmail.com.
-    local_part, domain = email.rsplit("@", 1)
-    if domain in {"gmail.com", "googlemail.com"}:
-        local_part = local_part.split("+", 1)[0].replace(".", "")
-        if not local_part:
-            return None
-        domain = "gmail.com"
-    return f"{local_part}@{domain}"
-
-
-def _referral_recipient_email_hash(value: Any) -> str | None:
-    email = _normalize_referral_recipient_email(value)
-    secret = str(
-        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
-        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
-        or ""
-    ).strip()
-    if not email or len(secret) < 32:
-        return None
-    return hmac.new(secret.encode("utf-8"), email.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _normalize_referral_recipient_phone(value: Any) -> str | None:
-    """Normalize all phone values returned for one selected device contact."""
-    values = value if isinstance(value, (list, tuple)) else [value]
-    normalized: set[str] = set()
-    for item in values[:10]:
-        raw = str(item or "").strip()
-        if not raw or len(raw) > 80:
-            continue
-        # Formatting characters are irrelevant for a repeated selection of the
-        # same contact. Keep digits only and sort the set so contact field order
-        # does not change its fingerprint. No country code is guessed.
-        digits = re.sub(r"\D", "", raw)
-        if 7 <= len(digits) <= 15:
-            normalized.add(digits)
-    return "|".join(sorted(normalized)) if normalized else None
-
-
-def _referral_recipient_contact_hash(value: Any) -> str | None:
-    """Return keyed hashes for each valid phone of one selected contact.
-
-    Multiple digests are stored joined in the existing text column. That lets a
-    later entry of any one of a contact's phone numbers match the original
-    selection, without storing raw numbers or adding a new table.
-    """
-    normalized = _normalize_referral_recipient_phone(value)
-    secret = str(
-        os.getenv("APRIL_REFERRAL_TARGET_SECRET")
-        or os.getenv("APRIL_WEB_TO_BOT_TOKEN")
-        or ""
-    ).strip()
-    if not normalized or len(secret) < 32:
-        return None
-    key = secret.encode("utf-8")
-    phones = [phone for phone in normalized.split("|") if phone]
-    digests = {
-        hmac.new(key, f"contact:{phone}".encode("utf-8"), hashlib.sha256).hexdigest()
-        for phone in phones
+  async function saveNickname(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(""); setNotice("");
+    setSavingNick(true);
+    try {
+      const response = await fetch("/api/community", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action: "save_profile", display_name: draftNickname }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "PROFILE_SAVE_FAILED");
+      const savedName = String(payload.profile?.display_name || draftNickname).trim();
+      setNickname(savedName); setDraftNickname(savedName); nicknameDirtyRef.current = false; setNotice(t.saved);
+      try { window.localStorage.setItem(`${DISPLAY_NAME_STORAGE_PREFIX}${aprilId}`, savedName); } catch { /* Server remains authoritative. */ }
+      await loadCommunity(true);
+    } catch (caught) {
+      setError(errorText(String((caught as Error)?.message || ""), t));
+    } finally {
+      setSavingNick(false);
     }
-    # Keep the old combined-set digest as well, so invitations created by the
-    # earlier implementation remain detectable after this migration.
-    if phones:
-        digests.add(
-            hmac.new(key, f"contact:{'|'.join(phones)}".encode("utf-8"), hashlib.sha256).hexdigest()
-        )
-    return "|".join(sorted(digests)) if digests else None
+  }
 
-
-def _free_media_ensure_row(cur, uid: str) -> dict[str, Any]:
-    """Create the one quota row for a canonical authenticated user."""
-    code = _free_media_make_referral_code()
-    cur.execute(
-        """
-        INSERT INTO free_media_quota (user_id, referral_code)
-        VALUES (%s, %s)
-        ON CONFLICT (user_id) DO NOTHING
-        """,
-        (uid, code),
-    )
-    cur.execute(
-        "SELECT * FROM free_media_quota WHERE user_id = %s FOR UPDATE",
-        (uid,),
-    )
-    row = cur.fetchone()
-    if not row:
-        raise RuntimeError("FREE_MEDIA_QUOTA_ROW_UNAVAILABLE")
-    return dict(row)
-
-
-def _free_media_normalize_timestamp(value: Any) -> datetime | None:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    try:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _free_media_expire_cooldown(cur, uid: str, row: dict[str, Any], current: datetime) -> dict[str, Any]:
-    cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
-    if cooldown_until and cooldown_until <= current:
-        cur.execute(
-            """
-            UPDATE free_media_quota
-            SET used_units = 0, cooldown_until = NULL,
-                period_started_at = %s, updated_at = %s
-            WHERE user_id = %s
-            RETURNING *
-            """,
-            (current, current, uid),
-        )
-        refreshed = cur.fetchone()
-        if refreshed:
-            return dict(refreshed)
-    return row
-
-
-def _free_media_recover_stale_reservations(
-    cur, uid: str, row: dict[str, Any], current: datetime
-) -> dict[str, Any]:
-    """Refund abandoned in-flight reservations after the safety TTL.
-
-    All quota paths lock users.user_id, then free_media_quota, then usage events.
-    Matching that order prevents deadlocks between concurrent send/retry paths.
-    """
-    cutoff = current - timedelta(seconds=FREE_MEDIA_RESERVATION_TTL_SECONDS)
-    cur.execute(
-        """
-        SELECT id, base_units, bonus_units
-        FROM free_media_usage_events
-        WHERE user_id = %s AND status = 'reserved' AND created_at <= %s
-        ORDER BY id
-        FOR UPDATE
-        """,
-        (uid, cutoff),
-    )
-    stale = cur.fetchall() or []
-    if not stale:
-        return row
-
-    stale_ids = [int(item.get("id") or 0) for item in stale if int(item.get("id") or 0) > 0]
-    refund_base = sum(max(0, int(item.get("base_units") or 0)) for item in stale)
-    refund_bonus = sum(max(0, int(item.get("bonus_units") or 0)) for item in stale)
-    new_used = max(0, int(row.get("used_units") or 0) - refund_base)
-    new_bonus = max(0, int(row.get("bonus_units") or 0)) + refund_bonus
-    cooldown = _free_media_normalize_timestamp(row.get("cooldown_until"))
-    if new_used < FREE_MEDIA_PACK_UNITS:
-        cooldown = None
-
-    cur.execute(
-        """
-        UPDATE free_media_quota
-        SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = %s
-        WHERE user_id = %s
-        RETURNING *
-        """,
-        (new_used, new_bonus, cooldown, current, uid),
-    )
-    refreshed = cur.fetchone()
-    if stale_ids:
-        cur.execute(
-            "UPDATE free_media_usage_events SET status = 'released' WHERE id = ANY(%s) AND status = 'reserved'",
-            (stale_ids,),
-        )
-    return dict(refreshed) if refreshed else row
-
-
-def _free_media_status_payload(row: dict[str, Any], current: datetime, *, referral_count: int = 0) -> dict[str, Any]:
-    used = max(0, int(row.get("used_units") or 0))
-    bonus = max(0, int(row.get("bonus_units") or 0))
-    cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
-    retry = max(0, int((cooldown_until - current).total_seconds())) if cooldown_until else 0
-    base_remaining = max(0, FREE_MEDIA_PACK_UNITS - used)
-    remaining = bonus if retry > 0 else base_remaining + bonus
-    return {
-        "limit": FREE_MEDIA_PACK_UNITS,
-        "used": min(FREE_MEDIA_PACK_UNITS, used),
-        "base_remaining": base_remaining if retry <= 0 else 0,
-        "bonus_remaining": bonus,
-        "remaining": max(0, remaining),
-        "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
-        "retry_seconds": retry,
-        "cooldown_seconds": FREE_MEDIA_COOLDOWN_SECONDS,
-        "referral_code": str(row.get("referral_code") or ""),
-        "confirmed_invites": max(0, int(referral_count or 0)),
+  async function sendMessage(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (sending) return;
+    const text = messageDraft.trim();
+    if (!text && !selectedFile) return;
+    if (selectedFile && selectedFile.size > MAX_UPLOAD_BYTES) {
+      setError(t.tooLarge); return;
     }
-
-
-def get_free_media_quota_status(user_id: Any) -> dict[str, Any] | None:
-    """Return a quota snapshot for a canonical authenticated users.user_id."""
-    uid = str(user_id or "").strip()
-    if not uid:
-        return None
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, email, provider, plan, subscription_until
-                    FROM users WHERE user_id = %s FOR UPDATE
-                    """,
-                    (uid,),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return None
-                current = now()
-                raw_plan = str(user.get("plan") or "free").strip().lower()
-                until = float(user.get("subscription_until") or 0)
-                plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
-                if plan != "free":
-                    return {
-                        "unlimited": True,
-                        "plan": plan,
-                        "limit": None,
-                        "remaining": None,
-                        "used": 0,
-                        "bonus_remaining": 0,
-                        "retry_seconds": 0,
-                    }
-                row = _free_media_ensure_row(cur, uid)
-                row = _free_media_recover_stale_reservations(cur, uid, row, current)
-                row = _free_media_expire_cooldown(cur, uid, row, current)
-                cur.execute(
-                    "SELECT COUNT(*) AS count FROM april_referral_invites WHERE inviter_user_id = %s AND status = 'rewarded'",
-                    (uid,),
-                )
-                referral_count = int((cur.fetchone() or {}).get("count") or 0)
-                return {
-                    "unlimited": False,
-                    "plan": "free",
-                    **_free_media_status_payload(row, current, referral_count=referral_count),
-                }
-    except Exception as exc:
-        print(f"[APRIL_FREE_MEDIA] status_failed type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
-
-
-def reserve_free_media_units(
-    user_id: Any,
-    message_id: Any,
-    units: int,
-    operation: str,
-    *,
-    bonus_only: bool = False,
-) -> dict[str, Any]:
-    """Atomically reserve media units. Retries of the same message are idempotent.
-
-    image_edit is bonus-only: it never consumes the ordinary six-hourly Free pack.
-    """
-    # Every caller is already behind the canonical chat/auth boundary and passes
-    # users.user_id. Resolve and re-open no alias lookup connection here: validate
-    # that exact row under lock in the transaction below.
-    uid = str(user_id or "").strip()
-    message_key = str(message_id or "").strip()[:180]
-    operation_key = str(operation or "").strip().lower()
-    try:
-        unit_count = int(units)
-    except (TypeError, ValueError):
-        unit_count = 0
-    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"} or unit_count < 1 or unit_count > 6:
-        return {"allowed": False, "error_code": "FREE_MEDIA_REQUEST_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"allowed": False, "error_code": "FREE_MEDIA_TRACKING_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Lock the authoritative account row first. This serializes usage
-                # updates even when two Web requests arrive at the same moment.
-                cur.execute(
-                    """
-                    SELECT user_id, email, provider, plan, subscription_until
-                    FROM users WHERE user_id = %s FOR UPDATE
-                    """,
-                    (uid,),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return {"allowed": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-                current = now()
-                raw_plan = str(user.get("plan") or "free").strip().lower()
-                until = float(user.get("subscription_until") or 0)
-                active_plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
-                if active_plan != "free":
-                    return {"allowed": True, "tracked": False, "plan": active_plan}
-
-                row = _free_media_ensure_row(cur, uid)
-                row = _free_media_recover_stale_reservations(cur, uid, row, current)
-                row = _free_media_expire_cooldown(cur, uid, row, current)
-                cur.execute(
-                    """
-                    SELECT id, status, units, base_units, bonus_units
-                    FROM free_media_usage_events
-                    WHERE user_id = %s AND message_id = %s AND operation = %s
-                    """,
-                    (uid, message_key, operation_key),
-                )
-                existing = cur.fetchone()
-                if existing and str(existing.get("status") or "") in {"reserved", "committed"}:
-                    return {
-                        "allowed": True,
-                        "tracked": True,
-                        "already_reserved": True,
-                        "event_id": int(existing.get("id") or 0),
-                    }
-
-                used = max(0, int(row.get("used_units") or 0))
-                bonus = max(0, int(row.get("bonus_units") or 0))
-                cooldown_until = _free_media_normalize_timestamp(row.get("cooldown_until"))
-                cooling = bool(cooldown_until and cooldown_until > current)
-                base_remaining = 0 if (cooling or bonus_only or operation_key == "image_edit") else max(0, FREE_MEDIA_PACK_UNITS - used)
-                available = bonus if (bonus_only or operation_key == "image_edit") else base_remaining + bonus
-                if unit_count > available:
-                    status = _free_media_status_payload(row, current)
-                    return {
-                        "allowed": False,
-                        "error_code": "FREE_IMAGE_EDIT_BONUS_REQUIRED" if operation_key == "image_edit" else "FREE_MEDIA_LIMIT_REACHED",
-                        "limit": FREE_MEDIA_PACK_UNITS,
-                        **status,
-                    }
-
-                base_units = 0 if (bonus_only or operation_key == "image_edit") else min(unit_count, base_remaining)
-                bonus_units = unit_count - base_units
-                new_used = used + base_units
-                new_bonus = bonus - bonus_units
-                new_cooldown = cooldown_until
-                if new_used >= FREE_MEDIA_PACK_UNITS and new_bonus <= 0 and not new_cooldown:
-                    new_cooldown = current + timedelta(seconds=FREE_MEDIA_COOLDOWN_SECONDS)
-                cur.execute(
-                    """
-                    UPDATE free_media_quota
-                    SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = %s
-                    WHERE user_id = %s
-                    """,
-                    (new_used, new_bonus, new_cooldown, current, uid),
-                )
-                if existing:
-                    cur.execute(
-                        """
-                        UPDATE free_media_usage_events
-                        SET units = %s, base_units = %s, bonus_units = %s,
-                            status = 'reserved', created_at = %s, committed_at = NULL
-                        WHERE id = %s
-                        RETURNING id
-                        """,
-                        (unit_count, base_units, bonus_units, current, int(existing["id"])),
-                    )
-                    event = cur.fetchone() or {}
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO free_media_usage_events
-                            (user_id, message_id, operation, units, base_units, bonus_units, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'reserved')
-                        RETURNING id
-                        """,
-                        (uid, message_key, operation_key, unit_count, base_units, bonus_units),
-                    )
-                    event = cur.fetchone() or {}
-                return {
-                    "allowed": True,
-                    "tracked": True,
-                    "event_id": int(event.get("id") or 0),
-                    "units": unit_count,
-                    "base_units": base_units,
-                    "bonus_units": bonus_units,
-                }
-    except Exception as exc:
-        print(f"[APRIL_FREE_MEDIA] reserve_failed type={type(exc).__name__}", flush=True)
-        return {"allowed": False, "error_code": "FREE_MEDIA_TRACKING_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def commit_free_media_reservation(user_id: Any, message_id: Any, operation: str) -> bool:
-    uid = str(user_id or "").strip()
-    message_key = str(message_id or "").strip()[:180]
-    operation_key = str(operation or "").strip().lower()
-    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"}:
-        return False
-    conn = get_conn()
-    if not conn:
-        return False
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE free_media_usage_events
-                    SET status = 'committed', committed_at = CURRENT_TIMESTAMP
-                    WHERE user_id = %s AND message_id = %s AND operation = %s
-                      AND status = 'reserved'
-                    """,
-                    (uid, message_key, operation_key),
-                )
-                return cur.rowcount > 0
-    finally:
-        conn.close()
-
-
-def release_free_media_reservation(user_id: Any, message_id: Any, operation: str) -> bool:
-    """Refund only a reservation that never reached a successful media result."""
-    uid = str(user_id or "").strip()
-    message_key = str(message_id or "").strip()[:180]
-    operation_key = str(operation or "").strip().lower()
-    if not uid or not message_key or operation_key not in {"attachment", "generation", "image_edit"}:
-        return False
-    conn = get_conn()
-    if not conn:
-        return False
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Follow the same lock order as reserve/status: authenticated user,
-                # quota row, then the individual event.
-                cur.execute(
-                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
-                    (uid,),
-                )
-                if not _is_authenticated_row(cur.fetchone()):
-                    return False
-                cur.execute(
-                    "SELECT used_units, bonus_units, cooldown_until FROM free_media_quota WHERE user_id = %s FOR UPDATE",
-                    (uid,),
-                )
-                quota = cur.fetchone()
-                if not quota:
-                    return False
-                cur.execute(
-                    """
-                    SELECT id, base_units, bonus_units
-                    FROM free_media_usage_events
-                    WHERE user_id = %s AND message_id = %s AND operation = %s
-                      AND status = 'reserved'
-                    FOR UPDATE
-                    """,
-                    (uid, message_key, operation_key),
-                )
-                event = cur.fetchone()
-                if not event:
-                    return False
-                new_used = max(0, int(quota.get("used_units") or 0) - int(event.get("base_units") or 0))
-                new_bonus = max(0, int(quota.get("bonus_units") or 0)) + int(event.get("bonus_units") or 0)
-                cooldown = _free_media_normalize_timestamp(quota.get("cooldown_until"))
-                if new_used < FREE_MEDIA_PACK_UNITS and new_bonus > 0:
-                    cooldown = None
-                elif new_used < FREE_MEDIA_PACK_UNITS:
-                    cooldown = None
-                cur.execute(
-                    """
-                    UPDATE free_media_quota
-                    SET used_units = %s, bonus_units = %s, cooldown_until = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = %s
-                    """,
-                    (new_used, new_bonus, cooldown, uid),
-                )
-                cur.execute(
-                    "UPDATE free_media_usage_events SET status = 'released' WHERE id = %s",
-                    (int(event["id"]),),
-                )
-                return True
-    finally:
-        conn.close()
-
-
-def prepare_april_referral_share(
-    inviter_user_id: Any,
-    recipient_phone: Any = None,
-    *,
-    reveal_warnings: bool = True,
-) -> dict[str, Any]:
-    """Prepare one account-bound invitation link without accessing contacts.
-
-    Android's native share sheet intentionally hides the recipient from WebView.
-    The token is therefore single-claim, tied to the inviter, and prepared once
-    before the user opens the system share sheet. Legacy phone-bound rows remain
-    readable; new rows have both recipient hashes NULL.
-    """
-    inviter = str(inviter_user_id or "").strip()
-    if not inviter:
-        return {"success": False, "error_code": "REFERRAL_INVALID"}
-
-    # For compatibility, an old caller may still send one phone. New callers do not.
-    contact_hash_set = _referral_recipient_contact_hash(recipient_phone) if recipient_phone else None
-    if recipient_phone and not contact_hash_set:
-        return {"success": False, "error_code": "REFERRAL_CONTACT_INVALID"}
-
-    conn = get_conn()
-    if not conn:
-        print("[APRIL_REFERRAL] event=prepare outcome=unavailable reason=database_connection", flush=True)
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_id, email, name, provider FROM users WHERE user_id = %s FOR UPDATE",
-                    (inviter,),
-                )
-                inviter_row = cur.fetchone()
-                if not _is_authenticated_row(inviter_row):
-                    print("[APRIL_REFERRAL] event=prepare outcome=rejected reason=authenticated_user_required", flush=True)
-                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-
-                quota_row = _free_media_ensure_row(cur, inviter)
-                current = now()
-                cur.execute(
-                    """UPDATE april_referral_share_targets
-                       SET status = 'expired'
-                       WHERE inviter_user_id = %s AND status = 'reserved' AND created_at < %s""",
-                    (inviter, current - timedelta(hours=5)),
-                )
-
-                # A self-link can only be identified after its owner opens it: the
-                # Android share sheet deliberately does not expose the recipient.
-                # Persist that observation and surface one early warning on the
-                # sender's next attempt, before generating/opening another link.
-                cur.execute(
-                    """SELECT id FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s
-                         AND self_claim_attempted_at IS NOT NULL
-                         AND self_warning_shown_at IS NULL
-                       ORDER BY self_claim_attempted_at DESC, id DESC
-                       LIMIT 1 FOR UPDATE""",
-                    (inviter,),
-                )
-                self_warning = cur.fetchone()
-                if self_warning:
-                    # A previous attempt to open one's own link is a warning, not
-                    # a reason to prevent the owner from preparing a fresh link.
-                    # The actual claim path below still rejects self-invites.
-                    if reveal_warnings:
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET self_warning_shown_at = %s
-                               WHERE id = %s AND self_warning_shown_at IS NULL""",
-                            (current, int(self_warning.get("id") or 0)),
-                        )
-                    print("[APRIL_REFERRAL] event=prepare warning=previous_self_claim continue=true", flush=True)
-
-                # A claimed token has already been activated by one new account.
-                # Warn once before preparing a fresh link. The intended next
-                # recipient cannot be identified without reintroducing contacts.
-                cur.execute(
-                    """SELECT id FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s AND status = 'claimed'
-                         AND claimed_by_user_id IS NOT NULL
-                         AND claimed_by_user_id <> inviter_user_id
-                         AND repeat_warning_shown_at IS NULL
-                       ORDER BY claimed_at DESC NULLS LAST, id DESC
-                       LIMIT 1 FOR UPDATE""",
-                    (inviter,),
-                )
-                repeat_warning = cur.fetchone()
-                if repeat_warning:
-                    # A previously claimed one-time token must not block a new
-                    # invitation for a different friend. Keep the reminder state,
-                    # but prepare the next token normally.
-                    if reveal_warnings:
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET repeat_warning_shown_at = %s
-                               WHERE id = %s AND repeat_warning_shown_at IS NULL""",
-                            (current, int(repeat_warning.get("id") or 0)),
-                        )
-                    print("[APRIL_REFERRAL] event=prepare warning=previous_invite_claimed continue=true", flush=True)
-
-                # Reuse the same current contact-free reservation across quick taps,
-                # reloads and React StrictMode effect replay. It avoids orphan tokens.
-                if not contact_hash_set:
-                    cur.execute(
-                        """SELECT invite_token, referral_code
-                           FROM april_referral_share_targets
-                           WHERE inviter_user_id = %s AND recipient_contact_hash IS NULL
-                             AND recipient_email_hash IS NULL AND status = 'reserved'
-                             AND created_at >= %s
-                           ORDER BY created_at DESC LIMIT 1 FOR UPDATE""",
-                        (inviter, current - timedelta(hours=5)),
-                    )
-                    existing = cur.fetchone()
-                    if existing:
-                        print("[APRIL_REFERRAL] event=prepare outcome=reserved reused=true", flush=True)
-                        return {
-                            "success": True,
-                            "referral_code": str(existing.get("referral_code") or "").upper(),
-                            "invite_token": str(existing.get("invite_token") or ""),
-                            "inviter_name": str(inviter_row.get("name") or "")[:80],
-                            "reused_reservation": True,
-                        }
-                else:
-                    cur.execute(
-                        """SELECT recipient_contact_hash FROM april_referral_share_targets
-                           WHERE inviter_user_id = %s
-                             AND (status IN ('sent', 'claimed') OR
-                                  (status = 'reserved' AND created_at >= %s))
-                           FOR UPDATE""",
-                        (inviter, current - timedelta(hours=5)),
-                    )
-                    for existing_row in cur.fetchall() or []:
-                        existing_hashes = set(str(existing_row.get("recipient_contact_hash") or "").split("|"))
-                        existing_hashes.discard("")
-                        if set(contact_hash_set.split("|")) & existing_hashes:
-                            return {"success": False, "error_code": "REFERRAL_TARGET_ALREADY_SHARED"}
-
-                referral_code = str(quota_row.get("referral_code") or "").strip().upper()
-                if not referral_code:
-                    return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-                invite_token = secrets.token_urlsafe(24)
-                cur.execute(
-                    """INSERT INTO april_referral_share_targets
-                       (inviter_user_id, recipient_email_hash, recipient_contact_hash,
-                        invite_token, referral_code, status)
-                       VALUES (%s, NULL, %s, %s, %s, 'reserved')""",
-                    (inviter, contact_hash_set, invite_token, referral_code),
-                )
-                print("[APRIL_REFERRAL] event=prepare outcome=reserved reused=false", flush=True)
-                return {
-                    "success": True,
-                    "referral_code": referral_code,
-                    "invite_token": invite_token,
-                    "inviter_name": str(inviter_row.get("name") or "")[:80],
-                    "reused_reservation": False,
-                }
-    except Exception as exc:
-        print(f"[APRIL_REFERRAL] event=prepare outcome=error type={type(exc).__name__}", flush=True)
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def finish_april_referral_share(
-    inviter_user_id: Any,
-    invite_token: Any,
-    sent: Any,
-    share_channel: Any = "system_share",
-) -> dict[str, Any]:
-    """Finish one Free invitation and unlock its one-time share reward.
-
-    A successful system-share completion grants six additional media operations
-    immediately. The target row stores the grant timestamp so retries and a later
-    invitee registration can never grant the same share bonus twice.
-    """
-    inviter = str(inviter_user_id or "").strip()
-    token = str(invite_token or "").strip()
-    channel = str(share_channel or "system_share").strip().lower()
-    allowed_channels = {"telegram", "whatsapp", "viber", "email", "other", "copy", "system_share"}
-    if not inviter or not token or len(token) > 128 or channel not in allowed_channels:
-        return {"success": False, "error_code": "REFERRAL_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
-                    (inviter,),
-                )
-                if not _is_authenticated_row(cur.fetchone()):
-                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-
-                # Keep the same account -> quota -> invitation lock order as the
-                # preparation and media-reservation paths.
-                quota_row = _free_media_ensure_row(cur, inviter)
-                cur.execute(
-                    """SELECT id, status, share_channel, share_rewarded_at, share_reward_units
-                       FROM april_referral_share_targets
-                       WHERE inviter_user_id = %s AND invite_token = %s FOR UPDATE""",
-                    (inviter, token),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return {"success": False, "error_code": "REFERRAL_INVALID"}
-                status = str(row.get("status") or "")
-                already_rewarded = bool(row.get("share_rewarded_at"))
-                if status == "claimed":
-                    return {
-                        "success": True,
-                        "status": "claimed",
-                        "share_channel": str(row.get("share_channel") or "system_share"),
-                        "share_rewarded": already_rewarded,
-                        "reward_units": max(0, int(row.get("share_reward_units") or 0)),
-                    }
-                if status in {"cancelled", "expired"}:
-                    # Cancellation is idempotent: closing the UI twice or retrying
-                    # after a lost acknowledgement must not trap the dialog open.
-                    if sent is not True:
-                        return {"success": True, "status": status}
-                    return {"success": False, "error_code": "REFERRAL_INVALID"}
-
-                if sent is True:
-                    reward_units = 0
-                    current = now()
-                    if not already_rewarded:
-                        reward_units = FREE_MEDIA_REFERRAL_REWARD_UNITS
-                        current_bonus = max(0, int(quota_row.get("bonus_units") or 0))
-                        cur.execute(
-                            """UPDATE free_media_quota
-                               SET bonus_units = %s, cooldown_until = NULL, updated_at = %s
-                               WHERE user_id = %s""",
-                            (current_bonus + reward_units, current, inviter),
-                        )
-                        if cur.rowcount != 1:
-                            raise RuntimeError("REFERRAL_SHARE_REWARD_QUOTA_UPDATE_FAILED")
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET status = 'sent',
-                                   sent_at = COALESCE(sent_at, %s),
-                                   share_channel = %s,
-                                   share_reward_units = %s,
-                                   share_rewarded_at = %s
-                               WHERE id = %s AND status IN ('reserved', 'sent')
-                                 AND share_rewarded_at IS NULL""",
-                            (current, channel, reward_units, current, int(row.get("id") or 0)),
-                        )
-                        if cur.rowcount != 1:
-                            raise RuntimeError("REFERRAL_SHARE_REWARD_ALREADY_SETTLED")
-                    else:
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET status = 'sent',
-                                   sent_at = COALESCE(sent_at, %s),
-                                   share_channel = %s
-                               WHERE id = %s AND status IN ('reserved', 'sent')""",
-                            (current, channel, int(row.get("id") or 0)),
-                        )
-                        if cur.rowcount != 1:
-                            raise RuntimeError("REFERRAL_SHARE_TARGET_UPDATE_FAILED")
-                    return {
-                        "success": True,
-                        "status": "sent",
-                        "share_channel": channel,
-                        "share_rewarded": True,
-                        "reward_units": reward_units,
-                    }
-
-                if status == "sent":
-                    return {
-                        "success": True,
-                        "status": "sent",
-                        "share_channel": str(row.get("share_channel") or channel),
-                        "share_rewarded": already_rewarded,
-                        "reward_units": max(0, int(row.get("share_reward_units") or 0)),
-                    }
-                cur.execute(
-                    """UPDATE april_referral_share_targets SET status = 'cancelled'
-                       WHERE id = %s AND status = 'reserved'""",
-                    (int(row.get("id") or 0),),
-                )
-                return {"success": cur.rowcount == 1, "status": "cancelled"}
-    except Exception as exc:
-        print(f"[APRIL_REFERRAL] share_finish_failed type={type(exc).__name__}", flush=True)
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def create_public_shared_asset(owner_user_id: Any, filename: Any, mime_type: Any, content: Any) -> dict[str, Any]:
-    """Persist a short-lived public share asset owned by an authenticated account."""
-    owner = str(owner_user_id or "").strip()
-    raw = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else b""
-    if not owner or not raw or len(raw) > 8 * 1024 * 1024:
-        return {"success": False, "error_code": "SHARED_ASSET_INVALID"}
-    safe_name = str(filename or "april-file.bin").replace("\\", "/").split("/")[-1]
-    safe_name = "".join(ch for ch in safe_name if ch.isprintable() and ch not in "\r\n\x00")[:180] or "april-file.bin"
-    safe_mime = str(mime_type or "application/octet-stream").split(";", 1)[0].strip().lower()
-    if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", safe_mime):
-        safe_mime = "application/octet-stream"
-    token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    digest = hashlib.sha256(raw).hexdigest()
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error_code": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE", (owner,))
-                if not _is_authenticated_row(cur.fetchone()):
-                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-                cur.execute("DELETE FROM april_public_shared_assets WHERE expires_at <= %s", (now(),))
-                expires = now() + timedelta(days=7)
-                cur.execute(
-                    """INSERT INTO april_public_shared_assets
-                       (owner_user_id, token_hash, filename, mime_type, content, sha256, expires_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (owner, token_hash, safe_name, safe_mime, psycopg2.Binary(raw), digest, expires),
-                )
-        return {"success": True, "token": token, "filename": safe_name, "mime_type": safe_mime,
-                "sha256": digest, "expires_at": expires.isoformat(), "size_bytes": len(raw)}
-    except Exception as exc:
-        print(f"[APRIL_SHARE] create_failed type={type(exc).__name__}", flush=True)
-        return {"success": False, "error_code": "SHARED_ASSET_SAVE_FAILED"}
-    finally:
-        conn.close()
-
-
-def get_public_shared_asset(token: Any) -> dict[str, Any] | None:
-    """Read a public file by its high-entropy bearer token; expires after seven days."""
-    raw_token = str(token or "").strip()
-    if len(raw_token) < 32 or len(raw_token) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", raw_token):
-        return None
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT filename, mime_type, content, sha256, expires_at
-                   FROM april_public_shared_assets
-                   WHERE token_hash = %s AND expires_at > %s
-                   LIMIT 1""",
-                (token_hash, now()),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            content = bytes(row.get("content") or b"")
-            digest = hashlib.sha256(content).hexdigest()
-            if not content or not hmac.compare_digest(digest, str(row.get("sha256") or "")):
-                return None
-            return {"filename": row.get("filename"), "mime_type": row.get("mime_type"),
-                    "content": content, "sha256": digest, "expires_at": row.get("expires_at")}
-    except Exception as exc:
-        print(f"[APRIL_SHARE] read_failed type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
-
-
-def claim_april_referral(
-    invitee_user_id: Any,
-    referral_code: Any,
-    invite_token: Any = None,
-) -> dict[str, Any]:
-    """Claim an invitation and grant its bonus only if sharing did not already do so."""
-    # The HTTP bridge resolves the authenticated public April ID before calling
-    # this function; all referral records use the canonical internal user key.
-    invitee = str(invitee_user_id or "").strip()
-    code = str(referral_code or "").strip().upper()[:40]
-    if not invitee or not code:
-        return {"success": False, "error_code": "REFERRAL_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, email, provider, provider_user_id, created_at
-                    FROM users WHERE user_id = %s FOR UPDATE
-                    """,
-                    (invitee,),
-                )
-                invitee_row = cur.fetchone()
-                if not _is_authenticated_row(invitee_row):
-                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-                cur.execute(
-                    """
-                    SELECT q.user_id, q.referral_code, u.name, u.provider_user_id
-                    FROM free_media_quota q
-                    JOIN users u ON u.user_id = q.user_id
-                    WHERE UPPER(q.referral_code) = %s
-                    LIMIT 1
-                    """,
-                    (code,),
-                )
-                inviter_row = cur.fetchone()
-                if not inviter_row:
-                    return {"success": False, "error_code": "REFERRAL_INVALID"}
-                inviter = str(inviter_row.get("user_id") or "")
-                if not inviter or inviter == invitee:
-                    token = str(invite_token or "").strip()
-                    if inviter and token and len(token) <= 128:
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET self_claim_attempted_at = COALESCE(self_claim_attempted_at, %s)
-                               WHERE inviter_user_id = %s AND invite_token = %s
-                                 AND UPPER(referral_code) = %s
-                                 AND status IN ('reserved', 'sent', 'claimed')""",
-                            (now(), inviter, token, code),
-                        )
-                    print("[APRIL_REFERRAL] event=claim outcome=rejected reason=self_invite", flush=True)
-                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
-
-                # Lock in the same account -> quota -> share-target order as the
-                # sender's finish path. The row is already expected to exist because
-                # the referral code belongs to free_media_quota.
-                _free_media_ensure_row(cur, inviter)
-                share_target = None
-                token = str(invite_token or "").strip()
-                if token:
-                    if len(token) > 128:
-                        return {"success": False, "error_code": "REFERRAL_INVALID"}
-                    cur.execute(
-                        """SELECT id, inviter_user_id, recipient_email_hash, recipient_contact_hash,
-                                  referral_code, status, share_rewarded_at, share_reward_units
-                           FROM april_referral_share_targets
-                           WHERE invite_token = %s FOR UPDATE""",
-                        (token,),
-                    )
-                    share_target = cur.fetchone()
-                    if not share_target:
-                        return {"success": False, "error_code": "REFERRAL_INVALID"}
-                    share_target_status = str(share_target.get("status") or "")
-                    if share_target_status == "claimed":
-                        return {"success": False, "error_code": "REFERRAL_ALREADY_USED"}
-                    if (
-                        str(share_target.get("inviter_user_id") or "") != inviter
-                        or str(share_target.get("referral_code") or "").upper() != code
-                        or share_target_status in {"cancelled", "expired"}
-                    ):
-                        return {"success": False, "error_code": "REFERRAL_INVALID"}
-                    stored_email_hash = str(share_target.get("recipient_email_hash") or "")
-                    stored_contact_hash = str(share_target.get("recipient_contact_hash") or "")
-                    # Legacy email-bound links still require the matching account.
-                    # Contact-bound links are intentionally not tied to a Google
-                    # identity: the sender selected a phone contact, while the
-                    # receiving person may open/register through any provider.
-                    if stored_email_hash:
-                        invitee_email_hash = _referral_recipient_email_hash(invitee_row.get("email"))
-                        if (
-                            not invitee_email_hash
-                            or not hmac.compare_digest(invitee_email_hash, stored_email_hash)
-                        ):
-                            return {"success": False, "error_code": "REFERRAL_RECIPIENT_MISMATCH"}
-                    elif stored_contact_hash:
-                        # Legacy contact-bound invite. The HMAC cannot be compared
-                        # against a new account because the native share sheet hides
-                        # recipient identity; the one-time token + one-claim rule
-                        # remains the authoritative guard.
-                        pass
-                    else:
-                        # New contact-free link: any genuinely new authenticated
-                        # account may claim this token once. No phone/email required.
-                        pass
-
-                # A canonical authenticated account can claim at most one referral
-                # reward. Check this before the new-registration window so a repeat
-                # attempt always receives the duplicate explanation, even months later.
-                # This unique invitee check also blocks the same person from earning
-                # multiple bonuses by opening different invitation URLs.
-                cur.execute(
-                    """
-                    SELECT inviter_user_id, status
-                    FROM april_referral_invites
-                    WHERE invitee_user_id = %s
-                    FOR UPDATE
-                    """,
-                    (invitee,),
-                )
-                existing = cur.fetchone()
-                if existing:
-                    existing_inviter = str(existing.get("inviter_user_id") or "")
-                    return {
-                        "success": False,
-                        "error_code": "REFERRAL_ALREADY_USED",
-                        "same_inviter": existing_inviter == inviter,
-                        "already_rewarded": str(existing.get("status") or "") == "rewarded",
-                    }
-
-                # Only genuinely new accounts may claim a referral, and the
-                # registration window remains seven days. Existing users cannot
-                # generate retroactive rewards by opening a shared URL.
-                created_at = _free_media_normalize_timestamp(invitee_row.get("created_at"))
-                current = now()
-                if not created_at or (current - created_at).total_seconds() > 7 * 24 * 60 * 60:
-                    return {"success": False, "error_code": "REFERRAL_REGISTRATION_WINDOW_EXPIRED"}
-
-                # Guard against duplicate Google identities creating a second
-                # April account that attempts to invite itself.
-                if (
-                    str(inviter_row.get("provider_user_id") or "").strip()
-                    and str(inviter_row.get("provider_user_id") or "").strip()
-                    == str(invitee_row.get("provider_user_id") or "").strip()
-                ):
-                    if share_target:
-                        cur.execute(
-                            """UPDATE april_referral_share_targets
-                               SET self_claim_attempted_at = COALESCE(self_claim_attempted_at, %s)
-                               WHERE id = %s AND inviter_user_id = %s""",
-                            (now(), int(share_target.get("id") or 0), inviter),
-                        )
-                    print("[APRIL_REFERRAL] event=claim outcome=rejected reason=same_provider_identity", flush=True)
-                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
-
-                # If the sender has already received the immediate share reward,
-                # claiming the same token must not credit a second six-operation bonus.
-                share_rewarded = bool(share_target and share_target.get("share_rewarded_at"))
-                reward_units = 0 if share_rewarded else FREE_MEDIA_REFERRAL_REWARD_UNITS
-                if reward_units > 0:
-                    cur.execute(
-                        """
-                        UPDATE free_media_quota
-                        SET bonus_units = bonus_units + %s,
-                            cooldown_until = NULL,
-                            updated_at = %s
-                        WHERE user_id = %s
-                        """,
-                        (reward_units, current, inviter),
-                    )
-                    if cur.rowcount != 1:
-                        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-
-                cur.execute(
-                    """
-                    INSERT INTO april_referral_invites
-                        (inviter_user_id, invitee_user_id, referral_code, status, reward_units, rewarded_at)
-                    VALUES (%s, %s, %s, 'rewarded', %s, %s)
-                    """,
-                    (inviter, invitee, code, reward_units, current),
-                )
-                if share_target:
-                    cur.execute(
-                        """UPDATE april_referral_share_targets
-                           SET status = 'claimed', claimed_by_user_id = %s, claimed_at = %s,
-                               share_rewarded_at = COALESCE(share_rewarded_at, %s),
-                               share_reward_units = CASE
-                                   WHEN share_rewarded_at IS NULL THEN %s
-                                   ELSE share_reward_units
-                               END
-                           WHERE id = %s AND status IN ('reserved', 'sent')""",
-                        (invitee, current, current, reward_units, int(share_target.get("id") or 0)),
-                    )
-                    if cur.rowcount != 1:
-                        raise RuntimeError("REFERRAL_SHARE_TARGET_ALREADY_CLAIMED")
-                return {
-                    "success": True,
-                    "error_code": None,
-                    "pending_confirmation": False,
-                    "rewarded": True,
-                    "reward_units": reward_units,
-                    "already_rewarded_on_share": share_rewarded,
-                    "inviter_name": str(inviter_row.get("name") or "")[:80],
-                }
-    except Exception as exc:
-        print(f"[APRIL_REFERRAL] claim_failed type={type(exc).__name__}", flush=True)
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def confirm_april_referral_on_first_use(invitee_user_id: Any) -> dict[str, Any]:
-    """Compatibility handler for legacy pending referrals from older deployments."""
-    invitee = str(invitee_user_id or "").strip()
-    if not invitee:
-        return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Most authenticated users are not invitees. Use the unique
-                # invitee index as a cheap read first; only pending referrals
-                # enter the row-locking reward transaction.
-                cur.execute(
-                    "SELECT id FROM april_referral_invites WHERE invitee_user_id = %s AND status = 'pending' LIMIT 1",
-                    (invitee,),
-                )
-                if not cur.fetchone():
-                    return {"success": True, "rewarded": False}
-                cur.execute(
-                    "SELECT user_id, email, provider FROM users WHERE user_id = %s FOR UPDATE",
-                    (invitee,),
-                )
-                if not _is_authenticated_row(cur.fetchone()):
-                    return {"success": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
-                cur.execute(
-                    """
-                    SELECT id, inviter_user_id, reward_units
-                    FROM april_referral_invites
-                    WHERE invitee_user_id = %s AND status = 'pending'
-                    FOR UPDATE
-                    """,
-                    (invitee,),
-                )
-                invite = cur.fetchone()
-                if not invite:
-                    return {"success": True, "rewarded": False}
-                inviter = str(invite.get("inviter_user_id") or "")
-                reward_units = max(1, int(invite.get("reward_units") or FREE_MEDIA_REFERRAL_REWARD_UNITS))
-                if not inviter or inviter == invitee:
-                    return {"success": False, "error_code": "REFERRAL_SELF_INVITE"}
-                inviter_quota = _free_media_ensure_row(cur, inviter)
-                new_bonus = max(0, int(inviter_quota.get("bonus_units") or 0)) + reward_units
-                current = now()
-                cur.execute(
-                    """
-                    UPDATE free_media_quota
-                    SET bonus_units = %s, cooldown_until = NULL, updated_at = %s
-                    WHERE user_id = %s
-                    """,
-                    (new_bonus, current, inviter),
-                )
-                cur.execute(
-                    """
-                    UPDATE april_referral_invites
-                    SET status = 'rewarded', rewarded_at = %s
-                    WHERE id = %s AND status = 'pending'
-                    """,
-                    (current, int(invite.get("id") or 0)),
-                )
-                return {"success": True, "rewarded": True, "reward_units": reward_units}
-    except Exception as exc:
-        print(f"[APRIL_REFERRAL] confirm_failed type={type(exc).__name__}", flush=True)
-        return {"success": False, "error_code": "REFERRAL_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-
-SUPPORT_COOLDOWN_SECONDS = 24 * 60 * 60
-
-
-def _support_time_ms(value: Any) -> int | None:
-    if not value:
-        return None
-    try:
-        if isinstance(value, datetime):
-            stamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-            return int(stamp.timestamp() * 1000)
-        return int(float(value) * 1000)
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _support_message_payload(
-    row: dict[str, Any] | None,
-    *,
-    include_identity: bool = False,
-    include_image: bool = True,
-) -> dict[str, Any] | None:
-    """Shape a Premium support request; its optional media is an image only.
-
-    Optional media is image-only. Legacy generic-file columns, if present during
-    upgrade, are migrated selectively and removed by init_db().
-    """
-    if not row:
-        return None
-    raw_image_data = str(row.get("image_data") or "")
-    raw_image_mime = str(row.get("image_mime") or "").strip().lower().split(";", 1)[0]
-    has_image = raw_image_mime in {"image/jpeg", "image/png", "image/webp"} and (
-        "image_data" not in row or raw_image_data.lower().startswith(f"data:{raw_image_mime};base64,")
-    )
-    result = {
-        "id": int(row.get("id") or 0),
-        "message": str(row.get("message") or ""),
-        "language": str(row.get("language") or "en"),
-        "created_at_ms": _support_time_ms(row.get("created_at")),
-        "admin_reply": str(row.get("admin_reply") or "") or None,
-        "has_admin_reply": bool(row.get("has_admin_reply") or row.get("admin_reply")),
-        "replied_at_ms": _support_time_ms(row.get("replied_at")),
-        "image_mime": raw_image_mime if has_image else None,
-        "image_name": str(row.get("image_name") or "") or None if has_image else None,
-        "admin_reply_language": (str(row.get("admin_reply_language") or "en").strip().lower() if row.get("admin_reply") else None),
-        "has_image": bool(has_image),
-        "admin_read_at_ms": _support_time_ms(row.get("admin_read_at")),
-        "user_read_at_ms": _support_time_ms(row.get("user_read_at")),
-        "admin_unread": row.get("admin_read_at") is None,
-        "user_unread": bool(row.get("has_admin_reply") or row.get("admin_reply")) and row.get("user_read_at") is None,
+    setError(""); setNotice(""); setSending(true);
+    try {
+      // Use JSON for ordinary text posts. Multipart is reserved for actual
+      // attachments, so Free and Premium text messages do not depend on a
+      // multipart parser or file transport path.
+      let body: BodyInit;
+      const headers: Record<string, string> = { Accept: "application/json" };
+      if (selectedFile) {
+        const form = new FormData();
+        form.set("action", "send_message");
+        form.set("message", text);
+        form.set("file", selectedFile, selectedFile.name);
+        body = form;
+      } else {
+        headers["Content-Type"] = "application/json";
+        body = JSON.stringify({ action: "send_message", message: text });
+      }
+      const response = await fetch("/api/community", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers, body,
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "MESSAGE_SEND_FAILED");
+      setMessageDraft(""); setSelectedFile(null); setNotice(t.sent); followLatestRef.current = true;
+      await loadCommunity(true);
+      window.setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }), 80);
+    } catch (caught) {
+      setError(errorText(String((caught as Error)?.message || ""), t));
+    } finally {
+      setSending(false);
     }
-    if include_image:
-        result["image_data"] = raw_image_data if has_image and raw_image_data.lower().startswith("data:image/") else None
-    if include_identity:
-        result.update({
-            "user_id": str(row.get("user_id") or ""),
-            "april_id": str(row.get("april_id") or ""),
-            "name": str(row.get("name") or ""),
-            "email": str(row.get("email") or ""),
-            "active_premium": bool(row.get("active_premium")),
-        })
-    return result
+  }
 
-def _support_resolve_user(raw: str) -> dict[str, Any] | None:
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT user_id, april_id, email, provider, plan, subscription_until
-                   FROM users WHERE user_id = %s OR april_id = %s
-                   ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1""",
-                (raw, raw, raw),
-            )
-            row = cur.fetchone()
-            return dict(row) if row and _is_authenticated_row(row) else None
-    finally:
-        conn.close()
+  async function messageAction(action: "delete_message" | "admin_delete_message" | "report_message", messageId: number) {
+    if ((action === "delete_message" || action === "admin_delete_message") && !window.confirm(
+      action === "admin_delete_message"
+        ? (langKey === "ru" ? "Удалить это сообщение для всех участников сообщества?" : langKey === "ua" ? "Видалити це повідомлення для всіх учасників спільноти?" : "Delete this message for everyone in the community?")
+        : t.deleteConfirm,
+    )) return;
+    if (action === "report_message" && !window.confirm(t.reportConfirm)) return;
+    setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/community", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action, message_id: messageId }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "COMMUNITY_ACTION_FAILED");
+      if (action === "report_message") setNotice(t.reported);
+      else if (action === "admin_delete_message") setNotice(
+        langKey === "ru" ? "Сообщение удалено администратором." : langKey === "ua" ? "Повідомлення видалено адміністратором." : "Message removed by an administrator.",
+      );
+      await loadCommunity(true);
+    } catch (caught) {
+      setError(errorText(String((caught as Error)?.message || ""), t));
+    }
+  }
 
+  async function relationAction(member: CommunityMember) {
+    if (member.relation === "outgoing") return;
+    if (member.relation === "friend") {
+      window.location.assign(`/space/direct/${encodeURIComponent(member.april_id)}`);
+      return;
+    }
+    const action = member.relation === "incoming" ? "accept_friend_request" : "send_friend_request";
+    setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/community", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action, peer_id: member.april_id, requester_id: member.april_id }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "FRIEND_ACTION_FAILED");
+      if (payload?.relation === "friend") setNotice(t.friend);
+      else if (payload?.relation === "incoming") setNotice(t.incomingRequest);
+      else setNotice(t.requestSent);
+      await loadCommunity(true);
+    } catch (caught) {
+      setError(errorText(String((caught as Error)?.message || ""), t));
+    }
+  }
 
-def get_premium_support_status(user_id: Any) -> dict[str, Any] | None:
-    """Return the current user's support history summary without bulk image bytes."""
-    raw = str(user_id or "").strip()
-    if not raw:
-        return None
-    user = _support_resolve_user(raw)
-    if not user:
-        return None
-    canonical_id = str(user.get("user_id") or raw)
-    current = now()
-    until = float(user.get("subscription_until") or 0)
-    active_premium = str(user.get("plan") or "free").lower() == "premium" and until > current.timestamp()
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT s.id, s.user_id, s.message, s.language, s.created_at, s.admin_reply, s.replied_at,
-                          s.image_mime, s.image_name, s.admin_reply_language, s.admin_read_at, s.user_read_at,
-                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply
-                   FROM premium_support_messages s WHERE s.user_id = %s
-                   ORDER BY s.created_at DESC, s.id DESC LIMIT 50""",
-                (canonical_id,),
-            )
-            rows = [dict(row) for row in (cur.fetchall() or [])]
-            cur.execute(
-                """SELECT COUNT(*) AS unread_count, MAX(s.id) AS newest_unread_id
-                   FROM premium_support_messages s
-                   WHERE s.user_id = %s AND s.user_read_at IS NULL
-                     AND (s.admin_reply IS NOT NULL OR EXISTS(
-                         SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id
-                     ))""",
-                (canonical_id,),
-            )
-            unread_row = cur.fetchone() or {}
-            latest = rows[0] if rows else None
-            next_allowed = None
-            if latest and latest.get("created_at"):
-                created = latest["created_at"]
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
-            remaining = max(0, int((next_allowed - current).total_seconds())) if next_allowed else 0
-            messages = [_support_message_payload(row, include_image=False) for row in rows]
-            latest_payload = _support_message_payload(latest, include_image=False)
-            unread_count = max(0, int(unread_row.get("unread_count") or 0))
-            return {
-                "success": True,
-                "is_admin": False,
-                "active_premium": active_premium,
-                "can_send": bool(active_premium and remaining <= 0),
-                "next_allowed_at_ms": _support_time_ms(next_allowed),
-                "remaining_seconds": remaining,
-                "latest_message": latest_payload,
-                "messages": messages,
-                "unread_reply_count": unread_count,
-                "has_unread_reply": unread_count > 0,
-                "unread_reply_message_id": int(unread_row.get("newest_unread_id") or 0) or None,
-            }
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] STATUS_ERROR type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
+  async function shareCommunity() {
+    const shareUrl = `${APRIL_PUBLIC_SITE_ORIGIN}/space${aprilId ? `?invite=${encodeURIComponent(aprilId)}` : ""}`;
+    const data = { title: "April Community", text: t.inviteText, url: shareUrl };
+    try {
+      if (typeof navigator.share === "function") {
+        await navigator.share(data);
+        return;
+      }
+    } catch (caught) {
+      if ((caught as { name?: string })?.name === "AbortError") return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setNotice(t.inviteCopied);
+    } catch {
+      setError(t.error);
+    }
+  }
 
+  function onMessagesScroll() {
+    const box = scrollBoxRef.current;
+    if (!box) return;
+    followLatestRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  }
 
-def get_premium_support_message_detail(user_id: Any, message_id: Any, *, is_admin: bool = False) -> dict[str, Any] | None:
-    """Load one full ticket (including image bytes) only after authorization."""
-    try:
-        ticket_id = int(message_id)
-    except (TypeError, ValueError, OverflowError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if ticket_id <= 0:
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    raw = str(user_id or "").strip()
-    user = _support_resolve_user(raw)
-    if not user:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    canonical_id = str(user.get("user_id") or raw)
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
-                          s.admin_reply, s.replied_at, s.admin_id, s.image_data, s.image_mime, s.image_name,
-                          s.admin_reply_language, s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
-                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply,
-                          (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
-                   FROM premium_support_messages s JOIN users u ON u.user_id = s.user_id
-                   WHERE s.id = %s LIMIT 1""",
-                (ticket_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-            data = dict(row)
-            if is_admin:
-                if not bool(data.get("active_premium")):
-                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-            elif str(data.get("user_id") or "") != canonical_id:
-                return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-            payload = _support_message_payload(data, include_identity=is_admin, include_image=True) or {}
-            cur.execute(
-                """SELECT id, reply, reply_language, admin_id, image_data, image_mime, image_name, created_at
-                   FROM premium_support_replies
-                   WHERE support_message_id = %s
-                   ORDER BY created_at ASC, id ASC""",
-                (ticket_id,),
-            )
-            reply_rows = [dict(item) for item in (cur.fetchall() or [])]
-            replies = [{
-                "id": int(item.get("id") or 0),
-                "reply": str(item.get("reply") or ""),
-                "language": str(item.get("reply_language") or "en").strip().lower(),
-                "admin_id": str(item.get("admin_id") or ""),
-                "image_data": str(item.get("image_data") or "") or None,
-                "image_mime": str(item.get("image_mime") or "").strip().lower() or None,
-                "image_name": str(item.get("image_name") or "") or None,
-                "has_image": bool(
-                    str(item.get("image_mime") or "").strip().lower() in {"image/jpeg", "image/png", "image/webp"}
-                    and str(item.get("image_data") or "").lower().startswith(
-                        f"data:{str(item.get('image_mime') or '').strip().lower()};base64,"
-                    )
-                ),
-                "created_at_ms": _support_time_ms(item.get("created_at")),
-            } for item in reply_rows if str(item.get("reply") or "").strip() or item.get("image_data")]
-            legacy_reply = str(data.get("admin_reply") or "").strip()
-            # Older deployments stored one reply only on premium_support_messages.
-            # Keep it visible after the first new supplement is added post-upgrade.
-            if legacy_reply and not any(item["reply"] == legacy_reply for item in replies):
-                replies.insert(0, {
-                    "id": 0,
-                    "reply": legacy_reply,
-                    "language": str(data.get("admin_reply_language") or "en").strip().lower(),
-                    "admin_id": str(data.get("admin_id") or ""),
-                    "image_data": None,
-                    "image_mime": None,
-                    "image_name": None,
-                    "has_image": False,
-                    "created_at_ms": _support_time_ms(data.get("replied_at")),
-                })
-            payload["admin_replies"] = replies
-            payload["has_admin_reply"] = bool(replies or legacy_reply)
-            payload["user_unread"] = payload["has_admin_reply"] and payload.get("user_read_at_ms") is None
-            return {"success": True, "is_admin": bool(is_admin), "message": payload}
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] DETAIL_ERROR type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
-    finally:
-        conn.close()
+  const incomingRequests = members
+    .filter((member) => member.relation === "incoming" && !member.is_blocked)
+    .sort((a, b) => a.display_name.localeCompare(b.display_name));
+  const friendContacts = members
+    .filter((member) => member.relation === "friend")
+    .sort((a, b) => a.display_name.localeCompare(b.display_name))
+    .slice(0, 10);
+  const otherContacts = members
+    .filter((member) => member.relation === "outgoing" || Boolean(member.is_blocked))
+    .sort((a, b) => a.display_name.localeCompare(b.display_name))
+    .slice(0, 10);
+  const friendIds = useMemo(() => new Set(members.filter((member) => member.relation === "friend").map((member) => member.april_id.toLowerCase())), [members]);
+  const memberById = useMemo(() => new Map(members.map((member) => [member.april_id.toLowerCase(), member])), [members]);
+  const labels = UI_TEXT[langKey];
+  const profileUI = PROFILE_UI[langKey];
 
+  async function toggleMemberBlock(memberId: string, currentlyBlocked: boolean) {
+    const cleanId = String(memberId || "").trim();
+    if (!cleanId || cleanId.toLowerCase() === aprilId.toLowerCase()) return;
+    if (!window.confirm(currentlyBlocked ? labels.confirmUnblock : labels.confirmBlock)) return;
+    setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/community", {
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action: currentlyBlocked ? "unblock_member" : "block_member", peer_id: cleanId }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || "COMMUNITY_BLOCK_FAILED");
+      setNotice(currentlyBlocked ? labels.unblockDone : labels.blockDone);
+      await loadCommunity(true);
+    } catch (caught) {
+      setError(errorText(String((caught as Error)?.message || ""), t));
+    }
+  }
 
-def mark_premium_support_message_read(user_id: Any, message_id: Any, *, is_admin: bool = False) -> dict[str, Any]:
-    """Mark one visible ticket read by its recipient without affecting the other side."""
-    try:
-        ticket_id = int(message_id)
-    except (TypeError, ValueError, OverflowError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if ticket_id <= 0:
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    raw = str(user_id or "").strip()
-    user = _support_resolve_user(raw)
-    if not user:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    canonical_id = str(user.get("user_id") or raw)
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                if is_admin:
-                    cur.execute(
-                        """UPDATE premium_support_messages s SET admin_read_at = COALESCE(s.admin_read_at, CURRENT_TIMESTAMP)
-                           FROM users u WHERE s.id = %s AND u.user_id = s.user_id
-                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)""",
-                        (ticket_id,),
-                    )
-                else:
-                    cur.execute(
-                        """UPDATE premium_support_messages SET user_read_at = CURRENT_TIMESTAMP
-                           WHERE id = %s AND user_id = %s""",
-                        (ticket_id, canonical_id),
-                    )
-                if cur.rowcount != 1:
-                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-        return {"success": True, "message_id": ticket_id, "reader": "admin" if is_admin else "user"}
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] MARK_READ_ERROR type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
-    finally:
-        conn.close()
+  if (status === "loading") {
+    return <main className="min-h-screen bg-[#07080d] px-4 py-10 text-zinc-300">{t.loading}</main>;
+  }
 
-def send_premium_support_message(
-    user_id: Any, message: Any, language: Any = "en", image_data: Any = None,
-    image_mime: Any = None, image_name: Any = None,
-) -> dict[str, Any]:
-    """Insert a Premium text/image request with an atomic per-account 24h limit."""
-    raw = str(user_id or "").strip()
-    body = str(message or "").strip()
-    lang = str(language or "en").strip().lower()[:8] or "en"
-    if not raw:
-        return {"success": False, "error": "USER_ID_REQUIRED"}
-    if len(body) > 4000:
-        return {"success": False, "error": "MESSAGE_TOO_LONG"}
-    image_data = str(image_data or "").strip()
-    image_mime = str(image_mime or "").strip().lower().split(";", 1)[0]
-    safe_image_name = str(image_name or "").replace("\\", "/").split("/")[-1].strip()[:180]
-    if image_data:
-        # Premium support accepts only image/screenshot media, never generic files.
-        allowed_image_mimes = {"image/jpeg", "image/png", "image/webp"}
-        if (image_mime not in allowed_image_mimes
-                or not image_data.startswith(f"data:{image_mime};base64,")
-                or len(image_data) > 850_000):
-            return {"success": False, "error": "IMAGE_INVALID"}
-        if not safe_image_name:
-            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image_mime]
-            safe_image_name = f"support-image{suffix}"
-    else:
-        image_data, image_mime, safe_image_name = None, None, None
-    # The request payloads are independent: non-empty text, image, or both.
-    if not body and not image_data:
-        return {"success": False, "error": "MESSAGE_TOO_SHORT"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Serialize send attempts for this account, including simultaneous
-                # requests arriving from separate tabs/devices.
-                cur.execute(
-                    """SELECT user_id, email, provider, plan, subscription_until
-                       FROM users WHERE user_id = %s OR april_id = %s
-                       ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                       LIMIT 1 FOR UPDATE""",
-                    (raw, raw, raw),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-                canonical_id = str(user.get("user_id") or raw)
-                active = str(user.get("plan") or "free").lower() == "premium" and float(user.get("subscription_until") or 0) > now().timestamp()
-                if not active:
-                    return {"success": False, "error": "PREMIUM_REQUIRED"}
-                cur.execute(
-                    "SELECT created_at FROM premium_support_messages WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
-                    (canonical_id,),
-                )
-                latest = cur.fetchone()
-                if latest and latest.get("created_at"):
-                    created = latest["created_at"]
-                    if created.tzinfo is None:
-                        created = created.replace(tzinfo=timezone.utc)
-                    next_allowed = created + timedelta(seconds=SUPPORT_COOLDOWN_SECONDS)
-                    current = now()
-                    if current < next_allowed:
-                        return {
-                            "success": False,
-                            "error": "COOLDOWN_ACTIVE",
-                            "next_allowed_at_ms": _support_time_ms(next_allowed),
-                            "remaining_seconds": max(0, int((next_allowed - current).total_seconds())),
-                        }
-                cur.execute(
-                    """INSERT INTO premium_support_messages(
-                           user_id, message, language, image_data, image_mime, image_name, user_read_at
-                       ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                       RETURNING id, user_id, message, language, created_at, admin_reply, replied_at,
-                                 image_data, image_mime, image_name""",
-                    (canonical_id, body, lang, image_data, image_mime, safe_image_name),
-                )
-        status = get_premium_support_status(raw)
-        return status or {"success": False, "error": "SUPPORT_STATUS_UNAVAILABLE"}
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] SEND_ERROR type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
-    finally:
-        conn.close()
+  if (!authenticated) {
+    return (
+      <main className="min-h-screen bg-[#07080d] px-4 py-10 text-white">
+        <div className="mx-auto max-w-xl rounded-3xl border border-white/10 bg-white/[0.03] p-6 sm:p-8">
+          <Link href="/settings" className="text-sm text-zinc-400 hover:text-white">← {t.back}</Link>
+          <h1 className="mt-6 text-3xl font-semibold">{t.title}</h1>
+          <p className="mt-3 text-zinc-400">{t.signIn}</p>
+          <Link href="/" className="mt-6 inline-flex rounded-full border border-[#7dff8f]/30 bg-[#7dff8f]/10 px-5 py-3 font-semibold text-[#bfffc7]">{t.signInButton}</Link>
+        </div>
+      </main>
+    );
+  }
 
+  return (
+    <main className="min-h-[100dvh] overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.08),transparent_34%),#07080d] px-2 py-2 text-white sm:px-4 sm:py-3">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-2">
+        <header className="flex min-h-10 items-center justify-between gap-2 rounded-xl border border-white/[0.07] bg-[#10111a]/75 px-3 py-2">
+          <div className="min-w-0">
+            <Link href="/settings" aria-label={t.back} title={t.back}
+              className="block truncate text-sm font-semibold tracking-tight transition hover:text-[#bfffc7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7dff8f]/40 sm:text-base">
+              {profileUI.communityTitle}
+            </Link>
+          </div>
+          <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-extrabold tracking-wide ${plan === "premium" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-200" : "border-white/10 bg-white/[0.04] text-zinc-300"}`}>
+            {plan === "premium" ? t.premium : t.free}
+          </span>
+        </header>
 
-def list_premium_support_messages(limit: int = 10) -> dict[str, Any] | None:
-    """Return at most ten active Premium tickets, unread items first."""
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        safe_limit = max(1, min(int(limit), 10))
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT s.id, s.user_id, s.message, s.language, s.created_at,
-                          s.admin_reply, s.replied_at, s.image_mime, s.image_name,
-                          s.admin_reply_language, s.admin_read_at, s.user_read_at, u.april_id, u.name, u.email,
-                          EXISTS(SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id) AS has_admin_reply,
-                          (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
-                   FROM premium_support_messages s
-                   JOIN users u ON u.user_id = s.user_id
-                   WHERE LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                     AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                   ORDER BY (s.admin_read_at IS NULL) DESC,
-                            (s.replied_at IS NULL AND s.admin_reply IS NULL AND NOT EXISTS(
-                                SELECT 1 FROM premium_support_replies r WHERE r.support_message_id = s.id
-                            )) DESC,
-                            s.created_at DESC, s.id DESC
-                   LIMIT %s""",
-                (safe_limit,),
-            )
-            rows = cur.fetchall() or []
-            cur.execute(
-                """SELECT COUNT(*) AS unread_count FROM premium_support_messages s
-                   JOIN users u ON u.user_id = s.user_id
-                   WHERE s.admin_read_at IS NULL
-                     AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                     AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)"""
-            )
-            unread = cur.fetchone() or {}
-            return {
-                "success": True,
-                "is_admin": True,
-                "unread_count": max(0, int(unread.get("unread_count") or 0)),
-                "messages": [_support_message_payload(dict(row), include_identity=True, include_image=False) for row in rows],
-            }
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] INBOX_ERROR type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
+        <section className="shrink-0 overflow-hidden rounded-xl border border-[#60a5fa]/20 bg-[#10111a]/85 shadow-[0_0_18px_rgba(59,130,246,0.04)]">
+          <button type="button" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition hover:bg-white/[0.025]">
+            <span className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[#7dff8f]/30 bg-[#7dff8f]/[0.07] text-xs font-bold text-[#bfffc7]">{(nickname || labels.you).slice(0, 1).toLocaleUpperCase()}</span>
+              <span className="min-w-0">
+                <span className="block truncate text-xs font-semibold text-zinc-100">{profileUI.personalProfile}</span>
+                <span className="block truncate text-[10px] text-zinc-500">{nickname || labels.you} · {aprilId}</span>
+              </span>
+              {incomingRequests.length > 0 && <span className="relative ml-1 flex h-3 w-3 shrink-0" title={`${incomingRequests.length} ${profileUI.incomingRequests}`} aria-label={`${incomingRequests.length} ${profileUI.incomingRequests}`}>
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-300 opacity-80" />
+                <span className="relative inline-flex h-3 w-3 rounded-full bg-yellow-300 shadow-[0_0_12px_rgba(253,224,71,0.9)]" />
+              </span>}
+              {incomingRequests.length > 0 && <span className="shrink-0 rounded-full border border-yellow-300/30 bg-yellow-300/10 px-2 py-0.5 text-[10px] font-bold text-yellow-200">{incomingRequests.length}</span>}
+            </span>
+            <span className="shrink-0 text-zinc-500" aria-hidden="true">{profileOpen ? "⌃" : "⌄"}</span>
+          </button>
 
-def reply_premium_support_message(
-    message_id: Any, reply: Any, admin_id: Any, language: Any = "en",
-    image_data: Any = None, image_mime: Any = None, image_name: Any = None,
-) -> dict[str, Any]:
-    """Add a text reply, image reply, or both to an existing Premium request."""
-    try:
-        ticket_id = int(message_id)
-    except (TypeError, ValueError, OverflowError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    body = str(reply or "").strip()
-    admin = str(admin_id or "").strip()
-    reply_language = str(language or "en").strip().lower()[:8] or "en"
-    if ticket_id <= 0:
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if len(body) > 4000:
-        return {"success": False, "error": "REPLY_TOO_LONG"}
+          {profileOpen && <div className="border-t border-white/[0.06] p-3 sm:p-4">
+            <div className="grid min-w-0 gap-4 md:grid-cols-2">
+              <div className="min-w-0 rounded-xl border border-white/[0.07] bg-black/15 p-3 sm:p-4">
+                <form onSubmit={saveNickname} className="flex flex-col gap-2.5">
+                  <label htmlFor="community-nickname" className="text-sm font-semibold text-zinc-200">{t.profile}</label>
+                  <input id="community-nickname" type="text" autoComplete="nickname" maxLength={32} value={draftNickname}
+                    onChange={(event) => { nicknameDirtyRef.current = true; setDraftNickname(event.target.value); }} placeholder={t.nickPlaceholder}
+                    className="w-full min-w-0 rounded-xl border border-white/10 bg-black/20 px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-[#7dff8f]/40 focus:ring-2 focus:ring-[#7dff8f]/10" />
+                  <button type="submit" disabled={savingNick || draftNickname.trim() === nickname.trim() || draftNickname.trim().length < 2}
+                    className="rounded-xl border border-[#7dff8f]/25 bg-[#7dff8f]/10 px-4 py-2.5 text-sm font-semibold text-[#bfffc7] transition hover:bg-[#7dff8f]/15 disabled:cursor-not-allowed disabled:opacity-45">
+                    {savingNick ? t.saving : t.saveNick}
+                  </button>
+                </form>
+                <button type="button" onClick={() => void shareCommunity()} className="mt-3 w-full rounded-xl border border-[#7dff8f]/25 bg-[#7dff8f]/[0.06] px-3 py-2.5 text-sm font-semibold text-[#bfffc7] transition hover:bg-[#7dff8f]/[0.12]">＋ {t.inviteFriend}</button>
+              </div>
 
-    image_data = str(image_data or "").strip()
-    image_mime = str(image_mime or "").strip().lower().split(";", 1)[0]
-    safe_image_name = str(image_name or "").replace("\\", "/").split("/")[-1].strip()[:180]
-    if image_data:
-        allowed_image_mimes = {"image/jpeg", "image/png", "image/webp"}
-        if (image_mime not in allowed_image_mimes
-                or not image_data.startswith(f"data:{image_mime};base64,")
-                or len(image_data) > 850_000):
-            return {"success": False, "error": "IMAGE_INVALID"}
-        if not safe_image_name:
-            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image_mime]
-            safe_image_name = f"support-image{suffix}"
-    else:
-        image_data, image_mime, safe_image_name = None, None, None
-    if len(body) < 2 and not image_data:
-        return {"success": False, "error": "REPLY_TOO_SHORT"}
+              <div className="min-w-0 space-y-3">
+                <section className={`rounded-xl border p-3 ${incomingRequests.length ? "border-yellow-300/35 bg-yellow-300/[0.045] shadow-[0_0_18px_rgba(250,204,21,0.07)]" : "border-white/[0.07] bg-black/10"}`}>
+                  <div className="mb-2 flex items-center gap-2">
+                    {incomingRequests.length > 0 && <span className="relative flex h-2.5 w-2.5 shrink-0"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-300 opacity-80" /><span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-yellow-300" /></span>}
+                    <h2 className="text-sm font-semibold text-zinc-100">{profileUI.incomingRequests}</h2>
+                    <span className="ml-auto text-xs text-zinc-500">{incomingRequests.length}</span>
+                  </div>
+                  {incomingRequests.length === 0 ? <p className="text-xs leading-5 text-zinc-500">{profileUI.noIncomingRequests}</p> : <div className="space-y-2">
+                    {incomingRequests.slice(0, 10).map((member) => <article key={member.april_id} className="flex min-w-0 items-center gap-2 rounded-lg border border-yellow-300/20 bg-black/15 px-2.5 py-2">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-yellow-300/30 bg-yellow-300/10 text-xs font-bold text-yellow-100">{member.display_name.slice(0, 1).toLocaleUpperCase()}</span>
+                      <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-yellow-100">{member.display_name}</span><span className="text-[9px] font-extrabold text-zinc-500">{member.plan === "premium" ? t.premium : t.free}</span></span>
+                      <button type="button" onClick={() => void relationAction(member)} className="shrink-0 rounded-lg border border-yellow-300/30 bg-yellow-300/10 px-2.5 py-2 text-xs font-semibold text-yellow-100 hover:bg-yellow-300/15">{profileUI.accept}</button>
+                    </article>)}
+                  </div>}
+                </section>
 
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT s.id, s.admin_reply,
-                              (LOWER(COALESCE(u.plan, 'free')) = 'premium' AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)) AS active_premium
-                       FROM premium_support_messages s JOIN users u ON u.user_id = s.user_id
-                       WHERE s.id = %s FOR UPDATE OF s""",
-                    (ticket_id,),
-                )
-                row = cur.fetchone()
-                if not row or not bool(row.get("active_premium")):
-                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-                cur.execute(
-                    """INSERT INTO premium_support_replies(
-                           support_message_id, reply, reply_language, admin_id,
-                           image_data, image_mime, image_name
-                       ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id""",
-                    (ticket_id, body, reply_language, admin, image_data, image_mime, safe_image_name),
-                )
-                reply_row = cur.fetchone() or {}
-                # The legacy summary keeps the first non-empty text for older inbox
-                # clients; all replies and images are retained in the new timeline.
-                cur.execute(
-                    """UPDATE premium_support_messages
-                       SET admin_reply = COALESCE(NULLIF(BTRIM(admin_reply), ''), NULLIF(%s, '')),
-                           admin_reply_language = CASE
-                               WHEN (admin_reply IS NULL OR BTRIM(admin_reply) = '') AND NULLIF(%s, '') IS NOT NULL THEN %s
-                               ELSE admin_reply_language
-                           END,
-                           replied_at = CURRENT_TIMESTAMP, admin_id = %s,
-                           admin_read_at = COALESCE(admin_read_at, CURRENT_TIMESTAMP),
-                           user_read_at = NULL
-                       WHERE id = %s""",
-                    (body, body, reply_language, admin, ticket_id),
-                )
-                if cur.rowcount != 1:
-                    return {"success": False, "error": "SUPPORT_MESSAGE_NOT_FOUND"}
-        return {"success": True, "message_id": ticket_id, "reply_id": int(reply_row.get("id") or 0), "has_admin_reply": True}
-    except Exception as exc:
-        print(f"[APRIL_SUPPORT] REPLY_ERROR type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "SUPPORT_UNAVAILABLE"}
-    finally:
-        conn.close()
+                <section className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold text-zinc-100">{profileUI.friends}</h2><span className="text-xs text-zinc-500">{friendContacts.length}</span></div>
+                  {friendContacts.length === 0 ? <p className="text-xs leading-5 text-zinc-500">{profileUI.noFriends}</p> : <div className="space-y-1.5">
+                    {friendContacts.map((member) => <div key={member.april_id} className="flex min-w-0 items-center gap-2 rounded-lg border border-amber-300/15 bg-amber-300/[0.025] px-2.5 py-2">
+                      <span className="min-w-0 flex-1 truncate text-sm text-amber-100" title={member.display_name}>{member.display_name}</span>
+                      <span className="shrink-0 rounded-full border border-amber-300/20 px-1.5 py-0.5 text-[9px] font-bold text-amber-100/80">{member.plan === "premium" ? t.premium : t.free}</span>
+                      <button type="button" onClick={() => void relationAction(member)} className="shrink-0 rounded-lg border border-amber-300/25 px-2 py-1.5 text-[11px] font-semibold text-amber-100 hover:bg-amber-300/[0.08]">{t.openDirect}</button>
+                    </div>)}
+                  </div>}
+                </section>
 
+                {otherContacts.length > 0 && <section className="rounded-xl border border-white/[0.07] bg-black/10 p-3">
+                  <h2 className="mb-2 text-sm font-semibold text-zinc-100">{profileUI.contacts}</h2>
+                  <div className="space-y-1.5">{otherContacts.map((member) => <div key={member.april_id} className="flex min-w-0 items-center gap-2 rounded-lg border border-white/[0.06] px-2.5 py-2">
+                    <span className="min-w-0 flex-1 truncate text-xs text-zinc-300" title={member.display_name}>{member.display_name}</span>
+                    {member.relation === "outgoing" && <span className="shrink-0 text-[10px] text-zinc-500">{t.requestSent}</span>}
+                    <button type="button" onClick={() => void toggleMemberBlock(member.april_id, Boolean(member.is_blocked))} className="shrink-0 rounded-lg border border-white/10 px-2 py-1 text-[10px] text-zinc-400 hover:text-white">{member.is_blocked ? labels.unblock : labels.block}</button>
+                  </div>)}</div>
+                </section>}
+              </div>
+            </div>
+            </div>}
+        </section>
 
-def _premium_test_enabled() -> bool:
-    """Enable simulated Premium grants only by explicit environment opt-in.
+        <section className="flex h-[calc(100dvh-132px)] min-h-[330px] min-w-0 flex-col overflow-hidden rounded-xl border border-[#60a5fa]/20 bg-[#10111a]/95 shadow-[0_12px_32px_rgba(0,0,0,0.18)] sm:h-[calc(100dvh-145px)] sm:rounded-2xl">
+          <div className="shrink-0 border-b border-white/[0.07] px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <Link href="/settings" aria-label={t.back} title={t.back}
+                className="truncate text-xs font-semibold transition hover:text-[#bfffc7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#7dff8f]/40 sm:text-sm">
+                {profileUI.communityTitle}
+              </Link>
+              <span className="shrink-0 text-xs text-zinc-500">{messages.length}</span>
+            </div>
+          </div>
+          <div ref={scrollBoxRef} onScroll={onMessagesScroll} className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-2 py-2 sm:px-3 sm:py-2">
+            {loading ? <p className="py-8 text-center text-sm text-zinc-500">{t.loading}</p> : messages.length === 0 ? <p className="py-12 text-center text-sm text-zinc-500">{t.empty}</p> : messages.map((item, messageIndex) => {
+              const authorId = String(item.author_april_id || "").trim();
+              const author = authorId ? memberById.get(authorId.toLowerCase()) : undefined;
+              const relationTarget: CommunityMember = author || { april_id: authorId, display_name: item.display_name, plan: item.plan, relation: "none" };
+              return <article key={item.id} className={`w-[calc(100%-18px)] ${messageIndex % 2 === 0 ? "ml-[18px] mr-0" : "mr-[18px] ml-0"} rounded-xl border px-2.5 py-2 transition-colors ${item.is_own ? "border-[#7dff8f]/35 bg-[#7dff8f]/[0.045] shadow-[0_0_18px_rgba(125,255,143,0.08)]" : friendIds.has(authorId.toLowerCase()) ? "border-amber-300/40 bg-amber-300/[0.035] shadow-[0_0_18px_rgba(250,204,21,0.09)]" : "border-sky-300/25 bg-sky-300/[0.025] shadow-[0_0_14px_rgba(96,165,250,0.07)]"}`}>
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                    <span title={item.display_name} className={`max-w-[45vw] truncate whitespace-nowrap text-xs font-semibold ${item.is_own ? "text-[#bfffc7]" : friendIds.has(authorId.toLowerCase()) ? "text-amber-200" : "text-sky-200"}`}>{item.display_name}</span>
+                    <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-extrabold tracking-wide ${item.plan === "premium" ? "border border-emerald-300/25 bg-emerald-300/10 text-emerald-200" : "border border-white/10 bg-white/[0.04] text-zinc-400"}`}>{item.plan === "premium" ? t.premium : t.free}</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {!item.is_deleted && (item.is_own || (isAdmin && !item.is_own)) && <button
+                      type="button"
+                      onClick={() => void messageAction(item.is_own ? "delete_message" : "admin_delete_message", item.id)}
+                      aria-label={item.is_own ? t.delete : (langKey === "ru" ? "Удалить сообщение пользователя" : langKey === "ua" ? "Видалити повідомлення користувача" : "Delete user message")}
+                      className="rounded-md border border-rose-300/20 bg-rose-300/[0.06] px-2 py-1 text-[10px] font-semibold text-rose-200 transition hover:border-rose-300/40 hover:bg-rose-300/[0.13] hover:text-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/40"
+                    >{item.is_own ? t.delete : (langKey === "ru" ? "Удалить" : langKey === "ua" ? "Видалити" : "Delete")}</button>}
+                    <time className="text-[9px] text-zinc-500">{formatDate(item.created_at, langKey)}</time>
+                  </span>
+                </div>
+                {item.is_deleted ? <p className="mt-1 text-xs italic text-zinc-500">{t.deleted}</p> : item.message && <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-zinc-200">{item.message}</p>}
+                {item.attachment && <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-300/15 bg-sky-300/[0.035] px-2 py-1.5">
+                  <div className="flex min-w-0 items-center gap-3"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-sky-300/15 bg-sky-300/[0.06] font-mono text-[9px] text-sky-200">FILE</span><div className="min-w-0"><p className="break-all text-xs text-zinc-200">{item.attachment.name}</p><p className="text-[10px] text-zinc-500">{formatSize(item.attachment.size, langKey)}</p></div></div>
+                  <a href={item.attachment.download_url} download className="rounded-lg border border-sky-300/20 px-2 py-1 text-[10px] font-semibold text-sky-200 transition hover:bg-sky-300/[0.07]">{t.download}</a>
+                </div>}
+                {!item.is_deleted && !item.is_own && !isAdmin && <div className="mt-1.5 flex flex-wrap items-center gap-1 border-t border-white/[0.05] pt-1">
+                  {authorId && <button type="button" disabled={relationTarget.relation === "outgoing"} onClick={() => void relationAction(relationTarget)} className={`max-w-[46%] truncate rounded-md border px-2 py-1 text-[9px] font-semibold leading-4 transition disabled:cursor-default disabled:opacity-50 ${relationTarget.relation === "friend" ? "border-amber-300/25 text-amber-100 hover:bg-amber-300/[0.07]" : relationTarget.relation === "incoming" ? "border-yellow-300/30 text-yellow-100 hover:bg-yellow-300/[0.08]" : "border-sky-300/20 text-sky-200 hover:bg-sky-300/[0.06]"}`}>
+                    {relationTarget.relation === "friend" ? t.openDirect : relationTarget.relation === "incoming" ? t.acceptFriend : relationTarget.relation === "outgoing" ? t.requestSent : t.addFriend}
+                  </button>}
+                </div>}
+              </article>;
+            })}
+            <div ref={bottomRef} />
+          </div>
+          <form onSubmit={sendMessage} className="z-10 shrink-0 border-t border-white/[0.08] bg-[#10111a]/98 p-2 pb-[calc(0.35rem_+_env(safe-area-inset-bottom))] backdrop-blur-xl">
+            {selectedFile && <div className="mb-1 flex min-w-0 items-center gap-2 rounded-lg border border-sky-300/20 bg-sky-300/[0.05] px-2 py-1 text-[10px] text-zinc-300"><svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-sky-200" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="m8 12.5 6.5-6.5a3 3 0 0 1 4.2 4.2l-8.4 8.4a5 5 0 0 1-7.1-7.1l8.2-8.2" /></svg><span className="min-w-0 flex-1 truncate">{selectedFile.name} · {formatSize(selectedFile.size, langKey)}</span><button type="button" onClick={() => setSelectedFile(null)} className="shrink-0 px-1 text-zinc-400 hover:text-rose-200" aria-label="Remove file">×</button></div>}
+            <div className="flex min-w-0 items-end gap-1.5">
+              <label title={t.attach} aria-label={t.attach} className="pointer-events-auto mb-[3px] flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full border border-white/[0.04] bg-[rgba(42,42,52,0.72)] text-zinc-200 shadow-[0_8px_30px_rgba(0,0,0,0.14)] backdrop-blur-3xl transition hover:text-sky-200">
+                <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="m8 12.5 6.5-6.5a3 3 0 0 1 4.2 4.2l-8.4 8.4a5 5 0 0 1-7.1-7.1l8.2-8.2" /></svg>
+                <input type="file" accept=".txt,.md,.pdf,.zip,.7z,.tar,.gz,.json,.jsonl,.csv,.log,.py,.js,.ts,.tsx,.jsx,.html,.css,.sql,.xml,.yaml,.yml,.toml,.ini,.conf,.env,.lock,.diff,.patch,.java,.kt,.go,.rs,.c,.cpp,.h,.hpp,.php,.rb,.swift,.dart,.sh,.ps1,.bat,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.rtf,.ipynb" className="sr-only" onChange={(event) => {
+                  const input = event.currentTarget; const file = input.files?.[0] || null; input.value = "";
+                  if (file && file.size > MAX_UPLOAD_BYTES) { setError(t.tooLarge); setSelectedFile(null); return; }
+                  if (isDisallowedMediaFile(file)) { setError(t.blocked); setSelectedFile(null); return; }
+                  setError(""); setSelectedFile(file);
+                }} />
+              </label>
+              <div className="relative flex min-h-[42px] min-w-0 flex-1 items-end rounded-[24px] border border-white/[0.06] bg-[rgba(42,42,52,0.76)] px-2.5 py-1.5 shadow-[0_8px_30px_rgba(0,0,0,0.14)] backdrop-blur-3xl focus-within:border-[#7dff8f]/25 focus-within:shadow-[0_0_20px_rgba(125,255,143,0.08)]">
+                <label htmlFor="community-message" className="sr-only">{t.placeholder}</label>
+                <textarea ref={composerRef} id="community-message" value={messageDraft} maxLength={4000} rows={1} onChange={(event) => setMessageDraft(event.target.value)} onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+                }} placeholder={t.placeholder} className="max-h-[100px] min-h-[28px] w-full resize-none overflow-y-auto bg-transparent px-1 pr-10 text-[13px] leading-6 text-white outline-none placeholder:text-zinc-400" />
+                <button type="submit" aria-label={t.send} title={t.send} disabled={sending || (!messageDraft.trim() && !selectedFile)} className={`absolute bottom-[7px] right-[7px] flex h-7 w-7 items-center justify-center rounded-full border border-white/[0.05] backdrop-blur-3xl transition-all duration-300 disabled:cursor-not-allowed ${sending || (!messageDraft.trim() && !selectedFile) ? "bg-[rgba(58,58,68,0.72)] text-zinc-400" : "bg-[rgba(120,255,140,0.22)] text-[#e8ffd9] shadow-[0_0_18px_rgba(120,255,140,0.34),0_0_42px_rgba(120,255,140,0.20)]"}`}>
+                  {sending ? <span className="text-xs">…</span> : <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.9"><path strokeLinecap="round" strokeLinejoin="round" d="M5 12h13m-5-5 5 5-5 5" /></svg>}
+                </button>
+              </div>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 px-1"><span title={t.fileLimit} className="min-w-0 truncate text-[9px] text-zinc-600">{t.fileLimit}</span><span className="shrink-0 text-[9px] text-zinc-600">{messageDraft.length}/4000</span></div>
+          </form>
+        </section>
 
-    Keep this disabled in the public/Google Play production deployment until
-    real Google Play Billing and server-side purchase verification are live.
-    For a private test deployment, set APRIL_ALLOW_TEST_ACTIVATION=1.
-    """
-    return str(os.getenv("APRIL_ALLOW_TEST_ACTIVATION", "")).strip().lower() in {"1", "true", "yes"}
-
-
-def _new_premium_id() -> str:
-    return "APR-PRM-" + secrets.token_hex(5).upper()
-
-
-def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS) -> dict[str, Any]:
-    """Grant or extend a 28-day test Premium entitlement for an authenticated user.
-
-    The Premium ID is stored once in the canonical users row, copied into a
-    zero-value test-grant ledger row, and retained after expiry for reuse. When
-    renewing an unexpired Lite/Premium plan, the new duration is added to its
-    existing expiry instead of discarding the unused time.
-    """
-    uid = str(user_id or "").strip()
-    if not uid:
-        return {"success": False, "error": "USER_ID_REQUIRED"}
-    if not _premium_test_enabled():
-        return {"success": False, "error": "PREMIUM_TEST_MODE_DISABLED"}
-    # During the pre-billing phase every registered Google-authenticated account
-    # may use the test button. Identity is resolved from the trusted request header
-    # and canonical users row; no email allowlist or browser-provided ID is trusted.
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
-                    FROM users
-                    WHERE user_id = %s OR april_id = %s
-                    ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
-                    LIMIT 1
-                    FOR UPDATE
-                    """,
-                    (uid, uid, uid),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-                # Normalize the inbound API identifier before updating users or
-                # writing the payments ledger so they always point to one row.
-                uid = str(user.get("user_id") or uid).strip()
-                provider = str(user.get("provider") or "").strip().lower()
-                if provider != "google":
-                    return {"success": False, "error": "PREMIUM_TEST_USER_NOT_ALLOWED"}
-                premium_id = str(user.get("premium_id") or "").strip()
-                if not premium_id:
-                    for _ in range(5):
-                        candidate = _new_premium_id()
-                        cur.execute("SELECT 1 FROM users WHERE premium_id = %s", (candidate,))
-                        if not cur.fetchone():
-                            premium_id = candidate
-                            break
-                    if not premium_id:
-                        return {"success": False, "error": "PREMIUM_ID_GENERATION_FAILED"}
-                current_seconds = now().timestamp()
-                current_plan = str(user.get("plan") or "free").strip().lower()
-                current_expiry = float(user.get("subscription_until") or 0)
-                renewal_base = (
-                    current_expiry
-                    if current_plan in {"lite", "premium"} and current_expiry > current_seconds
-                    else current_seconds
-                )
-                expires_at = renewal_base + max(1, min(int(hours), PREMIUM_TEST_DURATION_HOURS)) * 3600
-                cur.execute(
-                    "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
-                    (premium_id, expires_at, uid),
-                )
-                # Keep a trace of each test activation in the same payment ledger,
-                # keyed by the canonical April user ID and the exact Premium ID.
-                # Zero amount + test_grant status prevent it from being mistaken
-                # for a real payment or counted as paid subscription history.
-                cur.execute(
-                    """
-                    INSERT INTO payments
-                        (user_id, plan, amount, premium_id, payment_status, payment_source)
-                    VALUES (%s, 'premium', 0, %s, 'test_grant', 'test_activation')
-                    """,
-                    (uid, premium_id),
-                )
-        status = get_user_subscription_status(uid)
-        if not status:
-            return {"success": False, "error": "SUBSCRIPTION_STATUS_UNAVAILABLE"}
-        return {"success": True, **status}
-    except psycopg2.errors.UndefinedColumn:
-        return {"success": False, "error": "PREMIUM_SCHEMA_MIGRATION_REQUIRED"}
-    finally:
-        conn.close()
-
-
-def check_subscription(user_id):
-    return get_user_plan(user_id) in {"lite", "premium"}
-
-
-def should_warn(user_id):
-    conn = get_conn()
-    if not conn:
-        return False
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT subscription_until, warned FROM users WHERE user_id=%s", (str(user_id),))
-                user = cur.fetchone()
-                if not user:
-                    return False
-                remaining = float(user.get("subscription_until") or 0) - now().timestamp()
-                if remaining < 86400 and not bool(user.get("warned")):
-                    cur.execute("UPDATE users SET warned=TRUE WHERE user_id=%s", (str(user_id),))
-                    return True
-                return False
-    finally:
-        conn.close()
-
-
-def should_reset_limits(user):
-    return bool(user) and str(user.get("last_reset") or "") != today()
-
-
-def reset_user_limits(cur, uid):
-    cur.execute(
-        "UPDATE users SET messages_today=0, images_today=0, last_reset=%s WHERE user_id=%s",
-        (today(), str(uid)),
-    )
-
-
-def can_send_message(user_id, limit=FREE_MESSAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
-        return True
-    conn = get_conn()
-    if not conn:
-        return True
-    uid = str(user_id)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id=%s", (uid,))
-                user = cur.fetchone()
-                if not user:
-                    _ensure_user_defaults(cur, uid)
-                    return True
-                if should_reset_limits(user):
-                    reset_user_limits(cur, uid)
-                    user["messages_today"] = 0
-                if int(user.get("messages_today") or 0) >= limit:
-                    return False
-                cur.execute("UPDATE users SET messages_today=messages_today+1 WHERE user_id=%s", (uid,))
-                return True
-    finally:
-        conn.close()
-
-
-def can_generate_image(user_id, limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
-        return True
-    conn = get_conn()
-    if not conn:
-        return True
-    uid = str(user_id)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT images_today, last_reset FROM users WHERE user_id=%s", (uid,))
-                user = cur.fetchone()
-                if not user:
-                    _ensure_user_defaults(cur, uid)
-                    return True
-                if should_reset_limits(user):
-                    reset_user_limits(cur, uid)
-                    user["images_today"] = 0
-                if int(user.get("images_today") or 0) >= limit:
-                    return False
-                cur.execute("UPDATE users SET images_today=images_today+1 WHERE user_id=%s", (uid,))
-                return True
-    finally:
-        conn.close()
-
-
-def get_remaining_messages(user_id, limit=FREE_MESSAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
-        return "∞"
-    conn = get_conn()
-    if not conn:
-        return limit
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today FROM users WHERE user_id=%s", (str(user_id),))
-                user = cur.fetchone()
-                return max(0, limit - int((user or {}).get("messages_today") or 0))
-    finally:
-        conn.close()
-
-
-def get_remaining_images(user_id, limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
-        return "∞"
-    conn = get_conn()
-    if not conn:
-        return limit
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT images_today FROM users WHERE user_id=%s", (str(user_id),))
-                user = cur.fetchone()
-                return max(0, limit - int((user or {}).get("images_today") or 0))
-    finally:
-        conn.close()
-
-
-def get_remaining_days(user_id):
-    if user_id == ADMIN_ID:
-        return "∞"
-    conn = get_conn()
-    if not conn:
-        return 0
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT subscription_until FROM users WHERE user_id=%s", (str(user_id),))
-                user = cur.fetchone()
-                seconds = float((user or {}).get("subscription_until") or 0) - now().timestamp()
-                return max(0, math.ceil(seconds / 86400))
-    finally:
-        conn.close()
-
-
-def get_limits(user_id, msg_limit=FREE_MESSAGES_LIMIT, img_limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID:
-        return {"messages_used":"∞","messages_limit":"∞","images_used":"∞","images_limit":"∞"}
-    msg_limit_out = "∞" if msg_limit == -1 else msg_limit
-    img_limit_out = "∞" if img_limit == -1 else img_limit
-    conn = get_conn()
-    if not conn:
-        return {"messages_used":0,"messages_limit":msg_limit_out,"images_used":0,"images_limit":img_limit_out}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT messages_today, images_today, last_reset FROM users WHERE user_id=%s", (str(user_id),))
-                user = cur.fetchone()
-                if not user:
-                    return {"messages_used":0,"messages_limit":msg_limit_out,"images_used":0,"images_limit":img_limit_out}
-                if should_reset_limits(user):
-                    reset_user_limits(cur, user_id)
-                    messages = images = 0
-                else:
-                    messages = int(user.get("messages_today") or 0)
-                    images = int(user.get("images_today") or 0)
-                return {"messages_used":messages,"messages_limit":msg_limit_out,"images_used":images,"images_limit":img_limit_out}
-    finally:
-        conn.close()
-
-
-def get_admin_stats():
-    conn = get_conn()
-    if not conn:
-        return {"users":0,"subs":0,"income_total":0,"income_today":0}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS count FROM users")
-                users = int(cur.fetchone()["count"])
-                cur.execute("SELECT COUNT(*) AS count FROM users WHERE plan IN ('lite','premium') AND subscription_until > %s", (now().timestamp(),))
-                subs = int(cur.fetchone()["count"])
-                cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM payments")
-                total = int(cur.fetchone()["total"] or 0)
-                cur.execute("SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE created_at::date = %s", (today(),))
-                today_income = int(cur.fetchone()["total"] or 0)
-                return {"users":users,"subs":subs,"income_total":total,"income_today":today_income}
-    finally:
-        conn.close()
-
-
-def get_reset_seconds(user_id):
-    current = now()
-    nxt = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((nxt - current).total_seconds())
-
-
-def format_time(seconds):
-    seconds = int(seconds or 0)
-    return f"{seconds // 3600:02}:{(seconds % 3600)//60:02}:{seconds % 60:02}"
-
-
-def touch_user_activity(user_id: Any) -> None:
-    """Update last activity on existing authenticated chat requests."""
-    uid = str(user_id or "").strip()
-    if not uid:
-        return
-    conn = get_conn()
-    if not conn:
-        return
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE user_id = %s", (uid,))
-    finally:
-        conn.close()
-
-
-def get_admin_user_telemetry() -> dict[str, int] | None:
-    """Count registered identities, excluding guest/voice/system placeholder rows.
-
-    Only rows with a real email and authentication provider are eligible. Email
-    is the canonical identity key, so legacy rows keyed by email and April-ID
-    rows for the same Google identity are not counted as separate users. If an
-    identity has any currently active Premium row, that identity is Premium.
-    Online remains based on a recent chat activity mark (last 3 minutes).
-    """
-    conn = get_conn()
-    if not conn:
-        return None
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    WITH registered AS (
-                        SELECT
-                            LOWER(BTRIM(email)) AS account_key,
-                            (
-                                LOWER(BTRIM(COALESCE(plan, 'free'))) = 'premium'
-                                AND COALESCE(subscription_until, 0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                            ) AS premium_active,
-                            (last_seen_at >= CURRENT_TIMESTAMP - INTERVAL '3 minutes') AS recently_active
-                        FROM users
-                        WHERE NULLIF(BTRIM(email), '') IS NOT NULL
-                          AND NULLIF(BTRIM(provider), '') IS NOT NULL
-                          AND LOWER(BTRIM(user_id)) NOT IN ('guest', 'web_voice')
-                    ),
-                    accounts AS (
-                        SELECT
-                            account_key,
-                            BOOL_OR(COALESCE(premium_active, FALSE)) AS premium_active,
-                            BOOL_OR(COALESCE(recently_active, FALSE)) AS recently_active
-                        FROM registered
-                        GROUP BY account_key
-                    )
-                    SELECT
-                        COUNT(*)::INT AS total,
-                        COUNT(*) FILTER (WHERE premium_active)::INT AS premium,
-                        COUNT(*) FILTER (WHERE NOT premium_active)::INT AS free,
-                        COUNT(*) FILTER (WHERE recently_active)::INT AS online
-                    FROM accounts
-                    """
-                )
-                row = cur.fetchone() or {}
-                return {
-                    key: max(0, int(row.get(key) or 0))
-                    for key in ("online", "premium", "free", "total")
-                }
-    except Exception as exc:
-        print(f"[APRIL_TELEMETRY] READ_ERROR type={type(exc).__name__}", flush=True)
-        return None
-    finally:
-        conn.close()
-
-def get_all_users():
-    conn = get_conn()
-    if not conn:
-        return []
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id FROM users ORDER BY created_at ASC")
-                return [row["user_id"] for row in cur.fetchall()]
-    finally:
-        conn.close()
-
-
-# =========================================================
-# PUBLIC COMMUNITY SPACE (separate from private April memory)
-# =========================================================
-
-COMMUNITY_MAX_MESSAGE_CHARS = 4000
-COMMUNITY_MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
-COMMUNITY_RATE_LIMIT_PER_MINUTE = 10
-COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES = 30 * 1024 * 1024
-_COMMUNITY_BLOCKED_EXTENSIONS = {
-    ".exe", ".msi", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".vbe",
-    ".scr", ".pif", ".dll", ".sys", ".so", ".dylib", ".apk", ".app",
+        {(notice || error) && <p role="status" aria-live="polite" className={`pointer-events-none fixed top-[calc(3.5rem_+_env(safe-area-inset-top))] left-3 right-3 z-50 mx-auto max-w-xl rounded-xl border px-3 py-2 text-xs shadow-xl backdrop-blur-xl ${error ? "border-rose-400/25 bg-[#171018]/95 text-rose-200" : "border-emerald-300/25 bg-[#0c1714]/95 text-emerald-200"}`}>{error || notice}</p>}
+      </div>
+    </main>
+  );
 }
-
-# Public community and each individual friend conversation retain their latest
-# 30 messages. This is separate from the 12/24-hour private April memory TTL.
-COMMUNITY_HISTORY_MAX_MESSAGES = 30
-
-
-def _community_lock_history(cur, scope: str, key: str = "global") -> None:
-    """Serialize writes to one history scope while its oldest rows are pruned."""
-    cur.execute(
-        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-        ("april-community-history:" + str(scope), str(key)),
-    )
-
-
-def _community_prune_public_history(cur) -> None:
-    """Physically delete older public rows, preserving the latest 30 globally."""
-    cur.execute(
-        """DELETE FROM community_messages
-           WHERE id IN (
-               SELECT id
-               FROM community_messages
-               ORDER BY id DESC
-               OFFSET %s
-           )""",
-        (COMMUNITY_HISTORY_MAX_MESSAGES,),
-    )
-
-
-def _community_direct_pair_key(user_a: Any, user_b: Any) -> str:
-    """Return one stable lock key regardless of which friend opened the chat."""
-    return "|".join(sorted((str(user_a), str(user_b))))
-
-
-def _community_prune_direct_history(cur, user_a: Any, user_b: Any) -> None:
-    """Physically delete older rows, preserving the latest 30 for this pair."""
-    a, b = str(user_a), str(user_b)
-    cur.execute(
-        """DELETE FROM community_direct_messages
-           WHERE id IN (
-               SELECT id
-               FROM community_direct_messages
-               WHERE (sender_id = %s AND recipient_id = %s)
-                  OR (sender_id = %s AND recipient_id = %s)
-               ORDER BY id DESC
-               OFFSET %s
-           )""",
-        (a, b, b, a, COMMUNITY_HISTORY_MAX_MESSAGES),
-    )
-
-
-def _community_ensure_public_history_limit(cur) -> None:
-    """Repair old overflow only when needed; ordinary polling does not lock."""
-    cur.execute("SELECT COUNT(*) AS amount FROM community_messages")
-    amount = int((cur.fetchone() or {}).get("amount") or 0)
-    if amount > COMMUNITY_HISTORY_MAX_MESSAGES:
-        _community_lock_history(cur, "public")
-        _community_prune_public_history(cur)
-
-
-def _community_ensure_direct_history_limit(cur, user_a: Any, user_b: Any) -> None:
-    """Repair old overflow for one pair only when needed."""
-    a, b = str(user_a), str(user_b)
-    cur.execute(
-        """SELECT COUNT(*) AS amount
-           FROM community_direct_messages
-           WHERE (sender_id = %s AND recipient_id = %s)
-              OR (sender_id = %s AND recipient_id = %s)""",
-        (a, b, b, a),
-    )
-    amount = int((cur.fetchone() or {}).get("amount") or 0)
-    if amount > COMMUNITY_HISTORY_MAX_MESSAGES:
-        _community_lock_history(cur, "direct", _community_direct_pair_key(a, b))
-        _community_prune_direct_history(cur, a, b)
-
-
-def _community_canonical_user(user_id: Any) -> str | None:
-    raw = str(user_id or "").strip()
-    if not raw:
-        return None
-    canonical = resolve_user_id(raw)
-    if not canonical or not is_authenticated_user(canonical):
-        return None
-    return canonical
-
-
-def _community_iso(value: Any) -> str | None:
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc).isoformat()
-    return str(value) if value is not None else None
-
-
-def _community_payload(row: dict[str, Any]) -> dict[str, Any]:
-    deleted = bool(row.get("is_deleted"))
-    attachment_name = None if deleted else row.get("attachment_name")
-    attachment_size = None if deleted else row.get("attachment_size")
-    return {
-        "id": int(row.get("id") or 0),
-        "author_april_id": str(row.get("author_april_id") or "").strip(),
-        "display_name": str(row.get("display_name") or "Участник")[:32],
-        "plan": "premium" if str(row.get("author_plan") or row.get("plan") or "free").lower() == "premium" else "free",
-        "message": "Сообщение удалено автором." if deleted else str(row.get("message") or ""),
-        "created_at": _community_iso(row.get("created_at")),
-        "is_deleted": deleted,
-        "is_own": bool(row.get("is_own")),
-        "attachment": ({
-            "name": str(attachment_name or "file"),
-            "size": int(attachment_size or 0),
-            "download_url": f"/api/community?file_id={int(row.get('id') or 0)}",
-        } if attachment_name else None),
-    }
-
-
-# =========================================================
-# COMMUNITY FRIEND CIRCLE + PRIVATE USER-TO-USER MESSAGES
-# =========================================================
-
-def _community_pair(user_a: str, user_b: str) -> tuple[str, str]:
-    return (user_a, user_b) if user_a < user_b else (user_b, user_a)
-
-
-def _community_find_target(cur, peer_april_id: Any, current_user_id: str) -> dict[str, Any] | None:
-    public_id = str(peer_april_id or "").strip()
-    if not public_id or len(public_id) > 100:
-        return None
-    cur.execute(
-        """SELECT user_id, april_id, name, LOWER(COALESCE(plan, 'free')) AS plan,
-                  COALESCE(subscription_until, 0) AS subscription_until
-           FROM users
-           WHERE LOWER(COALESCE(april_id, '')) = LOWER(%s)
-             AND COALESCE(email, '') <> '' AND COALESCE(provider, '') <> ''
-           LIMIT 1""",
-        (public_id,),
-    )
-    target = cur.fetchone()
-    if not target or str(target.get("user_id") or "") == current_user_id:
-        return None
-    return dict(target)
-
-
-def _community_active_plan(row: dict[str, Any]) -> str:
-    active = (
-        str(row.get("plan") or "free").lower() == "premium"
-        and float(row.get("subscription_until") or 0) > now().timestamp()
-    )
-    return "premium" if active else "free"
-
-
-def get_community_members(user_id: Any, *, limit: int = 100) -> dict[str, Any]:
-    """Return public community members with safe April IDs and friendship state."""
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    safe_limit = max(1, min(100, int(limit or 100)))
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT u.user_id, u.april_id, u.name,
-                              LOWER(COALESCE(u.plan, 'free')) AS plan,
-                              COALESCE(u.subscription_until, 0) AS subscription_until,
-                              p.display_name, p.is_custom,
-                              COALESCE(u.last_seen_at, u.last_login_at, u.created_at) AS activity_at
-                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id <> %s
-                         AND COALESCE(u.april_id, '') <> ''
-                         AND COALESCE(u.email, '') <> '' AND COALESCE(u.provider, '') <> ''
-                       ORDER BY
-                         CASE WHEN EXISTS (
-                           SELECT 1 FROM community_friendships cf WHERE cf.status='accepted'
-                             AND ((cf.user_a=%s AND cf.user_b=u.user_id) OR (cf.user_b=%s AND cf.user_a=u.user_id))
-                         ) THEN 0
-                         WHEN EXISTS (
-                           SELECT 1 FROM community_friendships cf WHERE cf.status='pending'
-                             AND ((cf.user_a=%s AND cf.user_b=u.user_id) OR (cf.user_b=%s AND cf.user_a=u.user_id))
-                         ) THEN 1 ELSE 2 END,
-                         COALESCE(u.last_seen_at, u.last_login_at, u.created_at) DESC NULLS LAST
-                       LIMIT %s""",
-                    (uid, uid, uid, uid, uid, safe_limit),
-                )
-                rows = [dict(row) for row in (cur.fetchall() or [])]
-                cur.execute(
-                    """SELECT user_a, user_b, requested_by_user_id, status
-                       FROM community_friendships
-                       WHERE user_a = %s OR user_b = %s""",
-                    (uid, uid),
-                )
-                relations: dict[str, str] = {}
-                for row in cur.fetchall() or []:
-                    row = dict(row)
-                    other = str(row.get("user_b") if str(row.get("user_a")) == uid else row.get("user_a") or "")
-                    if row.get("status") == "accepted":
-                        relations[other] = "friend"
-                    elif str(row.get("requested_by_user_id") or "") == uid:
-                        relations[other] = "outgoing"
-                    else:
-                        relations[other] = "incoming"
-                cur.execute("SELECT blocked_user_id FROM community_user_blocks WHERE blocker_user_id = %s", (uid,))
-                blocked_user_ids = {str((row or {}).get("blocked_user_id") or "") for row in (cur.fetchall() or [])}
-                members = []
-                for row in rows:
-                    public_id = str(row.get("april_id") or "").strip()
-                    if not public_id:
-                        continue
-                    default_name = str(row.get("name") or "").strip()
-                    if not default_name:
-                        default_name = f"Участник {public_id[-4:]}"
-                    members.append({
-                        "april_id": public_id,
-                        "display_name": str(row.get("display_name") or default_name).strip()[:32],
-                        "plan": _community_active_plan(row),
-                        "relation": relations.get(str(row.get("user_id") or ""), "none"),
-                        "is_blocked": str(row.get("user_id") or "") in blocked_user_ids,
-                    })
-                cur.execute(
-                    """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
-                              COALESCE(u.subscription_until, 0) AS subscription_until,
-                              p.display_name, p.is_custom
-                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id = %s LIMIT 1""",
-                    (uid,),
-                )
-                own = dict(cur.fetchone() or {})
-                default_own = str(own.get("name") or "").strip() or f"Участник {str(own.get('april_id') or uid)[-4:]}"
-                own_name = str(own.get("display_name") or default_own).strip()[:32]
-                if not own.get("display_name"):
-                    cur.execute(
-                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
-                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
-                        (uid, own_name),
-                    )
-                return {
-                    "success": True,
-                    "members": members,
-                    "profile": {"display_name": own_name, "is_custom": bool(own.get("is_custom"))},
-                    "plan": _community_active_plan(own),
-                }
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] MEMBERS_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def send_community_friend_request(user_id: Any, peer_april_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                target = _community_find_target(cur, peer_april_id, uid)
-                if not target:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                peer = str(target["user_id"])
-                a, b = _community_pair(uid, peer)
-                cur.execute("SELECT status, requested_by_user_id FROM community_friendships WHERE user_a=%s AND user_b=%s FOR UPDATE", (a, b))
-                existing = cur.fetchone()
-                if existing:
-                    state = str(existing.get("status") or "")
-                    requested_by = str(existing.get("requested_by_user_id") or "")
-                    if state == "accepted":
-                        return {"success": True, "relation": "friend"}
-                    if requested_by == uid:
-                        return {"success": True, "relation": "outgoing"}
-                    return {"success": True, "relation": "incoming", "error": "FRIEND_REQUEST_INCOMING"}
-                cur.execute(
-                    """INSERT INTO community_friendships(user_a, user_b, requested_by_user_id, status)
-                       VALUES (%s,%s,%s,'pending')""",
-                    (a, b, uid),
-                )
-                return {"success": True, "relation": "outgoing"}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] FRIEND_REQUEST_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def accept_community_friend_request(user_id: Any, requester_april_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                target = _community_find_target(cur, requester_april_id, uid)
-                if not target:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                requester = str(target["user_id"])
-                a, b = _community_pair(uid, requester)
-                cur.execute(
-                    """UPDATE community_friendships SET status='accepted', updated_at=CURRENT_TIMESTAMP
-                       WHERE user_a=%s AND user_b=%s AND status='pending' AND requested_by_user_id=%s
-                       RETURNING user_a""",
-                    (a, b, requester),
-                )
-                if not cur.fetchone():
-                    cur.execute("SELECT status FROM community_friendships WHERE user_a=%s AND user_b=%s", (a, b))
-                    row = cur.fetchone() or {}
-                    if row.get("status") == "accepted":
-                        return {"success": True, "relation": "friend"}
-                    return {"success": False, "error": "FRIEND_REQUEST_NOT_FOUND"}
-                return {"success": True, "relation": "friend"}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] FRIEND_ACCEPT_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def set_community_user_block(user_id: Any, peer_april_id: Any, *, blocked: bool) -> dict[str, Any]:
-    """Block/unblock another user in the public community without deleting content."""
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                target = _community_find_target(cur, peer_april_id, uid)
-                if not target:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                peer = str(target.get("user_id") or "")
-                if blocked:
-                    cur.execute(
-                        """INSERT INTO community_user_blocks(blocker_user_id, blocked_user_id)
-                           VALUES (%s, %s) ON CONFLICT (blocker_user_id, blocked_user_id) DO NOTHING""",
-                        (uid, peer),
-                    )
-                else:
-                    cur.execute(
-                        "DELETE FROM community_user_blocks WHERE blocker_user_id=%s AND blocked_user_id=%s",
-                        (uid, peer),
-                    )
-                return {"success": True, "is_blocked": bool(blocked), "peer_id": str(target.get("april_id") or peer_april_id)}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] USER_BLOCK_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def remove_community_friend(user_id: Any, peer_april_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                target = _community_find_target(cur, peer_april_id, uid)
-                if not target:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                a, b = _community_pair(uid, str(target["user_id"]))
-                cur.execute("DELETE FROM community_friendships WHERE user_a=%s AND user_b=%s AND status='accepted'", (a, b))
-                return {"success": True, "relation": "none"}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] FRIEND_REMOVE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def _community_require_friends(cur, uid: str, peer: dict[str, Any]) -> str | None:
-    peer_uid = str(peer.get("user_id") or "")
-    a, b = _community_pair(uid, peer_uid)
-    cur.execute("SELECT status FROM community_friendships WHERE user_a=%s AND user_b=%s", (a, b))
-    row = cur.fetchone() or {}
-    return peer_uid if row.get("status") == "accepted" else None
-
-
-def _community_direct_payload(row: dict[str, Any], *, current_user_id: str, peer_april_id: str) -> dict[str, Any]:
-    deleted = bool(row.get("is_deleted"))
-    attachment_name = None if deleted else row.get("attachment_name")
-    attachment_size = None if deleted else row.get("attachment_size")
-    sender_uid = str(row.get("sender_id") or "")
-    sender_plan = str(row.get("sender_plan") or "free")
-    return {
-        "id": int(row.get("id") or 0),
-        "sender_name": str(row.get("sender_name") or "Участник")[:32],
-        "sender_plan": sender_plan,
-        "is_own": sender_uid == current_user_id,
-        "message": "Сообщение удалено автором." if deleted else str(row.get("message") or ""),
-        "created_at": _community_iso(row.get("created_at")),
-        "is_deleted": deleted,
-        "attachment": ({
-            "name": str(attachment_name or "file"),
-            "size": int(attachment_size or 0),
-            "download_url": f"/api/community?dm_file_id={int(row.get('id') or 0)}&peer_id={quote(str(peer_april_id), safe='')}",
-        } if attachment_name else None),
-    }
-
-
-def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_MESSAGES) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    safe_limit = max(1, min(COMMUNITY_HISTORY_MAX_MESSAGES, int(limit or COMMUNITY_HISTORY_MAX_MESSAGES)))
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                peer = _community_find_target(cur, peer_april_id, uid)
-                if not peer:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                peer_uid = _community_require_friends(cur, uid, peer)
-                if not peer_uid:
-                    return {"success": False, "error": "FRIENDS_REQUIRED"}
-                _community_ensure_direct_history_limit(cur, uid, peer_uid)
-                cur.execute(
-                    """SELECT m.id, m.sender_id, m.recipient_id, m.message, m.created_at,
-                              m.attachment_name, m.attachment_size, m.is_deleted,
-                              COALESCE(NULLIF(sp.display_name,''), NULLIF(su.name,''), 'Участник') AS sender_name,
-                              CASE WHEN LOWER(COALESCE(su.plan,'free'))='premium'
-                                      AND COALESCE(su.subscription_until,0) > EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                                   THEN 'premium' ELSE 'free' END AS sender_plan
-                       FROM community_direct_messages m
-                       JOIN users su ON su.user_id=m.sender_id
-                       LEFT JOIN community_profiles sp ON sp.user_id=su.user_id
-                       WHERE ((m.sender_id=%s AND m.recipient_id=%s) OR (m.sender_id=%s AND m.recipient_id=%s))
-                       ORDER BY m.id DESC LIMIT %s""",
-                    (uid, peer_uid, peer_uid, uid, safe_limit),
-                )
-                messages = [dict(row) for row in (cur.fetchall() or [])]
-                messages.reverse()
-                peer_name = str(peer.get("name") or "").strip() or f"Участник {str(peer.get('april_id') or '')[-4:]}"
-                cur.execute("SELECT display_name FROM community_profiles WHERE user_id=%s", (peer_uid,))
-                profile_row = cur.fetchone() or {}
-                peer_name = str(profile_row.get("display_name") or peer_name).strip()[:32]
-                return {
-                    "success": True,
-                    "messages": [_community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id)) for row in messages],
-                    "peer": {"april_id": str(peer.get("april_id") or ""), "display_name": peer_name, "plan": _community_active_plan(peer)},
-                }
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] DIRECT_READ_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def create_community_direct_message(
-    user_id: Any, peer_april_id: Any, message: Any, *,
-    attachment_name: str | None = None, attachment_mime: str | None = None,
-    attachment_data: bytes | None = None,
-) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    text_value = str(message or "").replace("\x00", "").strip()
-    if len(text_value) > COMMUNITY_MAX_MESSAGE_CHARS:
-        return {"success": False, "error": "MESSAGE_TOO_LONG"}
-    original_name = str(attachment_name or "").replace("\\", "/").split("/")[-1].strip()
-    binary = bytes(attachment_data) if attachment_data is not None else None
-    if binary is not None and (not binary or len(binary) > COMMUNITY_MAX_ATTACHMENT_BYTES):
-        return {"success": False, "error": "ATTACHMENT_TOO_LARGE_OR_EMPTY"}
-    if binary is not None and os.path.splitext(original_name)[1].lower() in _COMMUNITY_BLOCKED_EXTENSIONS:
-        return {"success": False, "error": "ATTACHMENT_TYPE_BLOCKED"}
-    if not text_value and binary is None:
-        return {"success": False, "error": "MESSAGE_OR_FILE_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                peer = _community_find_target(cur, peer_april_id, uid)
-                if not peer:
-                    return {"success": False, "error": "COMMUNITY_USER_NOT_FOUND"}
-                peer_uid = _community_require_friends(cur, uid, peer)
-                if not peer_uid:
-                    return {"success": False, "error": "FRIENDS_REQUIRED"}
-                _community_lock_history(cur, "direct", _community_direct_pair_key(uid, peer_uid))
-                _community_prune_direct_history(cur, uid, peer_uid)
-                cur.execute("SELECT COUNT(*) AS amount FROM community_direct_messages WHERE sender_id=%s AND created_at > NOW() - INTERVAL '1 minute' AND is_deleted=FALSE", (uid,))
-                if int((cur.fetchone() or {}).get("amount") or 0) >= 30:
-                    return {"success": False, "error": "RATE_LIMITED"}
-                if binary is not None:
-                    cur.execute("SELECT COALESCE(SUM(attachment_size),0) AS used FROM community_direct_messages WHERE sender_id=%s AND is_deleted=FALSE", (uid,))
-                    used_bytes = int((cur.fetchone() or {}).get("used") or 0)
-                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
-                        return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
-                cur.execute(
-                    """INSERT INTO community_direct_messages(
-                           sender_id, recipient_id, message, attachment_name, attachment_mime, attachment_size, attachment_data)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s)
-                       RETURNING id, sender_id, recipient_id, message, created_at, attachment_name, attachment_size, is_deleted""",
-                    (uid, peer_uid, text_value, original_name or None, str(attachment_mime or "application/octet-stream")[:160] if binary is not None else None, len(binary) if binary is not None else None, binary),
-                )
-                row = dict(cur.fetchone() or {})
-                row["sender_name"] = ""
-                cur.execute("SELECT COALESCE(NULLIF(p.display_name,''),NULLIF(u.name,''),'Участник') AS sender_name, CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium' AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) THEN 'premium' ELSE 'free' END AS sender_plan FROM users u LEFT JOIN community_profiles p ON p.user_id=u.user_id WHERE u.user_id=%s", (uid,))
-                details = dict(cur.fetchone() or {})
-                row.update(details)
-                # The newly inserted row has the newest ID, so it survives pruning.
-                _community_prune_direct_history(cur, uid, peer_uid)
-                return {"success": True, "message": _community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id))}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] DIRECT_CREATE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def get_community_direct_file(user_id: Any, peer_april_id: Any, message_id: Any) -> dict[str, Any] | None:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    try:
-        mid = int(message_id)
-        if mid <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                peer = _community_find_target(cur, peer_april_id, uid)
-                if not peer or not _community_require_friends(cur, uid, peer):
-                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
-                peer_uid = str(peer.get("user_id") or "")
-                cur.execute(
-                    """SELECT attachment_data AS data, attachment_name AS name, attachment_mime AS mime
-                       FROM community_direct_messages
-                       WHERE id=%s AND is_deleted=FALSE AND attachment_data IS NOT NULL
-                         AND ((sender_id=%s AND recipient_id=%s) OR (sender_id=%s AND recipient_id=%s))
-                       LIMIT 1""",
-                    (mid, uid, peer_uid, peer_uid, uid),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
-                return {"success": True, "data": bytes(row.get("data") or b""), "name": str(row.get("name") or "shared-file"), "mime": str(row.get("mime") or "application/octet-stream")}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] DIRECT_FILE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def delete_community_direct_message(user_id: Any, message_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    try:
-        mid = int(message_id)
-        if mid <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE community_direct_messages SET is_deleted=TRUE, message='', attachment_name=NULL, attachment_mime=NULL, attachment_size=NULL, attachment_data=NULL WHERE id=%s AND sender_id=%s AND is_deleted=FALSE RETURNING id", (mid, uid))
-                if not cur.fetchone():
-                    return {"success": False, "error": "MESSAGE_NOT_FOUND_OR_NOT_OWNED"}
-                return {"success": True}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] DIRECT_DELETE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_MESSAGES, before_id: int | None = None) -> dict[str, Any] | None:
-    """Read at most the latest 30 public messages and the server nickname."""
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    safe_limit = max(1, min(COMMUNITY_HISTORY_MAX_MESSAGES, int(limit or COMMUNITY_HISTORY_MAX_MESSAGES)))
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                _community_ensure_public_history_limit(cur)
-                cur.execute(
-                    """SELECT u.name, u.april_id, LOWER(COALESCE(u.plan, 'free')) AS plan,
-                              COALESCE(u.subscription_until, 0) AS subscription_until,
-                              p.display_name, p.is_custom
-                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id = %s LIMIT 1""",
-                    (uid,),
-                )
-                profile = cur.fetchone() or {}
-                default_name = str(profile.get("name") or "").strip()
-                if not default_name:
-                    suffix = str(profile.get("april_id") or uid)[-4:]
-                    default_name = f"Участник {suffix}"
-                display_name = str(profile.get("display_name") or default_name).strip()[:32]
-                if not profile.get("display_name"):
-                    cur.execute(
-                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
-                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
-                        (uid, display_name),
-                    )
-                if before_id and int(before_id) > 0:
-                    cur.execute(
-                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
-                                  m.attachment_name, m.attachment_size, m.is_deleted,
-                                  CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
-                                            AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                                       THEN 'premium' ELSE 'free' END AS author_plan
-                           FROM community_messages m JOIN users u ON u.user_id=m.user_id
-                           WHERE m.id < %s
-                             AND NOT EXISTS (
-                               SELECT 1 FROM community_user_blocks b
-                               WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
-                             )
-                           ORDER BY m.id DESC LIMIT %s""",
-                        (int(before_id), uid, safe_limit),
-                    )
-                else:
-                    cur.execute(
-                        """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
-                                  m.attachment_name, m.attachment_size, m.is_deleted,
-                                  CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
-                                            AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
-                                       THEN 'premium' ELSE 'free' END AS author_plan
-                           FROM community_messages m JOIN users u ON u.user_id=m.user_id
-                           WHERE NOT EXISTS (
-                             SELECT 1 FROM community_user_blocks b
-                             WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
-                           )
-                           ORDER BY m.id DESC LIMIT %s""",
-                        (uid, safe_limit),
-                    )
-                rows = list(cur.fetchall() or [])
-                rows.reverse()
-                messages = []
-                for row in rows:
-                    item = dict(row)
-                    item["is_own"] = str(item.get("user_id") or "") == uid
-                    messages.append(_community_payload(item))
-                active_premium = (
-                    str(profile.get("plan") or "free").lower() == "premium"
-                    and float(profile.get("subscription_until") or 0) > now().timestamp()
-                )
-                # Keep community moderation aligned with the single ID hardcoded in
-                # the Admin profile and Community UI. Do not let an unrelated Railway
-                # override hide the admin controls.
-                current_april_id = str(profile.get("april_id") or "").strip().upper()
-                is_admin = current_april_id == "APR-WMBS-8W4Y"
-                return {
-                    "success": True,
-                    "messages": messages,
-                    "profile": {"display_name": display_name, "is_custom": bool(profile.get("is_custom"))},
-                    "is_admin": is_admin,
-                    "plan": "premium" if active_premium else "free",
-                    "can_post": True,
-                    "max_message_chars": COMMUNITY_MAX_MESSAGE_CHARS,
-                    "max_attachment_bytes": COMMUNITY_MAX_ATTACHMENT_BYTES,
-                }
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] SNAPSHOT_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def save_community_display_name(user_id: Any, display_name: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    name = re.sub(r"\s+", " ", str(display_name or "")).strip()
-    if not (2 <= len(name) <= 32) or not re.fullmatch(r"[\w .’'-]+", name, flags=re.UNICODE):
-        return {"success": False, "error": "INVALID_DISPLAY_NAME"}
-    if name.casefold() in {"admin", "administrator", "moderator", "support", "админ", "администратор", "модератор", "техподдержка"}:
-        return {"success": False, "error": "RESERVED_DISPLAY_NAME"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
-                       VALUES (%s, %s, TRUE, CURRENT_TIMESTAMP)
-                       ON CONFLICT (user_id) DO UPDATE SET
-                         display_name = EXCLUDED.display_name,
-                         is_custom = TRUE,
-                         updated_at = CURRENT_TIMESTAMP
-                       RETURNING display_name""",
-                    (uid, name),
-                )
-                row = cur.fetchone() or {}
-                return {"success": True, "profile": {"display_name": str(row.get("display_name") or name)}}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] PROFILE_SAVE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def reset_community_display_name(user_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT name, april_id FROM users WHERE user_id = %s LIMIT 1", (uid,))
-                user = cur.fetchone() or {}
-                name = str(user.get("name") or "").strip()
-                if not name:
-                    name = f"Участник {str(user.get('april_id') or uid)[-4:]}"
-                name = name[:32]
-                cur.execute(
-                    """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
-                       VALUES (%s, %s, FALSE, CURRENT_TIMESTAMP)
-                       ON CONFLICT (user_id) DO UPDATE SET
-                         display_name = EXCLUDED.display_name,
-                         is_custom = FALSE,
-                         updated_at = CURRENT_TIMESTAMP
-                       RETURNING display_name""",
-                    (uid, name),
-                )
-                row = cur.fetchone() or {}
-                return {"success": True, "profile": {"display_name": str(row.get("display_name") or name), "is_custom": False}}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] PROFILE_RESET_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def create_community_message(
-    user_id: Any,
-    message: Any,
-    *,
-    attachment_name: Any = None,
-    attachment_mime: Any = None,
-    attachment_data: bytes | None = None,
-) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    text_value = str(message or "").strip()
-    binary = bytes(attachment_data) if attachment_data is not None else None
-    if len(text_value) > COMMUNITY_MAX_MESSAGE_CHARS:
-        return {"success": False, "error": "MESSAGE_TOO_LONG"}
-    if not text_value and not binary:
-        return {"success": False, "error": "MESSAGE_OR_FILE_REQUIRED"}
-    if binary is not None and (not binary or len(binary) > COMMUNITY_MAX_ATTACHMENT_BYTES):
-        return {"success": False, "error": "ATTACHMENT_TOO_LARGE_OR_EMPTY"}
-
-    safe_name = None
-    safe_mime = None
-    if binary is not None:
-        original_name = str(attachment_name or "shared-file").replace("\\", "/").split("/")[-1].strip()
-        original_name = "".join(ch for ch in original_name if ch.isprintable() and ch not in "\r\n\x00")[:160]
-        if not original_name or original_name in {".", ".."}:
-            original_name = "shared-file"
-        if os.path.splitext(original_name)[1].lower() in _COMMUNITY_BLOCKED_EXTENSIONS:
-            return {"success": False, "error": "ATTACHMENT_TYPE_BLOCKED"}
-        safe_name = original_name
-        safe_mime = str(attachment_mime or "application/octet-stream").split(";", 1)[0].strip().lower()[:120]
-        if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", safe_mime):
-            safe_mime = "application/octet-stream"
-
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # Serialize public writes; prune old rows before storage-quota checks.
-                _community_lock_history(cur, "public")
-                _community_prune_public_history(cur)
-                cur.execute(
-                    """SELECT u.name, u.april_id, p.display_name,
-                              LOWER(COALESCE(u.plan,'free')) AS plan,
-                              COALESCE(u.subscription_until,0) AS subscription_until
-                       FROM users u LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id = %s LIMIT 1""",
-                    (uid,),
-                )
-                profile = cur.fetchone() or {}
-                display_name = str(profile.get("display_name") or profile.get("name") or "").strip()
-                if not display_name:
-                    display_name = f"Участник {str(profile.get('april_id') or uid)[-4:]}"
-                display_name = display_name[:32]
-                if not profile.get("display_name"):
-                    cur.execute(
-                        """INSERT INTO community_profiles(user_id, display_name, is_custom)
-                           VALUES (%s, %s, FALSE) ON CONFLICT (user_id) DO NOTHING""",
-                        (uid, display_name),
-                    )
-                cur.execute(
-                    "SELECT COUNT(*) AS amount FROM community_messages WHERE user_id = %s AND created_at > NOW() - INTERVAL '1 minute'",
-                    (uid,),
-                )
-                if int((cur.fetchone() or {}).get("amount") or 0) >= COMMUNITY_RATE_LIMIT_PER_MINUTE:
-                    return {"success": False, "error": "RATE_LIMITED"}
-                if binary is not None:
-                    cur.execute(
-                        """SELECT COALESCE(SUM(attachment_size), 0) AS used_bytes
-                           FROM community_messages
-                           WHERE user_id = %s AND is_deleted = FALSE""",
-                        (uid,),
-                    )
-                    used_bytes = int((cur.fetchone() or {}).get("used_bytes") or 0)
-                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
-                        return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
-                cur.execute(
-                    """INSERT INTO community_messages(
-                           user_id, display_name, message, attachment_name,
-                           attachment_mime, attachment_size, attachment_data
-                       ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                       RETURNING id, user_id, display_name, message, created_at,
-                                 attachment_name, attachment_size, is_deleted""",
-                    (uid, display_name, text_value, safe_name, safe_mime, len(binary) if binary is not None else None, binary),
-                )
-                row = dict(cur.fetchone() or {})
-                row["is_own"] = True
-                row["author_plan"] = _community_active_plan(profile)
-                # Keep only the latest 30 public messages, physically removing older
-                # rows (including stored attachment bytes and report rows).
-                _community_prune_public_history(cur)
-                return {"success": True, "message": _community_payload(row)}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] MESSAGE_CREATE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def get_community_file(user_id: Any, message_id: Any) -> dict[str, Any] | None:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    try:
-        mid = int(message_id)
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if mid <= 0:
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT attachment_name, attachment_mime, attachment_size, attachment_data
-                       FROM community_messages m
-                       WHERE m.id = %s AND m.is_deleted = FALSE
-                         AND NOT EXISTS (
-                           SELECT 1 FROM community_user_blocks b
-                           WHERE b.blocker_user_id = %s AND b.blocked_user_id = m.user_id
-                         )
-                       LIMIT 1""",
-                    (mid, uid),
-                )
-                row = cur.fetchone()
-                if not row or row.get("attachment_data") is None:
-                    return {"success": False, "error": "COMMUNITY_FILE_NOT_FOUND"}
-                return {
-                    "success": True,
-                    "name": str(row.get("attachment_name") or "shared-file"),
-                    "mime": str(row.get("attachment_mime") or "application/octet-stream"),
-                    "size": int(row.get("attachment_size") or 0),
-                    "data": bytes(row.get("attachment_data") or b""),
-                }
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] FILE_READ_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    try:
-        mid = int(message_id)
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """UPDATE community_messages
-                       SET is_deleted = TRUE, message = '', attachment_name = NULL,
-                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
-                       WHERE id = %s AND user_id = %s AND is_deleted = FALSE""",
-                    (mid, uid),
-                )
-                if cur.rowcount != 1:
-                    return {"success": False, "error": "MESSAGE_NOT_FOUND_OR_NOT_OWNED"}
-                return {"success": True, "message_id": mid}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] MESSAGE_DELETE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[str, Any]:
-    """Delete any public community message, but only for the configured superadmin."""
-    admin_uid = _community_canonical_user(admin_user_id)
-    if not admin_uid:
-        return {"success": False, "error": "SUPERADMIN_REQUIRED"}
-    # Authorization uses the exact April ID displayed in Admin-profile. Resolve
-    # the authenticated session to its DB user and verify that row server-side.
-    auth_conn = get_conn()
-    if not auth_conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with auth_conn.cursor() as cur:
-            cur.execute("SELECT april_id FROM users WHERE user_id = %s LIMIT 1", (admin_uid,))
-            admin_row = cur.fetchone() or {}
-        if str(admin_row.get("april_id") or "").strip().upper() != "APR-WMBS-8W4Y":
-            return {"success": False, "error": "SUPERADMIN_REQUIRED"}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] ADMIN_AUTH_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        auth_conn.close()
-    try:
-        mid = int(message_id)
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    if mid <= 0:
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """UPDATE community_messages
-                       SET is_deleted = TRUE, message = '', attachment_name = NULL,
-                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
-                       WHERE id = %s AND is_deleted = FALSE""",
-                    (mid,),
-                )
-                if cur.rowcount != 1:
-                    return {"success": False, "error": "MESSAGE_NOT_FOUND"}
-                return {"success": True, "message_id": mid, "deleted_by": "admin"}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] ADMIN_DELETE_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-def report_community_message(user_id: Any, message_id: Any, reason: Any = "inappropriate") -> dict[str, Any]:
-    uid = _community_canonical_user(user_id)
-    if not uid:
-        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-    try:
-        mid = int(message_id)
-    except (TypeError, ValueError):
-        return {"success": False, "error": "MESSAGE_ID_INVALID"}
-    safe_reason = str(reason or "inappropriate").strip().lower()[:40]
-    if safe_reason not in {"inappropriate", "spam", "abuse", "malware", "other"}:
-        safe_reason = "other"
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM community_messages WHERE id = %s AND user_id <> %s AND is_deleted = FALSE", (mid, uid))
-                if not cur.fetchone():
-                    return {"success": False, "error": "MESSAGE_NOT_FOUND"}
-                cur.execute(
-                    """INSERT INTO community_message_reports(message_id, reporter_user_id, reason)
-                       VALUES (%s, %s, %s) ON CONFLICT (message_id, reporter_user_id) DO NOTHING""",
-                    (mid, uid, safe_reason),
-                )
-                return {"success": True, "reported": cur.rowcount == 1}
-    except Exception as exc:
-        print(f"[APRIL_COMMUNITY] MESSAGE_REPORT_FAILED type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
-    finally:
-        conn.close()
-
-
-
-def submit_ai_content_report(user_id: Any, message_id: Any, reason: Any, content_excerpt: Any) -> dict[str, Any]:
-    """Persist a report about AI-generated content from an authenticated April account.
-
-    Reports are scoped to the canonical users.user_id and are deleted with that
-    account. A modest per-account quota limits abuse of the reporting mechanism.
-    """
-    raw = str(user_id or "").strip()
-    msg_id = str(message_id or "").strip()[:160]
-    report_reason = str(reason or "").strip().lower()
-    excerpt = str(content_excerpt or "").strip()[:2000]
-    if not raw or not msg_id or not excerpt or report_reason not in {"harmful", "offensive", "misleading", "other"}:
-        return {"success": False, "error": "REPORT_FIELDS_INVALID"}
-
-    conn = get_conn()
-    if not conn:
-        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                # The account row is authoritative; clients cannot choose report ownership.
-                cur.execute(
-                    """SELECT user_id, email, provider FROM users
-                       WHERE user_id = %s OR april_id = %s
-                       ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1""",
-                    (raw, raw, raw),
-                )
-                user = cur.fetchone()
-                if not _is_authenticated_row(user):
-                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-                canonical_id = str(user.get("user_id") or "").strip()
-                if not canonical_id:
-                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-
-                cur.execute(
-                    """CREATE TABLE IF NOT EXISTS april_ai_content_reports (
-                        id BIGSERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                        message_id TEXT NOT NULL,
-                        reason TEXT NOT NULL CHECK (reason IN ('harmful', 'offensive', 'misleading', 'other')),
-                        content_excerpt TEXT NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'open',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    )"""
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_april_ai_content_reports_created_at ON april_ai_content_reports(created_at DESC)"
-                )
-                cur.execute(
-                    """SELECT COUNT(*) AS report_count FROM april_ai_content_reports
-                       WHERE user_id = %s AND created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'""",
-                    (canonical_id,),
-                )
-                count_row = cur.fetchone() or {}
-                if int(count_row.get("report_count") or 0) >= 10:
-                    return {"success": False, "error": "REPORT_RATE_LIMITED"}
-                cur.execute(
-                    """INSERT INTO april_ai_content_reports (user_id, message_id, reason, content_excerpt)
-                       VALUES (%s, %s, %s, %s) RETURNING id""",
-                    (canonical_id, msg_id, report_reason, excerpt),
-                )
-                inserted = cur.fetchone() or {}
-                report_id = int(inserted.get("id") or 0)
-                if report_id <= 0:
-                    return {"success": False, "error": "REPORT_SAVE_FAILED"}
-        return {"success": True, "report_id": report_id}
-    except Exception as exc:
-        print(f"[APRIL_CONTENT_REPORT] SAVE_ERROR type={type(exc).__name__}", flush=True)
-        return {"success": False, "error": "CONTENT_REPORT_UNAVAILABLE"}
-    finally:
-        conn.close()
