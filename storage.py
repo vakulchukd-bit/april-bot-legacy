@@ -4885,6 +4885,7 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                                        THEN 'premium' ELSE 'free' END AS author_plan
                            FROM community_messages m JOIN users u ON u.user_id=m.user_id
                            WHERE m.id < %s
+                             AND m.is_deleted = FALSE
                              AND NOT EXISTS (
                                SELECT 1 FROM community_user_blocks b
                                WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
@@ -4900,10 +4901,11 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                                             AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                                        THEN 'premium' ELSE 'free' END AS author_plan
                            FROM community_messages m JOIN users u ON u.user_id=m.user_id
-                           WHERE NOT EXISTS (
-                             SELECT 1 FROM community_user_blocks b
-                             WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
-                           )
+                           WHERE m.is_deleted = FALSE
+                             AND NOT EXISTS (
+                               SELECT 1 FROM community_user_blocks b
+                               WHERE b.blocker_user_id=%s AND b.blocked_user_id=m.user_id
+                             )
                            ORDER BY m.id DESC LIMIT %s""",
                         (uid, safe_limit),
                     )
