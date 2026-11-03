@@ -1,8 +1,9 @@
 """Shared File Delivery Room for Free and Premium SceneContracts.
 
-This room creates only a renderer artifact. It does not persist bytes, decide
-which plan may create a file, or choose a second transport route. Executors
-attach authenticated dialogue-memory asset references after persistence.
+This room creates FileDeliveryBlock renderer artifacts from already-produced
+TableBlock, CodeBlock, long-form text, or authenticated saved asset references.
+It does not generate source content, decide plan entitlement, or persist bytes;
+executors persist the payload and attach authenticated dialogue-memory references.
 """
 from __future__ import annotations
 
@@ -136,7 +137,13 @@ def attach_file_delivery_blocks(
         block for block in blocks
         if str(block.get("type") or block.get("artifact_type") or "").strip().lower() == "table"
     ]
-    wants_inline_table = "table" in requested and bool(table_blocks)
+    # TableBlock has its own export control only when the table is also shown
+    # inline. An explicit file-only request must instead produce a real XLSX
+    # FileDeliveryBlock so the user receives one downloadable workbook.
+    wants_inline_table = (
+        "table" in requested and bool(table_blocks)
+        and str(file_delivery_mode or "").lower() != "file_only"
+    )
     existing_file_names = {
         str(block_payload(block).get("filename") or block_payload(block).get("name") or "").strip().casefold()
         for block in blocks if str(block.get("type") or block.get("artifact_type") or "").lower() in {"file", "document", "file_card", "text_file", "code_file"}
@@ -147,6 +154,13 @@ def attach_file_delivery_blocks(
                   if str(ref.get("asset_role") or "april_output") == "april_output"
                   and str(ref.get("output_type") or "").lower() in {"code", "file"}
                   and re.fullmatch(r"[a-f0-9]{64}", str(ref.get("sha256") or ""), re.I)]
+    if str(file_delivery_mode or "").lower() == "file_only" and table_blocks:
+        # When the table itself is the requested deliverable, the protected XLSX
+        # export below is canonical. Do not also attach the provider's CSV asset
+        # as a second, competing download card.
+        saved_refs = [ref for ref in saved_refs
+                      if not str(ref.get("filename") or "").lower().endswith(".csv")
+                      and "text/csv" not in str(ref.get("mime_type") or "").lower()]
     if saved_refs:
         for block in blocks:
             block_type = str(block.get("type") or block.get("artifact_type") or "").lower()
@@ -359,7 +373,8 @@ def attach_file_delivery_blocks(
             # The visible TableBlock has a built-in XLSX export menu. Keeping an
             # extra FileDeliveryBlock here would create a second, inconsistent file.
             continue
-        title = str(table.get("title") or table.get("caption") or "April table")[:120]
+        default_table_title = "Таблица" if str(language or "").lower().startswith(("ru", "uk", "ua")) else "April table"
+        title = str(table.get("title") or table.get("caption") or default_table_title)[:120]
         filename = re.sub(r"[^\w.-]+", "_", title, flags=re.UNICODE).strip("._")[:90] or "april-table"
         filename = filename if filename.lower().endswith(".xlsx") else f"{filename}.xlsx"
         if filename.casefold() in existing_file_names:
@@ -378,9 +393,101 @@ def attach_file_delivery_blocks(
                     "rows": normalized_rows,
                     "additional_sheets": table.get("additional_sheets") if isinstance(table.get("additional_sheets"), list) else [],
                 },
+                # Keep the table's typed source beside the file so later Premium
+                # turns can continue editing/reusing the same table branch even
+                # though file_only removes the visible TableBlock.
+                "source_artifacts": [{
+                    "type": "table", "title": title,
+                    "headers": normalized_headers, "rows": normalized_rows,
+                    "additional_sheets": table.get("additional_sheets") if isinstance(table.get("additional_sheets"), list) else [],
+                }],
             },
         })
         existing_file_names.add(filename.casefold())
+
+    # Code requested as a file must be a real downloadable source file, not only
+    # an inline CodeBlock. Preserve the requested language and choose a safe,
+    # conventional extension without changing the source text.
+    code_blocks = [
+        block for block in blocks
+        if str(block.get("type") or block.get("artifact_type") or "").strip().lower() == "code"
+    ]
+    for code_block in code_blocks:
+        code_payload = block_payload(code_block)
+        code_text = next((str(code_payload.get(key) or "") for key in ("code", "source_code", "source", "content", "text")
+                          if str(code_payload.get(key) or "").strip()), "")
+        if not code_text:
+            continue
+        language_key = str(code_payload.get("language") or code_block.get("language") or "text").strip().lower()
+        extensions = {
+            "python": (".py", "text/x-python"), "py": (".py", "text/x-python"),
+            "javascript": (".js", "text/javascript"), "js": (".js", "text/javascript"),
+            "typescript": (".ts", "text/typescript"), "ts": (".ts", "text/typescript"),
+            "tsx": (".tsx", "text/typescript"), "jsx": (".jsx", "text/javascript"),
+            "json": (".json", "application/json"), "html": (".html", "text/html"),
+            "css": (".css", "text/css"), "sql": (".sql", "application/sql"),
+            "bash": (".sh", "text/x-shellscript"), "shell": (".sh", "text/x-shellscript"),
+            "yaml": (".yml", "application/yaml"), "yml": (".yml", "application/yaml"),
+            "xml": (".xml", "application/xml"), "markdown": (".md", "text/markdown"),
+        }
+        extension, mime_type = extensions.get(language_key, (".txt", "text/plain; charset=utf-8"))
+        preferred_name = str(code_payload.get("filename") or code_block.get("filename") or "").strip()
+        safe_name = re.sub(r"[^\w.-]+", "_", preferred_name, flags=re.UNICODE).strip("._")[:90]
+        filename = safe_name or f"april_code{extension}"
+        if not filename.lower().endswith(extension):
+            filename = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", filename) + extension
+        if filename.casefold() in existing_file_names:
+            continue
+        file_blocks.append({
+            "type": "file", "artifact_type": "file", "renderer": RENDERER, "viewer": RENDERER,
+            "source_room": ROOM_ID,
+            "payload": {
+                "title": str(code_payload.get("title") or "Code file")[:120],
+                "filename": filename, "mime_type": mime_type,
+                "content": code_text, "source": "code_block_export", "description": "",
+                "source_artifacts": [{
+                    "type": "code", "language": language_key,
+                    "filename": filename, "code": code_text,
+                }],
+            },
+        })
+        existing_file_names.add(filename.casefold())
+
+    # When the user explicitly asks for a long answer as a file, create a Markdown
+    # document from the complete assistant text. Tables and code are handled by
+    # their typed exporters above, so they are not flattened into a text document.
+    if not table_blocks and not code_blocks and not any(
+        str(block.get("type") or block.get("artifact_type") or "").strip().lower() == "file"
+        and any(str((block.get("payload") or {}).get(key) or "").strip() for key in ("content", "text", "code"))
+        for block in blocks
+    ):
+        text_candidates: list[str] = []
+        for text_block in blocks:
+            if str(text_block.get("type") or text_block.get("artifact_type") or "").strip().lower() not in {"text", "markdown", "message", "message_text", "answer"}:
+                continue
+            text_payload = block_payload(text_block)
+            candidate = next((str(text_payload.get(key) or "") for key in ("content", "markdown", "text", "answer")
+                              if str(text_payload.get(key) or "").strip()), "")
+            if candidate.strip():
+                text_candidates.append(candidate)
+        long_text = max(text_candidates, key=len) if text_candidates else ""
+        if len(long_text.strip()) >= 500:
+            filename = "april_answer.md"
+            if filename.casefold() not in existing_file_names:
+                file_blocks.append({
+                    "type": "file", "artifact_type": "file", "renderer": RENDERER, "viewer": RENDERER,
+                    "source_room": ROOM_ID,
+                    "payload": {
+                        "title": "April answer", "filename": filename,
+                        "mime_type": "text/markdown; charset=utf-8",
+                        "content": long_text, "source": "long_text_export", "description": "",
+                        "source_artifacts": [{
+                            "type": "copy", "filename": filename,
+                            "content": long_text, "text": long_text,
+                        }],
+                    },
+                })
+                existing_file_names.add(filename.casefold())
 
     # Existing File blocks may already contain the bytes inline or a saved ref.
     for block in blocks:
@@ -415,6 +522,15 @@ def attach_file_delivery_blocks(
             return True
         return bool(re.match(r"^https://", str(payload.get("download_url") or payload.get("file_url") or ""), re.I))
 
+    # Empty FileDeliveryBlock shells can coexist with a concrete artifact after
+    # provider restoration (the mobile UI then displays a second, blank card).
+    # Keep only file blocks that carry bytes, an authenticated asset reference,
+    # an XLSX export payload, or a validated download URL.
+    blocks = [
+        block for block in blocks
+        if str(block.get("type") or block.get("artifact_type") or "").lower() != "file"
+        or has_downloadable_source(block)
+    ]
     delivered_file_blocks = [
         block for block in blocks
         if str(block.get("type") or block.get("artifact_type") or "").lower() == "file"
