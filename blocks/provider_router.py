@@ -3300,8 +3300,177 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if total <= MAX_PROMPT_TOKENS:
                     break
     if total > MAX_PROMPT_TOKENS:
-        # Preserve the explicit failure only when the actual protected source itself
-        # cannot fit; ordinary metadata overflow must not cause an HTTP 500.
+        # Compact duplicated audit data before declaring a genuine Free-capacity
+        # limit. In particular, REQUEST_SEQUENCE may contain 20+ independently
+        # classified tasks while DIALOGUE_TRANSITION_ANALYSIS repeats the same
+        # vectors; the sequence is authoritative for order/output types.
+        def _recount_emergency() -> int:
+            nonlocal card, total
+            card = _json_card(minimal)
+            total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
+            if externalized_structures:
+                total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            return total
+
+        transition = minimal.get("DIALOGUE_TRANSITION_ANALYSIS")
+        if isinstance(transition, dict):
+            transition = dict(transition)
+            pre = transition.get("pre_response_analysis") if isinstance(transition.get("pre_response_analysis"), dict) else {}
+            if pre:
+                transition["pre_response_analysis"] = {
+                    key: pre[key] for key in (
+                        "classification", "response_strategy", "source_message_key", "latest_answer_match",
+                        "history_branch_selected", "request_task_count", "branch_alignment",
+                    ) if key in pre
+                }
+            minimal["DIALOGUE_TRANSITION_ANALYSIS"] = {
+                key: transition[key] for key in (
+                    "classification", "response_strategy", "source_message_key", "latest_answer_match",
+                    "history_branch_selected", "request_task_count", "pre_response_analysis",
+                ) if key in transition
+            }
+
+        def _slim_asset_index(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+            result = dict(value)
+            for role in ("user_inputs", "april_outputs"):
+                entries = result.get(role)
+                if not isinstance(entries, list):
+                    continue
+                result[role] = [
+                    {key: entry[key] for key in ("kind", "output_type", "filename", "mime_type", "message_id", "title", "sha256") if key in entry}
+                    for entry in entries[:5] if isinstance(entry, dict)
+                ]
+            return result
+
+        anchor_card = minimal.get("DIALOGUE_ANCHOR")
+        if isinstance(anchor_card, dict):
+            anchor_card = dict(anchor_card)
+            for key in ("assistant_message", "assistant_last_message", "last_answer", "user_message"):
+                if key in anchor_card:
+                    anchor_card[key] = _semantic_compress(anchor_card.get(key), 36 if key.startswith("assistant") or key == "last_answer" else 18)
+            for key in ("artifact_index", "dialogue_assets", "assets"):
+                if key in anchor_card:
+                    anchor_card[key] = _slim_asset_index(anchor_card[key])
+            minimal["DIALOGUE_ANCHOR"] = anchor_card
+
+        pairs = minimal.get("CONTINUATION_CONTEXT")
+        if isinstance(pairs, list):
+            slim_pairs = []
+            pair_limit = 5 if minimal.get("HISTORY_REQUEST") else 3
+            for pair in pairs[:pair_limit]:
+                if not isinstance(pair, dict):
+                    continue
+                clean_pair = dict(pair)
+                for key in ("user", "april", "source_user_text", "source_april_text"):
+                    if key in clean_pair:
+                        clean_pair[key] = _semantic_compress(clean_pair.get(key), 34 if key in {"april", "source_april_text"} else 18)
+                if "dialogue_assets" in clean_pair:
+                    clean_pair["dialogue_assets"] = _slim_asset_index(clean_pair["dialogue_assets"])
+                slim_pairs.append(clean_pair)
+            minimal["CONTINUATION_CONTEXT"] = slim_pairs
+
+        # Non-history requests do not need a second, independently ranked topic
+        # catalogue once an exact active anchor/selected pair has been chosen.
+        if not minimal.get("HISTORY_REQUEST"):
+            minimal.pop("DIALOGUE_HISTORY_TOPICS", None)
+            minimal.pop("DIALOGUE_TOPIC_INDEX", None)
+            minimal.pop("DIALOGUE_TABLE_MARKDOWN", None)
+        guidance = minimal.get("CONTINUATION_GUIDANCE")
+        if isinstance(guidance, dict):
+            minimal["CONTINUATION_GUIDANCE"] = {
+                key: guidance[key] for key in (
+                    "mode", "semantic_intent", "search_direction", "topic_reference",
+                    "selection_method", "selected_message_ids", "coverage_policy", "last_turn_link",
+                ) if key in guidance
+            }
+
+        # All substeps remain in order and retain their own requested renderer
+        # types. Only duplicate prose is shortened progressively until the card
+        # fits; no task is removed and protected current/structured source stays exact.
+        sequence_source = minimal.get("REQUEST_SEQUENCE")
+        if isinstance(sequence_source, list):
+            for per_step_tokens in (12, 9, 6, 4):
+                compact_sequence = []
+                for index, step in enumerate(sequence_source, start=1):
+                    if isinstance(step, dict):
+                        raw_request = _text(step.get("request") or step.get("q") or step.get("query"))
+                        outputs = step.get("output_types") or step.get("o") or step.get("output") or ["text"]
+                        if not isinstance(outputs, list):
+                            outputs = [outputs]
+                        record = {
+                            "i": step.get("step_index") or step.get("i") or index,
+                            "o": [str(value)[:24] for value in outputs[:6] if value],
+                        }
+                        compact_request = _semantic_compress(raw_request, per_step_tokens) if raw_request else ""
+                        if compact_request:
+                            record["q"] = compact_request
+                        # Keep non-default subtask semantics when they change how
+                        # the step is handled; omit NEW_INFORMATION as redundant.
+                        intent = _text(step.get("semantic_intent")).upper()
+                        if intent and intent != "NEW_INFORMATION":
+                            record["intent"] = intent[:32]
+                        compact_sequence.append({key: value for key, value in record.items() if value not in (None, "", [], {})})
+                    else:
+                        compact_request = _semantic_compress(step, per_step_tokens)
+                        compact_sequence.append({"i": index, **({"q": compact_request} if compact_request else {}), "o": ["text"]})
+                minimal["REQUEST_SEQUENCE"] = compact_sequence
+                _recount_emergency()
+                if total <= MAX_PROMPT_TOKENS:
+                    break
+
+            if total > MAX_PROMPT_TOKENS:
+                # The exact CURRENT_REQUEST remains untouched above. When many
+                # substeps make even 4-token descriptions too expensive, keep
+                # every ordered step and its renderer contract without replacing
+                # the user's request with misleading one-word fragments.
+                minimal["REQUEST_SEQUENCE"] = [
+                    {
+                        "i": (step.get("step_index") or step.get("i") or index)
+                        if isinstance(step, dict) else index,
+                        "o": [
+                            str(value)[:24] for value in (
+                                step.get("output_types") or step.get("o") or step.get("output") or ["text"]
+                                if isinstance(step, dict) else ["text"]
+                            )[:6] if value
+                        ],
+                        **({"intent": _text(step.get("semantic_intent")).upper()[:32]}
+                           if isinstance(step, dict) and _text(step.get("semantic_intent")).upper() not in {"", "NEW_INFORMATION"}
+                           else {}),
+                    }
+                    for index, step in enumerate(sequence_source, start=1)
+                ]
+                _recount_emergency()
+
+        if total > MAX_PROMPT_TOKENS:
+            # Drop secondary presentation/personality metadata before any source
+            # or task identity. Site navigation instructions remain when needed.
+            for key in (
+                "DIALOGUE_COMMUNICATION", "DIALOGUE_BASED_PORTRAIT_PROFILE",
+                "HISTORY_TOPIC_MINIMUM", "DIALOGUE_KNOWN_TOPIC_COUNT",
+                "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS",
+            ):
+                minimal.pop(key, None)
+                _recount_emergency()
+                if total <= MAX_PROMPT_TOKENS:
+                    break
+
+        if total > MAX_PROMPT_TOKENS:
+            # Minimal semantic contract: preserve current request, output contract,
+            # every task index/type, relation and selected source IDs.
+            compact_system = (
+                "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Follow DIALOGUE_RELATION and LAST_TURN_LINK; "
+                "use only selected authenticated history when it matches. Preserve protected source values and every "
+                "REQUEST_SEQUENCE step in order with its output type. Use concrete registered renderers only. "
+                "Return valid JSON matching OUTPUT_CONTRACT; do not invent data or claim an artifact without its payload."
+            )
+            system = compact_system
+            _recount_emergency()
+
+    if total > MAX_PROMPT_TOKENS:
+        # This remaining case is a genuine Free input-capacity limit (e.g. an
+        # exact protected source alone is larger than the package allowance).
         raise RuntimeError(f"APRIL_PROMPT_BUDGET_UNSATISFIABLE:{total}>{MAX_PROMPT_TOKENS}")
     return system, card, total, ("emergency_compaction" if 'emergency' in locals() else ("protected_data_externalized_hard_budget" if externalized_structures else "minimal_hard_budget"))
 
@@ -6417,6 +6586,64 @@ async def _repair_requested_graph(
     return repaired, usage, meta
 
 
+def _free_provider_fallback_contract(request: MachineRequest, failure_code: str, provider_retries: int = 0) -> dict[str, Any]:
+    """Build a public-safe Free fallback; implementation codes stay in metadata/logs."""
+    constraints = request.constraints if isinstance(request.constraints, dict) else {}
+    language = _text(
+        constraints.get("display_language") or constraints.get("provider_output_language") or "en"
+    ).lower()
+    language = language.split("-", 1)[0]
+    if language == "uk":
+        language = "ua"
+    is_capacity_limit = str(failure_code or "").startswith((
+        "APRIL_INPUT_BUDGET_EXCEEDED",
+        "APRIL_PROMPT_BUDGET_UNSATISFIABLE",
+        "APRIL_OUTPUT_BUDGET_EXCEEDED",
+    ))
+    if is_capacity_limit:
+        answers = {
+            "ru": "Извините, полный объём этого запроса превышает возможности пакета Free. Перейдите на Premium, чтобы увеличить объём обрабатываемых данных и доступный объём ответа. Продолжим в этом же диалоге.",
+            "ua": "Вибачте, повний обсяг цього запиту перевищує можливості пакета Free. Перейдіть на Premium, щоб збільшити обсяг даних для обробки та доступний обсяг відповіді. Продовжимо в цьому самому діалозі.",
+            "en": "Sorry, the full scope of this request exceeds the Free plan's capacity. Upgrade to Premium for more input data and a larger response allowance. We can continue in this same conversation.",
+            "fr": "Désolé, le volume complet de cette demande dépasse les capacités de l’offre Free. Passez à Premium pour traiter davantage de données et obtenir des réponses plus longues. Nous pouvons continuer dans cette même conversation.",
+            "de": "Der vollständige Umfang dieser Anfrage überschreitet die Kapazität des Free-Tarifs. Wechseln Sie zu Premium, um mehr Daten zu verarbeiten und längere Antworten zu erhalten. Wir können in diesem Dialog fortfahren.",
+            "es": "Lo sentimos, el alcance completo de esta solicitud supera la capacidad del plan Free. Pásate a Premium para procesar más datos y obtener respuestas más amplias. Podemos continuar en esta misma conversación.",
+        }
+        error_kind = "free_capacity_limit"
+    else:
+        answers = {
+            "ru": "Не удалось завершить обработку запроса из-за технической ошибки. История этого диалога сохранена; повторите запрос здесь же.",
+            "ua": "Не вдалося завершити обробку запиту через технічну помилку. Історію цього діалогу збережено; повторіть запит тут само.",
+            "en": "The request could not be completed because of a technical error. This conversation's history is retained; please retry here.",
+            "fr": "La demande n’a pas pu être terminée en raison d’une erreur technique. L’historique de cette conversation est conservé ; réessayez ici.",
+            "de": "Die Anfrage konnte aufgrund eines technischen Fehlers nicht abgeschlossen werden. Der Gesprächsverlauf bleibt erhalten; versuchen Sie es hier erneut.",
+            "es": "No se pudo completar la solicitud por un error técnico. El historial de esta conversación se conserva; inténtalo de nuevo aquí.",
+        }
+        error_kind = "technical_failure"
+    answer = answers.get(language, answers["en"])
+    return {
+        "machine_response": {
+            "answer": answer,
+            "content": answer,
+            "summary": answer,
+            "render_blocks": [{
+                "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+                "content": answer,
+            }],
+            "metadata": {
+                "provider_model": MODEL,
+                "provider_context_authority": "PROCESSOR",
+                "provider_fallback": True,
+                "provider_error_code": str(failure_code or "PROVIDER_REQUEST_FAILED")[:220],
+                "provider_error_kind": error_kind,
+                "provider_retries": max(0, int(provider_retries or 0)),
+                "provider_output_limit": FREE_OUTPUT_TOKEN_LIMIT,
+            },
+            "artifacts": [],
+        }
+    }
+
+
 async def generate_text(
     request: MachineRequest | dict[str, Any],
 ) -> dict[str, Any]:
@@ -6624,8 +6851,15 @@ async def generate_text(
                 **response_summary,
             })
             if response_status == "incomplete" and not refusal_adapter_applied:
-                failure_code = "PROVIDER_OUTPUT_INCOMPLETE"
                 reason = _text(getattr(response, "incomplete_reason", "")) or "unknown"
+                reason_key = re.sub(r"[^a-z0-9_]+", "_", reason.lower()).strip("_")
+                if reason_key in {"max_output_tokens", "max_output_tokens_exceeded", "output_token_limit", "output_limit", "token_limit"}:
+                    # This is a real Free output allowance boundary, not a
+                    # provider/server fault. Route it to the localized Premium
+                    # capacity notice after the bounded recovery has been used.
+                    failure_code = f"APRIL_OUTPUT_BUDGET_EXCEEDED:{reason_key}"
+                else:
+                    failure_code = "PROVIDER_OUTPUT_INCOMPLETE"
                 print(
                     f"[APRIL_PROVIDER] incomplete model output; retries={provider_retries} "
                     f"reason={re.sub(r'[^A-Za-z0-9_:-]', '_', reason)[:80]} "
@@ -7007,80 +7241,15 @@ async def generate_text(
             )
 
         if contract is None:
-            language = _text(
-                (request.constraints or {}).get("display_language")
-                or (request.constraints or {}).get("provider_output_language")
-                or "en"
-            ).lower()
-            attachments = (request.metadata or {}).get("attachments", []) if isinstance(request.metadata, dict) else []
-            has_attachment = bool(attachments or (request.visual_context or {}).get("items") or (request.metadata or {}).get("file_inputs") or (request.metadata or {}).get("file_contents"))
-            if failure_code.startswith(("APRIL_INPUT_BUDGET_EXCEEDED", "APRIL_PROMPT_BUDGET_UNSATISFIABLE")):
-                match_budget = re.search(r":(\d+)>(\d+)", failure_code)
-                over_budget_detail = (
-                    f"оценивается в {match_budget.group(1)} токенов при лимите {match_budget.group(2)}"
-                    if match_budget else f"не помещается в лимит {MAX_PROMPT_TOKENS} токенов"
-                )
-                over_budget_detail_uk = (
-                    f"оцінюється у {match_budget.group(1)} токенів за ліміту {match_budget.group(2)}"
-                    if match_budget else f"не вміщується в ліміт {MAX_PROMPT_TOKENS} токенів"
-                )
-                over_budget_detail_en = (
-                    f"is estimated at {match_budget.group(1)} tokens against a {match_budget.group(2)}-token limit"
-                    if match_budget else f"does not fit within the {MAX_PROMPT_TOKENS}-token limit"
-                )
-                if language.startswith("ru"):
-                    answer = (f"Запрос не отправлен модели: подготовленный текстовый ввод {over_budget_detail}. "
-                              "Я не стал молча обрезать исходные данные. Разделите материал на несколько частей или укажите конкретный файл/раздел для разбора; затем продолжим в этом же диалоге.")
-                elif language.startswith("uk"):
-                    answer = (f"Запит не надіслано моделі: підготовлений текстовий ввід {over_budget_detail_uk}. "
-                              "Я не став мовчки обрізати вихідні дані. Розділіть матеріал на кілька частин або вкажіть конкретний файл/розділ для аналізу; продовжимо в цьому самому діалозі.")
-                else:
-                    answer = (f"The request was not sent to the model: the prepared text input {over_budget_detail_en}. "
-                              "I did not silently truncate the source data. Split the material into smaller parts or specify a file/section, then continue in this same conversation.")
-            elif language.startswith("ru"):
-                answer = (
-                    "Не удалось завершить ответ модели (" + failure_code + "). "
-                    "Оригинал вложения сохранён; повторно загружать его не нужно. Повторите запрос в этом же диалоге."
-                    if has_attachment else
-                    "Не удалось завершить ответ модели в этом запросе (" + failure_code + "). Повторите исходный запрос в этом же диалоге; не начинайте новую переписку."
-                )
-            elif language.startswith("uk"):
-                answer = (
-                    "Не вдалося завершити відповідь моделі в цьому запиті (" + failure_code + "). "
-                    "Оригінал вкладення збережено; повторно завантажувати його не потрібно. Повторіть запит у цьому самому діалозі."
-                    if has_attachment else
-                    "Не вдалося завершити відповідь моделі в цьому запиті (" + failure_code + "). Повторіть початковий запит у цьому самому діалозі; не починайте нову розмову."
-                )
-            else:
-                answer = (
-                    "The model could not complete this response (" + failure_code + "). "
-                    "The original attachment remains saved; re-uploading is not required. Retry in the same conversation."
-                    if has_attachment else
-                    "The model could not complete this response (" + failure_code + "). Retry the original request in this same conversation; do not start a new conversation."
-                )
-            contract = {
-                "machine_response": {
-                    "answer": answer,
-                    "content": answer,
-                    "summary": answer,
-                    "render_blocks": [{
-                        "type": "text",
-                        "renderer": "MessageTextBlock",
-                        "viewer": "MessageTextBlock",
-                        "content": answer,
-                    }],
-                    "metadata": {
-                        "provider_model": MODEL,
-                        "provider_context_authority": "PROCESSOR",
-                        "provider_fallback": True,
-                        "provider_error_code": failure_code,
-                        "provider_retries": int(locals().get("provider_retries", 0)),
-                        "provider_output_limit": FREE_OUTPUT_TOKEN_LIMIT,
-                    },
-                    "artifacts": [],
-                }
-            }
-            print(f"[APRIL_PROVIDER] non-empty fallback returned; retries={locals().get('provider_retries', 0)} code={failure_code}", flush=True)
+            contract = _free_provider_fallback_contract(
+                request, failure_code, int(locals().get("provider_retries", 0))
+            )
+            print(
+                f"[APRIL_PROVIDER] non-empty fallback returned; retries={locals().get('provider_retries', 0)} "
+                f"kind={contract['machine_response']['metadata'].get('provider_error_kind')} "
+                f"code={(re.match(r'[A-Z0-9_]+', failure_code.upper()).group(0) if re.match(r'[A-Z0-9_]+', failure_code.upper()) else 'PROVIDER_REQUEST_FAILED')}",
+                flush=True,
+            )
 
         machine_response = contract["machine_response"]
         machine_response.setdefault("metadata", {})
@@ -7104,6 +7273,31 @@ async def generate_text(
         # immediate user retry has another chance to produce a real answer.
         if not machine_response.get("metadata", {}).get("provider_fallback"):
             _cache[key] = (time.time(), contract)
+        return contract
+    except Exception as exc:
+        # _build_input() runs before the inner provider-call recovery block. Catch
+        # its last-resort budget failure here so the Web route still returns a
+        # localized Free capacity notice instead of surfacing an internal 500.
+        raw_error = str(exc or "").strip()
+        if raw_error.startswith(("APRIL_INPUT_BUDGET_EXCEEDED", "APRIL_PROMPT_BUDGET_UNSATISFIABLE")):
+            failure_code = raw_error[:220]
+        elif raw_error and re.match(r"^[A-Z0-9_]+(?:[: ]|$)", raw_error.upper()):
+            failure_code = raw_error[:220]
+        else:
+            failure_code = type(exc).__name__.upper() or "PROVIDER_REQUEST_FAILED"
+        if contract is None:
+            contract = _free_provider_fallback_contract(request, failure_code, int(locals().get("provider_retries", 0)))
+        _log_json("FALLBACK", {
+            "request_fingerprint": key[:16],
+            "failure_code": (re.match(r"[A-Z0-9_]+", failure_code.upper()).group(0) if re.match(r"[A-Z0-9_]+", failure_code.upper()) else "PROVIDER_REQUEST_FAILED"),
+            "failure_stage": "provider_request_or_prompt_build",
+            "provider_retries": int(locals().get("provider_retries", 0)),
+            "input_budget": {
+                "budget_tokens": MAX_PROMPT_TOKENS,
+                "estimated_text_input_tokens_with_recovery_headroom": input_diagnostics.get("estimated_text_input_tokens_with_recovery_headroom"),
+                "compression_stage": input_diagnostics.get("compression_stage"),
+            },
+        })
         return contract
     finally:
         machine_for_timing = (contract or {}).get("machine_response") if isinstance(contract, dict) else None
