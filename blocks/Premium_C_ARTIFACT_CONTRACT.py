@@ -4830,8 +4830,27 @@ def prepare_render_blocks_for_room_dispatch(
             payload = _canonicalize_premium_3d_payload(payload, explicit_3d_type=explicit_3d_type)
 
         # Room payloads are hydrated only from evidence already returned for this turn.
+        # Some provider responses put the full Markdown table inside a typed
+        # TableBlock's content/markdown field while the assistant prose merely
+        # promises that the table will appear below. Parse that block-local source
+        # before falling back to the top-level answer; otherwise SceneContract
+        # drops the only copy of the table and Premium memory cannot resume it.
         if block_type == "table" and not _has_render_payload("table", payload):
-            if table_from_answer:
+            embedded_table = {}
+            for source_key in ("markdown", "content", "text", "source", "table_text"):
+                candidate_source = payload.get(source_key) or block.get(source_key)
+                if isinstance(candidate_source, str) and candidate_source.strip():
+                    embedded_table = _markdown_table_payload(candidate_source)
+                    if embedded_table:
+                        break
+            if embedded_table:
+                for metadata_key in ("title", "description", "caption", "summary", "units", "notes"):
+                    metadata_value = payload.get(metadata_key) or block.get(metadata_key)
+                    if metadata_value not in (None, "", [], {}):
+                        embedded_table.setdefault(metadata_key, deepcopy(metadata_value))
+                payload = embedded_table
+                block["source_room"] = block.get("source_room") or "C_TABLE_ROOM"
+            elif table_from_answer:
                 payload = deepcopy(table_from_answer)
                 block["source_room"] = block.get("source_room") or "C_TABLE_ROOM"
         elif block_type == "graph" and not _has_render_payload("graph", payload):
