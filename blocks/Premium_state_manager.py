@@ -3434,6 +3434,21 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
 
         kind = _protected_structured_kind(value)
         if kind:
+            # File-only delivery hides the inline TableBlock/CodeBlock from the
+            # renderer, but its FileDeliveryBlock carries the exact typed source
+            # under `source_artifacts`. Rehydrate those explicit child artifacts
+            # so the next Premium turn can still continue the same table/code
+            # branch instead of treating the file as an unrelated new topic.
+            if kind == "file":
+                payload = value.get("payload") if isinstance(value.get("payload"), dict) else {}
+                source_artifacts = value.get("source_artifacts")
+                if not isinstance(source_artifacts, list):
+                    source_artifacts = payload.get("source_artifacts")
+                if isinstance(source_artifacts, list):
+                    for child_index, child in enumerate(source_artifacts):
+                        found.extend(collect_typed_nodes(
+                            child, source_field, path + ("source_artifacts", child_index), depth + 1
+                        ))
             serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
             found.append({
                 "kind": kind,
@@ -3443,7 +3458,8 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
                 "_fingerprint": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
                 "_richness": _protected_node_richness(kind, value),
             })
-            # Keep the complete typed node as one object; do not split its arrays.
+            # Keep the complete typed node and its explicit source_artifacts as
+            # whole objects; do not split their data arrays into separate nodes.
             return found
 
         for key, child in value.items():
@@ -3516,7 +3532,36 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
         # and delimited formulas still have a lossless continuation representation.
         items.extend(_answer_code_and_diagram_items(source_answer, items))
         typed_kinds = {_text(item.get("kind")).lower() for item in items if isinstance(item, dict)}
-        if "table" not in typed_kinds:
+
+        def _has_value_bearing_table_node(item: dict[str, Any]) -> bool:
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            candidates = [data]
+            for nested_key in ("payload", "spec", "table", "data_table"):
+                nested = data.get(nested_key)
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+            for candidate in candidates:
+                headers = next((candidate.get(key) for key in ("headers", "columns", "column_headers", "labels")
+                                if isinstance(candidate.get(key), list) and candidate.get(key)), [])
+                rows = next((candidate.get(key) for key in ("rows", "data", "values", "matrix", "records")
+                             if isinstance(candidate.get(key), list) and candidate.get(key)), [])
+                if headers and rows:
+                    if any(
+                        (isinstance(row, dict) and any(value not in (None, "", [], {}) for value in row.values()))
+                        or (isinstance(row, (list, tuple)) and any(value not in (None, "", [], {}) for value in row))
+                        or (not isinstance(row, (dict, list, tuple)) and row not in (None, "", [], {}))
+                        for row in rows
+                    ):
+                        return True
+            return False
+
+        table_nodes = [item for item in items if isinstance(item, dict) and _text(item.get("kind")).lower() == "table"]
+        has_value_bearing_table = any(_has_value_bearing_table_node(item) for item in table_nodes)
+        if not has_value_bearing_table:
+            # A renderer shell (TableBlock with a title/renderer but no cells)
+            # is not evidence that the table was safely persisted. Remove those
+            # shells and rebuild the protected data from the canonical answer.
+            items = [item for item in items if item not in table_nodes]
             items.extend(_answer_markdown_table_items(source_answer))
         if "formula" not in typed_kinds:
             items.extend(_answer_formula_items(source_answer))
