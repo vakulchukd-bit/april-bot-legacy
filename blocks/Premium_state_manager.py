@@ -2270,8 +2270,16 @@ def _hot_branch_followup_candidate(
         float(candidate.get("user_overlap") or 0),
         float(candidate.get("subject_overlap") or 0),
     )
+    subject_mismatch = bool(candidate.get("subject_mismatch"))
+    selection_confirmed, _, _ = _selection_followup_confirmed(text, profile, latest_row)
+    # An unrelated self-contained subject must not inherit a hot branch merely
+    # because the prior assistant answer ended with a question. A confirmed
+    # selection from that exact answer (including a scalar option reply) is the
+    # only safe exception.
+    if subject_mismatch and not selection_confirmed:
+        return False
     if reference_followup or marker or pragmatic_followup:
-        return not bool(candidate.get("subject_mismatch")) and (semantic_fit > 0.0 or structurally_underspecified)
+        return (not subject_mismatch or selection_confirmed) and (semantic_fit > 0.0 or structurally_underspecified)
     if not structurally_underspecified:
         return False
 
@@ -2291,7 +2299,7 @@ def _hot_branch_followup_candidate(
     open_question = "?" in assistant_text or "？" in assistant_text
     # An unanswered assistant question is a strong discourse link even after a pause.
     if open_question and len(tokens) <= 8:
-        return True
+        return not subject_mismatch or selection_confirmed
     return semantic_fit >= 0.18 or proximity >= 0.58
 
 
