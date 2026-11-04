@@ -2438,7 +2438,11 @@ def _canonical_visual_payload_for_dedupe(block: Dict[str, Any]) -> Any:
     if block_type == "formula":
         formulas = payload.get("formulas") or payload.get("latex_formulas")
         if isinstance(formulas, list):
-            normalized = [str(item.get("latex") if isinstance(item, dict) else item).strip() for item in formulas if str(item.get("latex") if isinstance(item, dict) else item).strip()]
+            normalized = []
+            for item in formulas:
+                expression = _premium_formula_candidate(item)
+                if expression and expression not in normalized:
+                    normalized.append(expression)
             if normalized:
                 return {"formulas": normalized}
         return {
@@ -3954,16 +3958,20 @@ def _payload_for_render_block(block: Dict[str, Any], block_type: str) -> Dict[st
     # changing the mathematical expression; otherwise SceneContract can silently
     # discard a real formula and leave only its surrounding prose.
     if block_type == "formula":
-        expression = next((
-            str(merged.get(key) or "").strip()
-            for key in ("formula", "latex", "equation", "expression", "math", "content", "text", "display_text", "markdown")
-            if str(merged.get(key) or "").strip()
-        ), "")
-        if expression and len(expression) <= 4000:
-            merged.setdefault("formula", expression)
-            merged.setdefault("latex", expression)
-            if not isinstance(merged.get("formulas"), list) or not merged.get("formulas"):
-                merged["formulas"] = [expression]
+        # Canonicalize only expressions that the browser can actually render.
+        valid_formulas = _premium_formula_candidates(merged, block)
+        if valid_formulas:
+            merged["formulas"] = valid_formulas
+            merged["latex_formulas"] = list(valid_formulas)
+            merged.setdefault("formula", valid_formulas[0])
+            merged.setdefault("latex", valid_formulas[0])
+        else:
+            for key in ("formulas", "latex_formulas", "equations"):
+                if isinstance(merged.get(key), list):
+                    merged.pop(key, None)
+            for key in ("formula", "latex", "equation", "expression", "math"):
+                if key in merged and not _premium_formula_candidate(merged.get(key)):
+                    merged.pop(key, None)
 
     # Accept a direct Mermaid/SVG source on a diagram's generic text aliases.
     # Diagram payload parsing happens before this adapter in older responses, so
@@ -4083,6 +4091,86 @@ def _unwrap_render_payload_envelopes(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not changed:
             break
     return merged
+
+def _premium_formula_candidate(value: Any) -> str:
+    """Extract one candidate formula from provider data without turning prose into math."""
+    if isinstance(value, dict):
+        value = next((value.get(key) for key in (
+            "latex", "tex", "formula", "equation", "expression", "math", "value"
+        ) if value.get(key) not in (None, "", [], {})), "")
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    if not text or len(text) > 4000:
+        return ""
+    text = re.sub(r"^\s*(?:\$\$|\\\[|\\\()\s*|\s*(?:\$\$|\\\]|\\\))\s*$", "", text).strip()
+    if not text or re.search(r"[А-Яа-яЁё]{2,}", text):
+        return ""
+    # A formula needs an actual mathematical operator/structure, not a caption.
+    if not re.search(r"[=<>≈≠≤≥^_{}\\∑∏∫√±×÷*/]", text):
+        return ""
+    allowed_tex = {
+        "frac", "dfrac", "tfrac", "sqrt", "root", "sum", "prod", "int", "iint", "iiint",
+        "lim", "sin", "cos", "tan", "cot", "arcsin", "arccos", "arctan", "sinh", "cosh",
+        "tanh", "log", "ln", "exp", "max", "min", "det", "dim", "arg", "Re", "Im",
+        "pi", "theta", "phi", "varphi", "alpha", "beta", "gamma", "delta", "epsilon",
+        "lambda", "mu", "nu", "rho", "sigma", "tau", "omega", "infty", "partial", "nabla",
+        "cdot", "times", "div", "pm", "mp", "le", "ge", "neq", "approx", "equiv", "propto",
+        "in", "notin", "forall", "exists", "to", "rightarrow", "leftarrow", "Rightarrow",
+        "left", "right", "mathrm", "mathbf", "mathbb", "mathcal", "operatorname", "overline",
+        "underline", "hat", "bar", "vec", "text", "displaystyle", "limits", "qquad", "quad",
+    }
+    commands = re.findall(r"\\([A-Za-z]+)", text)
+    if any(command not in allowed_tex for command in commands):
+        return ""
+    if re.search(r"\b(?:the|we|obtain|obtains|therefore|where|from|example|this|that|is|are|for|and|with|because|formula|equation|result|hence|thus)\b", text, re.I):
+        return ""
+    # Match the browser guard: adjacent variable letters in E=mc^2 are valid,
+    # standalone natural-language words are not.
+    if re.search(r"(?:^|\s)[A-Za-z]{3,}(?=\s|$)", text):
+        return ""
+    return text
+
+
+def _premium_formula_candidates(payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> List[str]:
+    p = payload if isinstance(payload, dict) else {}
+    b = block if isinstance(block, dict) else {}
+    values: List[Any] = []
+    for key in ("formulas", "latex_formulas", "equations"):
+        candidate_list = p.get(key)
+        if isinstance(candidate_list, list):
+            values.extend(candidate_list[:40])
+    for source in (p, b):
+        for key in ("formula", "latex", "equation", "expression", "math"):
+            if source.get(key) not in (None, "", [], {}):
+                values.append(source.get(key))
+        # FormulaRenderer can extract delimited math and equation-only lines from
+        # Markdown/text. Mirror that behavior so a valid answer formula is retained
+        # even when the provider omitted the canonical `formulas` array.
+        for key in ("markdown", "content", "text", "display_text"):
+            raw_text = source.get(key)
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                continue
+            for match in re.finditer(
+                r"\\\[([\s\S]*?)\\\]|\\\(([\s\S]*?)\\\)|\$\$([\s\S]*?)\$\$|(?<!\$)\$([^$\n]{1,400})\$(?!\$)",
+                raw_text,
+            ):
+                candidate = next((group for group in match.groups() if group and group.strip()), "")
+                if candidate:
+                    values.append(candidate.strip())
+            for line in raw_text.splitlines():
+                candidate = re.sub(r"[`*_]", "", line).strip()
+                if candidate and re.search(r"[=≈≠≤≥]", candidate):
+                    values.append(candidate)
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        expression = _premium_formula_candidate(value)
+        if expression and expression not in seen:
+            seen.add(expression)
+            normalized.append(expression)
+    return normalized
+
 
 def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
     p = payload if isinstance(payload, dict) else {}
@@ -4244,7 +4332,9 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             return any((isinstance(item, str) and item.strip()) or (isinstance(item, dict) and any(str(item.get(key) or "").strip() for key in ("src", "url", "image", "asset_url", "image_data_uri", "image_base64", "base64"))) for item in images)
         return any(str(p.get(key) or "").strip() for key in ("src", "url", "image", "image_data_uri", "image_base64", "base64"))
     if block_type == "formula":
-        return bool(str(p.get("formula") or p.get("latex") or p.get("equation") or p.get("expression") or p.get("markdown") or "").strip() or (isinstance(p.get("formulas"), list) and bool(p["formulas"])) or (isinstance(p.get("latex_formulas"), list) and bool(p["latex_formulas"])))
+        # Reject placeholder arrays such as [{}], [""], or ["None"]. The Web
+        # FormulaRenderer intentionally suppresses prose and empty math shells.
+        return bool(_premium_formula_candidates(p, block))
     if block_type == "code":
         return bool(str(p.get("code") or p.get("content") or (block or {}).get("code") or "").strip())
     if block_type == "copy":
@@ -5249,9 +5339,15 @@ def _explanation_language(answer: str, language_hint: Any = "") -> str:
         return code
 
     low = (answer or "").lower()
-    if any(ch in low for ch in "їєґ") or re.search(r"\b(це|який|яка|формула|посилання|зображення|таблиця|графік|схема|рівняння|пояснює)\b", low):
+    # Distinguish Russian/Ukrainian using language-specific characters first.
+    # Common cognates ("формула", "таблиця/таблица", "схема") are not evidence.
+    if any(ch in low for ch in "іїєґ"):
         return "uk"
-    if re.search(r"[а-яё]", low):
+    if any(ch in low for ch in "ыэъё"):
+        return "ru"
+    if re.search(r"[а-я]", low):
+        # Neutral Cyrillic fallback is Russian; the authenticated/user-selected
+        # language hint takes precedence whenever available.
         return "ru"
     if re.search(r"[\u3040-\u30ff]", answer or ""):
         return "ja"
@@ -5280,6 +5376,21 @@ def _explanation_language(answer: str, language_hint: Any = "") -> str:
     if re.search(r"\b(hallo|bedankt|uitleg|deze|het|een)\b", low):
         return "nl"
     return "en"
+
+
+def _render_explanation_language_conflicts(value: Any, expected_language: str) -> bool:
+    """Reject clearly cross-language renderer captions before they reach the UI."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) < 12:
+        return False
+    expected = str(expected_language or "").lower().split("-", 1)[0]
+    if expected == "ru":
+        return bool(re.search(r"[іїєґ]", text))
+    if expected == "uk":
+        return bool(re.search(r"[ыэъё]", text))
+    if expected in {"en", "fr", "de", "es", "it", "pl", "pt", "nl"}:
+        return bool(re.search(r"[А-Яа-яЁёІіЇїЄєҐґ]", text))
+    return False
 
 
 def _render_payload(block: Dict[str, Any]) -> Dict[str, Any]:
@@ -6070,8 +6181,9 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
     language = _explanation_language(answer, language_hint)
     ordered: List[Dict[str, Any]] = []
     additions = 0
+    suppressed_indices: set[int] = set()
     for original_index, original in enumerate(blocks):
-        if not isinstance(original, dict):
+        if original_index in suppressed_indices or not isinstance(original, dict):
             continue
         block = dict(original)
         block_type = _scene_block_type(block)
@@ -6082,28 +6194,61 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
         # Keep stable references even when the renderer had no explicit block id.
         block_id = str(block.get("block_id") or block.get("id") or f"block_{original_index + 1}").strip()
         block.setdefault("block_id", block_id)
+        payload = _render_payload(block)
+        # Validate embedded captions before any early exit. Anchored renderers can
+        # intentionally use the following narrative fragment instead of a new
+        # caption, but a stale provider explanation must still not leak through
+        # another renderer/viewer in a different language.
+        locale_fields = ("explanation", "render_explanation", "what_it_shows", "description", "summary")
+        locale_changed = False
+        for field_name in locale_fields:
+            field_value = block.get(field_name)
+            if _render_explanation_language_conflicts(field_value, language):
+                block.pop(field_name, None)
+                locale_changed = True
+            payload_value = payload.get(field_name) if isinstance(payload, dict) else None
+            if _render_explanation_language_conflicts(payload_value, language):
+                payload = dict(payload)
+                payload.pop(field_name, None)
+                locale_changed = True
+        if locale_changed:
+            if isinstance(block.get("payload"), dict):
+                block["payload"] = payload
+            elif isinstance(block.get("data"), dict):
+                block["data"] = payload
         ordered.append(block)
 
         # If the source explicitly has a following explanation linked to this block,
-        # preserve it and do not duplicate it.
+        # preserve it only when it matches the selected display language. Otherwise
+        # replace that stale explanation with the localized, source-grounded fallback.
         following = blocks[original_index + 1] if original_index + 1 < len(blocks) else None
+        linked_caption_locale_conflict = False
         if isinstance(following, dict) and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}:
             linked_to = str(following.get("explanation_for_block_id") or following.get("explanation_for") or "").strip()
             if linked_to and linked_to in {block_id, str(block.get("id") or "")}:
-                continue
+                linked_caption_locale_conflict = _render_explanation_language_conflicts(_scene_text(following), language)
+                if linked_caption_locale_conflict:
+                    suppressed_indices.add(original_index + 1)
+                else:
+                    continue
 
         # For an anchored renderer with a real continuation, the next text
         # fragment is already the explanation in context. Avoid inserting a
         # second, synthetic paraphrase between that fragment and the answer.
-        if block.get("_anchor_has_continuation") and isinstance(following, dict) and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}:
+        if (not linked_caption_locale_conflict and block.get("_anchor_has_continuation")
+                and isinstance(following, dict)
+                and _scene_block_type(following) in {"text", "markdown", "message", "message_text"}):
             continue
 
-        payload = _render_payload(block)
         explanation = str(_render_block_field(block, payload, "explanation", "render_explanation", "what_it_shows") or "").strip()
+        if _render_explanation_language_conflicts(explanation, language):
+            explanation = ""
         if block_type in {"image", "gallery"} and _looks_like_image_prompt_echo(explanation):
             explanation = ""
         if len(explanation) < 24:
             description = str(_render_block_field(block, payload, "description", "summary") or "").strip()
+            if _render_explanation_language_conflicts(description, language):
+                description = ""
             if len(description) >= 48 and not (
                 block_type in {"image", "gallery"} and _looks_like_image_prompt_echo(description)
             ):
@@ -6140,6 +6285,16 @@ def _ensure_premium_render_explanations(blocks: List[Dict[str, Any]], answer: st
             if not already_labeled and not explanation.lstrip().lower().startswith(prefix.lower()):
                 explanation = f"**{prefix}.** {explanation}"
         explanation = explanation[:1400]
+        # Keep the renderer's embedded caption and the adjacent visible text
+        # explanation in the same selected language. Otherwise a localized
+        # fallback can sit below a renderer that still carries stale provider
+        # text in a different language and may be picked up by another viewer.
+        block["explanation"] = explanation
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["explanation"] = explanation
+            block["payload"] = payload
+        ordered[-1] = block
 
         step_index = block.get("step_index", 1)
         explanation_block = {
@@ -6421,8 +6576,10 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     ]
     metadata_for_language = scene.metadata if isinstance(scene.metadata, dict) else {}
     interpretation_for_language = metadata_for_language.get("interpretation") if isinstance(metadata_for_language.get("interpretation"), dict) else {}
+    interpretation_input_for_language = interpretation_for_language.get("input") if isinstance(interpretation_for_language.get("input"), dict) else {}
     language_hint = (
-        interpretation_for_language.get("display_language")
+        interpretation_input_for_language.get("display_language")
+        or interpretation_for_language.get("display_language")
         or interpretation_for_language.get("language")
         or metadata_for_language.get("display_language")
         or ""
