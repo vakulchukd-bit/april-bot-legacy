@@ -1084,6 +1084,67 @@ def _detect_image_generation_request(text: str) -> bool:
     return False
 
 
+
+def _implicit_visual_request_as_diagram(text: str, existing_outputs: list[str] | None = None) -> bool:
+    """Route generic subject-visualization requests to April's structured visual room.
+
+    A raster image is still selected only by _detect_image_generation_request(),
+    which requires an explicit picture/image/photo/illustration target. This helper
+    covers requests such as "draw a piggy bank" or "show a horse" and does not
+    turn ordinary explanations, navigation, data charts, or file requests into art.
+    """
+    low = _text(text).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    if _detect_image_generation_request(low):
+        return False
+    if _is_ui_instruction_request(low) or _is_structured_visual_explanation_request(low):
+        return False
+    if _is_image_discussion_without_new_visual_action(low):
+        return False
+    if _is_standalone_assistant_self_question(low) or _is_site_navigation_request(low):
+        return False
+
+    outputs = {str(item).strip().lower() for item in (existing_outputs or []) if str(item).strip()}
+    # These renderers already express a more specific visual deliverable.
+    if outputs.intersection({"image", "graph", "table", "formula", "file", "code", "link", "copy"}):
+        return False
+
+    action = bool(re.search(
+        r"(?<![\w\u0080-\uffff])(?:draw|depict|sketch|illustrate|show|display|render|visuali[sz]e|"
+        r"нарис\w*|изобраз\w*|покаж\w*|показ\w*|отобраз\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        low,
+    ))
+    if not action:
+        return False
+
+    # Avoid false positives where the verb asks for a status, text, link or an
+    # explanation rather than a visible object. Structured explanations are
+    # handled by their own established detector above.
+    nonvisual_target = bool(re.search(
+        r"(?:ответ\w*|результат\w*|статус\w*|ссылк\w*|текст\w*|сообщен\w*|"
+        r"инструкц\w*|объяснен\w*|объясн\w*|описан\w*|истори\w*|список\w*|"
+        r"путь\w*\s+в\s+меню|настройк\w*\s+аккаунт\w*|"
+        r"answer\w*|result\w*|status\w*|link\w*|text\w*|message\w*|"
+        r"instruction\w*|explanation\w*|description\w*|history\w*|list\w*)",
+        low,
+    ))
+    if nonvisual_target:
+        return False
+
+    # A visible subject must be present beyond the action/filler words. This
+    # blocks bare commands such as "show me" while allowing named objects,
+    # animals, people, places, and abstract concepts users want to see.
+    words = re.findall(r"[a-zа-яё0-9]+", low, flags=re.IGNORECASE)
+    stop = {
+        "нарисуй", "нарисовать", "нарисуйте", "изобрази", "изобразить", "покажи", "показать", "покажите",
+        "отобрази", "визуализируй", "draw", "depict", "sketch", "illustrate", "show", "display", "render", "visualize", "visualise",
+        "мне", "нам", "пожалуйста", "давай", "можешь", "можно", "хочу", "сделай", "сделать", "будто", "как", "вот", "это", "этот", "эта", "эту", "для", "на", "в", "из", "по", "the", "a", "an", "me", "us", "please", "can", "could", "to", "for", "of", "as",
+    }
+    subject_words = [word for word in words if word not in stop]
+    return bool(subject_words)
+
+
 def _detect_link_request(text: str) -> bool:
     """Recognize explicit plural/resource link requests without mistaking recall for generation."""
     low = _text(text).lower().replace("ё", "е")
@@ -1563,6 +1624,10 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         outputs = [kind for kind in outputs if kind != "diagram"]
         if "image" not in outputs:
             outputs.append("image")
+    elif _implicit_visual_request_as_diagram(low, outputs) and "diagram" not in outputs:
+        # Generic drawing/showing of an object is the lightweight structured
+        # visual path. Explicit picture/image/photo wording remains on Images.
+        outputs.append("diagram")
 
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
