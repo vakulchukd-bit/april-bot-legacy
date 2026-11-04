@@ -38,9 +38,12 @@ ADMIN_ID = os.getenv("APRIL_ADMIN_ID", "")
 FREE_MESSAGES_LIMIT = int(os.getenv("APRIL_FREE_MESSAGES_LIMIT", "20"))
 FREE_IMAGES_LIMIT = int(os.getenv("APRIL_FREE_IMAGES_LIMIT", "5"))
 LITE_PRICE = int(os.getenv("APRIL_LITE_PRICE", "12"))
-PREMIUM_PRICE = int(os.getenv("APRIL_PREMIUM_PRICE", "69"))
+PREMIUM_PRICE = int(os.getenv("APRIL_PREMIUM_28D_PRICE_USD", "25"))
+PREMIUM_12H_PRICE = int(os.getenv("APRIL_PREMIUM_12H_PRICE_USD", "3"))
 LITE_DAYS = int(os.getenv("APRIL_LITE_DAYS", "5"))
 PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "28"))
+PREMIUM_28D_SECONDS = 28 * 24 * 60 * 60
+PREMIUM_12H_SECONDS = 12 * 60 * 60
 
 FILE_PATH = "data/subscriptions.json"
 
@@ -161,7 +164,11 @@ _USERS_COLUMNS = (
 _ALLOWED_TABLE_COLUMNS = {
     "users": set(_USERS_COLUMNS),
     # Test grants are recorded for audit, but they are explicitly not paid payments.
-    "payments": {"id", "user_id", "plan", "amount", "premium_id", "payment_status", "payment_source", "created_at"},
+    "payments": {
+        "id", "user_id", "plan", "amount", "premium_id", "payment_status",
+        "payment_source", "created_at", "product_code", "currency", "amount_minor",
+        "duration_seconds", "order_id", "provider_payment_id", "paid_at",
+    },
     "dialogue_memory": {"id", "user_id", "created_at", "retention_hours", "turn_index", "user_text", "april_text", "user_text_en", "april_text_en", "language", "relation", "pair_hash", "dialog_id", "conversation_id", "message_id", "interpretation_id", "structured_request", "structured_response", "asset_payloads"},
 }
 
@@ -395,7 +402,17 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'paid'")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_source TEXT NOT NULL DEFAULT 'legacy'")
                 cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+                # Payment-intent fields are additive; existing legacy/test rows remain intact.
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS product_code TEXT")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS currency TEXT")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount_minor INTEGER")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS duration_seconds INTEGER")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id TEXT")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS provider_payment_id TEXT")
+                cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created ON payments(user_id, created_at DESC)")
+                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_order_id_unique ON payments(order_id) WHERE order_id IS NOT NULL AND order_id <> ''")
+                cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_payment_unique ON payments(provider_payment_id) WHERE provider_payment_id IS NOT NULL AND provider_payment_id <> ''")
 
                 # Free media quota and referral rewards are independent from
                 # dialogue_memory retention. Every row is keyed by the canonical
@@ -4088,6 +4105,226 @@ def activate_test_premium(user_id: Any, hours: int = PREMIUM_TEST_DURATION_HOURS
         return {"success": True, **status}
     except psycopg2.errors.UndefinedColumn:
         return {"success": False, "error": "PREMIUM_SCHEMA_MIGRATION_REQUIRED"}
+    finally:
+        conn.close()
+
+
+
+
+def _premium_payment_package(product_code: str) -> dict[str, Any] | None:
+    """Return the server-owned one-time Premium catalogue; never trust client price/duration."""
+    code = str(product_code or "").strip().lower()
+    if code == "premium_28d":
+        price = int(os.getenv("APRIL_PREMIUM_28D_PRICE_USD", str(PREMIUM_PRICE)))
+        return {"product_code": code, "amount": price, "amount_minor": price * 100,
+                "currency": "USD", "duration_seconds": PREMIUM_28D_SECONDS,
+                "description": "April Premium 28 days"}
+    if code == "premium_12h":
+        price = int(os.getenv("APRIL_PREMIUM_12H_PRICE_USD", str(PREMIUM_12H_PRICE)))
+        return {"product_code": code, "amount": price, "amount_minor": price * 100,
+                "currency": "USD", "duration_seconds": PREMIUM_12H_SECONDS,
+                "description": "April Premium 12 hours"}
+    return None
+
+
+def create_pending_premium_payment(user_id: Any, product_code: str) -> dict[str, Any]:
+    """Create a pending one-time payment for the canonical Google-authenticated April user."""
+    uid = str(user_id or "").strip()
+    package = _premium_payment_package(product_code)
+    if not uid:
+        return {"success": False, "error": "USER_ID_REQUIRED"}
+    if not package:
+        return {"success": False, "error": "INVALID_PREMIUM_PACKAGE"}
+    if package["amount"] <= 0 or package["amount_minor"] <= 0:
+        return {"success": False, "error": "INVALID_PREMIUM_PRICE"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
+                       FROM users WHERE user_id = %s OR april_id = %s
+                       ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE""",
+                    (uid, uid, uid),
+                )
+                user = cur.fetchone()
+                if not _is_authenticated_row(user) or str(user.get("provider") or "").strip().lower() != "google":
+                    return {"success": False, "error": "GOOGLE_AUTHENTICATED_USER_REQUIRED"}
+                uid = str(user.get("user_id") or uid).strip()
+                order_id = "APRIL-" + secrets.token_hex(12).upper()
+                cur.execute(
+                    """INSERT INTO payments
+                       (user_id, plan, amount, premium_id, payment_status, payment_source,
+                        product_code, currency, amount_minor, duration_seconds, order_id)
+                       VALUES (%s, 'premium', %s, %s, 'pending', 'fondy_google_pay',
+                               %s, %s, %s, %s, %s)""",
+                    (uid, package["amount"], str(user.get("premium_id") or "") or None,
+                     package["product_code"], package["currency"], package["amount_minor"],
+                     package["duration_seconds"], order_id),
+                )
+        return {"success": True, "user_id": uid, "order_id": order_id, **package}
+    except psycopg2.errors.UndefinedColumn:
+        return {"success": False, "error": "PAYMENT_SCHEMA_MIGRATION_REQUIRED"}
+    except psycopg2.errors.UniqueViolation:
+        return {"success": False, "error": "PAYMENT_ORDER_COLLISION"}
+    finally:
+        conn.close()
+
+
+
+def get_premium_payment_status(user_id: Any, order_id: Any) -> dict[str, Any]:
+    """Read the state of one payment order owned by the canonical account."""
+    uid = str(user_id or "").strip()
+    oid = str(order_id or "").strip()
+    if not uid or not oid or len(oid) > 80:
+        return {"success": False, "error": "PAYMENT_ORDER_NOT_FOUND"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT order_id, payment_status, product_code, currency, amount_minor, paid_at
+                   FROM payments
+                   WHERE user_id = %s AND order_id = %s AND payment_source = 'fondy_google_pay'
+                   LIMIT 1""",
+                (uid, oid),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"success": False, "error": "PAYMENT_ORDER_NOT_FOUND"}
+            return {
+                "success": True,
+                "order_id": str(row.get("order_id") or ""),
+                "payment_status": str(row.get("payment_status") or "pending").lower(),
+                "product_code": str(row.get("product_code") or ""),
+                "currency": str(row.get("currency") or ""),
+                "amount_minor": int(row.get("amount_minor") or 0),
+                "paid_at": row.get("paid_at").isoformat() if row.get("paid_at") else None,
+            }
+    except psycopg2.errors.UndefinedColumn:
+        return {"success": False, "error": "PAYMENT_SCHEMA_MIGRATION_REQUIRED"}
+    finally:
+        conn.close()
+
+def set_premium_payment_order_status(order_id: str, status: str) -> bool:
+    """Mark an unpaid payment intent failed/cancelled without changing any entitlement."""
+    oid = str(order_id or "").strip()
+    safe_status = str(status or "").strip().lower()
+    if not oid or safe_status not in {"failed", "cancelled"}:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE payments SET payment_status = %s WHERE order_id = %s AND payment_status = 'pending'",
+                    (safe_status, oid),
+                )
+                return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def settle_premium_payment(
+    order_id: str,
+    provider_payment_id: str,
+    amount_minor: int,
+    currency: str,
+) -> dict[str, Any]:
+    """Atomically convert a verified provider callback into a Premium entitlement.
+
+    The caller must verify the Fondy signature and merchant ID before invoking this
+    function. This function independently checks order amount/currency and is
+    idempotent: replayed callbacks cannot extend the term twice.
+    """
+    oid = str(order_id or "").strip()
+    payment_id = str(provider_payment_id or "").strip()
+    currency_code = str(currency or "").strip().upper()
+    try:
+        received_amount = int(amount_minor)
+    except (TypeError, ValueError):
+        received_amount = -1
+    if not oid or not payment_id or len(payment_id) > 160 or received_amount <= 0:
+        return {"success": False, "error": "PAYMENT_CALLBACK_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    uid = ""
+    already_paid = False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM payments WHERE order_id = %s FOR UPDATE", (oid,))
+                payment = cur.fetchone()
+                if not payment or str(payment.get("payment_source") or "") != "fondy_google_pay":
+                    return {"success": False, "error": "PAYMENT_ORDER_NOT_FOUND"}
+                uid = str(payment.get("user_id") or "").strip()
+                if str(payment.get("payment_status") or "").lower() == "paid":
+                    existing_id = str(payment.get("provider_payment_id") or "").strip()
+                    already_paid = bool(existing_id and existing_id == payment_id)
+                    if not already_paid:
+                        return {"success": False, "error": "PAYMENT_ALREADY_SETTLED"}
+                else:
+                    if str(payment.get("payment_status") or "").lower() != "pending":
+                        return {"success": False, "error": "PAYMENT_ORDER_NOT_PENDING"}
+                    if int(payment.get("amount_minor") or 0) != received_amount:
+                        return {"success": False, "error": "PAYMENT_AMOUNT_MISMATCH"}
+                    if str(payment.get("currency") or "").upper() != currency_code:
+                        return {"success": False, "error": "PAYMENT_CURRENCY_MISMATCH"}
+                    duration = int(payment.get("duration_seconds") or 0)
+                    if duration not in {PREMIUM_12H_SECONDS, PREMIUM_28D_SECONDS}:
+                        return {"success": False, "error": "PAYMENT_DURATION_INVALID"}
+                    cur.execute(
+                        """SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
+                           FROM users WHERE user_id = %s FOR UPDATE""",
+                        (uid,),
+                    )
+                    user = cur.fetchone()
+                    if not _is_authenticated_row(user) or str(user.get("provider") or "").strip().lower() != "google":
+                        return {"success": False, "error": "PAYMENT_USER_NOT_AUTHENTICATED"}
+                    premium_id = str(user.get("premium_id") or "").strip()
+                    if not premium_id:
+                        for _ in range(5):
+                            candidate = _new_premium_id()
+                            cur.execute("SELECT 1 FROM users WHERE premium_id = %s", (candidate,))
+                            if not cur.fetchone():
+                                premium_id = candidate
+                                break
+                        if not premium_id:
+                            return {"success": False, "error": "PREMIUM_ID_GENERATION_FAILED"}
+                    current_seconds = now().timestamp()
+                    current_plan = str(user.get("plan") or "free").strip().lower()
+                    current_expiry = float(user.get("subscription_until") or 0)
+                    renewal_base = current_expiry if current_plan in {"lite", "premium"} and current_expiry > current_seconds else current_seconds
+                    expires_at = renewal_base + duration
+                    cur.execute(
+                        "UPDATE users SET premium_id = %s, plan = 'premium', subscription_until = %s, warned = FALSE WHERE user_id = %s",
+                        (premium_id, expires_at, uid),
+                    )
+                    cur.execute(
+                        """UPDATE payments SET payment_status = 'paid', premium_id = %s,
+                                  provider_payment_id = %s, paid_at = CURRENT_TIMESTAMP
+                           WHERE order_id = %s AND payment_status = 'pending'""",
+                        (premium_id, payment_id, oid),
+                    )
+                    if cur.rowcount != 1:
+                        raise RuntimeError("payment settlement lost row lock")
+        if already_paid:
+            status = get_user_subscription_status(uid)
+            return {"success": bool(status), "already_settled": True, **(status or {})}
+        status = get_user_subscription_status(uid)
+        if not status or status.get("plan") != "premium":
+            return {"success": False, "error": "PREMIUM_ENTITLEMENT_NOT_VISIBLE"}
+        return {"success": True, **status}
+    except psycopg2.errors.UniqueViolation:
+        return {"success": False, "error": "DUPLICATE_PROVIDER_PAYMENT_ID"}
+    except psycopg2.errors.UndefinedColumn:
+        return {"success": False, "error": "PAYMENT_SCHEMA_MIGRATION_REQUIRED"}
     finally:
         conn.close()
 
