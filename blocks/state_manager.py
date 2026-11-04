@@ -1891,6 +1891,18 @@ def _candidate_score(
     protected_data = _protected_structured_data_from_row(row)
     data_richness = _structured_data_richness(protected_data)
     source_data_alignment = _source_data_alignment(row, protected_data=protected_data) if data_richness else 0.0
+    # SceneContract is the canonical persisted envelope for branch lineage. Read
+    # only its small dialogue-state manifest; never load binary payloads here.
+    stored_response = _parse_json(row.get("structured_response"))
+    stored_scene = stored_response.get("scene_contract") if isinstance(stored_response.get("scene_contract"), dict) else {}
+    stored_scene_meta = stored_scene.get("metadata") if isinstance(stored_scene.get("metadata"), dict) else {}
+    stored_dialogue_state = (
+        stored_scene_meta.get("dialogue_state")
+        if isinstance(stored_scene_meta.get("dialogue_state"), dict)
+        and stored_scene_meta.get("dialogue_state", {}).get("schema") == "april_dialogue_scene_state_v1"
+        else {}
+    )
+    stored_dialogue_assets = _compact_dialogue_assets(row)
 
     q_domains = _domain_terms(q)
     c_domains = _domain_terms(candidate_text)
@@ -1977,10 +1989,35 @@ def _candidate_score(
         "conversation_id": str(row.get("conversation_id") or ""),
         "interpretation_id": str(row.get("interpretation_id") or ""),
         "topic": _topic_label(row),
-        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id")),
-        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id")),
-        "selected_topic_id": _text(row.get("selected_topic_id")),
-        "active_branch_id": _text(row.get("active_branch_id")),
+        "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id") or stored_dialogue_state.get("topic_id")),
+        "branch_id": _text(row.get("branch_id") or row.get("active_branch_id") or stored_dialogue_state.get("branch_id")),
+        "topic_origin_message_id": _text(
+            stored_dialogue_state.get("topic_origin_message_id")
+            or stored_dialogue_state.get("branch_root_message_id")
+        ),
+        "dialogue_state": {
+            **{
+                key: stored_dialogue_state.get(key)
+                for key in (
+                    "schema", "relation", "classification", "strategy", "topic_id", "branch_id",
+                    "topic", "topic_origin_message_id", "branch_root_message_id",
+                    "source_message_id", "last_message_id", "same_dialog",
+                )
+                if stored_dialogue_state.get(key) not in (None, "", [], {})
+            },
+            "source_artifact_index": [
+                {key: artifact.get(key) for key in (
+                    "kind", "type", "artifact_type", "output_type", "title", "label", "summary",
+                    "filename", "mime_type", "renderer", "viewer", "asset_id", "artifact_id",
+                    "id", "message_id", "source_message_id", "asset_role", "structured_preview", "language",
+                ) if artifact.get(key) not in (None, "", [], {})}
+                for artifact in (stored_dialogue_state.get("source_artifact_index") or [])[:8]
+                if isinstance(artifact, dict)
+            ],
+        } if stored_dialogue_state else {},
+        "dialogue_assets": stored_dialogue_assets,
+        "selected_topic_id": _text(row.get("selected_topic_id") or stored_dialogue_state.get("topic_id")),
+        "active_branch_id": _text(row.get("active_branch_id") or stored_dialogue_state.get("branch_id")),
         "sections": _dialogue_section_map(row),
         "is_pending_clarification": _row_is_pending_clarification(row),
         "memory_summary": _compact_memory_summary(row),
@@ -2192,12 +2229,31 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     # requested from the user) and its compact summary. The pair is the unit of
     # dialogue continuity; neither speaker is discarded.
     outline = _compact_memory_summary(item)
-    assistant_reply = _text(item.get("april") or item.get("april_text"))
+    assistant_reply = _text(item.get("april") or item.get("april_text") or item.get("assistant_last_message"))
+    source_user = _text(item.get("user_request") or item.get("user_text") or item.get("user"))
+    source_april = _text(item.get("assistant_last_message") or item.get("april_text") or item.get("april"))
     if not outline:
         outline = assistant_reply[:220]
     modalities = set(item.get("row_modalities") or [])
     has_asset = bool(modalities & {"image", "file", "text_file", "voice"})
     evidence = (_text(item.get("attachment_evidence")) or _row_attachment_evidence(item))[:900] if has_asset else ""
+    dialogue_assets = item.get("dialogue_assets") if isinstance(item.get("dialogue_assets"), dict) else _compact_dialogue_assets(item)
+    dialogue_state = item.get("dialogue_state") if isinstance(item.get("dialogue_state"), dict) else {}
+    artifact_index = []
+    saved_artifact_rows = dialogue_assets.get("april_outputs") or dialogue_state.get("source_artifact_index") or []
+    for artifact in saved_artifact_rows[:8]:
+        if not isinstance(artifact, dict):
+            continue
+        entry = {
+            key: artifact.get(key)
+            for key in (
+                "kind", "output_type", "title", "filename", "mime_type", "message_id",
+                "asset_role", "sha256", "structured_preview", "language",
+            )
+            if artifact.get(key) not in (None, "", [], {})
+        }
+        if entry:
+            artifact_index.append(entry)
     return {
         "turn": item.get("turn_index"),
         "created_at": float(item.get("created_at") or 0) if item.get("created_at") else None,
@@ -2208,11 +2264,30 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "user": _text(item.get("user") or item.get("user_text"))[:240],
         "user_request": _text(item.get("user_text") or item.get("user_text_en") or item.get("user"))[:700],
         "april": assistant_reply[:420] if assistant_reply else outline[:220],
-        "assistant_last_message": assistant_reply[:1800] if assistant_reply else outline[:420],
+        "assistant_last_message": assistant_reply[:5200] if assistant_reply else outline[:420],
         "april_summary": outline[:220],
-        "topic": _text(item.get("topic"))[:100],
-        "topic_id": _text(item.get("topic_id") or item.get("selected_topic_id"))[:120],
-        "branch_id": _text(item.get("branch_id") or item.get("active_branch_id"))[:120],
+        "source_user_text": source_user[:1800],
+        "source_april_text": source_april[:5200],
+        "source_user_text_chars": len(source_user),
+        "source_april_text_chars": len(source_april),
+        "source_user_text_complete": len(source_user) <= 1800,
+        "source_april_text_complete": len(source_april) <= 5200,
+        "source_content_complete": len(source_user) <= 1800 and len(source_april) <= 5200,
+        "source_text_origin": "dialogue_memory",
+        "assistant_artifact_index": artifact_index,
+        "dialogue_state": {
+            key: dialogue_state.get(key)
+            for key in (
+                "schema", "relation", "classification", "strategy", "topic_id", "branch_id",
+                "topic", "topic_origin_message_id", "branch_root_message_id",
+                "source_message_id", "last_message_id", "same_dialog", "source_artifact_index",
+            )
+            if dialogue_state.get(key) not in (None, "", [], {})
+        },
+        "topic": _text(item.get("topic") or dialogue_state.get("topic"))[:100],
+        "topic_id": _text(item.get("topic_id") or item.get("selected_topic_id") or dialogue_state.get("topic_id"))[:120],
+        "branch_id": _text(item.get("branch_id") or item.get("active_branch_id") or dialogue_state.get("branch_id"))[:120],
+        "topic_origin_message_id": _text(item.get("topic_origin_message_id") or dialogue_state.get("topic_origin_message_id") or dialogue_state.get("branch_root_message_id"))[:120],
         "dialog_id": _text(item.get("dialog_id"))[:120],
         "conversation_id": _text(item.get("conversation_id"))[:120],
         "sections": sections,
@@ -2220,7 +2295,7 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
         "same_dialog": bool(item.get("same_dialog")),
         "message_id": _text(item.get("message_id")),
         "attachment_evidence": evidence,
-        "dialogue_assets": _compact_dialogue_assets(item),
+        "dialogue_assets": dialogue_assets,
         "context_binding": {
             "subject_terms": list(item.get("subject_terms") or [])[:12],
             "numeric_anchor_overlap": float(item.get("numeric_anchor_overlap") or 0),
