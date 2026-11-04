@@ -281,6 +281,8 @@ APRIL_ACCESS_MATRIX = {
 def _select_user_journeys(query: str) -> list[dict]:
     """Return a small relevant workflow excerpt without guessing unseen UI controls."""
     low = _text(query).lower().replace("ё", "е")
+    if _is_external_community_topic(low):
+        return []
     result = []
     feedback_target = bool(re.search(r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|наж|где|куда)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response))", low, re.I))
     feedback_location = bool(re.search(r"(?:куда.{0,40}наж|где.{0,70}(?:кноп|наход|это)|кноп\w*.{0,60}(?:под\s+(?:ответ|сообщ)|где|наж)|покажи.{0,60}(?:где|куда|путь)|where.{0,60}(?:click|button|find))", low, re.I | re.S))
@@ -522,6 +524,44 @@ def _site_words(value: Any) -> set[str]:
     words = re.findall(r"[a-zа-яіїєґ0-9]+", text, flags=re.IGNORECASE)
     return {word for word in words if len(word) > 2 and word not in _SITE_STOPWORDS}
 
+def _is_external_community_topic(query: Any) -> bool:
+    """Keep external IT/AI communities separate from April's own /space route.
+
+    A bare section name or an explicit in-app action may still navigate to April
+    Community. A topical question about current IT/AI developments must remain an
+    information request even when it contains the word "community/сообщество".
+    """
+    low = str(query or "").lower().replace("ё", "е").strip()
+    if not low or not re.search(r"(?:сообществ\w*|community|communities|developer\s+community)", low, re.I):
+        return False
+
+    local_scope = bool(re.search(
+        r"(?:\bapril\b|април\w*|/space|\bspace\s+page\b|на\s+сайт\w*|в\s+приложени\w*|"
+        r"мой\s+сообществ\w*|мое\s+сообществ\w*|моё\s+сообществ\w*|"
+        r"открой|перейд\w*|зайди|войд\w*|найди\s+пользоват|добав\w*\s+друг|"
+        r"личн\w*\s+чат|публичн\w*\s+пост|раздел\s+участник\w*|страниц\w*\s+сообществ\w*)",
+        low, re.I,
+    ))
+    if local_scope:
+        return False
+
+    global_scope = bool(re.search(
+        r"(?:миров\w*|глобальн\w*|международн\w*|worldwide|global|international|"
+        r"\b(?:it|ai|ml)\b|айти|искусственн\w*\s+интеллект\w*|\bии\b|нейросет\w*|"
+        r"разработчик\w*|исследовател\w*|open[- ]?source|machine\s+learning|генеративн\w*\s+ии)",
+        low, re.I,
+    ))
+    topical_intent = bool(re.search(
+        r"(?:что\s+(?:сейчас\s+)?актуальн\w*|актуальн\w*\s+сейчас|что\s+обсужда\w*|"
+        r"какие\s+тенденц\w*|нов\w*\s+направлен\w*|что\s+происход\w*|"
+        r"тренд\w*|разработк\w*|исследовани\w*|состояни\w*\s+отрасл\w*)",
+        low, re.I,
+    ))
+    # A clear world/global qualifier is sufficient; otherwise require both a
+    # technical domain and an informational/trend question.
+    explicit_world = bool(re.search(r"(?:миров\w*|глобальн\w*|международн\w*|worldwide|global|international)", low, re.I))
+    return explicit_world or (global_scope and topical_intent)
+
 def _semantic_site_area_scores(query: str) -> list[tuple[float, str]]:
     """Rank existing map entries from the request plus their visible UI semantics.
 
@@ -530,6 +570,8 @@ def _semantic_site_area_scores(query: str) -> list[tuple[float, str]]:
     документ', or 'поменять ник' and keeps each matching child card distinct.
     """
     q = str(query or "").lower().replace("ё", "е").strip()
+    if _is_external_community_topic(q):
+        return []
     q_words = _site_words(q)
     if not q_words:
         return []
@@ -14086,6 +14128,8 @@ def is_site_help_query(query: str) -> bool:
     low = str(query or "").strip().lower().replace("ё", "е")
     if not low:
         return False
+    if _is_external_community_topic(low):
+        return False
     if _is_attachment_instruction_query(low):
         return True
     # Direct route/section names are enough: a user can simply type "Сообщество".
@@ -14786,6 +14830,8 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
 
 def _site_help_requested(machine_request: Any) -> bool:
     query = _current_user_query(machine_request)
+    if query and _is_external_community_topic(query):
+        return False
     # The current turn is authoritative. An old `site_navigation` capability or
     # continuation anchor must not hijack a full non-UI request (for example, a
     # physical wiring schematic) and replace its intended C_DIAGRAM_ROOM render.
