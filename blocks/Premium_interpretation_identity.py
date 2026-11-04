@@ -4037,9 +4037,23 @@ def analyze_dialogue_transition(
         len(previous_terms & current_terms) / max(1, len(previous_terms | current_terms))
         if previous_terms and current_terms else 0.0
     )
-    references_previous = bool(
+    semantic_features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
+    pragmatic_features = semantics.get("pragmatic_features") if isinstance(semantics.get("pragmatic_features"), dict) else {}
+    strong_previous_answer_action = bool(
         semantics.get("previous_answer_reference") or semantics.get("active_branch_repair")
-        or semantics.get("requires_memory") or current_signature.get("reference_strength", 0) >= 0.18
+        or semantic_features.get("previous_answer_reference")
+        or semantic_features.get("active_branch_repair")
+        or semantic_features.get("explicit_previous_answer_correction")
+        or semantic_features.get("answer_followup")
+        or semantic_features.get("continuation_action")
+        or pragmatic_features.get("previous_answer_reference")
+        or pragmatic_features.get("active_branch_repair")
+        or pragmatic_features.get("explicit_previous_answer_correction")
+        or pragmatic_features.get("context_dependent_reaction")
+    )
+    references_previous = bool(
+        strong_previous_answer_action or semantics.get("requires_memory")
+        or current_signature.get("reference_strength", 0) >= 0.18
     )
     previous_sections = source_pair.get("sections") if isinstance(source_pair.get("sections"), list) else []
     section_headings = []
@@ -4067,9 +4081,12 @@ def analyze_dialogue_transition(
     elif relation == "CONTINUE" and source_message_id:
         classification = "TOPIC_CONTINUATION"
         strategy = "CONTINUE_WITH_NEW_INFORMATION"
-    elif references_previous and source_message_id and (overlap >= 0.12 or not current_terms):
-        # Use historical context only when State Manager has actually selected an
-        # anchor/pair; lexical similarity alone can never resurrect another topic.
+    elif references_previous and source_message_id and (
+        overlap >= 0.12 or not current_terms or strong_previous_answer_action
+    ):
+        # A classified correction/extension is stronger evidence than raw token
+        # overlap (for example, "where is the formula?" may share few subject words).
+        # The source still must be a real selected/latest authenticated dialogue pair.
         classification = "HISTORICAL_TOPIC_REACTIVATION" if not same_dialog else "TOPIC_CONTINUATION"
         strategy = "RESUME_HISTORICAL_BRANCH" if classification == "HISTORICAL_TOPIC_REACTIVATION" else "CONTINUE_WITH_NEW_INFORMATION"
     else:
@@ -4158,6 +4175,18 @@ def analyze_dialogue_transition(
             "latest_answer_has_topic_vector": bool(_context_signature(previous_answer).get("subject_terms")),
             "request_task_count": int(semantics.get("task_count") or semantics.get("request_count") or 1),
             "request_vector": _text(semantics.get("primary_intent") or semantics.get("intent") or "UNRESOLVED")[:80],
+            "previous_answer_self_audit": {
+                "performed": True,
+                "previous_answer_present": bool(previous_answer),
+                "user_action": (
+                    "REPAIR_PREVIOUS_ANSWER" if strong_previous_answer_action and (semantics.get("active_branch_repair") or semantic_features.get("active_branch_repair") or pragmatic_features.get("active_branch_repair") or semantic_features.get("explicit_previous_answer_correction"))
+                    else "DEVELOP_PREVIOUS_ANSWER" if strong_previous_answer_action
+                    else "ANSWER_CURRENT_REQUEST"
+                ),
+                "compare_against_latest_answer": bool(source_message_id and previous_answer),
+                "reuse_source_message_id": source_message_id if strong_previous_answer_action else "",
+                "do_not_repeat_completed_sections": True,
+            },
             "must_verify_artifact_lineage": bool(artifacts),
             "must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
         },
@@ -4166,6 +4195,7 @@ def analyze_dialogue_transition(
             "begin_with_brief_context_summary": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION", "ARTIFACT_REVISION"},
             "do_not_repeat_completed_sections": True,
             "develop_only_requested_or_unfinished_parts": True,
+            "repair_identified_omissions_or_errors_without_unneeded_clarification": classification in {"TOPIC_CONTINUATION", "ARTIFACT_REVISION"},
             "use_exact_source_artifact_for_revision": classification == "ARTIFACT_REVISION",
             "preserve_topic_branch_and_origin_ids": classification in {"TOPIC_CONTINUATION", "HISTORICAL_TOPIC_REACTIVATION", "ARTIFACT_REVISION"},
             "new_topic_must_not_inherit_unrelated_assets": classification == "NEW_TOPIC",
