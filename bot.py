@@ -61,7 +61,7 @@ from storage import (
     submit_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
     remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
-    get_community_direct_file, delete_community_direct_message,
+    get_community_direct_file, delete_community_direct_message, admin_delete_community_direct_message,
     COMMUNITY_MAX_ATTACHMENT_BYTES, COMMUNITY_MAX_MESSAGE_CHARS,
     get_free_media_quota_status, reserve_free_media_units,
     commit_free_media_reservation, release_free_media_reservation,
@@ -2643,6 +2643,8 @@ class AprilHandler(BaseHTTPRequestHandler):
                 )
             elif action == "delete_direct_message":
                 result = delete_community_direct_message(canonical_user_id, fields.get("message_id"))
+            elif action == "admin_delete_direct_message":
+                result = admin_delete_community_direct_message(canonical_user_id, fields.get("message_id"))
             elif action == "save_profile":
                 result = save_community_display_name(canonical_user_id, fields.get("display_name"))
             elif action == "reset_profile":
