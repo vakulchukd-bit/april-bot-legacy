@@ -2303,6 +2303,200 @@ async def execute(
         dialogue_context=dialogue_context,
         semantic_interpretation=semantic_interpretation,
     )
+
+    # Reconcile the semantic classifier with the State Manager's selected branch
+    # before Interpretation is built. A lexical NEW_INFORMATION result must not
+    # override a locally verified same-dialog continuation.
+    transition_class = _text(transition_analysis.get("classification")).upper()
+    transition_previous = (
+        transition_analysis.get("previous_exchange")
+        if isinstance(transition_analysis.get("previous_exchange"), dict) else {}
+    )
+    transition_current = (
+        transition_analysis.get("current_request")
+        if isinstance(transition_analysis.get("current_request"), dict) else {}
+    )
+    transition_source_id = _text(transition_previous.get("message_id"))
+    transition_same_dialog = bool(transition_previous.get("same_dialog"))
+    transition_explicit_switch = bool(transition_current.get("explicit_topic_switch"))
+    explicit_history_request = bool(
+        semantic_interpretation.get("history_request") or dialogue_context.get("history_request")
+    )
+    sync_active_branch = (
+        not transition_explicit_switch
+        and (
+            transition_class == "TOPIC_CONTINUATION"
+            or (transition_class == "HISTORICAL_TOPIC_REACTIVATION" and transition_same_dialog)
+        )
+    )
+    transition_source_pair: dict[str, Any] = {}
+
+    if sync_active_branch:
+        # Keep the exact selected USER↔APRIL source pair at the head of the
+        # continuation context. Only this selected pair is marked loss-sensitive;
+        # unrelated pairs remain normally compressible.
+        selected_for_provider = [
+            dict(item) for item in (dialogue_context.get("selected_pairs") or [])
+            if isinstance(item, dict)
+        ]
+        source_pair = next(
+            (
+                item for item in selected_for_provider
+                if transition_source_id and _text(item.get("message_id")) == transition_source_id
+            ),
+            None,
+        )
+        if source_pair is None:
+            for candidate in (
+                dialogue_context.get("anchor"),
+                dialogue_context.get("latest_assistant_anchor"),
+            ):
+                if isinstance(candidate, dict) and (
+                    not transition_source_id or _text(candidate.get("message_id")) == transition_source_id
+                ):
+                    source_pair = dict(candidate)
+                    break
+        if source_pair is None and transition_source_id:
+            # The transition audit still has a bounded, grounded excerpt even if
+            # State Manager returned only a topic anchor rather than its full pair.
+            source_pair = {
+                "message_id": transition_source_id,
+                "topic": _text(transition_previous.get("topic"))[:120],
+                "user_request": _text(transition_previous.get("user_request"))[:700],
+                "assistant_last_message": _text(transition_previous.get("april_answer_excerpt"))[:1800],
+                "april_summary": _text(transition_previous.get("april_answer_summary"))[:460],
+                "same_dialog": transition_same_dialog,
+                "topic_id": _text(transition_previous.get("topic_id"))[:120],
+                "branch_id": _text(transition_previous.get("branch_id"))[:120],
+                "source_text_origin": "transition_excerpt",
+            }
+
+        if isinstance(source_pair, dict) and transition_source_id:
+            source_pair = dict(source_pair)
+            source_user_text = _text(
+                source_pair.get("source_user_text")
+                or source_pair.get("user_request")
+                or source_pair.get("user")
+            )
+            source_april_text = _text(
+                source_pair.get("source_april_text")
+                or source_pair.get("assistant_last_message")
+                or source_pair.get("april")
+            )
+            source_pair.update({
+                "preserve_source_text": bool(source_user_text or source_april_text),
+                "source_user_text": source_user_text[:1800],
+                "source_april_text": source_april_text[:5200],
+                "source_user_text_chars": len(source_user_text),
+                "source_april_text_chars": len(source_april_text),
+                "source_user_text_complete": len(source_user_text) <= 1800,
+                "source_april_text_complete": len(source_april_text) <= 5200,
+                "source_content_complete": len(source_user_text) <= 1800 and len(source_april_text) <= 5200,
+                "source_text_origin": _text(source_pair.get("source_text_origin") or "dialogue_memory")[:40],
+                "topic_id": _text(source_pair.get("topic_id") or transition_previous.get("topic_id"))[:120],
+                "branch_id": _text(source_pair.get("branch_id") or transition_previous.get("branch_id"))[:120],
+                "topic_origin_message_id": _text(
+                    source_pair.get("topic_origin_message_id")
+                    or source_pair.get("origin_message_id")
+                    or transition_source_id
+                )[:120],
+            })
+            source_pair["same_dialog"] = transition_same_dialog
+            transition_source_pair = dict(source_pair)
+            remaining = [
+                item for item in selected_for_provider
+                if _text(item.get("message_id")) != transition_source_id
+            ]
+            # The matched source is the discourse anchor. Keep only a few
+            # adjacent selected pairs so source evidence survives the Free budget.
+            dialogue_context["selected_pairs"] = [source_pair] + remaining[:4]
+            dialogue_context["continuation_source_message_id"] = transition_source_id
+            dialogue_context["continuation_source_preserved"] = True
+
+        # Synchronize the relation and semantic direction as one route contract.
+        # An explicit request to list/review history remains explicit; otherwise
+        # same-dialog branch reactivation is a continuation, not archive browsing.
+        dialogue_context["relation"] = "CONTINUE"
+        dialogue_context["reason"] = _text(
+            dialogue_context.get("reason") or "pre_response_active_branch_match"
+        )[:120]
+        semantic_interpretation = dict(semantic_interpretation or {})
+        if explicit_history_request:
+            semantic_interpretation.update({
+                "primary_intent": "HISTORY_RECALL",
+                "direction": "SEARCH_DIALOGUE_HISTORY",
+                "time_scope": semantic_interpretation.get("time_scope") or "ACTIVE_DIALOGUE",
+                "topic_reference": semantic_interpretation.get("topic_reference") or "PREVIOUS_DIALOGUE",
+                "requires_memory": True,
+                "history_request": True,
+            })
+        else:
+            semantic_interpretation.update({
+                "primary_intent": "TOPIC_CONTINUATION",
+                "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+                "time_scope": "ACTIVE_DIALOGUE",
+                "topic_reference": "ACTIVE_TOPIC",
+                "requires_memory": True,
+                "history_request": False,
+            })
+        semantic_interpretation["relation_hint"] = "CONTINUE"
+        semantic_interpretation["search_scope"] = "TOPIC_OR_ACTIVE_CONTEXT"
+        semantic_interpretation["pre_response_source_message_id"] = transition_source_id
+        semantic_interpretation["pre_response_classification"] = transition_class
+        features = semantic_interpretation.get("intent_features")
+        if not isinstance(features, dict):
+            features = {}
+        features.update({
+            "continuation_action": True,
+            "previous_answer_reference": True,
+            "context_dependent_question": True,
+        })
+        semantic_interpretation["intent_features"] = features
+        semantic_interpretation["reason"] = "state_manager_and_latest_answer_route_reconciled"
+
+        # Keep the per-question route in step with the top-level decision.
+        for item, task_context in zip(question_sequence, question_contexts):
+            if not isinstance(item, dict) or not isinstance(task_context, dict):
+                continue
+            task_relation = _text(task_context.get("relation")).upper()
+            if task_relation != "CONTINUE" and len(question_sequence) > 1:
+                continue
+            task_semantic = _text(item.get("semantic_intent")).upper()
+            item["semantic_intent"] = (
+                "HISTORY_RECALL" if explicit_history_request else "TOPIC_CONTINUATION"
+            )
+            item["search_direction"] = (
+                "SEARCH_DIALOGUE_HISTORY" if explicit_history_request
+                else "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+            )
+            item["requires_memory"] = True
+            item["history_request"] = explicit_history_request
+            item["reason"] = "parent_route_reconciled_with_selected_dialogue_branch"
+            task_search = item.get("dialogue_search")
+            if isinstance(task_search, dict):
+                task_search["relation"] = "CONTINUE"
+                task_search["semantic_intent"] = item["semantic_intent"]
+                task_search["search_direction"] = item["search_direction"]
+                task_search["history_request"] = explicit_history_request
+                task_search["requires_memory"] = True
+                if transition_source_id:
+                    task_search["source_message_id"] = transition_source_id
+
+        _apr_timing_log(
+            "dialogue_semantics_reconciled",
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            classification=transition_class,
+            relation=dialogue_context.get("relation"),
+            semantic_intent=semantic_interpretation.get("primary_intent"),
+            search_direction=semantic_interpretation.get("direction"),
+            source_message_key=_apr_diag_ref(transition_source_id),
+            selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+            source_preserved=bool(dialogue_context.get("continuation_source_preserved")),
+            history_request=explicit_history_request,
+        )
+
     pre_response_analysis = transition_analysis.setdefault("pre_response_analysis", {})
     if isinstance(pre_response_analysis, dict):
         pre_response_analysis["request_task_count"] = max(1, len(question_sequence))
@@ -2323,9 +2517,14 @@ async def execute(
         ]
         pre_response_analysis["routing_order"] = [
             "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH",
-            "AUTHENTICATED_HISTORICAL_BRANCH_SEARCH_IF_CURRENT_BRANCH_MISSES",
-            "NEW_TOPIC_ONLY_AFTER_CURRENT_AND_HISTORY_MISS",
+            "MATCHED_RETAINED_DIALOGUE_BRANCH_WITHIN_EXISTING_FREE_RETENTION",
+            "NEW_TOPIC_ONLY_AFTER_CURRENT_AND_ELIGIBLE_RETAINED_BRANCH_MISS",
         ]
+        pre_response_analysis["request_vector"] = _text(
+            semantic_interpretation.get("primary_intent") or "UNRESOLVED"
+        )[:80]
+        pre_response_analysis["selected_source_message_id"] = transition_source_id
+        pre_response_analysis["active_branch_synchronized"] = bool(sync_active_branch)
     dialogue_context["dialogue_transition_analysis"] = transition_analysis
     # Preserve the compact linkage card emitted by State Manager and enrich it
     # with the independent interpretation result for Provider.
@@ -2378,6 +2577,7 @@ async def execute(
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v3_last_answer_relation"
     request_structure["semantic_interpretation"] = semantic_interpretation
     request_structure["semantic_interpretation_version"] = "april_request_semantics_v1"
+    request_structure["dialogue_route_reconciled"] = bool(sync_active_branch)
     request_structure["dialogue_transition_analysis"] = transition_analysis
     request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
     request_structure["last_turn_link"] = dict(dialogue_context.get("last_turn_link") or {})
@@ -3620,6 +3820,61 @@ async def execute(
             result["content"] = synchronized_text
             result["summary"] = synchronized_text
     scene_meta = scene_contract.get("metadata") if isinstance(scene_contract.get("metadata"), dict) else {}
+    # Persist a small, non-binary branch manifest in the same canonical
+    # SceneContract as the renderer artifacts. State Manager reads this manifest
+    # on later turns so topic/branch origin and artifact lineage stay attached.
+    state_source = transition_source_pair or (
+        dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
+    )
+    if not isinstance(state_source, dict):
+        state_source = {}
+    state_source_artifacts = []
+    for artifact in (state_source.get("assistant_artifact_index") or [])[:8]:
+        if not isinstance(artifact, dict):
+            continue
+        state_source_artifacts.append({
+            key: artifact.get(key)
+            for key in (
+                "kind", "type", "artifact_type", "output_type", "title", "label", "summary",
+                "filename", "mime_type", "renderer", "viewer", "asset_id", "artifact_id",
+                "id", "message_id", "source_message_id", "asset_role", "operation",
+                "structured_preview", "language",
+            )
+            if artifact.get(key) not in (None, "", [], {})
+        })
+    source_message_id = _text(
+        transition_previous.get("message_id")
+        or state_source.get("message_id")
+    )[:120]
+    branch_is_continuing = bool(sync_active_branch and source_message_id)
+    topic_origin_message_id = _text(
+        state_source.get("topic_origin_message_id")
+        or state_source.get("origin_message_id")
+        or (source_message_id if branch_is_continuing else identity.get("message_id"))
+    )[:120]
+    dialogue_state_manifest = {
+        "schema": "april_dialogue_scene_state_v1",
+        "relation": "CONTINUE" if branch_is_continuing else _text(dialogue_context.get("relation") or "NEW")[:24],
+        "classification": transition_class or "NEW_TOPIC",
+        "strategy": _text(transition_analysis.get("response_strategy") or "ANSWER_NEW_TOPIC")[:48],
+        "topic": _text(state_source.get("topic") or dialogue_context.get("active_topic"))[:140],
+        "topic_id": _text(state_source.get("topic_id") or state_source.get("selected_topic_id"))[:120],
+        "branch_id": _text(state_source.get("branch_id") or state_source.get("active_branch_id"))[:120],
+        "topic_origin_message_id": topic_origin_message_id,
+        "branch_root_message_id": topic_origin_message_id,
+        "source_message_id": source_message_id or _text(identity.get("message_id"))[:120],
+        "last_message_id": _text(identity.get("message_id"))[:120],
+        "same_dialog": bool(branch_is_continuing and transition_same_dialog),
+        "active_branch_preserved": branch_is_continuing,
+        "history_request": bool(explicit_history_request),
+        "selected_message_ids": [
+            _text(item.get("message_id"))[:120]
+            for item in (dialogue_context.get("selected_pairs") or [])[:8]
+            if isinstance(item, dict) and _text(item.get("message_id"))
+        ],
+        "source_artifact_index": state_source_artifacts,
+    }
+    scene_meta["dialogue_state"] = dialogue_state_manifest
     scene_meta["dialogue_assets"] = {
         "user_inputs": attachment_refs,
         "april_outputs": output_asset_refs,
