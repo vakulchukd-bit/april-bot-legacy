@@ -27,6 +27,8 @@ from email.policy import default as email_policy_default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.voice_reader import transcribe_voice_bytes
@@ -51,6 +53,7 @@ from blocks.Premium_state_manager import (
 from storage import (
     activate_test_premium, find_or_create_user, get_user_plan,
     get_user_subscription_status, init_db, is_authenticated_user, resolve_user_id,
+    create_pending_premium_payment, get_premium_payment_status, set_premium_payment_order_status, settle_premium_payment,
     delete_april_account, load_dialogue_history_index, load_dialogue_history_details, load_dialogue_asset_payloads,
     dialogue_message_saved, get_admin_user_telemetry, touch_user_activity,
     get_premium_support_status, get_premium_support_message_detail,
@@ -1965,6 +1968,51 @@ def _history_payload(
         return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
 
 
+
+
+def _fondy_signature(fields: dict[str, Any], payment_key: str) -> str:
+    """Fondy SHA-1 signature: payment key + sorted non-empty parameter values."""
+    values: list[str] = []
+    for key in sorted(fields):
+        if key in {"signature", "response_signature_string"}:
+            continue
+        value = fields.get(key)
+        if value is None or str(value) == "":
+            continue
+        values.append(str(value))
+    source = str(payment_key) + "|" + "|".join(values)
+    return hashlib.sha1(source.encode("utf-8")).hexdigest()
+
+
+def _fondy_signature_valid(fields: dict[str, Any], payment_key: str) -> bool:
+    supplied = str(fields.get("signature") or "").strip().lower()
+    if not supplied or len(supplied) != 40:
+        return False
+    expected = _fondy_signature(fields, payment_key)
+    return hmac.compare_digest(expected, supplied)
+
+
+def _fondy_provider_config() -> tuple[int | None, str, str, str]:
+    """Credentials needed to authenticate API responses and signed callbacks."""
+    provider = str(os.getenv("APRIL_PAYMENT_PROVIDER", "fondy")).strip().lower()
+    try:
+        merchant_id = int(str(os.getenv("APRIL_FONDY_MERCHANT_ID", "")).strip())
+    except (TypeError, ValueError):
+        merchant_id = 0
+    payment_key = str(os.getenv("APRIL_FONDY_PAYMENT_KEY", "")).strip()
+    callback_url = str(os.getenv("APRIL_FONDY_CALLBACK_URL", "")).strip()
+    if provider != "fondy" or merchant_id <= 0 or len(payment_key) < 16 or not callback_url.startswith("https://"):
+        return None, "", "", ""
+    return merchant_id, payment_key, callback_url, "https://pay.fondy.eu/api/checkout/token"
+
+
+def _fondy_enabled_config() -> tuple[int | None, str, str, str]:
+    enabled = str(os.getenv("APRIL_GOOGLE_PAY_ENABLED", "0")).strip().lower() in {"1", "true", "yes"}
+    if not enabled:
+        return None, "", "", ""
+    return _fondy_provider_config()
+
+
 class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AprilBotRU/3.0"
@@ -2476,6 +2524,201 @@ class AprilHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
+
+        # Public payment callback: access is controlled by Fondy's cryptographic
+        # signature + merchant/order/amount checks, not by a browser session.
+        if parsed_path == "/api/payments/fondy/callback":
+            _, payment_key, _, _ = _fondy_provider_config()
+            if not payment_key:
+                self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
+                return
+            raw, body_error = self._read_bounded_request_body(128 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400,
+                                {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                content_type = str(self.headers.get("Content-Type", "application/json")).lower()
+                if "application/x-www-form-urlencoded" in content_type:
+                    parsed_form = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                    payload = {key: values[-1] for key, values in parsed_form.items() if values}
+                else:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(payload, dict):
+                    raise ValueError("callback must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_PAYMENT_CALLBACK"})
+                return
+
+            if not _fondy_signature_valid(payload, payment_key):
+                _apr_timing_log("fondy_callback_signature_rejected", order_key=_apr_diag_ref(payload.get("order_id")))
+                self._send_json(403, {"success": False, "error": "PAYMENT_SIGNATURE_INVALID"})
+                return
+            merchant_raw = str(payload.get("merchant_id") or "").strip()
+            try:
+                configured_merchant = int(str(os.getenv("APRIL_FONDY_MERCHANT_ID", "")).strip())
+                supplied_merchant = int(merchant_raw)
+            except (TypeError, ValueError):
+                configured_merchant, supplied_merchant = 0, -1
+            if configured_merchant <= 0 or supplied_merchant != configured_merchant:
+                self._send_json(403, {"success": False, "error": "PAYMENT_MERCHANT_MISMATCH"})
+                return
+
+            order_id = _text(payload.get("order_id"))
+            order_status = _text(payload.get("order_status")).lower()
+            if order_status != "approved":
+                if order_id and order_status in {"declined", "expired", "cancelled", "canceled", "reversed"}:
+                    set_premium_payment_order_status(order_id, "failed")
+                # Non-approved status is acknowledged; only known final failures
+                # close the pending order. Intermediate statuses remain pending.
+                self._send_json(200, {"success": True, "acknowledged": True})
+                return
+            if _text(payload.get("response_status")).lower() != "success":
+                self._send_json(400, {"success": False, "error": "PAYMENT_RESPONSE_NOT_SUCCESSFUL"})
+                return
+            if _text(payload.get("tran_type")).lower() not in {"", "purchase"}:
+                self._send_json(400, {"success": False, "error": "PAYMENT_TRANSACTION_TYPE_INVALID"})
+                return
+            payment_id = _text(payload.get("payment_id"))
+            currency = _text(payload.get("currency")).upper()
+            actual_currency = _text(payload.get("actual_currency") or currency).upper()
+            try:
+                amount_minor = int(str(payload.get("amount") or "0"))
+                actual_amount = int(str(payload.get("actual_amount") or amount_minor))
+            except (TypeError, ValueError):
+                amount_minor, actual_amount = -1, -2
+            if amount_minor <= 0 or actual_amount != amount_minor or actual_currency != currency:
+                self._send_json(400, {"success": False, "error": "PAYMENT_AMOUNT_OR_CURRENCY_INVALID"})
+                return
+            result = settle_premium_payment(order_id, payment_id, amount_minor, currency)
+            if result.get("success"):
+                _apr_timing_log(
+                    "fondy_payment_settled", order_key=_apr_diag_ref(order_id),
+                    payment_key=_apr_diag_ref(payment_id),
+                    user_key=_apr_diag_ref(result.get("user_id")),
+                    premium_key=_apr_diag_ref(result.get("premium_id")),
+                    product="premium_prepaid",
+                )
+                self._send_json(200, {"success": True, "response_status": "success"})
+                return
+            _apr_timing_log("fondy_payment_settlement_rejected", order_key=_apr_diag_ref(order_id), error=_text(result.get("error")))
+            status = 404 if result.get("error") == "PAYMENT_ORDER_NOT_FOUND" else 400
+            self._send_json(status, {"success": False, "error": result.get("error") or "PAYMENT_SETTLEMENT_FAILED"})
+            return
+
+        # Read payment-order state for the authenticated account. This is separate
+        # from the user's current Premium status so an old active period cannot be
+        # mistaken for confirmation of a newly-created order.
+        if parsed_path == "/api/subscription/google-pay/payment-status":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "GOOGLE_AUTHENTICATED_USER_REQUIRED"})
+                return
+            raw, body_error = self._read_bounded_request_body(8 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400,
+                                {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("request must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+            order_id = _text(body.get("order_id"))
+            result = get_premium_payment_status(canonical_user_id, order_id)
+            status = 200 if result.get("success") else 404 if result.get("error") == "PAYMENT_ORDER_NOT_FOUND" else 503
+            self._send_json(status, result)
+            return
+
+        # Authenticated server-side payment intent. The browser submits only the
+        # product code; account identity, price, currency and duration come from
+        # the session bridge + canonical Bot catalogue/database.
+        if parsed_path == "/api/subscription/google-pay/create-order":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "GOOGLE_AUTHENTICATED_USER_REQUIRED"})
+                return
+            merchant_id, payment_key, callback_url, api_url = _fondy_enabled_config()
+            if not merchant_id or not payment_key:
+                self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
+                return
+            raw, body_error = self._read_bounded_request_body(16 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400,
+                                {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("request must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+            product_code = _text(body.get("package_code"))
+            order = create_pending_premium_payment(canonical_user_id, product_code)
+            if not order.get("success"):
+                error = _text(order.get("error") or "PAYMENT_ORDER_CREATE_FAILED")
+                status = 503 if error in {"DATABASE_UNAVAILABLE", "PAYMENT_SCHEMA_MIGRATION_REQUIRED"} else 400
+                self._send_json(status, {"success": False, "error": error})
+                return
+
+            request_fields = {
+                "server_callback_url": callback_url,
+                "order_id": order["order_id"],
+                "currency": order["currency"],
+                "merchant_id": merchant_id,
+                "order_desc": order["description"],
+                "lifetime": 1800,
+                "amount": int(order["amount_minor"]),
+            }
+            request_fields["signature"] = _fondy_signature(request_fields, payment_key)
+            request_payload = json.dumps({"request": request_fields}, separators=(",", ":")).encode("utf-8")
+            try:
+                req = UrlRequest(api_url, data=request_payload, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
+                with urlopen(req, timeout=15) as response:
+                    gateway_data = json.loads(response.read(128 * 1024).decode("utf-8"))
+                gateway_response = gateway_data.get("response") if isinstance(gateway_data, dict) else None
+                if not isinstance(gateway_response, dict) or _text(gateway_response.get("response_status")).lower() != "success":
+                    raise RuntimeError("Fondy did not return a successful checkout token")
+                token = _text(gateway_response.get("token"))
+                if not token or len(token) > 128:
+                    raise RuntimeError("Fondy checkout token missing")
+                response_signature = _text(gateway_response.get("signature"))
+                if response_signature and not _fondy_signature_valid(gateway_response, payment_key):
+                    raise RuntimeError("Fondy response signature invalid")
+            except (HTTPError, URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimeError, ValueError) as exc:
+                set_premium_payment_order_status(order["order_id"], "failed")
+                _apr_timing_log("fondy_token_create_failed", order_key=_apr_diag_ref(order.get("order_id")), error_type=type(exc).__name__)
+                self._send_json(502, {"success": False, "error": "PAYMENT_GATEWAY_TEMPORARILY_UNAVAILABLE"})
+                return
+
+            _apr_timing_log("fondy_payment_order_created", order_key=_apr_diag_ref(order.get("order_id")), user_key=_apr_diag_ref(canonical_user_id), product=product_code)
+            self._send_json(200, {
+                "success": True,
+                "provider": "fondy",
+                "order_id": order["order_id"],
+                "package_code": order["product_code"],
+                "amount": order["amount"],
+                "currency": order["currency"],
+                "token": token,
+                "merchant_id": merchant_id,
+                "expires_in_seconds": 1800,
+                "auto_renewal": False,
+            })
+            return
+
         if parsed_path == "/api/artifacts/share":
             if not self._service_authorized():
                 self.close_connection = True
