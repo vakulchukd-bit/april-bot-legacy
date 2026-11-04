@@ -4570,6 +4570,91 @@ async def execute(
         dialogue_context["pending_clarification"] = {}
         dialogue_context["request_sequence_count"] = len(question_sequence)
 
+    # Synchronous local pre-response self-audit: a strong semantic signal that the
+    # user is correcting, extending, or referring to April's latest answer may
+    # restore that exact active branch when State Manager returned NEW with no pair.
+    # This is deliberately not based on topic-word presence or loose similarity.
+    semantic_features = semantic_interpretation.get("features") if isinstance(semantic_interpretation.get("features"), dict) else {}
+    pragmatic_features = semantic_interpretation.get("pragmatic_features") if isinstance(semantic_interpretation.get("pragmatic_features"), dict) else {}
+    explicit_topic_switch = bool(
+        semantic_interpretation.get("explicit_topic_switch")
+        or semantic_features.get("explicit_topic_switch")
+    )
+    explicit_previous_answer_action = bool(
+        semantic_interpretation.get("previous_answer_reference")
+        or semantic_interpretation.get("active_branch_repair")
+        or semantic_features.get("previous_answer_reference")
+        or semantic_features.get("active_branch_repair")
+        or semantic_features.get("explicit_previous_answer_correction")
+        or semantic_features.get("answer_followup")
+        or semantic_features.get("continuation_action")
+        or pragmatic_features.get("previous_answer_reference")
+        or pragmatic_features.get("active_branch_repair")
+        or pragmatic_features.get("explicit_previous_answer_correction")
+        or pragmatic_features.get("context_dependent_reaction")
+    )
+    latest_assistant_anchor = dialogue_context.get("latest_assistant_anchor") if isinstance(dialogue_context.get("latest_assistant_anchor"), dict) else {}
+    latest_anchor_id = _text(latest_assistant_anchor.get("message_id") or latest_assistant_anchor.get("source_message_id"))[:120]
+    existing_selected_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+    if (
+        len(question_sequence) == 1
+        and _text(dialogue_context.get("relation")).upper() != "CONTINUE"
+        and not dialogue_context.get("history_request")
+        and not explicit_topic_switch
+        and explicit_previous_answer_action
+        and latest_anchor_id
+        and latest_assistant_anchor.get("same_dialog", True) is not False
+        and not existing_selected_pairs
+    ):
+        dialogue_context["relation"] = "CONTINUE"
+        dialogue_context["reason"] = "pre_response_latest_answer_self_audit"
+        dialogue_context["selected_pairs"] = [latest_assistant_anchor]
+        dialogue_context["anchor"] = latest_assistant_anchor
+        dialogue_context["active_branch_preserved"] = True
+        semantic_interpretation["primary_intent"] = "TOPIC_CONTINUATION"
+        semantic_interpretation["direction"] = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        semantic_interpretation["topic_reference"] = "PREVIOUS_OR_ACTIVE_TOPIC"
+        semantic_interpretation["requires_memory"] = True
+        semantic_interpretation["pre_response_route_reason"] = "latest_answer_semantic_action_recovered"
+        dialogue_context["source_retrieval"] = {
+            "method": "latest_answer_pre_response_self_audit",
+            "strategy": "ACTIVE_BRANCH_SOURCE",
+            "source_message_id": latest_anchor_id,
+        }
+        repaired_search = dict(dialogue_context.get("search") or {})
+        repaired_search.update({"relation": "CONTINUE", "reason": "pre_response_latest_answer_self_audit"})
+        dialogue_context["search"] = repaired_search
+        # Keep the per-task sequence and the parent context in agreement. If only
+        # the parent were repaired, REQUEST_SEQUENCE could still tell Provider
+        # that this same turn is NEW while the dialogue card says CONTINUE.
+        if question_sequence and isinstance(question_sequence[0], dict):
+            first_task = question_sequence[0]
+            first_task_search = dict(first_task.get("dialogue_search") or {})
+            first_task_search.update({
+                "relation": "CONTINUE",
+                "reason": "pre_response_latest_answer_self_audit",
+                "anchor_message_id": latest_anchor_id,
+                "reused_parent_branch_context": True,
+            })
+            first_task["dialogue_search"] = first_task_search
+            first_task["relation"] = "CONTINUE"
+            first_task["semantic_intent"] = "TOPIC_CONTINUATION"
+            first_task["search_direction"] = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+            first_task["topic_reference"] = "PREVIOUS_OR_ACTIVE_TOPIC"
+            if question_contexts:
+                question_contexts[0] = dict(dialogue_context)
+
+    _apr_timing_log(
+        "pre_response_self_audit", None,
+        mode="SYNCHRONOUS_LOCAL_NO_EXTRA_MODEL_CALL",
+        explicit_previous_answer_action=bool(explicit_previous_answer_action),
+        branch_route_override=bool(dialogue_context.get("reason") == "pre_response_latest_answer_self_audit"),
+        relation=_text(dialogue_context.get("relation") or "NEW").upper(),
+        task_count=max(1, len(question_sequence)),
+        source_message_key=_apr_diag_ref(latest_anchor_id) if latest_anchor_id else "",
+        topic_switch_protected=bool(explicit_topic_switch),
+    )
+
     search_result = dialogue_context.get("search") if isinstance(dialogue_context.get("search"), dict) else {}
     anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
     selected_pairs = dialogue_context.get("selected_pairs") or []
@@ -4688,6 +4773,25 @@ async def execute(
         pre_response_analysis["latest_answer_expects_user_input"] = bool(latest_answer_relation.get("expects_user_input"))
         pre_response_analysis["latest_answer_match"] = bool(latest_answer_relation.get("matched"))
         pre_response_analysis["latest_answer_message_id"] = _text(latest_answer_relation.get("message_id"))[:120]
+        previous_answer_action = (
+            "REPAIR_PREVIOUS_ANSWER" if explicit_previous_answer_action and (
+                semantic_interpretation.get("active_branch_repair")
+                or semantic_features.get("active_branch_repair")
+                or semantic_features.get("explicit_previous_answer_correction")
+                or pragmatic_features.get("active_branch_repair")
+            ) else "DEVELOP_PREVIOUS_ANSWER" if explicit_previous_answer_action
+            else "ANSWER_CURRENT_REQUEST"
+        )
+        pre_response_analysis["self_audit"] = {
+            "performed": True,
+            "mode": "LOCAL_NO_EXTRA_OPENAI_CALL",
+            "latest_answer_checked": bool((transition_analysis.get("previous_exchange") or {}).get("april_answer_excerpt")),
+            "user_action": previous_answer_action,
+            "branch_route_override": bool(dialogue_context.get("reason") == "pre_response_latest_answer_self_audit"),
+            "selected_source_message_id": _text((transition_analysis.get("previous_exchange") or {}).get("message_id"))[:120],
+            "task_count": max(1, len(question_sequence)),
+            "repair_without_unnecessary_clarification": previous_answer_action == "REPAIR_PREVIOUS_ANSWER",
+        }
         pre_response_analysis["request_vector"] = _text(
             semantic_interpretation.get("primary_intent")
             or semantic_interpretation.get("intent")
