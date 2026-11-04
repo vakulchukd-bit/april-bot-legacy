@@ -4694,6 +4694,7 @@ def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: in
                        JOIN users su ON su.user_id=m.sender_id
                        LEFT JOIN community_profiles sp ON sp.user_id=su.user_id
                        WHERE ((m.sender_id=%s AND m.recipient_id=%s) OR (m.sender_id=%s AND m.recipient_id=%s))
+                         AND m.is_deleted = FALSE
                        ORDER BY m.id DESC LIMIT %s""",
                     (uid, peer_uid, peer_uid, uid, safe_limit),
                 )
@@ -4703,10 +4704,15 @@ def get_community_direct_messages(user_id: Any, peer_april_id: Any, *, limit: in
                 cur.execute("SELECT display_name FROM community_profiles WHERE user_id=%s", (peer_uid,))
                 profile_row = cur.fetchone() or {}
                 peer_name = str(profile_row.get("display_name") or peer_name).strip()[:32]
+                cur.execute("SELECT april_id FROM users WHERE user_id=%s LIMIT 1", (uid,))
+                own_identity = cur.fetchone() or {}
+                current_april_id = str(own_identity.get("april_id") or "").strip().upper()
+                is_admin = bool(current_april_id) and current_april_id == _community_superadmin_april_id()
                 return {
                     "success": True,
                     "messages": [_community_direct_payload(row, current_user_id=uid, peer_april_id=str(peer.get("april_id") or peer_april_id)) for row in messages],
                     "peer": {"april_id": str(peer.get("april_id") or ""), "display_name": peer_name, "plan": _community_active_plan(peer)},
+                    "is_admin": is_admin,
                 }
     except Exception as exc:
         print(f"[APRIL_COMMUNITY] DIRECT_READ_FAILED type={type(exc).__name__}", flush=True)
@@ -4842,6 +4848,49 @@ def delete_community_direct_message(user_id: Any, message_id: Any) -> dict[str, 
         return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
     finally:
         conn.close()
+
+def admin_delete_community_direct_message(admin_user_id: Any, message_id: Any) -> dict[str, Any]:
+    """Delete any 1:1 community message, but only for the configured superadmin."""
+    admin_uid = _community_canonical_user(admin_user_id)
+    if not admin_uid:
+        return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    try:
+        mid = int(message_id)
+        if mid <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Derive admin status from the authenticated DB user. Never trust
+                # an admin flag or April ID supplied by the browser.
+                cur.execute("SELECT april_id FROM users WHERE user_id=%s LIMIT 1", (admin_uid,))
+                admin_row = cur.fetchone() or {}
+                actual_admin_april_id = str(admin_row.get("april_id") or "").strip().upper()
+                if not actual_admin_april_id or actual_admin_april_id != _community_superadmin_april_id():
+                    print("[APRIL_COMMUNITY] DIRECT_ADMIN_DELETE_DENIED reason=april_id_mismatch", flush=True)
+                    return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+                cur.execute(
+                    """UPDATE community_direct_messages
+                       SET is_deleted=TRUE, message='', attachment_name=NULL,
+                           attachment_mime=NULL, attachment_size=NULL, attachment_data=NULL
+                       WHERE id=%s AND is_deleted=FALSE
+                       RETURNING id""",
+                    (mid,),
+                )
+                if not cur.fetchone():
+                    return {"success": False, "error": "MESSAGE_NOT_FOUND"}
+                return {"success": True, "message_id": mid, "deleted_by": "admin"}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] DIRECT_ADMIN_DELETE_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
 
 def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_MESSAGES, before_id: int | None = None) -> dict[str, Any] | None:
     """Read at most the latest 30 public messages and the server nickname."""
