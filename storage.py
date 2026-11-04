@@ -789,6 +789,11 @@ def init_db() -> None:
                 cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_mime TEXT")
                 cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_size BIGINT")
                 cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_data BYTEA")
+                # A small raster preview is stored separately from the original.
+                # Both live on the same 30-message retention lifecycle.
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_preview_mime TEXT")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_preview_size BIGINT")
+                cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS attachment_preview_data BYTEA")
                 cur.execute("ALTER TABLE community_messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_created ON community_messages(created_at DESC, id DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_community_messages_user_created ON community_messages(user_id, created_at DESC)")
@@ -4484,6 +4489,10 @@ def _community_payload(row: dict[str, Any]) -> dict[str, Any]:
     deleted = bool(row.get("is_deleted"))
     attachment_name = None if deleted else row.get("attachment_name")
     attachment_size = None if deleted else row.get("attachment_size")
+    attachment_mime = "" if deleted else str(row.get("attachment_mime") or "application/octet-stream").lower()
+    has_preview = bool(row.get("has_preview")) and not deleted
+    attachment_id = int(row.get("id") or 0)
+    raster_image = attachment_mime in {"image/png", "image/jpeg", "image/webp", "image/gif"}
     return {
         "id": int(row.get("id") or 0),
         "author_april_id": str(row.get("author_april_id") or "").strip(),
@@ -4496,7 +4505,10 @@ def _community_payload(row: dict[str, Any]) -> dict[str, Any]:
         "attachment": ({
             "name": str(attachment_name or "file"),
             "size": int(attachment_size or 0),
-            "download_url": f"/api/community?file_id={int(row.get('id') or 0)}",
+            "mime_type": attachment_mime,
+            "download_url": f"/api/community?file_id={attachment_id}",
+            "view_url": f"/api/community?view_id={attachment_id}" if raster_image else None,
+            "preview_url": f"/api/community?preview_id={attachment_id}" if has_preview else None,
         } if attachment_name else None),
     }
 
@@ -4890,7 +4902,7 @@ def create_community_direct_message(
                 if binary is not None:
                     cur.execute("SELECT COALESCE(SUM(attachment_size),0) AS used FROM community_direct_messages WHERE sender_id=%s AND is_deleted=FALSE", (uid,))
                     used_bytes = int((cur.fetchone() or {}).get("used") or 0)
-                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
+                    if used_bytes + len(binary) + (len(preview_binary) if preview_binary is not None else 0) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
                         return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
                 cur.execute(
                     """INSERT INTO community_direct_messages(
@@ -5058,7 +5070,8 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                 if before_id and int(before_id) > 0:
                     cur.execute(
                         """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
-                                  m.attachment_name, m.attachment_size, m.is_deleted,
+                                  m.attachment_name, m.attachment_mime, m.attachment_size,
+                                  (m.attachment_preview_data IS NOT NULL) AS has_preview, m.is_deleted,
                                   CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
                                             AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                                        THEN 'premium' ELSE 'free' END AS author_plan
@@ -5075,7 +5088,8 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
                 else:
                     cur.execute(
                         """SELECT m.id, m.user_id, u.april_id AS author_april_id, m.display_name, m.message, m.created_at,
-                                  m.attachment_name, m.attachment_size, m.is_deleted,
+                                  m.attachment_name, m.attachment_mime, m.attachment_size,
+                                  (m.attachment_preview_data IS NOT NULL) AS has_preview, m.is_deleted,
                                   CASE WHEN LOWER(COALESCE(u.plan,'free'))='premium'
                                             AND COALESCE(u.subscription_until,0)>EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
                                        THEN 'premium' ELSE 'free' END AS author_plan
@@ -5197,12 +5211,15 @@ def create_community_message(
     attachment_name: Any = None,
     attachment_mime: Any = None,
     attachment_data: bytes | None = None,
+    attachment_preview_mime: Any = None,
+    attachment_preview_data: bytes | None = None,
 ) -> dict[str, Any]:
     uid = _community_canonical_user(user_id)
     if not uid:
         return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
     text_value = str(message or "").strip()
     binary = bytes(attachment_data) if attachment_data is not None else None
+    preview_binary = bytes(attachment_preview_data) if attachment_preview_data is not None else None
     if len(text_value) > COMMUNITY_MAX_MESSAGE_CHARS:
         return {"success": False, "error": "MESSAGE_TOO_LONG"}
     if not text_value and not binary:
@@ -5223,6 +5240,19 @@ def create_community_message(
         safe_mime = str(attachment_mime or "application/octet-stream").split(";", 1)[0].strip().lower()[:120]
         if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", safe_mime):
             safe_mime = "application/octet-stream"
+
+    safe_preview_mime = None
+    if preview_binary is not None:
+        if binary is None or not preview_binary or len(preview_binary) > 64 * 1024:
+            return {"success": False, "error": "ATTACHMENT_PREVIEW_INVALID"}
+        safe_preview_mime = str(attachment_preview_mime or "").split(";", 1)[0].strip().lower()
+        valid_preview = (
+            (safe_preview_mime == "image/webp" and len(preview_binary) >= 12 and preview_binary[:4] == b"RIFF" and preview_binary[8:12] == b"WEBP")
+            or (safe_preview_mime == "image/jpeg" and preview_binary.startswith(b"\xff\xd8\xff"))
+            or (safe_preview_mime == "image/png" and preview_binary.startswith(b"\x89PNG\r\n\x1a\n"))
+        )
+        if not valid_preview:
+            return {"success": False, "error": "ATTACHMENT_PREVIEW_INVALID"}
 
     conn = get_conn()
     if not conn:
@@ -5260,22 +5290,26 @@ def create_community_message(
                     return {"success": False, "error": "RATE_LIMITED"}
                 if binary is not None:
                     cur.execute(
-                        """SELECT COALESCE(SUM(attachment_size), 0) AS used_bytes
+                        """SELECT COALESCE(SUM(COALESCE(attachment_size,0) + COALESCE(attachment_preview_size,0)), 0) AS used_bytes
                            FROM community_messages
                            WHERE user_id = %s AND is_deleted = FALSE""",
                         (uid,),
                     )
                     used_bytes = int((cur.fetchone() or {}).get("used_bytes") or 0)
-                    if used_bytes + len(binary) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
+                    if used_bytes + len(binary) + (len(preview_binary) if preview_binary is not None else 0) > COMMUNITY_USER_ATTACHMENT_QUOTA_BYTES:
                         return {"success": False, "error": "COMMUNITY_ATTACHMENT_QUOTA_REACHED"}
                 cur.execute(
                     """INSERT INTO community_messages(
                            user_id, display_name, message, attachment_name,
-                           attachment_mime, attachment_size, attachment_data
-                       ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                           attachment_mime, attachment_size, attachment_data,
+                           attachment_preview_mime, attachment_preview_size, attachment_preview_data
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        RETURNING id, user_id, display_name, message, created_at,
-                                 attachment_name, attachment_size, is_deleted""",
-                    (uid, display_name, text_value, safe_name, safe_mime, len(binary) if binary is not None else None, binary),
+                                 attachment_name, attachment_mime, attachment_size,
+                                 (attachment_preview_data IS NOT NULL) AS has_preview, is_deleted""",
+                    (uid, display_name, text_value, safe_name, safe_mime,
+                     len(binary) if binary is not None else None, binary,
+                     safe_preview_mime, len(preview_binary) if preview_binary is not None else None, preview_binary),
                 )
                 row = dict(cur.fetchone() or {})
                 row["is_own"] = True
@@ -5335,6 +5369,50 @@ def get_community_file(user_id: Any, message_id: Any) -> dict[str, Any] | None:
         conn.close()
 
 
+
+def get_community_preview(user_id: Any, message_id: Any) -> dict[str, Any] | None:
+    """Read a small, validated raster preview for a visible community post."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    if mid <= 0:
+        return {"success": False, "error": "MESSAGE_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT attachment_preview_mime, attachment_preview_size, attachment_preview_data
+                       FROM community_messages m
+                       WHERE m.id = %s AND m.is_deleted = FALSE
+                         AND NOT EXISTS (
+                           SELECT 1 FROM community_user_blocks b
+                           WHERE b.blocker_user_id = %s AND b.blocked_user_id = m.user_id
+                         )
+                       LIMIT 1""",
+                    (mid, uid),
+                )
+                row = cur.fetchone()
+                if not row or row.get("attachment_preview_data") is None:
+                    return {"success": False, "error": "COMMUNITY_PREVIEW_NOT_FOUND"}
+                mime = str(row.get("attachment_preview_mime") or "").lower()
+                data = bytes(row.get("attachment_preview_data") or b"")
+                if mime not in {"image/webp", "image/jpeg", "image/png"} or len(data) > 64 * 1024:
+                    return {"success": False, "error": "COMMUNITY_PREVIEW_NOT_FOUND"}
+                return {"success": True, "name": "preview.webp" if mime == "image/webp" else "preview.jpg" if mime == "image/jpeg" else "preview.png", "mime": mime, "size": len(data), "data": data}
+    except Exception as exc:
+        print(f"[APRIL_COMMUNITY] PREVIEW_READ_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
+    finally:
+        conn.close()
+
+
 def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
     uid = _community_canonical_user(user_id)
     if not uid:
@@ -5352,7 +5430,8 @@ def delete_community_message(user_id: Any, message_id: Any) -> dict[str, Any]:
                 cur.execute(
                     """UPDATE community_messages
                        SET is_deleted = TRUE, message = '', attachment_name = NULL,
-                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
+                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL,
+                           attachment_preview_mime = NULL, attachment_preview_size = NULL, attachment_preview_data = NULL
                        WHERE id = %s AND user_id = %s AND is_deleted = FALSE""",
                     (mid, uid),
                 )
@@ -5404,7 +5483,8 @@ def admin_delete_community_message(admin_user_id: Any, message_id: Any) -> dict[
                 cur.execute(
                     """UPDATE community_messages
                        SET is_deleted = TRUE, message = '', attachment_name = NULL,
-                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL
+                           attachment_mime = NULL, attachment_size = NULL, attachment_data = NULL,
+                           attachment_preview_mime = NULL, attachment_preview_size = NULL, attachment_preview_data = NULL
                        WHERE id = %s AND is_deleted = FALSE""",
                     (mid,),
                 )
