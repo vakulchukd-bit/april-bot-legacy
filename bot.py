@@ -58,7 +58,7 @@ from storage import (
     list_premium_support_messages, reply_premium_support_message,
     get_community_snapshot, save_community_display_name, reset_community_display_name, create_community_message,
     get_community_file, delete_community_message, admin_delete_community_message, report_community_message,
-    submit_ai_content_report,
+    submit_ai_content_report, list_ai_content_reports, delete_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
     remove_community_friend, set_community_user_block, get_community_direct_messages, create_community_direct_message,
     get_community_direct_file, delete_community_direct_message, admin_delete_community_direct_message,
@@ -2271,6 +2271,31 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(200, status)
                 return
+            if mode == "content_reports":
+                if not self._service_authorized():
+                    self.close_connection = True
+                    self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                    return
+                supplied_admin_id = _text(self.headers.get("X-April-User-Id"))
+                expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+                if not supplied_admin_id or supplied_admin_id.upper() != expected_admin_id.upper():
+                    self._send_json(403, {"success": False, "error": "SUPERADMIN_REQUIRED"})
+                    return
+                if not _text(os.getenv("DATABASE_URL")):
+                    self._send_json(503, {"success": False, "error": "DATABASE_UNAVAILABLE"})
+                    return
+                canonical_admin_id = resolve_user_id(supplied_admin_id)
+                if not canonical_admin_id or not is_authenticated_user(canonical_admin_id):
+                    self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                    return
+                inbox = list_ai_content_reports(supplied_admin_id, limit=30)
+                if not inbox or inbox.get("success") is not True:
+                    error = _text((inbox or {}).get("error") or "CONTENT_REPORT_UNAVAILABLE")
+                    status_code = 403 if error == "SUPERADMIN_REQUIRED" else 503
+                    self._send_json(status_code, inbox or {"success": False, "error": error})
+                    return
+                self._send_json(200, inbox)
+                return
             if mode == "shared_artifact":
                 # Public bearer links are unguessable and expire; only the Web
                 # bridge may reach this Bot route, while the recipient needs no APRIL login.
@@ -2546,6 +2571,21 @@ class AprilHandler(BaseHTTPRequestHandler):
                     return
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+
+            report_action = _text(body.get("action")).strip().lower()
+            if report_action == "mark_read":
+                expected_admin_id = _text(os.getenv("APRIL_SUPERADMIN_APRIL_ID", "APR-WMBS-8W4Y"))
+                if supplied_user_id.upper() != expected_admin_id.upper():
+                    self._send_json(403, {"success": False, "error": "SUPERADMIN_REQUIRED"})
+                    return
+                result = delete_ai_content_report(supplied_user_id, body.get("report_id"))
+                if result.get("success") is True:
+                    self._send_json(200, result)
+                    return
+                error = _text(result.get("error") or "CONTENT_REPORT_UNAVAILABLE")
+                status_code = 403 if error == "SUPERADMIN_REQUIRED" else 404 if error in {"REPORT_NOT_FOUND", "REPORT_ID_INVALID"} else 503
+                self._send_json(status_code, result)
                 return
 
             result = submit_ai_content_report(
