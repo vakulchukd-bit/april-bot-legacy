@@ -51,6 +51,82 @@ DIALOGUE_SEED_SECONDS = DIALOGUE_SEED_HOURS * 3600
 PREMIUM_MEMORY_WINDOW_HOURS = 24
 PREMIUM_MEMORY_WINDOW_SECONDS = PREMIUM_MEMORY_WINDOW_HOURS * 3600
 PREMIUM_TEST_DURATION_HOURS = 28 * 24
+SUPERADMIN_SUBSCRIPTION_YEARS = 100
+SUPERADMIN_SUBSCRIPTION_DAYS = SUPERADMIN_SUBSCRIPTION_YEARS * 365 + 25  # 100 years, including leap-year allowance.
+SUPERADMIN_RENEWAL_FLOOR_DAYS = 365 * 90  # Avoid rewriting the row on every request.
+
+
+def _configured_superadmin_april_id() -> str:
+    return str(os.getenv("APRIL_SUPERADMIN_APRIL_ID") or "APR-WMBS-8W4Y").strip().upper()
+
+
+def _is_superadmin_user_row(user: Any) -> bool:
+    if not user:
+        return False
+    expected = _configured_superadmin_april_id()
+    return bool(expected) and any(
+        str(user.get(field) or "").strip().upper() == expected
+        for field in ("april_id", "user_id")
+    )
+
+
+def _ensure_superadmin_premium(cur, user: dict[str, Any]) -> dict[str, Any]:
+    """Persist the configured Super Admin as Premium for a 100-year term.
+
+    The explicit Super Admin identity is resolved from the authoritative users
+    row. Browser-supplied plan values never participate in this decision.
+    """
+    if not _is_superadmin_user_row(user):
+        return user
+    canonical_id = str(user.get("user_id") or "").strip()
+    if not canonical_id:
+        return user
+    current = now()
+    current_seconds = current.timestamp()
+    until_seconds = float(user.get("subscription_until") or 0)
+    plan = str(user.get("plan") or "free").strip().lower()
+    renewal_floor = current_seconds + timedelta(days=SUPERADMIN_RENEWAL_FLOOR_DAYS).total_seconds()
+    if plan != "premium" or until_seconds < renewal_floor:
+        until_seconds = (current + timedelta(days=SUPERADMIN_SUBSCRIPTION_DAYS)).timestamp()
+        premium_id = str(user.get("premium_id") or "").strip() or _new_premium_id()
+        cur.execute(
+            """UPDATE users
+               SET plan = 'premium', subscription_until = %s,
+                   premium_id = COALESCE(NULLIF(premium_id, ''), %s), warned = FALSE
+               WHERE user_id = %s
+               RETURNING user_id, april_id, plan, subscription_until, premium_id""",
+            (until_seconds, premium_id, canonical_id),
+        )
+        updated = cur.fetchone()
+        if updated:
+            user.update(dict(updated))
+        else:
+            user["plan"] = "premium"
+            user["subscription_until"] = until_seconds
+            user["premium_id"] = premium_id
+    return user
+
+
+def is_superadmin_account(user_id: Any) -> bool:
+    """Resolve a canonical/internal or public April ID to the configured admin."""
+    raw = str(user_id or "").strip()
+    if not raw:
+        return False
+    conn = get_conn()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id, april_id, email, provider FROM users WHERE user_id = %s OR april_id = %s LIMIT 1",
+                (raw, raw),
+            )
+            row = cur.fetchone()
+            return _is_authenticated_row(row) and _is_superadmin_user_row(row)
+    except Exception:
+        return False
+    finally:
+        conn.close()
 
 # Free media quota is a shared pack: image generation and input attachment
 # analysis draw from the same six-unit balance. Text and voice transcription
@@ -811,6 +887,23 @@ def init_db() -> None:
                 cur.execute("UPDATE users SET created_at=CURRENT_TIMESTAMP WHERE created_at IS NULL")
                 cur.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
 
+                # Persist the configured Super Admin's long-lived Premium grant during
+                # startup as well as on account lookups. Existing admin/community routes
+                # that read the users table directly will therefore see Premium immediately.
+                configured_admin_id = _configured_superadmin_april_id()
+                cur.execute(
+                    """SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
+                       FROM users
+                       WHERE UPPER(BTRIM(COALESCE(april_id, ''))) = %s
+                          OR UPPER(BTRIM(COALESCE(user_id, ''))) = %s
+                       ORDER BY CASE WHEN UPPER(BTRIM(COALESCE(april_id, ''))) = %s THEN 0 ELSE 1 END
+                       LIMIT 1""",
+                    (configured_admin_id, configured_admin_id, configured_admin_id),
+                )
+                superadmin_row = cur.fetchone()
+                if _is_authenticated_row(superadmin_row):
+                    _ensure_superadmin_premium(cur, superadmin_row)
+
                 # Backfill once, only when this deployment first adds retention_hours.
                 # Current Premium rows can be identified from the canonical payments ledger;
                 # all other historical rows keep the migration default of 12 hours.
@@ -909,12 +1002,16 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                                    )
                                )
                            )
-                             AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                             AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                             AND (
+                               (LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                                AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s))
+                               OR UPPER(BTRIM(COALESCE(u.april_id, ''))) = %s
+                               OR UPPER(BTRIM(COALESCE(u.user_id, ''))) = %s
+                             )
                              AND COALESCE(d.retention_hours, 12) < 24
                              AND d.created_at + INTERVAL '24 hours' > %s
                              AND d.created_at <= %s""",
-                        (current, current, current),
+                        (current, _configured_superadmin_april_id(), _configured_superadmin_april_id(), current, current),
                     )
                 else:
                     owner_ids = _dialogue_owner_ids_cursor(cur, str(user_id))
@@ -927,13 +1024,17 @@ def cleanup_dialogue_memory_utc(user_id: Any | None = None, timestamp: float | i
                              AND EXISTS (
                                SELECT 1 FROM users AS u
                                WHERE u.user_id = %s
-                                 AND LOWER(COALESCE(u.plan, 'free')) = 'premium'
-                                 AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s)
+                                 AND (
+                                   (LOWER(COALESCE(u.plan, 'free')) = 'premium'
+                                    AND COALESCE(u.subscription_until, 0) > EXTRACT(EPOCH FROM %s))
+                                   OR UPPER(BTRIM(COALESCE(u.april_id, ''))) = %s
+                                   OR UPPER(BTRIM(COALESCE(u.user_id, ''))) = %s
+                                 )
                              )
                              AND COALESCE(d.retention_hours, 12) < 24
                              AND d.created_at + INTERVAL '24 hours' > %s
                              AND d.created_at <= %s""",
-                        (owner_ids, canonical_uid, current, current, current),
+                        (owner_ids, canonical_uid, current, _configured_superadmin_april_id(), _configured_superadmin_april_id(), current, current),
                     )
                 if user_id is None:
                     cur.execute(
@@ -1001,8 +1102,10 @@ def expire_subscriptions_utc(timestamp: float | int | datetime | None = None) ->
                 cur.execute(
                     """UPDATE users SET plan = 'free'
                        WHERE LOWER(COALESCE(plan, 'free')) IN ('lite', 'premium')
-                         AND COALESCE(subscription_until, 0) <= %s""",
-                    (current.timestamp(),),
+                         AND COALESCE(subscription_until, 0) <= %s
+                         AND UPPER(BTRIM(COALESCE(april_id, ''))) <> %s
+                         AND UPPER(BTRIM(COALESCE(user_id, ''))) <> %s""",
+                    (current.timestamp(), _configured_superadmin_april_id(), _configured_superadmin_april_id()),
                 )
                 return int(cur.rowcount or 0)
     except psycopg2.errors.UndefinedTable:
@@ -1112,11 +1215,14 @@ def save_dialogue_pair(
                 # The new pair still keeps the validated send timestamp as created_at.
                 cleanup_now = now()
                 cur.execute(
-                    "SELECT LOWER(COALESCE(plan, 'free')) AS plan, COALESCE(subscription_until, 0) AS subscription_until FROM users WHERE user_id = %s",
+                    "SELECT user_id, april_id, plan, subscription_until, premium_id FROM users WHERE user_id = %s",
                     (uid,),
                 )
                 plan_row = cur.fetchone() or {}
-                active_premium = (
+                is_superadmin = _is_superadmin_user_row(plan_row)
+                if is_superadmin:
+                    _ensure_superadmin_premium(cur, plan_row)
+                active_premium = is_superadmin or (
                     str(plan_row.get("plan") or "free").lower() == "premium"
                     and float(plan_row.get("subscription_until") or 0) > cleanup_now.timestamp()
                 ) if isinstance(plan_row, dict) else False
@@ -1264,10 +1370,15 @@ def load_dialogue_history_index(
                 owner_ids = _dialogue_owner_ids_cursor(cur, uid)
                 if not owner_ids:
                     return {"authenticated": False}
+                is_superadmin = _is_superadmin_user_row(account)
+                if is_superadmin:
+                    _ensure_superadmin_premium(cur, account)
                 raw_plan = str(account.get("plan") or "free").strip().lower()
                 expiry = float(account.get("subscription_until") or 0)
-                plan = raw_plan if raw_plan in {"lite", "premium"} and expiry > current.timestamp() else "free"
-                if raw_plan in {"lite", "premium"} and plan == "free":
+                plan = "premium" if is_superadmin else (
+                    raw_plan if raw_plan in {"lite", "premium"} and expiry > current.timestamp() else "free"
+                )
+                if not is_superadmin and raw_plan in {"lite", "premium"} and plan == "free":
                     cur.execute(
                         "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
                         (uid, raw_plan),
@@ -2129,7 +2240,7 @@ def get_user_plan(user_id):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT user_id, plan, subscription_until
+                    SELECT user_id, april_id, plan, subscription_until, premium_id
                     FROM users
                     WHERE user_id = %s OR april_id = %s
                     ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
@@ -2142,6 +2253,9 @@ def get_user_plan(user_id):
                     _ensure_user_defaults(cur, uid)
                     return "free"
                 uid = str(user.get("user_id") or uid).strip()
+                if _is_superadmin_user_row(user):
+                    _ensure_superadmin_premium(cur, user)
+                    return "premium"
                 plan = str(user.get("plan") or "free").strip().lower()
                 expires_at = float(user.get("subscription_until") or 0)
                 current_seconds = now().timestamp()
@@ -2190,12 +2304,17 @@ def get_user_subscription_status(user_id):
                     return None
                 # All linked records use the internal user_id as their key.
                 uid = str(user.get("user_id") or uid).strip()
+                is_superadmin = _is_superadmin_user_row(user)
+                if is_superadmin:
+                    _ensure_superadmin_premium(cur, user)
 
                 now_seconds = now().timestamp()
                 until_seconds = float(user.get("subscription_until") or 0)
                 raw_plan = str(user.get("plan") or "free").strip().lower()
-                plan = raw_plan if raw_plan in {"lite", "premium"} and until_seconds > now_seconds else "free"
-                if raw_plan in {"lite", "premium"} and plan == "free":
+                plan = "premium" if is_superadmin else (
+                    raw_plan if raw_plan in {"lite", "premium"} and until_seconds > now_seconds else "free"
+                )
+                if not is_superadmin and raw_plan in {"lite", "premium"} and plan == "free":
                     cur.execute("UPDATE users SET plan = 'free' WHERE user_id = %s", (uid,))
 
                 # A payment-history flag counts only paid transactions. Test-grant
@@ -2216,6 +2335,8 @@ def get_user_subscription_status(user_id):
                     "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
                     "has_premium_history": has_premium_history,
+                    "is_superadmin": is_superadmin,
+                    "subscription_label": "∞ / 100 лет" if is_superadmin else None,
                 }
                 if plan == "free":
                     payload["free_media"] = get_free_media_quota_status(uid)
@@ -2443,7 +2564,7 @@ def get_free_media_quota_status(user_id: Any) -> dict[str, Any] | None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT user_id, email, provider, plan, subscription_until
+                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
                     FROM users WHERE user_id = %s FOR UPDATE
                     """,
                     (uid,),
@@ -2452,13 +2573,19 @@ def get_free_media_quota_status(user_id: Any) -> dict[str, Any] | None:
                 if not _is_authenticated_row(user):
                     return None
                 current = now()
+                is_superadmin = _is_superadmin_user_row(user)
+                if is_superadmin:
+                    _ensure_superadmin_premium(cur, user)
                 raw_plan = str(user.get("plan") or "free").strip().lower()
                 until = float(user.get("subscription_until") or 0)
-                plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
+                plan = "premium" if is_superadmin else (
+                    raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
+                )
                 if plan != "free":
                     return {
                         "unlimited": True,
                         "plan": plan,
+                        "is_superadmin": is_superadmin,
                         "limit": None,
                         "remaining": None,
                         "used": 0,
@@ -2519,7 +2646,7 @@ def reserve_free_media_units(
                 # updates even when two Web requests arrive at the same moment.
                 cur.execute(
                     """
-                    SELECT user_id, email, provider, plan, subscription_until
+                    SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
                     FROM users WHERE user_id = %s FOR UPDATE
                     """,
                     (uid,),
@@ -2528,6 +2655,9 @@ def reserve_free_media_units(
                 if not _is_authenticated_row(user):
                     return {"allowed": False, "error_code": "AUTHENTICATED_USER_REQUIRED"}
                 current = now()
+                if _is_superadmin_user_row(user):
+                    _ensure_superadmin_premium(cur, user)
+                    return {"allowed": True, "tracked": False, "plan": "premium", "is_superadmin": True}
                 raw_plan = str(user.get("plan") or "free").strip().lower()
                 until = float(user.get("subscription_until") or 0)
                 active_plan = raw_plan if raw_plan in {"lite", "premium"} and until > current.timestamp() else "free"
@@ -3993,7 +4123,7 @@ def reset_user_limits(cur, uid):
 
 
 def can_send_message(user_id, limit=FREE_MESSAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id) or limit == -1:
         return True
     conn = get_conn()
     if not conn:
@@ -4019,7 +4149,7 @@ def can_send_message(user_id, limit=FREE_MESSAGES_LIMIT):
 
 
 def can_generate_image(user_id, limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id) or limit == -1:
         return True
     conn = get_conn()
     if not conn:
@@ -4045,7 +4175,7 @@ def can_generate_image(user_id, limit=FREE_IMAGES_LIMIT):
 
 
 def get_remaining_messages(user_id, limit=FREE_MESSAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id) or limit == -1:
         return "∞"
     conn = get_conn()
     if not conn:
@@ -4061,7 +4191,7 @@ def get_remaining_messages(user_id, limit=FREE_MESSAGES_LIMIT):
 
 
 def get_remaining_images(user_id, limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID or limit == -1:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id) or limit == -1:
         return "∞"
     conn = get_conn()
     if not conn:
@@ -4077,7 +4207,7 @@ def get_remaining_images(user_id, limit=FREE_IMAGES_LIMIT):
 
 
 def get_remaining_days(user_id):
-    if user_id == ADMIN_ID:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id):
         return "∞"
     conn = get_conn()
     if not conn:
@@ -4094,7 +4224,7 @@ def get_remaining_days(user_id):
 
 
 def get_limits(user_id, msg_limit=FREE_MESSAGES_LIMIT, img_limit=FREE_IMAGES_LIMIT):
-    if user_id == ADMIN_ID:
+    if user_id == ADMIN_ID or is_superadmin_account(user_id):
         return {"messages_used":"∞","messages_limit":"∞","images_used":"∞","images_limit":"∞"}
     msg_limit_out = "∞" if msg_limit == -1 else msg_limit
     img_limit_out = "∞" if img_limit == -1 else img_limit
@@ -5320,6 +5450,111 @@ def report_community_message(user_id: Any, message_id: Any, reason: Any = "inapp
     finally:
         conn.close()
 
+
+
+
+def list_ai_content_reports(admin_april_id: Any, limit: int = 30) -> dict[str, Any] | None:
+    """List unread user reports about AI answers for the configured Super Admin."""
+    supplied = str(admin_april_id or "").strip().upper()
+    if not supplied or supplied != _configured_superadmin_april_id():
+        return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    conn = get_conn()
+    if not conn:
+        return None
+    try:
+        safe_limit = max(1, min(int(limit), 100))
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS april_ai_content_reports (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        message_id TEXT NOT NULL,
+                        reason TEXT NOT NULL CHECK (reason IN ('harmful', 'offensive', 'misleading', 'other')),
+                        content_excerpt TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )"""
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_april_ai_content_reports_created_at ON april_ai_content_reports(created_at DESC)"
+                )
+                cur.execute(
+                    """SELECT r.id, r.user_id, r.message_id, r.reason, r.content_excerpt, r.created_at,
+                              u.april_id, u.name, u.email
+                       FROM april_ai_content_reports r
+                       LEFT JOIN users u ON u.user_id = r.user_id
+                       WHERE COALESCE(r.status, 'open') = 'open'
+                       ORDER BY r.created_at ASC, r.id ASC
+                       LIMIT %s""",
+                    (safe_limit,),
+                )
+                rows = [dict(row) for row in (cur.fetchall() or [])]
+                reports = []
+                for row in rows:
+                    created = row.get("created_at")
+                    if isinstance(created, datetime):
+                        if created.tzinfo is None:
+                            created = created.replace(tzinfo=timezone.utc)
+                        created_ms = int(created.timestamp() * 1000)
+                    else:
+                        created_ms = None
+                    reports.append({
+                        "id": int(row.get("id") or 0),
+                        "user_id": str(row.get("user_id") or ""),
+                        "april_id": str(row.get("april_id") or ""),
+                        "name": str(row.get("name") or ""),
+                        "email": str(row.get("email") or ""),
+                        "message_id": str(row.get("message_id") or ""),
+                        "reason": str(row.get("reason") or "other"),
+                        "content_excerpt": str(row.get("content_excerpt") or ""),
+                        "created_at_ms": created_ms,
+                    })
+                return {
+                    "success": True,
+                    "is_admin": True,
+                    "unread_count": len(reports),
+                    "reports": reports,
+                }
+    except Exception as exc:
+        print(f"[APRIL_CONTENT_REPORT] INBOX_ERROR type={type(exc).__name__}", flush=True)
+        return None
+    finally:
+        conn.close()
+
+
+def delete_ai_content_report(admin_april_id: Any, report_id: Any) -> dict[str, Any]:
+    """Acknowledge a report by deleting it from the active inbox and report history."""
+    supplied = str(admin_april_id or "").strip().upper()
+    if not supplied or supplied != _configured_superadmin_april_id():
+        return {"success": False, "error": "SUPERADMIN_REQUIRED"}
+    try:
+        rid = int(report_id)
+    except (TypeError, ValueError, OverflowError):
+        return {"success": False, "error": "REPORT_ID_INVALID"}
+    if rid <= 0:
+        return {"success": False, "error": "REPORT_ID_INVALID"}
+    conn = get_conn()
+    if not conn:
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM april_ai_content_reports WHERE id = %s RETURNING id",
+                    (rid,),
+                )
+                deleted = cur.fetchone()
+                if not deleted:
+                    return {"success": False, "error": "REPORT_NOT_FOUND"}
+        return {"success": True, "report_id": rid, "read": True, "deleted": True}
+    except psycopg2.errors.UndefinedTable:
+        return {"success": False, "error": "REPORT_NOT_FOUND"}
+    except Exception as exc:
+        print(f"[APRIL_CONTENT_REPORT] DELETE_ERROR type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "CONTENT_REPORT_UNAVAILABLE"}
+    finally:
+        conn.close()
 
 
 def submit_ai_content_report(user_id: Any, message_id: Any, reason: Any, content_excerpt: Any) -> dict[str, Any]:
