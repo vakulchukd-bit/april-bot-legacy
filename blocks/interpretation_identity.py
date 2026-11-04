@@ -2548,10 +2548,20 @@ def analyze_dialogue_transition(
         and not history_request
     )
 
-    if history_request or historical_match:
+    if history_request:
+        # An explicit history-inventory/recall request is intentional and may
+        # choose an older retained branch even when the latest answer also matches.
         source_pair = anchor or next((item for item in selected if isinstance(item, dict)), {})
         source_kind = "AUTHENTICATED_HISTORICAL_BRANCH" if source_pair else "HISTORY_LOOKUP_NO_MATCH"
-    elif relation == "CONTINUE" and latest and (latest_answer_match or not anchor_message_id or anchor_message_id == latest_message_id):
+    elif latest_answer_match and latest:
+        # The latest actual April answer is the primary discourse vector. This
+        # signal must win even when State Manager's coarse relation says NEW.
+        source_pair = latest
+        source_kind = "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH"
+    elif historical_match:
+        source_pair = anchor or next((item for item in selected if isinstance(item, dict)), {})
+        source_kind = "AUTHENTICATED_HISTORICAL_BRANCH" if source_pair else "HISTORY_LOOKUP_NO_MATCH"
+    elif relation == "CONTINUE" and latest and (not anchor_message_id or anchor_message_id == latest_message_id):
         source_pair = latest
         source_kind = "LATEST_APRIL_ANSWER_AND_ACTIVE_BRANCH"
     elif relation == "CONTINUE" and anchor:
@@ -2617,9 +2627,14 @@ def analyze_dialogue_transition(
     elif historical_match or (history_request and source_message_id):
         classification = "HISTORICAL_TOPIC_REACTIVATION"
         strategy = "RESUME_HISTORICAL_BRANCH"
-    elif relation == "CONTINUE" and source_message_id:
+    elif (relation == "CONTINUE" or latest_answer_match) and source_message_id and same_dialog:
+        # A verified latest-answer match is sufficient to continue the active
+        # dialogue even if a separate semantic layer labelled the request NEW.
         classification = "TOPIC_CONTINUATION"
         strategy = "CONTINUE_WITH_NEW_INFORMATION"
+    elif historical_match and source_message_id:
+        classification = "HISTORICAL_TOPIC_REACTIVATION"
+        strategy = "RESUME_HISTORICAL_BRANCH"
     elif references_previous and source_message_id and (subject_overlap >= 0.12 or not current_terms):
         classification = "HISTORICAL_TOPIC_REACTIVATION" if not same_dialog else "TOPIC_CONTINUATION"
         strategy = "RESUME_HISTORICAL_BRANCH" if classification == "HISTORICAL_TOPIC_REACTIVATION" else "CONTINUE_WITH_NEW_INFORMATION"
