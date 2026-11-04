@@ -2472,8 +2472,6 @@ class AprilHandler(BaseHTTPRequestHandler):
                     self._send_json(415, {"success": False, "error_code": "MULTIPART_REQUIRED"})
                     return
                 raw = self.rfile.read(length)
-                from email.parser import BytesParser
-                from email.policy import default as email_policy_default
                 message = BytesParser(policy=email_policy_default).parsebytes(
                     b"MIME-Version: 1.0\r\nContent-Type: " + content_type.encode("latin-1", "replace") + b"\r\n\r\n" + raw
                 )
