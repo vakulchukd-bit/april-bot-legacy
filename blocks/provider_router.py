@@ -2065,7 +2065,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         data["DIALOGUE_HISTORY_TOPICS"] = []
     # Preserve up to the requested ten topic entries for an explicit history list.
     # Ordinary continuation keeps a tighter index to avoid polluting the context.
-    data["DIALOGUE_TOPIC_INDEX"] = (data.get("DIALOGUE_TOPIC_INDEX") or [])[:10 if is_history else 3]
+    keep_active_topic_index = str(data.get("DIALOGUE_RELATION") or "NEW").upper() == "CONTINUE"
+    data["DIALOGUE_TOPIC_INDEX"] = (data.get("DIALOGUE_TOPIC_INDEX") or [])[
+        :10 if is_history else (3 if keep_active_topic_index else 0)
+    ]
     data["DIALOGUE_KNOWN_TOPIC_COUNT"] = int(data.get("DIALOGUE_KNOWN_TOPIC_COUNT") or 0) if is_history else 0
     for key in ("DIALOGUE_TABLE_MARKDOWN",):
         if data.get(key):
@@ -2137,6 +2140,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "user": _semantic_compress(item.get("user"), _scaled_prompt_tokens(55)),
                 "april": _semantic_compress(item.get("april"), _scaled_prompt_tokens(65)),
                 "topic": _semantic_compress(item.get("topic"), _scaled_prompt_tokens(24)),
+                "message_id": item.get("message_id"),
+                "topic_id": item.get("topic_id"),
+                "branch_id": item.get("branch_id"),
+                "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                "topic_origin_message_id": item.get("topic_origin_message_id") or item.get("origin_message_id"),
+                "same_dialog": item.get("same_dialog"),
+                "dialogue_state": item.get("dialogue_state") if isinstance(item.get("dialogue_state"), dict) else {},
+                "assistant_artifact_index": item.get("assistant_artifact_index") if isinstance(item.get("assistant_artifact_index"), list) else [],
                 "sections": [
                     {"heading": _semantic_compress(sec.get("heading"), _scaled_prompt_tokens(12)),
                      "summary": _semantic_compress(sec.get("summary"), _scaled_prompt_tokens(22)),
@@ -2157,7 +2168,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     for step in (item.get("question_sequence") or [])[-24:] if isinstance(step, dict)
                 ],
                 "assistant_artifact_index": [
-                    {key: artifact.get(key) for key in ("kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation") if artifact.get(key) not in (None, "", [], {})}
+                    {key: artifact.get(key) for key in ("kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation", "structured_preview", "language") if artifact.get(key) not in (None, "", [], {})}
                     for artifact in (item.get("assistant_artifact_index") or [])[:8] if isinstance(artifact, dict)
                 ],
             }
@@ -2391,7 +2402,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
                      "last_at": topic.get("last_at")}
                     for topic in (task_search.get("topic_index") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10)))] if isinstance(topic, dict)
-                ] if task_search.get("history_request") else [],
+                ] if task_search.get("history_request") or str(task_search.get("relation") or "").upper() == "CONTINUE" else [],
                 "topic": _semantic_compress(task_search.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                 "reason": _semantic_compress(task_search.get("reason"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
                 "anchor": {
@@ -2479,8 +2490,37 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "topic": _semantic_compress(item.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
                 "message_id": item.get("message_id"),
                 "topic_id": item.get("topic_id"),
+                "branch_id": item.get("branch_id"),
                 "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                "topic_origin_message_id": item.get("topic_origin_message_id") or item.get("origin_message_id"),
                 "same_dialog": item.get("same_dialog"),
+                "assistant_last_message": _clip(item.get("assistant_last_message"), 3000),
+                "assistant_artifact_index": [
+                    {
+                        key: (
+                            _clip(artifact.get(key), 800) if key == "structured_preview"
+                            else _clip(artifact.get(key), 180) if isinstance(artifact.get(key), str)
+                            else artifact.get(key)
+                        )
+                        for key in (
+                            "kind", "type", "artifact_type", "output_type", "title", "label",
+                            "summary", "description", "filename", "mime_type", "renderer", "viewer",
+                            "asset_id", "artifact_id", "id", "message_id", "source_message_id",
+                            "asset_role", "structured_preview", "language",
+                        )
+                        if artifact.get(key) not in (None, "", [], {})
+                    }
+                    for artifact in (item.get("assistant_artifact_index") or [])[:4]
+                    if isinstance(artifact, dict)
+                ],
+                "dialogue_state": {
+                    key: value for key, value in (item.get("dialogue_state") or {}).items()
+                    if key in {
+                        "schema", "relation", "classification", "strategy", "topic_id", "branch_id",
+                        "topic", "topic_origin_message_id", "branch_root_message_id",
+                        "source_message_id", "last_message_id", "same_dialog", "source_artifact_index",
+                    } and value not in (None, "", [], {})
+                } if isinstance(item.get("dialogue_state"), dict) else {},
                 "sections": [
                     {"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 3)),
                      "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
@@ -2889,10 +2929,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # source bindings even under compression; only ordinary turns may discard them.
     optional_shrinks = [("DIALOGUE_TABLE_MARKDOWN", "")]
     if not is_history:
-        optional_shrinks.extend([
-            ("DIALOGUE_HISTORY_TOPICS", []),
-            ("DIALOGUE_TOPIC_INDEX", []),
-        ])
+        optional_shrinks.append(("DIALOGUE_HISTORY_TOPICS", []))
+        if str(minimal.get("DIALOGUE_RELATION") or "NEW").upper() != "CONTINUE":
+            optional_shrinks.append(("DIALOGUE_TOPIC_INDEX", []))
     optional_shrinks.extend([
         ("DIALOGUE_KNOWN_TOPIC_COUNT", 0),
         ("SELECTED_ROOMS", []),
@@ -2979,10 +3018,20 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if isinstance(pair, dict):
                 compact_pair = {k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
                                 for k in ("topic", "user", "april") if pair.get(k)}
+                for identity_key in (
+                    "message_id", "topic_id", "branch_id", "origin_message_id",
+                    "topic_origin_message_id", "same_dialog", "dialogue_state",
+                ):
+                    if pair.get(identity_key) not in (None, "", [], {}):
+                        compact_pair[identity_key] = pair.get(identity_key)
                 if pair.get("assistant_last_message"):
                     compact_pair["assistant_last_message"] = _clip(pair.get("assistant_last_message"), 1000)
-                if isinstance(pair.get("assistant_artifact_index"), list):
-                    compact_pair["assistant_artifact_index"] = pair.get("assistant_artifact_index")[:4]
+                artifact_inventory = pair.get("assistant_artifact_index")
+                if not isinstance(artifact_inventory, list):
+                    source_state = pair.get("dialogue_state") if isinstance(pair.get("dialogue_state"), dict) else {}
+                    artifact_inventory = source_state.get("source_artifact_index")
+                if isinstance(artifact_inventory, list):
+                    compact_pair["assistant_artifact_index"] = artifact_inventory[:4]
                 if isinstance(pair.get("recent_steps"), list):
                     compact_pair["recent_steps"] = pair.get("recent_steps")[-12:]
                 if isinstance(pair.get("question_sequence"), list):
@@ -2994,9 +3043,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         "preserve_source_text": True,
                         "source_user_text": _clip(pair.get("source_user_text"), 300),
                         "source_april_text": _clip(pair.get("source_april_text"), 900),
-                        "source_user_text_complete": False,
-                        "source_april_text_complete": False,
-                        "source_content_complete": False,
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 300,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 900,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 300 and len(_text(pair.get("source_april_text"))) <= 900,
                         "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
                     })
                 compact_pairs.append(compact_pair)
@@ -3125,8 +3174,28 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "april": _clip(pair.get("april") or pair.get("source_april_text"), 420),
                     "message_id": pair.get("message_id"),
                     "topic_id": pair.get("topic_id"),
-                    "origin_message_id": pair.get("origin_message_id"),
+                    "branch_id": pair.get("branch_id"),
+                    "origin_message_id": pair.get("origin_message_id") or pair.get("topic_origin_message_id"),
+                    "topic_origin_message_id": pair.get("topic_origin_message_id") or pair.get("origin_message_id"),
                     "same_dialog": pair.get("same_dialog"),
+                    "assistant_last_message": _clip(pair.get("assistant_last_message"), 900),
+                    "dialogue_state": pair.get("dialogue_state") if isinstance(pair.get("dialogue_state"), dict) else {},
+                    "assistant_artifact_index": [
+                        {
+                            key: _clip(artifact.get(key), 420 if key == "structured_preview" else 120)
+                            for key in (
+                                "kind", "type", "artifact_type", "output_type", "title", "label",
+                                "filename", "mime_type", "message_id", "source_message_id",
+                                "asset_role", "structured_preview", "language",
+                            )
+                            if artifact.get(key) not in (None, "", [], {})
+                        }
+                        for artifact in (
+                            pair.get("assistant_artifact_index")
+                            or (pair.get("dialogue_state") or {}).get("source_artifact_index", [])
+                        )[:3]
+                        if isinstance(artifact, dict)
+                    ],
                     "sections": _emergency_sections(pair.get("sections"), limit=2),
                 }
                 if pair.get("preserve_source_text") is True:
@@ -3233,7 +3302,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "For a general overview, give a concise readable Markdown summary with one line per real topic, normally up to ten "
                 "and at least five when five or more distinct topics are supplied. For a named subject, prioritize matching topic "
                 "records and its selected pairs. " + empty_history_clause +
-                "Do not invent past topics. Respect the supplied time window and the Premium retention boundary."
+                "Do not invent past topics. Respect the supplied time window and the existing Free retention boundary; never widen it."
             )
         elif (
             emergency.get("DIALOGUE_RELATION") == "CONTINUE"
@@ -3248,7 +3317,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "This is a continuation-capable request. FIRST compare CURRENT_REQUEST with the exact assistant_message and artifact_index "
                 "in DIALOGUE_ANCHOR, which represent April's latest saved response in this authenticated chat. If they match, use the complete "
                 "selected branch in CONTINUATION_CONTEXT and its structured outputs; the latest assistant response is the entry point, not an old "
-                "active-work marker. If it does not match, use only the semantically selected 24-hour history branch; if no history match exists, "
+                "active-work marker. If it does not match, use only the semantically selected branch already returned within Free's existing 12-hour retention; if no match exists, "
                 "treat this as a clean NEW topic. Never let a stale branch replace a clearly different current subject. Do not repeat completed content."
             )
         else:
@@ -3363,9 +3432,17 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if not isinstance(pair, dict):
                     continue
                 clean_pair = dict(pair)
-                for key in ("user", "april", "source_user_text", "source_april_text"):
+                for key in ("user", "april"):
                     if key in clean_pair:
-                        clean_pair[key] = _semantic_compress(clean_pair.get(key), 34 if key in {"april", "source_april_text"} else 18)
+                        clean_pair[key] = _semantic_compress(clean_pair.get(key), 34 if key == "april" else 18)
+                if clean_pair.get("preserve_source_text") is True:
+                    # Canonical source excerpts contain names, titles and exact
+                    # values; do not paraphrase them during emergency compaction.
+                    clean_pair["source_user_text"] = _clip(clean_pair.get("source_user_text"), 500)
+                    clean_pair["source_april_text"] = _clip(clean_pair.get("source_april_text"), 1400)
+                    clean_pair["source_user_text_complete"] = bool(clean_pair.get("source_user_text_complete")) and len(_text(clean_pair.get("source_user_text"))) <= 500
+                    clean_pair["source_april_text_complete"] = bool(clean_pair.get("source_april_text_complete")) and len(_text(clean_pair.get("source_april_text"))) <= 1400
+                    clean_pair["source_content_complete"] = bool(clean_pair.get("source_content_complete")) and len(_text(clean_pair.get("source_user_text"))) <= 500 and len(_text(clean_pair.get("source_april_text"))) <= 1400
                 if "dialogue_assets" in clean_pair:
                     clean_pair["dialogue_assets"] = _slim_asset_index(clean_pair["dialogue_assets"])
                 slim_pairs.append(clean_pair)
@@ -3375,7 +3452,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # catalogue once an exact active anchor/selected pair has been chosen.
         if not minimal.get("HISTORY_REQUEST"):
             minimal.pop("DIALOGUE_HISTORY_TOPICS", None)
-            minimal.pop("DIALOGUE_TOPIC_INDEX", None)
+            if str(minimal.get("DIALOGUE_RELATION") or "NEW").upper() != "CONTINUE":
+                minimal.pop("DIALOGUE_TOPIC_INDEX", None)
             minimal.pop("DIALOGUE_TABLE_MARKDOWN", None)
         guidance = minimal.get("CONTINUATION_GUIDANCE")
         if isinstance(guidance, dict):
@@ -3953,13 +4031,23 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 "assistant_last_message": _clip(item.get("assistant_last_message") or item.get("assistant_message") or item.get("april_text"), 3000),
                 "assistant_artifact_index": [
                     {key: value for key, value in artifact.items()
-                     if key in {"kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation"}}
+                     if key in {"kind", "type", "artifact_type", "output_type", "title", "label", "summary", "description", "filename", "mime_type", "renderer", "viewer", "representation", "asset_id", "artifact_id", "id", "message_id", "source_message_id", "row_count", "column_count", "node_count", "edge_count", "width", "height", "operation", "image_operation", "edit_operation", "edit_mode", "action", "source_asset_id", "source_asset_message_id", "asset_role", "generation_model", "quality", "request_anchor", "prompt_summary", "visual_operation", "structured_preview", "language"}}
                     for artifact in (item.get("assistant_artifact_index") or [])
                     if isinstance(artifact, dict)
                 ][:8],
                 "topic": _clip(item.get("topic"), 200),
                 "topic_id": item.get("topic_id"),
+                "branch_id": item.get("branch_id"),
                 "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
+                "topic_origin_message_id": item.get("topic_origin_message_id") or item.get("origin_message_id"),
+                "dialogue_state": {
+                    key: value for key, value in (item.get("dialogue_state") or {}).items()
+                    if key in {
+                        "schema", "relation", "classification", "strategy", "topic_id", "branch_id",
+                        "topic", "topic_origin_message_id", "branch_root_message_id",
+                        "source_message_id", "last_message_id", "same_dialog",
+                    } and value not in (None, "", [], {})
+                } if isinstance(item.get("dialogue_state"), dict) else {},
                 "origin_turn": item.get("origin_turn"),
                 "sections": [
                     {"heading": _clip(sec.get("heading") or sec.get("h"), 180),
