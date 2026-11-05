@@ -2257,6 +2257,7 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "turn": item.get("turn_index"),
         "created_at": float(item.get("created_at") or 0) if item.get("created_at") else None,
+        "created_at_utc": _history_utc_iso(item.get("created_at")),
         "history_time_relation": _text(item.get("history_time_relation")),
         "history_time_label": _text(item.get("history_time_label"))[:140],
         "history_age_minutes": item.get("history_age_minutes"),
@@ -2547,6 +2548,17 @@ def _format_history_duration(minutes: float) -> str:
     if mins or not bits:
         bits.append(f"{mins} мин.")
     return " ".join(bits)
+
+
+def _history_utc_iso(value: Any) -> str:
+    """Return a stable UTC ISO-8601 timestamp for compact history context."""
+    try:
+        epoch = float(value or 0.0)
+        if epoch <= 0:
+            return ""
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
 
 
 def _history_local_now(now_value: float, utc_offset_minutes: int | None) -> tuple[datetime, str]:
