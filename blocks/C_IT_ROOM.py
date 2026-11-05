@@ -545,6 +545,14 @@ def _is_external_community_topic(query: Any) -> bool:
     if local_scope:
         return False
 
+    external_developer_community = bool(re.search(
+        r"(?:сообществ\w*.{0,55}(?:разработчик\w*|программист\w*|open[- ]?source)|"
+        r"(?:разработчик\w*|программист\w*|open[- ]?source).{0,55}сообществ\w*)",
+        low, re.IGNORECASE,
+    ))
+    if external_developer_community:
+        return True
+
     global_scope = bool(re.search(
         r"(?:миров\w*|глобальн\w*|международн\w*|worldwide|global|international|"
         r"\b(?:it|ai|ml)\b|айти|искусственн\w*\s+интеллект\w*|\bии\b|нейросет\w*|"
@@ -14029,9 +14037,61 @@ def _has_site_ui_target(query: str) -> bool:
     # saving/sharing/copying/downloading or a visible control, not any picture request.
     return bool(_SITE_GENERIC_MEDIA_RE.search(low) and _SITE_MEDIA_CONTROL_ACTION_RE.search(low))
 
+_SITE_HELP_NEGATION_RE = re.compile(
+    r"(?:\bне\s+(?:надо|нужно|нужен|нужна|нужны|хочу|спрашиваю|говорю|про|об|о)\b|"
+    r"\bне\s+интересу(?:ет|ют)\b|"
+    r"\b(?:no|not)\s+(?:need|want|asking\s+about)\b|"
+    r"\b(?:don't|do\s+not)\s+(?:need|want)\b)",
+    re.IGNORECASE,
+)
+_SITE_HELP_CONTRAST_SPLIT_RE = re.compile(
+    r"(?<=[.!?;])\s+|,\s*|\s+(?:а|но|однако|зато|вместо\s+этого|but|however|instead)\s+",
+    re.IGNORECASE,
+)
+
+
+def _effective_site_help_query(query: Any) -> tuple[str, bool]:
+    """Remove clauses that explicitly reject April-site help before routing.
+
+    A mention such as "не надо сайт по сообществу, а нарисуй синхрофазатрон"
+    is a correction, not a request to open Community. Keep positive clauses so a
+    second, explicit UI-navigation request in the same message still works.
+    """
+    raw = str(query or "").strip().replace("ё", "е")
+    if not raw:
+        return "", False
+    kept: list[str] = []
+    removed_negative_ui_clause = False
+    for clause in _SITE_HELP_CONTRAST_SPLIT_RE.split(raw):
+        part = clause.strip()
+        if not part:
+            continue
+        targets = list(_SITE_UI_TARGET_RE.finditer(part))
+        negations = list(_SITE_HELP_NEGATION_RE.finditer(part))
+        negative_ui_clause = False
+        for negation in negations:
+            for target in targets:
+                # The negation must be close to, and grammatically adjacent to,
+                # the UI target. This deliberately does not match "не могу найти".
+                distance = target.start() - negation.end()
+                reverse_distance = negation.start() - target.end()
+                if (0 <= distance <= 100) or (0 <= reverse_distance <= 45):
+                    negative_ui_clause = True
+                    break
+            if negative_ui_clause:
+                break
+        if negative_ui_clause:
+            removed_negative_ui_clause = True
+            continue
+        kept.append(part)
+    return " ".join(kept).strip(), removed_negative_ui_clause
+
 def _site_navigation_picture_request(query: str, referenced_area_ids: Any = None) -> bool:
     """Route visual questions about April UI to its real SVG navigation map."""
-    low = str(query or "").strip().lower().replace("ё", "е")
+    effective_query, removed_negative_clause = _effective_site_help_query(query)
+    low = effective_query.strip().lower().replace("ё", "е")
+    if not low or (removed_negative_clause and not is_site_help_query(low)):
+        return False
     referenced_ids = {str(value).strip().lower() for value in (referenced_area_ids or []) if str(value).strip()} if isinstance(referenced_area_ids, (list, tuple, set)) else set()
     explicit_ui_target = _has_site_ui_target(low)
     # A stale site-navigation anchor must not override a complete new task. Keep
@@ -14107,7 +14167,7 @@ def _is_attachment_instruction_query(query: Any) -> bool:
         return False
     media = bool(re.search(r"(?:картинк\w*|изображени\w*|фот\w*|снимк\w*|файл\w*|picture\w*|image\w*|photo\w*|file\w*)", low))
     upload_action = bool(re.search(r"(?:прикреп\w*|добав\w*|загруз\w*|выбрат\w*|отправ\w*|attach\w*|upload\w*|add\w*|select\w*)", low))
-    how_to = bool(re.search(r"(?:расскаж\w*.{0,35}как|объясн\w*.{0,35}как|подскажи\w*.{0,35}как|^как\b|куда\s+нажать|по\s+шагам|how\s+(?:do\s+i|to)|show\s+me\s+how)", low, re.I | re.S))
+    how_to = bool(re.search(r"(?:расскаж\w*.{0,35}как|объясн\w*.{0,35}как|подскажи\w*.{0,35}как|покажи\w*.{0,35}как|помоги\w*.{0,35}(?:прикреп|добав|загруз)|^как\b|куда\s+нажать|по\s+шагам|пошаг|how\s+(?:do\s+i|to)|show\s+me\s+how)", low, re.I | re.S))
     chat_target = bool(re.search(r"(?:в\s+(?:тво[её]м|этот|основн\w*|главн\w*)\s+(?:пространств\w*|чат\w*|диалог\w*)|в\s+чат\w*|в\s+переписк\w*|чтобы\s+(?:ты|април\w*)\s+(?:увид\w*|получил\w*|прочитал\w*)|so\s+(?:you|april)\s+can\s+(?:see|view|read)|in\s+(?:the\s+)?chat)", low, re.I))
     # Object placement/annotation refers to editing a photo, not uploading it.
     edit_surface = bool(re.search(r"(?:на\s+(?:эту\s+|этой\s+|этот\s+|мою\s+)?(?:фот\w*|картинк\w*|изображени\w*)|добав\w*.{0,55}\b(?:евро|гривн|надпис|объект|стрелк)\b)", low, re.I | re.S))
@@ -14124,8 +14184,9 @@ _SITE_INTERFACE_OVERVIEW_RE = re.compile(
 
 
 def is_site_help_query(query: str) -> bool:
-    """Detect April self-help/navigation questions independently of LLM classification."""
-    low = str(query or "").strip().lower().replace("ё", "е")
+    """Detect positive April self-help/navigation requests, excluding rejected routes."""
+    effective_query, _removed_negative_clause = _effective_site_help_query(query)
+    low = effective_query.strip().lower().replace("ё", "е")
     if not low:
         return False
     if _is_external_community_topic(low):
@@ -14360,10 +14421,15 @@ def _site_navigation_visual_brief(query: str, referenced_area_ids: Any = None) -
 def prepare_site_help_interpretation(
     interpretation: Dict[str, Any], query: str, question_sequence: Any = None, recent_context: Any = None
 ) -> bool:
-    """Bind site help to Interpretation and select a diagram unless another format is preferred."""
+    """Bind only positively requested April UI help to Interpretation."""
+    effective_query, removed_negative_clause = _effective_site_help_query(query)
+    if removed_negative_clause and not is_site_help_query(effective_query):
+        return False
+    if removed_negative_clause:
+        query = effective_query
     direct_match = is_site_help_query(query)
     referent_ids: List[str] = []
-    if not direct_match and _ELLIPTICAL_SITE_FOLLOWUP_RE.search(str(query or "")):
+    if not direct_match and not removed_negative_clause and _ELLIPTICAL_SITE_FOLLOWUP_RE.search(str(query or "")):
         relation = _text(recent_context.get("relation")).upper() if isinstance(recent_context, dict) else ""
         if relation in {"CONTINUE", "FOLLOWUP", "CONTINUATION"}:
             referent_ids = _referenced_site_area_ids(recent_context)
@@ -14581,8 +14647,9 @@ def _current_user_query(machine_request: Any) -> str:
 
 
 def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
-    """Return only the relevant routes for prompt efficiency; preserve the full map in this room."""
-    query = _current_user_query(machine_request).lower().replace("ё", "е")
+    """Return only routes relevant to the positive, current UI-help request."""
+    effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
+    query = effective_query.lower().replace("ё", "е")
     selected_ids: list[str] = []
     semantic_scores = _semantic_site_area_scores(query)
     matched_cases = APRIL_UI_HELP_QUERY_INDEX.get(_normalize_site_catalog_phrase(query), [])
@@ -14829,26 +14896,37 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None) -> str:
 
 
 def _site_help_requested(machine_request: Any) -> bool:
-    query = _current_user_query(machine_request)
-    if query and _is_external_community_topic(query):
+    raw_query = _current_user_query(machine_request)
+    query, removed_negative_clause = _effective_site_help_query(raw_query)
+
+    # The current turn is authoritative. Direct positive UI intent wins; a
+    # rejected UI clause cannot be revived by stale room flags or old anchors.
+    if query and is_site_help_query(query):
+        return True
+    if removed_negative_clause:
         return False
-    # The current turn is authoritative. An old `site_navigation` capability or
-    # continuation anchor must not hijack a full non-UI request (for example, a
-    # physical wiring schematic) and replace its intended C_DIAGRAM_ROOM render.
+
     if query:
-        query_words = _site_words(query)
-        explicit_ui_target = _has_site_ui_target(query)
-        explicit_april_knowledge_query = bool(
-            _SITE_GUIDE_TOPIC_RE.search(query)
-            and re.search(r"(?:\bapril\b|април\w*|эйприл\w*|/api/|\bapi\b|endpoint\b)", query, re.IGNORECASE)
-        )
-        if (
-            len(query_words) >= 7
-            and not explicit_ui_target
-            and not explicit_april_knowledge_query
-            and not is_site_help_query(query)
-        ):
-            return False
+        # The only inherited UI route allowed is a genuinely elliptical follow-up
+        # whose current interpretation contains a concrete, still-valid UI referent.
+        if _ELLIPTICAL_SITE_FOLLOWUP_RE.search(query):
+            if isinstance(machine_request, dict):
+                intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
+            else:
+                intent = getattr(machine_request, "intent", {})
+                intent = intent if isinstance(intent, dict) else {}
+            nested = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else {}
+            nested_intent = intent.get("intent") if isinstance(intent.get("intent"), dict) else {}
+            nested_interpretation_intent = nested.get("intent") if isinstance(nested.get("intent"), dict) else {}
+            valid_ids = {str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
+            for source in (intent, nested, nested_intent, nested_interpretation_intent):
+                refs = source.get("site_navigation_referent")
+                if isinstance(refs, list) and any(str(ref) in valid_ids for ref in refs):
+                    return True
+        return False
+
+    # Non-chat/internal callers without a current message may still supply an
+    # explicit room capability. It is never allowed to override actual user text.
     if isinstance(machine_request, dict):
         intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
     else:
@@ -14862,9 +14940,7 @@ def _site_help_requested(machine_request: Any) -> bool:
         if source.get("site_navigation_help") is True:
             return True
     routing = getattr(machine_request, "routing", {}) if not isinstance(machine_request, dict) else machine_request.get("routing", {})
-    if isinstance(routing, dict) and routing.get("site_help_requested") is True:
-        return True
-    return is_site_help_query(_current_user_query(machine_request))
+    return bool(isinstance(routing, dict) and routing.get("site_help_requested") is True)
 
 
 
@@ -14956,7 +15032,8 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     ).lower()
     is_ru_or_uk = language.startswith(("ru", "uk")) or not language
     heading = "Проверенные переходы" if is_ru_or_uk else "Verified links"
-    query_for_routes = _current_user_query(machine_request).lower().replace("ё", "е")
+    effective_route_query, _removed_negative_route_clause = _effective_site_help_query(_current_user_query(machine_request))
+    query_for_routes = effective_route_query.lower().replace("ё", "е")
     feedback_help = bool(re.search(
         r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|где|куда|наж)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response)|thank(?:s|ing)?\s+button)",
         query_for_routes, re.I,
@@ -15159,7 +15236,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     # Build a route graph without duplicating the homepage. Filter nodes by the
     # actual current screen; for example /aprill is a separate help page, not a
     # shortcut card inside the screenshot-confirmed profile/CURRENT PLAN panel.
-    current_route_query = _current_user_query(machine_request)
+    current_route_query, _removed_negative_route_clause = _effective_site_help_query(_current_user_query(machine_request))
     all_selected_area_ids = [str(area.get("id") or "") for area in areas if isinstance(area, dict)]
     # Whole-site requests get an overview canvas instead of being mistaken for a
     # profile quick-link request just because the map also contains settings.
@@ -15364,7 +15441,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         if language.startswith(("ru", "uk")) or not language else
         "This diagram shows the starting screen and verified destinations relevant to your question. Use the links in the text; arrows explain navigation and do not click automatically."
     )
-    current_query_for_render = _current_user_query(machine_request)
+    current_query_for_render, _removed_negative_render_clause = _effective_site_help_query(_current_user_query(machine_request))
     requested_outputs_for_render = _requested_outputs_from_machine_request(machine_request)
     render_navigation_diagram = _site_should_render_diagram(current_query_for_render, requested_outputs_for_render) and not source_image_edit
     if render_navigation_diagram:
@@ -15492,7 +15569,8 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
     }
     if context["site_help_requested"]:
         context["site_navigation_map"] = _select_site_map_excerpt(machine_request)
-        query = _current_user_query(machine_request).lower().replace("ё", "е")
+        effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
+        query = effective_query.lower().replace("ё", "е")
         full_interface_overview = bool(_SITE_INTERFACE_OVERVIEW_RE.search(query))
         if full_interface_overview or _SITE_GUIDE_TOPIC_RE.search(query) or re.search(r"(?:какие комнаты|список комнат|внутренн\w* комнат|room directory|что есть внутри april|структур\w* april)", query, re.I):
             context["room_directory"] = APRIL_ROOM_DIRECTORY
@@ -15534,16 +15612,17 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             prompt_fragments.append("For capabilities and Free/Premium comparison, use product_guide exactly, distinguish source-snapshot facts from live-status uncertainty, and state unimplemented/plan-only items openly.")
         if context.get("creator_identity_status"):
             prompt_fragments.append("For creator/developer identity, use creator_identity_status and source_visible_contact. Do not invent a person's name or legal company: the source says the legal operator name is unfinished.")
-        query = _current_user_query(machine_request)
+        effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
         requested_outputs = _requested_outputs_from_machine_request(machine_request)
-        if _site_should_render_diagram(query, requested_outputs):
+        if _site_should_render_diagram(effective_query, requested_outputs):
             prompt_fragments.extend([
                 "Complement site-navigation help with a screenshot-faithful April UI diagram built from the query-relevant screen blueprint; keep the written steps primary and never invent controls not present in that blueprint.",
                 "Use one portrait/mobile SVG for a short path; for a long procedure use two ordered, non-repeating diagrams that continue the route. Keep visible card/button labels and exact verified relative paths.",
                 "A source-image edit request takes precedence over a route diagram. Never replace an image-edit task with a generic map. Empty SVG/diagram shells must be dropped before SceneContract.",
             ])
+    effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
     diagram_hint = help_active and _site_should_render_diagram(
-        _current_user_query(machine_request), _requested_outputs_from_machine_request(machine_request)
+        effective_query, _requested_outputs_from_machine_request(machine_request)
     )
     return {
         "room": ROOM_ID,
