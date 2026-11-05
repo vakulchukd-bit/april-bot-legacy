@@ -1675,12 +1675,16 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "вернись", "покажи", "покажите", "скажи", "скажите", "назови", "назовите",
         "выведи", "дай", "дайте", "remind", "recall", "remember", "summarize", "list",
     })
-    temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
     temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
     explicit_time_reference = bool(re.search(
-        r"\b(?:(?:\d+|один|одна|одно|одну|два|две|пару|три|четыре|пять|полчаса|полторы?)\s*(?:-|–|—|до)?\s*)?(?:минут\w*|мин\b|час\w*|ч\b|дн\w*|сутк\w*|полчаса)\s*(?:назад|тому назад)\b|\b(?:в|около|примерно в)\s*\d{1,2}[:.]\d{2}\b",
+        r"\b(?:(?:\d+|один|одна|одно|одну|два|две|пару|пара|несколько|нескольких|три|четыре|пять|полчаса|полторы?)\s*(?:-|–|—|до)?\s*)?(?:секунд\w*|сек\.?|seconds?|secs?|минут\w*|мин\b|час\w*|ч\b|дн\w*|сутк\w*|полчаса)\s*(?:назад|тому назад|ago)\b|\b(?:в|около|примерно в)\s*\d{1,2}[:.]\d{2}\b",
         low,
     ))
+    temporal_past = (
+        past_reference or today_reference or recent_reference or explicit_time_reference
+        or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "недавно", "только", "что", "yesterday", "today", "recently"})
+        or "только что" in low or "just now" in low
+    )
     explicit_last_topic_reference = any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS if "последн" in marker or "последнее время" in marker or "за последнее время" in marker)
     # A natural Russian question often omits its grammatical subject:
     # "Какие темы и обсуждали?" still asks to retrieve previous dialogue.
@@ -1701,6 +1705,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "дайте", "выведи", "перечисли", "перечислите", "найди", "найдите",
             "истории", "диалогов", "диалоги", "темы", "сообщений", "что", "какие", "какой", "сколько",
         })
+    )
+    # A declarative phrase can still point to a previous dialogue branch:
+    # “мы же говорили об этом недавно”. Treat it as a history retrieval cue.
+    implicit_past_dialogue_pointer = bool(
+        dialogue_action and self_reference and temporal_past and not temporal_future
     )
     explicit_discussion_question = (dialogue_action and interrogative and (
         self_reference or temporal_past or recall_action or explicit_time_reference or any(term in low for term in (
@@ -1724,6 +1733,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or decision_recall
         or plan_recall
         or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
+        or implicit_past_dialogue_pointer
     ) and not future_topic_question
     # Explicit recall phrases in all supported languages override missing grammar cues.
     if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
@@ -1876,6 +1886,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
         "recent_reference": bool(recent_reference),
+        "explicit_time_reference": bool(explicit_time_reference),
+        "implicit_past_dialogue_pointer": bool(implicit_past_dialogue_pointer),
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
