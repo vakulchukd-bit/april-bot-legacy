@@ -3943,6 +3943,17 @@ def _compact_memory_summary(row: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", summary)[:440]
 
 
+def _premium_history_utc_iso(value: Any) -> str:
+    """Serialize a stored epoch as an unambiguous UTC ISO-8601 timestamp."""
+    try:
+        epoch = float(value or 0.0)
+        if epoch <= 0:
+            return ""
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
 def _temporal_neighbor(item: dict[str, Any], side: str) -> dict[str, Any]:
     """Create a small, factual descriptor for the closest retained pair near a time gap."""
     try:
@@ -4094,6 +4105,8 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
             section["source_message_id"] = _text(section.get("message_id") or source_message_id)
     return {
         "turn": item.get("turn_index"),
+        "created_at": float(item.get("created_at") or 0.0) if item.get("created_at") else None,
+        "created_at_utc": _premium_history_utc_iso(item.get("created_at")),
         "user": _text(item.get("user") or item.get("user_text"))[:360],
         "april": outline[:440],
         "assistant_last_message": assistant_last_message[:5200],
@@ -6786,6 +6799,19 @@ def search_dialogue_context(
                 "before": _temporal_neighbor(before_row, "before") if before_row else None,
                 "after": _temporal_neighbor(after_row, "after") if after_row else None,
             }
+            # Diagnostics alone are insufficient: pass the closest retained pair(s)
+            # into the normal interpreter/provider path so a time-gap request can
+            # still be answered from available history. Never widen retention.
+            neighbor_rows = []
+            if before_row is not None:
+                before_context = dict(before_row)
+                before_context["history_time_relation"] = "nearest_before_requested_window"
+                neighbor_rows.append(before_context)
+            if after_row is not None and (before_row is None or after_row.get("message_id") != before_row.get("message_id")):
+                after_context = dict(after_row)
+                after_context["history_time_relation"] = "nearest_after_requested_window"
+                neighbor_rows.append(after_context)
+            all_rows = sorted(neighbor_rows, key=lambda row: float(row.get("created_at") or 0.0))
         else:
             lower = float(time_filter["start_at"])
             upper = float(time_filter["end_at"])
@@ -6806,6 +6832,16 @@ def search_dialogue_context(
                     "before": _temporal_neighbor(before_row, "before") if before_row else None,
                     "after": _temporal_neighbor(after_row, "after") if after_row else None,
                 }
+                neighbor_rows = []
+                if before_row is not None:
+                    before_context = dict(before_row)
+                    before_context["history_time_relation"] = "nearest_before_requested_window"
+                    neighbor_rows.append(before_context)
+                if after_row is not None and (before_row is None or after_row.get("message_id") != before_row.get("message_id")):
+                    after_context = dict(after_row)
+                    after_context["history_time_relation"] = "nearest_after_requested_window"
+                    neighbor_rows.append(after_context)
+                all_rows = sorted(neighbor_rows, key=lambda row: float(row.get("created_at") or 0.0))
     resume_anchor_row = next((row for row in all_rows if (
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
