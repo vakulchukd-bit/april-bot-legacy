@@ -47,7 +47,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "free_provider_router_v9_code_file_contract_recovery_8000_output"
+PROVIDER_ROUTER_VERSION = "free_provider_router_v10_branch_digest_compaction_8000_output"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -68,6 +68,7 @@ IMAGE / MULTIMEDIA SEPARATION:
 The text answer is still the main answer. When image generation is explicitly requested, put only the requested visual subject/scene into the image-generation spec. Do not turn the whole explanation, tutorial, answer, code, table, diagram, or ordered steps into an image. Keep each requested explanatory or structured output in its own text/render block; put words inside the picture only when the user explicitly requests text within the image.
 - Answer like a careful domain expert: give the useful conclusion first, then explain the relevant why/how, implications, trade-offs and concrete next step when useful. Match depth to the question; completeness is required, padding is not.
 - For a continuation, use the selected topic/section and previous answer as the coverage ledger. Do not repeat material already answered: extend it with a genuinely new detail, deeper explanation, comparison, example, consequence, risk or next decision. Preserve established facts, user constraints, corrections, decisions, exact values and unresolved questions. Keep the topic's logical thread moving from turn to turn.
+- On Free continuation, CONTINUATION_CONTEXT may contain a branch_digest: treat its ordered steps, covered_sections, branch/topic/source IDs and artifact_refs as the compact coverage ledger. Do not expect a full transcript in the prompt; canonical messages remain in authenticated storage. Use PROTECTED_STRUCTURED_DATA for exact saved rows/values and restore visual/file artifacts by their source IDs. Never replace exact saved data with the prose digest, and never claim the original transcript was lost.
 - A short reaction such as “more interesting”, “continue”, “what else?”, “you already said that”, or an elliptical reference usually points to the active topic when same-dialog evidence supports that reading. Retrieve and verify the relevant prior pair; if the selected history does not fit, do not force it.
 - On a genuinely new topic, answer independently and do not import unrelated history. Make the answer naturally useful for a possible follow-up without artificially tying it to the previous subject. If the referent is genuinely ambiguous and no reliable anchor exists, ask one focused clarification rather than guessing.
 - Keep the input signal clean: prioritize CURRENT_REQUEST and lossless source values, then the strongest topic-specific context, then only background that changes the answer. Remove duplicate summaries, stale/irrelevant topics, redundant metadata and filler before compressing facts. Never silently omit a requested step, negate a constraint, alter a value, invent missing source data, or present an inference as a saved fact.
@@ -138,7 +139,7 @@ Do not expose internal reasoning.
 
 Always treat these sections as structured input:
 1. AUTHENTICATED_IDENTITY and CURRENT_REQUEST (the current request always exists)
-2. CONTINUATION_CONTEXT (selected USER↔APRIL pairs; [] when NEW unless HISTORY_REQUEST=true or a semantically matched historical pair is explicitly supplied)
+2. CONTINUATION_CONTEXT (selected USER↔APRIL source pair(s), or a compact branch_digest envelope on ordinary Free continuation; [] when NEW unless HISTORY_REQUEST=true or a semantically matched historical pair is explicitly supplied)
    When DIALOGUE_COMMUNICATION describes feedback/reaction, answer that conversational move: acknowledge praise naturally; treat dissatisfaction, correction, or “not what I meant” as a cue to re-evaluate the previous answer and improve it. If active_branch_repair or previous_answer_reference is true, use selected canonical source turns to verify what April actually said before explaining what should have happened; distinguish the actual prior answer from the corrected answer, never rewrite the historical claim as if April had already said the correction, and address the repair before advancing an ongoing task. Do not merely report search results or say “I found a record” unless the user asks what was discussed. For a bare acknowledgement such as “да”, “ага”, “ок” or “точно”, acknowledge briefly and do not repeat/regenerate the completed answer or artifact. Continue with more work only when the user adds a request or the preceding assistant turn explicitly asked for confirmation before an action.
    If a selected pair includes preserve_source_text=true, source_user_text/source_april_text are bounded excerpts copied from the canonical dialogue_memory row, not inferred summaries. Use them as primary evidence about the prior exchange. Respect source_content_complete/source_*_complete flags: never claim to have the full original text if a flag is false.
 3. NEW_DIALOGUE_REQUEST (always contains the literal current request; consult NEW_DIALOGUE_ACTIVE before treating it as a topic switch)
@@ -352,7 +353,7 @@ Keep internal fields concise. Interleave step-specific text and its requested/ma
 in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must carry real values.
 Composite output requests are cumulative, but there is no required renderer count or prose/render ratio: each visual must add concrete information, and the full explanation stays in the text answer. Generated illustrations are not authentic photographs.
 When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, render each one only when it is explicitly requested or materially useful and has a concrete payload. For non-numeric concepts use a grounded network graph only when relationships matter; never fake numeric data. Images need the generator signal; links need real URLs.
-Use CURRENT_REQUEST as the task. LATEST-ANSWER-FIRST CONTINUATION: On every turn, first compare CURRENT_REQUEST with the exact DIALOGUE_ANCHOR.assistant_message and its structured_output/artifact_index. If semantically related, continue that authenticated chat branch and inspect its complete ACTIVE_TOPIC_CONTEXT (all compatible branch steps, questions, and created artifacts) before answering; do not repeat completed work. Only when the latest assistant answer does not match may selected 24-hour history be used. If no history topic matches, start a clean NEW topic. Old active-work labels or artifact manifests cannot override the latest answer's real subject. Voice, image, video, and file attachments do not bypass this sequence. On CONTINUE, SELECTED_SECTION is the target when present; use
+Use CURRENT_REQUEST as the task. LATEST-ANSWER-FIRST CONTINUATION: State Manager has already compared CURRENT_REQUEST with the exact canonical latest April answer before provider routing. Use DIALOGUE_ANCHOR.assistant_message as its compact semantic summary and use its message/topic/branch IDs plus CONTINUATION_CONTEXT.branch_digest as the branch coverage ledger. Continue that authenticated chat branch; inspect the selected branch steps, covered sections and artifact references before answering; do not repeat completed work. Full source messages remain in storage and are retrieved by their IDs only when the user asks to quote/show the original. Only when the latest assistant answer does not match may selected 24-hour history be used. If no history topic matches, start a clean NEW topic. Old active-work labels or artifact manifests cannot override the latest answer's real subject. Voice, image, video, and file attachments do not bypass this sequence. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. When ACTIVE_WORK_BRANCH is
 active, it is the first context lane for the matched turn: keep current state and original task constraints
 before generic history ranking. Continue choices, scene actions, code/image edits, diagram changes and solution
@@ -1912,10 +1913,451 @@ def _active_topic_context_minimum(value: Any) -> dict[str, Any]:
     return {key: val for key, val in out.items() if val not in (None, "", [], {})}
 
 
+def _compact_free_branch_digest_payload(value: Any, *, step_limit: int = 8, section_limit: int = 8, artifact_limit: int = 8) -> dict[str, Any]:
+    """Keep a small, identity-preserving branch ledger through every prompt fallback.
+
+    This is a prompt representation only. Canonical turns, exact source text and
+    artifact payloads stay in their existing storage lanes and are never rewritten.
+    """
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {
+        "schema": _text(value.get("schema") or "april_free_branch_digest_v1")[:48],
+    }
+    for key, limit in (("topic", 18), ("topic_id", 100), ("branch_id", 100),
+                       ("origin_message_id", 100), ("anchor_message_id", 100)):
+        raw = value.get(key)
+        if raw not in (None, "", [], {}):
+            result[key] = _semantic_compress(raw, limit) if key == "topic" else _text(raw)[:100]
+    try:
+        result["pair_count"] = max(0, min(10000, int(value.get("pair_count") or 0)))
+    except (TypeError, ValueError, OverflowError):
+        result["pair_count"] = 0
+
+    steps = []
+    raw_steps = value.get("steps") if isinstance(value.get("steps"), list) else []
+    for step in raw_steps[-max(1, step_limit):]:
+        if not isinstance(step, dict):
+            continue
+        row = {}
+        if step.get("turn") is not None:
+            row["turn"] = step.get("turn")
+        for key, budget in (("user_request", 12), ("answer_summary", 18),
+                            ("source_evidence_summary", 8)):
+            raw = step.get(key)
+            if raw:
+                row[key] = _semantic_compress(raw, budget)
+        for key in ("message_id", "topic_id", "branch_id"):
+            raw = step.get(key)
+            if raw:
+                row[key] = _text(raw)[:100]
+        sections = []
+        for section in (step.get("sections") or [])[:2]:
+            if not isinstance(section, dict):
+                continue
+            item = {
+                "heading": _semantic_compress(section.get("heading"), 5),
+                "summary": _semantic_compress(section.get("summary"), 7),
+            }
+            if section.get("order") is not None:
+                item["order"] = section.get("order")
+            sections.append({k: v for k, v in item.items() if v not in (None, "", [], {})})
+        if sections:
+            row["sections"] = sections
+        if row:
+            steps.append(row)
+    if steps:
+        result["steps"] = steps
+
+    covered = []
+    for section in (value.get("covered_sections") or [])[:max(1, section_limit)]:
+        if isinstance(section, dict):
+            row = {
+                "heading": _semantic_compress(section.get("heading"), 5),
+                "summary": _semantic_compress(section.get("summary"), 7),
+            }
+            if section.get("order") is not None:
+                row["order"] = section.get("order")
+            row = {k: v for k, v in row.items() if v not in (None, "", [], {})}
+        else:
+            row = _semantic_compress(section, 7)
+        if row and row not in covered:
+            covered.append(row)
+    if covered:
+        result["covered_sections"] = covered
+
+    artifacts = []
+    for artifact in (value.get("artifact_refs") or [])[:max(1, artifact_limit)]:
+        if not isinstance(artifact, dict):
+            continue
+        row = {}
+        for key in ("id", "kind", "source_message_id", "branch_id", "title", "renderer", "viewer", "mime_type"):
+            raw = artifact.get(key)
+            if raw:
+                row[key] = _text(raw)[:100 if key.endswith("id") or key == "id" else 56]
+        for key in ("row_count", "column_count", "node_count", "edge_count", "width", "height"):
+            raw = artifact.get(key)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                row[key] = raw
+        if artifact.get("summary"):
+            row["summary"] = _semantic_compress(artifact.get("summary"), 7)
+        if row:
+            artifacts.append(row)
+    if artifacts:
+        result["artifact_refs"] = artifacts
+
+    if value.get("earlier_step_count"):
+        try:
+            result["earlier_step_count"] = max(0, int(value.get("earlier_step_count")))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if value.get("earlier_steps_summary"):
+        result["earlier_steps_summary"] = _semantic_compress(value.get("earlier_steps_summary"), 12)
+    # Exact source values remain in PROTECTED_STRUCTURED_DATA and saved artifacts.
+    result["exact_data_source"] = "PROTECTED_STRUCTURED_DATA and artifact_refs source IDs"
+    return {key: item for key, item in result.items() if item not in (None, "", [], {})}
+
+
+def _compact_free_continuation_card(data: dict[str, Any]) -> dict[str, Any]:
+    """Replace repeated Free continuation transcripts with a compact branch ledger.
+
+    Canonical messages and artifacts remain untouched in PostgreSQL. This function
+    only changes the prompt card immediately before OpenAI: one compact timeline,
+    stable source IDs, artifact references and (when explicitly marked) bounded
+    lossless source excerpts. Exact numeric/structured values stay in the separate
+    PROTECTED_STRUCTURED_DATA lane.
+    """
+    if not isinstance(data, dict) or bool(data.get("HISTORY_REQUEST")):
+        return {"applied": False}
+    relation = _text(data.get("DIALOGUE_RELATION") or "NEW").upper()
+    if relation != "CONTINUE" and not bool(data.get("CONTEXTUAL_HISTORY_MATCH")):
+        # A semantically matched historical pair may intentionally remain NEW.
+        if not (isinstance(data.get("CONTINUATION_CONTEXT"), list) and data.get("CONTINUATION_CONTEXT")):
+            return {"applied": False}
+
+    raw_pairs = data.get("CONTINUATION_CONTEXT") if isinstance(data.get("CONTINUATION_CONTEXT"), list) else []
+    raw_pairs = [item for item in raw_pairs if isinstance(item, dict)]
+    raw_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
+    current_text = _text(data.get("CURRENT_REQUEST"))
+    communication = data.get("DIALOGUE_COMMUNICATION") if isinstance(data.get("DIALOGUE_COMMUNICATION"), dict) else {}
+    transition_source = data.get("DIALOGUE_TRANSITION_ANALYSIS") if isinstance(data.get("DIALOGUE_TRANSITION_ANALYSIS"), dict) else {}
+    explicit_verbatim_request = bool(re.search(
+        r"(?:дословн|цитат|точн(?:ый|ую|ое)?\s+(?:текст|ответ|формулиров)|полный\s+(?:текст|ответ)|"
+        r"оригинал\s+(?:ответ|сообщен)|предыдущ(?:ий|его)\s+(?:ответ|сообщен).{0,35}(?:покажи|восстанови|скопируй)|"
+        r"quote\s+(?:the\s+)?(?:previous|original)|verbatim|exact\s+(?:text|answer)|show\s+the\s+previous\s+answer)",
+        current_text, re.IGNORECASE,
+    ))
+    needs_verbatim_source = bool(
+        explicit_verbatim_request
+        or communication.get("active_branch_repair")
+        or communication.get("factual_verification_request")
+        or (transition_source.get("pre_response_analysis") or {}).get("active_branch_repair")
+        or (transition_source.get("pre_response_analysis") or {}).get("factual_verification_request")
+    )
+    if not raw_pairs and not raw_anchor:
+        return {"applied": False}
+
+    anchor_message_id = _text(raw_anchor.get("message_id"))
+    anchor_branch_id = _text(raw_anchor.get("branch_id"))
+    anchor_topic_id = _text(raw_anchor.get("topic_id"))
+
+    # State Manager normally supplies one chronological branch window. If branch
+    # IDs are present, never merge incompatible sibling branches into this digest.
+    matching_pairs = raw_pairs
+    if anchor_branch_id:
+        # Do not silently fall back to sibling branches if the exact branch has
+        # no match. A branch-less pair is acceptable only when its topic identity
+        # is also compatible; otherwise the anchor supplies a one-step digest.
+        matching_pairs = [
+            item for item in raw_pairs
+            if _text(item.get("branch_id")) == anchor_branch_id
+            or (
+                not _text(item.get("branch_id"))
+                and (not anchor_topic_id or _text(item.get("topic_id")) in {"", anchor_topic_id})
+            )
+        ]
+    elif anchor_topic_id:
+        matching_pairs = [item for item in raw_pairs if _text(item.get("topic_id")) in {"", anchor_topic_id}]
+
+    def artifact_ref(item: dict[str, Any], fallback_branch: str = "") -> dict[str, Any]:
+        kind = _text(item.get("kind") or item.get("type") or item.get("artifact_type") or item.get("output_type") or item.get("renderer"))[:24]
+        result = {
+            "id": _text(item.get("asset_id") or item.get("artifact_id") or item.get("id") or item.get("message_id"))[:100],
+            "kind": kind,
+            "source_message_id": _text(item.get("source_message_id") or item.get("message_id") or item.get("asset_message_id"))[:100],
+            "branch_id": _text(item.get("branch_id") or fallback_branch)[:100],
+        }
+        title = _clip(item.get("title") or item.get("label") or item.get("filename"), 64)
+        if title:
+            result["title"] = title
+        for source_key, target_key in (("renderer", "renderer"), ("viewer", "viewer"), ("mime_type", "mime_type"),
+                                       ("row_count", "row_count"), ("column_count", "column_count"),
+                                       ("node_count", "node_count"), ("edge_count", "edge_count"),
+                                       ("width", "width"), ("height", "height")):
+            value = item.get(source_key)
+            if value not in (None, "", [], {}):
+                result[target_key] = value
+        summary = item.get("summary") or item.get("description") or item.get("structured_preview") or item.get("prompt_summary")
+        if summary:
+            result["summary"] = _semantic_compress(summary, 10)
+        return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+    step_rows: list[dict[str, Any]] = []
+    covered: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    seen_artifacts: set[tuple[str, str, str]] = set()
+    preserved_source_pair: dict[str, Any] | None = None
+    for index, pair in enumerate(matching_pairs):
+        user_source = pair.get("user_request") or pair.get("user_text") or pair.get("user")
+        answer_source = pair.get("april_summary") or pair.get("memory_summary") or pair.get("summary") or pair.get("april") or pair.get("assistant_last_message")
+        user_summary = _semantic_compress(user_source, 22)
+        answer_summary = _semantic_compress(answer_source, 38)
+        section_refs = []
+        for sec in (pair.get("sections") or [])[:8] if isinstance(pair.get("sections"), list) else []:
+            if not isinstance(sec, dict):
+                continue
+            heading = _semantic_compress(sec.get("heading") or sec.get("h"), 8)
+            summary = _semantic_compress(sec.get("summary") or sec.get("s"), 11)
+            if not heading and not summary:
+                continue
+            section = {"heading": heading, "summary": summary, "order": sec.get("order") or sec.get("n")}
+            if section not in covered:
+                covered.append(section)
+            if len(section_refs) < 3:
+                section_refs.append(section)
+
+        step = {
+            "turn": pair.get("turn"),
+            "user_request": user_summary,
+            "answer_summary": answer_summary,
+            "message_id": _text(pair.get("message_id"))[:100],
+            "topic_id": _text(pair.get("topic_id") or anchor_topic_id)[:100],
+            "branch_id": _text(pair.get("branch_id") or anchor_branch_id)[:100],
+            "sections": section_refs,
+        }
+        evidence = pair.get("attachment_evidence")
+        if evidence:
+            step["source_evidence_summary"] = _semantic_compress(evidence, 18)
+        step = {key: value for key, value in step.items() if value not in (None, "", [], {})}
+        step_rows.append(step)
+
+        pair_branch = _text(pair.get("branch_id") or anchor_branch_id)
+        raw_artifacts = pair.get("assistant_artifact_index") if isinstance(pair.get("assistant_artifact_index"), list) else []
+        for raw_artifact in raw_artifacts:
+            if not isinstance(raw_artifact, dict):
+                continue
+            compact = artifact_ref(raw_artifact, pair_branch)
+            signature = (compact.get("id", ""), compact.get("source_message_id", ""), compact.get("kind", ""))
+            if signature != ("", "", "") and signature not in seen_artifacts:
+                seen_artifacts.add(signature)
+                artifacts.append(compact)
+
+        # Executor retains exact excerpts internally for every matched source pair.
+        # Send them to OpenAI only for an explicit quotation request or a correction
+        # that must verify the former wording; ordinary continuation uses the digest.
+        if needs_verbatim_source and pair.get("preserve_source_text") is True:
+            # The selected window is chronological. Keep replacing the candidate so
+            # an explicit "show the previous answer" request receives the latest
+            # canonical source, not the oldest pair in the branch window.
+            preserved_source_pair = pair
+
+    # Also retain artifacts on the exact latest-answer anchor. Do not copy payloads.
+    for raw_artifact in (raw_anchor.get("artifact_index") or []) if isinstance(raw_anchor.get("artifact_index"), list) else []:
+        if not isinstance(raw_artifact, dict):
+            continue
+        compact = artifact_ref(raw_artifact, anchor_branch_id)
+        signature = (compact.get("id", ""), compact.get("source_message_id", ""), compact.get("kind", ""))
+        if signature != ("", "", "") and signature not in seen_artifacts:
+            seen_artifacts.add(signature)
+            artifacts.append(compact)
+
+    # If pair retrieval was empty but the exact latest answer anchor exists, make
+    # a one-step digest rather than reverting to the full previous assistant text.
+    latest_pair = matching_pairs[-1] if matching_pairs else {}
+    latest_user = latest_pair.get("user_request") or latest_pair.get("user_text") or latest_pair.get("user") or raw_anchor.get("user")
+    latest_answer = latest_pair.get("april_summary") or latest_pair.get("memory_summary") or latest_pair.get("summary") or latest_pair.get("april") or raw_anchor.get("assistant_message") or raw_anchor.get("april")
+    if not step_rows and (latest_user or latest_answer):
+        step_rows.append({
+            "user_request": _semantic_compress(latest_user, 22),
+            "answer_summary": _semantic_compress(latest_answer, 38),
+            "message_id": anchor_message_id,
+            "topic_id": anchor_topic_id,
+            "branch_id": anchor_branch_id,
+        })
+
+    # Preserve all selected branch steps as a compact ordered ledger. Older steps
+    # are summarized collectively if the retrieved window is larger than eight.
+    earlier_step_count = max(0, len(step_rows) - 8)
+    earlier_summary = ""
+    if earlier_step_count:
+        earlier_summary = _semantic_compress("; ".join(
+            f"{item.get('user_request', '')} → {item.get('answer_summary', '')}" for item in step_rows[:-8]
+        ), 48)
+        step_rows = step_rows[-8:]
+
+    branch_id = anchor_branch_id or next((_text(item.get("branch_id")) for item in reversed(matching_pairs) if item.get("branch_id")), "")
+    topic_id = anchor_topic_id or next((_text(item.get("topic_id")) for item in reversed(matching_pairs) if item.get("topic_id")), "")
+    origin_id = _text(raw_anchor.get("origin_message_id") or raw_anchor.get("topic_origin_message_id"))
+    if not origin_id:
+        origin_id = next((_text(item.get("origin_message_id") or item.get("topic_origin_message_id")) for item in matching_pairs if item.get("origin_message_id") or item.get("topic_origin_message_id")), "")
+
+    artifact_refs = artifacts[:12]
+    digest = {
+        "schema": "april_free_branch_digest_v1",
+        "topic": _semantic_compress(raw_anchor.get("topic") or (latest_pair.get("topic") if latest_pair else ""), 18),
+        "topic_id": topic_id,
+        "branch_id": branch_id,
+        "origin_message_id": origin_id,
+        "anchor_message_id": anchor_message_id or _text(latest_pair.get("message_id")),
+        "pair_count": len(matching_pairs),
+        "steps": step_rows,
+        "covered_sections": covered[:12],
+        "artifact_refs": artifact_refs,
+        "exact_data_source": "PROTECTED_STRUCTURED_DATA when present; restore artifacts by their source IDs",
+    }
+    if earlier_step_count:
+        digest["earlier_step_count"] = earlier_step_count
+        digest["earlier_steps_summary"] = earlier_summary
+
+    # The single selected pair is now a compact branch envelope. The full original
+    # transcript remains in storage and can be retrieved by these source IDs.
+    compact_pair = {
+        # The branch_digest is the one authoritative prompt-side coverage ledger.
+        # Do not duplicate its latest user/answer summaries, sections or asset index
+        # beside it; source IDs keep canonical records directly recoverable.
+        "turn": latest_pair.get("turn") if latest_pair else None,
+        "topic": digest.get("topic", ""),
+        "topic_id": topic_id,
+        "branch_id": branch_id,
+        "origin_message_id": origin_id,
+        "topic_origin_message_id": origin_id,
+        "message_id": digest.get("anchor_message_id"),
+        "same_dialog": bool(latest_pair.get("same_dialog", raw_anchor.get("same_dialog", True))) if latest_pair else bool(raw_anchor.get("same_dialog", True)),
+        "branch_digest": digest,
+    }
+    if preserved_source_pair:
+        compact_pair.update({
+            "preserve_source_text": True,
+            "source_user_text": _clip(preserved_source_pair.get("source_user_text"), 900),
+            "source_april_text": _clip(preserved_source_pair.get("source_april_text"), 3000),
+            "source_user_text_complete": bool(preserved_source_pair.get("source_user_text_complete")) and len(_text(preserved_source_pair.get("source_user_text"))) <= 900,
+            "source_april_text_complete": bool(preserved_source_pair.get("source_april_text_complete")) and len(_text(preserved_source_pair.get("source_april_text"))) <= 3000,
+            "source_content_complete": bool(preserved_source_pair.get("source_content_complete")) and len(_text(preserved_source_pair.get("source_user_text"))) <= 900 and len(_text(preserved_source_pair.get("source_april_text"))) <= 3000,
+            "source_text_origin": _text(preserved_source_pair.get("source_text_origin") or "dialogue_memory")[:40],
+        })
+    data["CONTINUATION_CONTEXT"] = [compact_pair]
+
+    # The anchor remains the primary discourse vector, but only its compact answer
+    # summary and exact IDs are sent; the complete answer remains in canonical memory.
+    data["DIALOGUE_ANCHOR"] = {
+        "topic": digest.get("topic", ""),
+        # State Manager already compared the latest canonical answer. Retain one
+        # compact answer summary and its source IDs, not three parallel excerpts.
+        "assistant_message": _semantic_compress(latest_answer, 54),
+        "structured_output": [],
+        "artifact_index": artifact_refs[:8],
+        "message_id": digest.get("anchor_message_id"),
+        "topic_id": topic_id,
+        "branch_id": branch_id,
+        "origin_message_id": origin_id,
+        "same_dialog": compact_pair.get("same_dialog", True),
+    }
+
+    # The latest-answer comparison was already performed by the semantic/state
+    # layers. Keep its decision/IDs, not another copy of the whole answer excerpt.
+    transition = data.get("DIALOGUE_TRANSITION_ANALYSIS")
+    if isinstance(transition, dict):
+        alignment = transition.get("alignment") if isinstance(transition.get("alignment"), dict) else {}
+        pre = transition.get("pre_response_analysis") if isinstance(transition.get("pre_response_analysis"), dict) else {}
+        previous = transition.get("previous_exchange") if isinstance(transition.get("previous_exchange"), dict) else {}
+        data["DIALOGUE_TRANSITION_ANALYSIS"] = {
+            "schema": _text(transition.get("schema") or "april_dialogue_transition_v1")[:40],
+            "classification": _text(transition.get("classification"))[:32],
+            "response_strategy": _text(transition.get("response_strategy"))[:40],
+            "source_relation": _text(transition.get("source_relation") or relation)[:16],
+            "source_kind": _text(transition.get("source_kind"))[:32],
+            "confidence": transition.get("confidence"),
+            "previous_exchange": {
+                "message_id": _text(previous.get("message_id") or digest.get("anchor_message_id"))[:100],
+                "topic_id": topic_id,
+                "branch_id": branch_id,
+                "same_dialog": bool(previous.get("same_dialog", True)),
+            },
+            "alignment": {
+                "latest_answer_match": bool(alignment.get("latest_answer_match") or data.get("LAST_TURN_LINK", {}).get("latest_answer_match")),
+                "latest_answer_expects_user_input": bool(alignment.get("latest_answer_expects_user_input")),
+                "history_match": bool(alignment.get("history_match")),
+            },
+            "pre_response_analysis": {
+                "request_task_count": pre.get("request_task_count", 1),
+                "latest_answer_is_primary_discourse_vector": bool(pre.get("latest_answer_is_primary_discourse_vector", True)),
+                "history_branch_selected": bool(pre.get("history_branch_selected")),
+            },
+        }
+
+    guidance = data.get("CONTINUATION_GUIDANCE")
+    if isinstance(guidance, dict):
+        data["CONTINUATION_GUIDANCE"] = {
+            key: guidance[key] for key in (
+                "mode", "semantic_intent", "search_direction", "topic_reference", "active_topic_seed",
+                "selection_method", "selected_section",
+                "coverage_policy", "waiting_acknowledgement", "active_task_policy",
+                "avoid_cross_topic_injection", "do_not_repeat_completed_answer_or_artifact",
+            ) if key in guidance
+        }
+    last_link = data.get("LAST_TURN_LINK")
+    if isinstance(last_link, dict):
+        data["LAST_TURN_LINK"] = {
+            key: last_link[key] for key in (
+                "decision", "anchor_message_id", "anchor_topic_id", "anchor_branch_id",
+                "latest_answer_match", "answer_subject_overlap", "previous_answer_expects_user_input",
+            ) if key in last_link
+        }
+    if isinstance(data.get("CONTEXT"), dict):
+        context = data["CONTEXT"]
+        data["CONTEXT"] = {
+            "active_topic": _semantic_compress(context.get("active_topic") or digest.get("topic"), 22),
+            "reason": _semantic_compress(context.get("reason"), 14),
+            "confidence": context.get("confidence", 0),
+        }
+    # Topic indexes are a second copy of the branch catalogue. Ordinary continuation
+    # is already bound to the selected topic and exact artifact IDs above.
+    data["DIALOGUE_TOPIC_INDEX"] = []
+    data["DIALOGUE_HISTORY_TOPICS"] = []
+    data["DIALOGUE_TABLE_MARKDOWN"] = ""
+    if isinstance(data.get("ACTIVE_TOPIC_CONTEXT"), dict):
+        active = data["ACTIVE_TOPIC_CONTEXT"]
+        data["ACTIVE_TOPIC_CONTEXT"] = {
+            key: active[key] for key in ("schema", "topic_id", "topic", "root_message_id", "pair_count", "branch_count", "summary", "active_branch_id", "artifact_count")
+            if key in active and active[key] not in (None, "", [], {})
+        }
+
+    return {
+        "applied": True,
+        "source_pairs": len(raw_pairs),
+        "digest_steps": len(step_rows),
+        "artifact_refs": len(artifact_refs),
+        "covered_sections": len(covered),
+        "preserved_source_text": bool(preserved_source_pair),
+    }
+
+
 def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: int = 0) -> tuple[str, str, int, str]:
     """Fit system prompt + dynamic JSON card + attachment labels to the token budget."""
     data = json.loads(json.dumps(structured, ensure_ascii=False))
     is_history = bool(data.get("HISTORY_REQUEST"))
+    continuation_compaction = _compact_free_continuation_card(data)
+    if continuation_compaction.get("applied"):
+        _log_json("FREE_BRANCH_DIGEST", {
+            "status": "compacted",
+            "source_pairs": continuation_compaction.get("source_pairs", 0),
+            "digest_steps": continuation_compaction.get("digest_steps", 0),
+            "artifact_refs": continuation_compaction.get("artifact_refs", 0),
+            "covered_sections": continuation_compaction.get("covered_sections", 0),
+            "preserved_source_text": bool(continuation_compaction.get("preserved_source_text")),
+            "history_request": False,
+            "canonical_history_unchanged": True,
+        })
 
     # Each explicitly requested topic/step and the top-level task are capped at
     # 30% of the global prompt budget. For multi-topic requests, the summary copy
@@ -2045,12 +2487,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     system = SYSTEM_PROMPT + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
     card, total = count(system, data)
-    stage = "full"
+    stage = "branch_digest_full" if continuation_compaction.get("applied") else "full"
     if total <= MAX_PROMPT_TOKENS:
         return system, card, total, stage
 
     system = SYSTEM_PROMPT_COMPACT + "\n\n" + FREE_RESPONSE_QUALITY_CONTRACT
-    stage = "compact_system"
+    stage = "branch_digest_compact_system" if continuation_compaction.get("applied") else "compact_system"
     if _text(data.get("NEW_DIALOGUE_REQUEST")) == _text(data.get("CURRENT_REQUEST")):
         data["NEW_DIALOGUE_REQUEST"] = "Same as CURRENT_REQUEST"
     # Multi-step detail stays in REQUEST_SEQUENCE rather than repeating in full.
@@ -2085,6 +2527,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             ("assistant_message", data.get("DIALOGUE_ANCHOR", {}).get("assistant_message", ""), _scaled_prompt_tokens(280)),
             ("artifact_index", data.get("DIALOGUE_ANCHOR", {}).get("artifact_index", []), _scaled_prompt_tokens(90)),
             ("message_id", data.get("DIALOGUE_ANCHOR", {}).get("message_id"), _scaled_prompt_tokens(16)),
+            ("topic_id", data.get("DIALOGUE_ANCHOR", {}).get("topic_id"), _scaled_prompt_tokens(16)),
+            ("branch_id", data.get("DIALOGUE_ANCHOR", {}).get("branch_id"), _scaled_prompt_tokens(16)),
+            ("origin_message_id", data.get("DIALOGUE_ANCHOR", {}).get("origin_message_id"), _scaled_prompt_tokens(16)),
             ("same_dialog", data.get("DIALOGUE_ANCHOR", {}).get("same_dialog", False), _scaled_prompt_tokens(16)),
         )
     }
@@ -2117,7 +2562,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             for item in data["ATTACHMENT_INDEX"] if isinstance(item, dict)
         ]
     card, total = count(system, data)
-    stage = "compact_metadata"
+    stage = "branch_digest_compact_metadata" if continuation_compaction.get("applied") else "compact_metadata"
     if total <= MAX_PROMPT_TOKENS:
         return system, card, total, stage
 
@@ -2127,9 +2572,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     has_preserved_source_pair = any(
         isinstance(item, dict) and item.get("preserve_source_text") is True for item in pairs
     )
-    # Never discard the only verified source excerpt just because the general prompt
-    # is over budget. Keep one bounded source pair and compress less critical context first.
-    pair_keep_levels = (3, 2, 1) if (is_history and pairs) or has_preserved_source_pair else (3, 2, 1, 0)
+    has_branch_digest = any(
+        isinstance(item, dict) and isinstance(item.get("branch_digest"), dict) for item in pairs
+    )
+    # A branch digest is the compact continuation evidence. Never reduce it to zero
+    # pairs: only the full transcript is omitted, not the selected branch ledger.
+    pair_keep_levels = (3, 2, 1) if (is_history and pairs) or has_preserved_source_pair or has_branch_digest else (3, 2, 1, 0)
     for keep_n in pair_keep_levels:
         compact_pairs = []
         for item in pairs[:keep_n]:
@@ -2172,6 +2620,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     for artifact in (item.get("assistant_artifact_index") or [])[:8] if isinstance(artifact, dict)
                 ],
             }
+            if isinstance(item.get("branch_digest"), dict):
+                compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
+                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=8
+                )
+                # The digest replaces repeated answer/section/artifact copies.
+                for duplicate_key in ("user", "april", "sections", "recent_steps", "question_sequence", "assistant_artifact_index", "dialogue_state"):
+                    compact_pair.pop(duplicate_key, None)
             if item.get("preserve_source_text") is True:
                 # Hard cap the loss-sensitive excerpt so a long creative text cannot
                 # crowd out the current request. Do not paraphrase it during compaction.
@@ -2477,6 +2932,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "structured_output": dialogue_anchor.get("structured_output") if isinstance(dialogue_anchor.get("structured_output"), list) else [],
             "artifact_index": dialogue_anchor.get("artifact_index") if isinstance(dialogue_anchor.get("artifact_index"), list) else [],
             "message_id": dialogue_anchor.get("message_id"),
+            "topic_id": dialogue_anchor.get("topic_id"),
+            "branch_id": dialogue_anchor.get("branch_id"),
+            "origin_message_id": dialogue_anchor.get("origin_message_id"),
             "same_dialog": bool(dialogue_anchor.get("same_dialog")),
         }
         pairs_min = []
@@ -2494,7 +2952,6 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "origin_message_id": item.get("origin_message_id") or item.get("topic_origin_message_id"),
                 "topic_origin_message_id": item.get("topic_origin_message_id") or item.get("origin_message_id"),
                 "same_dialog": item.get("same_dialog"),
-                "assistant_last_message": _clip(item.get("assistant_last_message"), 3000),
                 "assistant_artifact_index": [
                     {
                         key: (
@@ -2533,6 +2990,19 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     if isinstance(sec, dict)
                 ],
             }
+            if isinstance(item.get("branch_digest"), dict):
+                compact_min_pair["branch_digest"] = _compact_free_branch_digest_payload(
+                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=8
+                )
+                # The digest already contains the chronological question/answer
+                # summaries, sections and artifact refs. Do not send those twice.
+                compact_min_pair.pop("user", None)
+                compact_min_pair.pop("april", None)
+                compact_min_pair.pop("assistant_artifact_index", None)
+                compact_min_pair.pop("sections", None)
+            else:
+                # Legacy non-digest pairs retain one bounded answer excerpt only.
+                compact_min_pair["assistant_last_message"] = _clip(item.get("assistant_last_message"), 1200)
             if item.get("preserve_source_text") is True:
                 compact_min_pair.update({
                     "preserve_source_text": True,
@@ -2781,6 +3251,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     minimum_history_pair = 1 if (
         (is_history and original_pairs)
         or any(isinstance(item, dict) and item.get("preserve_source_text") is True for item in original_pairs)
+        # A compact branch digest is the only prompt-side continuation ledger.
+        # Keep one envelope even during the tiny-budget loop; the canonical
+        # transcript and exact artifacts remain in storage and are not removed.
+        or (not is_history and any(isinstance(item, dict) and isinstance(item.get("branch_digest"), dict) for item in original_pairs))
     ) else 0
     candidates = [
         (_scaled_prompt_tokens(420), min(_scaled_prompt_tokens(516), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24)), _scaled_prompt_tokens(70), min(2, len(original_pairs))),
@@ -2907,6 +3381,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     # Loss-sensitive historical structures move intact to a separately labeled source part;
     # only their small identity/checksum manifest remains in the compact card.
     externalized_structures = False
+    external_protected_token_cost = 0
     exact_protected = structured.get("PROTECTED_STRUCTURED_DATA") if isinstance(structured, dict) else None
     if total > MAX_PROMPT_TOKENS and isinstance(exact_protected, list) and exact_protected:
         manifest = {
@@ -2921,8 +3396,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         minimal["PROTECTED_STRUCTURED_DATA_EXTERNAL"] = manifest
         externalized_structures = True
         card = _json_card(minimal)
-        external_label_cost = _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
-        total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens)) + external_label_cost
+        # Reserve the complete separate input_text body, not only its label. The
+        # exact table/graph/formula values are never truncated, so the prompt card
+        # must shrink around their real token cost before _build_input sends them.
+        payload_text = json.dumps(exact_protected, ensure_ascii=False, separators=(",", ":"))
+        source_ids = ",".join(_text(item.get("source_message_id")) for item in exact_protected if isinstance(item, dict))
+        external_source_text = (
+            "PROTECTED_STRUCTURED_DATA_SOURCE schema=april_protected_structured_data_v1 "
+            f"source_message_ids={source_ids}; exact authoritative JSON follows. Preserve all labels, rows, coordinates, formulas, units, signs, ordering and values exactly.\n"
+            f"{payload_text}"
+        )
+        external_protected_token_cost = _estimate_tokens(external_source_text)
+        total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens)) + external_protected_token_cost
 
     # Drop redundant indexes and explanatory metadata before trimming request text.
     # An explicit history inventory must keep its requested 5–10 topic records and
@@ -2945,7 +3430,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             card = _json_card(minimal)
             total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
             if externalized_structures:
-                total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+                total += external_protected_token_cost
 
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("ACTIVE_TOPIC_CONTEXT"), dict):
         topic_manifest = minimal["ACTIVE_TOPIC_CONTEXT"]
@@ -3024,13 +3509,20 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 ):
                     if pair.get(identity_key) not in (None, "", [], {}):
                         compact_pair[identity_key] = pair.get(identity_key)
-                if pair.get("assistant_last_message"):
+                if isinstance(pair.get("branch_digest"), dict):
+                    compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
+                        pair.get("branch_digest"), step_limit=6, section_limit=6, artifact_limit=6
+                    )
+                    compact_pair.pop("topic", None)
+                    compact_pair.pop("user", None)
+                    compact_pair.pop("april", None)
+                elif pair.get("assistant_last_message"):
                     compact_pair["assistant_last_message"] = _clip(pair.get("assistant_last_message"), 1000)
                 artifact_inventory = pair.get("assistant_artifact_index")
                 if not isinstance(artifact_inventory, list):
                     source_state = pair.get("dialogue_state") if isinstance(pair.get("dialogue_state"), dict) else {}
                     artifact_inventory = source_state.get("source_artifact_index")
-                if isinstance(artifact_inventory, list):
+                if isinstance(artifact_inventory, list) and not isinstance(pair.get("branch_digest"), dict):
                     compact_pair["assistant_artifact_index"] = artifact_inventory[:4]
                 if isinstance(pair.get("recent_steps"), list):
                     compact_pair["recent_steps"] = pair.get("recent_steps")[-12:]
@@ -3053,17 +3545,17 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
-            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            total += external_protected_token_cost
 
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("DIALOGUE_ANCHOR"), dict):
         anchor = minimal["DIALOGUE_ANCHOR"]
         minimal["DIALOGUE_ANCHOR"] = {
-            k: anchor[k] for k in ("assistant_message", "structured_output", "artifact_index", "topic", "message_id", "same_dialog") if k in anchor
+            k: anchor[k] for k in ("assistant_message", "structured_output", "artifact_index", "topic", "message_id", "topic_id", "branch_id", "origin_message_id", "same_dialog") if k in anchor
         }
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
-            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            total += external_protected_token_cost
 
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("REQUEST_SEQUENCE"), list):
         # Keep every step/output type, but shorten per-step paraphrases and duplicate
@@ -3080,7 +3572,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
-            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            total += external_protected_token_cost
 
     if total > MAX_PROMPT_TOKENS:
         # This prompt is intentionally tiny and only activates for pathological
@@ -3095,7 +3587,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
-            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            total += external_protected_token_cost
     if total > MAX_PROMPT_TOKENS:
         # Final emergency card: the previous compactor retained too much duplicated
         # metadata (logs showed 4099 > Premium's 3600-token input budget). Keep the
@@ -3178,7 +3670,6 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "origin_message_id": pair.get("origin_message_id") or pair.get("topic_origin_message_id"),
                     "topic_origin_message_id": pair.get("topic_origin_message_id") or pair.get("origin_message_id"),
                     "same_dialog": pair.get("same_dialog"),
-                    "assistant_last_message": _clip(pair.get("assistant_last_message"), 900),
                     "dialogue_state": pair.get("dialogue_state") if isinstance(pair.get("dialogue_state"), dict) else {},
                     "assistant_artifact_index": [
                         {
@@ -3198,6 +3689,16 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     ],
                     "sections": _emergency_sections(pair.get("sections"), limit=2),
                 }
+                if isinstance(pair.get("branch_digest"), dict):
+                    record = {
+                        key: value for key, value in record.items()
+                        if key in {"message_id", "topic_id", "branch_id", "origin_message_id", "topic_origin_message_id", "same_dialog"}
+                    }
+                    record["branch_digest"] = _compact_free_branch_digest_payload(
+                        pair.get("branch_digest"), step_limit=5, section_limit=5, artifact_limit=5
+                    )
+                else:
+                    record["assistant_last_message"] = _clip(pair.get("assistant_last_message"), 700)
                 if pair.get("preserve_source_text") is True:
                     record.update({
                         "preserve_source_text": True,
@@ -3338,7 +3839,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card = _json_card(minimal)
         total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
         if externalized_structures:
-            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+            total += external_protected_token_cost
         # If room metadata is still the cause of overflow, preserve only route IDs,
         # paths and labels; the rest can be re-read from C_IT_ROOM on a later turn.
         if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("ROOM_KNOWLEDGE_CONTEXT"), dict):
@@ -3355,7 +3856,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             card = _json_card(minimal)
             total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
             if externalized_structures:
-                total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+                total += external_protected_token_cost
         if total > MAX_PROMPT_TOKENS:
             # Last resort for ordinary turns: discard optional contract metadata,
             # retaining the source request, language, output shape, sequence, and
@@ -3365,7 +3866,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 card = _json_card(minimal)
                 total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
                 if externalized_structures:
-                    total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+                    total += external_protected_token_cost
                 if total <= MAX_PROMPT_TOKENS:
                     break
     if total > MAX_PROMPT_TOKENS:
@@ -3378,7 +3879,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             card = _json_card(minimal)
             total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
             if externalized_structures:
-                total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+                total += external_protected_token_cost
             return total
 
         transition = minimal.get("DIALOGUE_TRANSITION_ANALYSIS")
@@ -4027,7 +4528,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             pair = {
                 "turn": item.get("turn_index") or item.get("turn"),
                 "user": _clip(item.get("user") or item.get("user_text"), 480),
+                "user_request": _clip(item.get("user_request") or item.get("user_text") or item.get("user"), 700),
                 "april": _clip(item.get("april") or item.get("april_text"), 360),
+                "april_summary": _clip(item.get("april_summary") or item.get("memory_summary") or item.get("summary"), 220),
                 "assistant_last_message": _clip(item.get("assistant_last_message") or item.get("assistant_message") or item.get("april_text"), 3000),
                 "assistant_artifact_index": [
                     {key: value for key, value in artifact.items()
@@ -4300,6 +4803,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "DIALOGUE_BASED_PORTRAIT_PROFILE": portrait_profile_card,
         "DIALOGUE_RELATION": relation,
+        "CONTEXTUAL_HISTORY_MATCH": bool(memory.get("contextual_history_match")),
         "LAST_TURN_LINK": last_turn_link,
         "DIALOGUE_TRANSITION_ANALYSIS": transition_card,
         "RECENT_LIMITATIONS": dialogue.get("recent_limitations") if isinstance(dialogue.get("recent_limitations"), dict) else {"has_recent_limitation": False, "count": 0, "events": []},
@@ -4325,6 +4829,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
                 if isinstance(artifact, dict)
             ][:8],
             "message_id": anchor.get("message_id"),
+            "topic_id": anchor.get("topic_id"),
+            "branch_id": anchor.get("branch_id"),
+            "origin_message_id": anchor.get("origin_message_id") or anchor.get("topic_origin_message_id"),
             "same_dialog": bool(anchor.get("same_dialog")),
         },
         "CONTINUATION_CONTEXT": _pairs(
