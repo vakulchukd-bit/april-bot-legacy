@@ -3217,7 +3217,15 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     self_reference = self_reference or bool(token_set & {"будем", "будете", "планируем", "собираемся", "we'll", "lets"})
     interrogative = bool(token_set & {"что", "чем", "чего", "какие", "какая", "какой", "кто", "где", "когда", "почему", "как", "зачем", "which", "what", "who", "where", "when", "why", "how"}) or "?" in source or "？" in source
     imperative_recall = bool(token_set & {"напомни", "вспомни", "перечисли", "перескажи", "восстанови", "найди", "вернись", "покажи", "remind", "recall", "remember", "summarize"})
-    temporal_past = past_reference or today_reference or recent_reference or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "yesterday", "today"})
+    explicit_time_reference = bool(re.search(
+        r"\b(?:(?:\d+|один|одна|одно|одну|два|две|пару|пара|несколько|нескольких|три|четыре|пять|полчаса|полторы?)\s*(?:-|–|—|до)?\s*)?(?:секунд\w*|сек\.?|seconds?|secs?|минут\w*|мин\b|час\w*|ч\b|дн\w*|сутк\w*|полчаса)\s*(?:назад|тому назад|ago)\b|\b(?:в|около|примерно в)\s*\d{1,2}[:.]\d{2}\b",
+        low,
+    ))
+    temporal_past = (
+        past_reference or today_reference or recent_reference or explicit_time_reference
+        or bool(token_set & {"вчера", "сегодня", "утром", "вечером", "недавно", "только", "что", "yesterday", "today", "recently"})
+        or "только что" in low or "just now" in low
+    )
     temporal_future = future_reference or bool(token_set & {"завтра", "будем", "буду", "будущем", "tomorrow", "will"})
     # A question about how to apply/improve the current dialogue mechanism is not
     # automatically a request to search old history. Earlier, self_reference alone
@@ -3268,7 +3276,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     )
     history_recall = (
         explicit_discussion_question
-        or (recall_action and (dialogue_action or self_reference or past_reference or today_reference or recent_reference or decision_action or plan_action))
+        or (recall_action and (dialogue_action or self_reference or past_reference or today_reference or recent_reference or explicit_time_reference or decision_action or plan_action))
+        or (dialogue_action and self_reference and temporal_past and not temporal_future)
         or decision_recall
         or plan_recall
         or (past_reference and (dialogue_action or decision_action or plan_action) and (interrogative or imperative_recall))
@@ -3760,6 +3769,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "past_reference": bool(past_reference),
         "today_reference": bool(today_reference),
         "recent_reference": bool(recent_reference),
+        "explicit_time_reference": bool(explicit_time_reference),
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
