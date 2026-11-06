@@ -285,18 +285,34 @@ def purge_user_state(user_ids: Any) -> int:
 def hydrate(
     user_id: Any,
     rows: list[dict[str, Any]] | None = None,
+    *,
+    limit: int = 0,
 ) -> dict[str, Any]:
-    """Refresh in-memory state from the canonical PostgreSQL dialogue store."""
+    """Refresh Free state, or return an ephemeral bounded recent dialogue view."""
     hydrate_started = time.perf_counter()
     uid = _uid(user_id)
     load_started = time.perf_counter()
     load_source = "provided_rows" if rows is not None else "postgres_load_dialogue_pairs"
     if rows is None:
         from storage import load_dialogue_pairs
-        rows = load_dialogue_pairs(uid, limit=0)
+        rows = load_dialogue_pairs(uid, limit=max(0, int(limit or 0)))
     _apr_timing_log("history_rows_loaded", load_started, user_key=_apr_diag_ref(uid),
         source=load_source, rows_loaded=len(rows or []))
 
+    if rows is not None and limit:
+        # A five-pair probe is request-local: never replace the shared Free snapshot
+        # with a truncated view. A real history/branch lookup calls hydrate() without
+        # limit and receives the complete retained window.
+        recent_state = _new_state(uid)
+        recent_state["dialogue_pairs"] = [
+            deepcopy(row) for row in (rows or []) if isinstance(row, dict)
+        ][-max(1, min(32, int(limit))):]
+        recent_state["last_activity"] = time.time()
+        recent_state["updated_at"] = recent_state["last_activity"]
+        _apr_timing_log("hydrate_recent_view_complete", hydrate_started,
+            user_key=_apr_diag_ref(uid), retained_pairs=len(recent_state["dialogue_pairs"]),
+            requested_limit=max(1, min(32, int(limit))))
+        return recent_state
     state = get_state(uid)
     with _LOCK:
         state["dialogue_pairs"] = [
@@ -748,7 +764,7 @@ def _assistant_expects_user_input(answer_text: Any) -> bool:
     return invitation and (has_choices or "?" in text or "？" in text or len(text) < 260)
 
 
-def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> dict[str, Any]:
+def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None, *, history_request: bool | None = None) -> dict[str, Any]:
     """Compare the new user turn with the immediately preceding USER↔APRIL pair.
 
     This is deterministic local routing evidence, not an LLM confidence score.
@@ -764,9 +780,8 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> di
         }
     user_text = _text(row.get("user_text") or row.get("user_text_en") or row.get("user"))
     answer_text = _text(row.get("april_text") or row.get("april_text_en") or row.get("april") or row.get("assistant_last_message"))
-    implicit_history_resume = bool(
-        _is_history_request(query) and not _history_query_topic_tokens(query)
-    )
+    semantic_history_request = _is_history_request(query) if history_request is None else bool(history_request)
+    implicit_history_resume = bool(semantic_history_request and not _history_query_topic_tokens(query))
     query_subjects = set() if implicit_history_resume else _subject_tokens(query)
     answer_subjects = _subject_tokens(answer_text[:5200])
     user_subjects = _subject_tokens(user_text[:1800])
@@ -1016,8 +1031,8 @@ def _is_history_request(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
         return False
-    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
-        return True
+    # Do not let a history noun override semantic intent. A mention of history
+    # inside a complaint/correction is not a request to search the archive.
     # Keep direct/legacy callers on the same intent logic as Exkrutor. The import
     # is lazy to avoid changing module initialization order.
     try:
@@ -3394,20 +3409,83 @@ def search_dialogue_context(
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    state = hydrate(uid)
-    all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    # Stage 1: load only the latest five retained pairs and compare the incoming
+    # turn with the immediately preceding USER↔APRIL exchange before any archive scan.
+    recent_state = hydrate(uid, limit=5)
+    recent_rows = [row for row in (recent_state.get("dialogue_pairs") or [])
+                   if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    query_interpretation = dict(query_interpretation or {})
+    recent_dialog_rows = [row for row in recent_rows if not _row_is_pending_clarification(row) and (
+        (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
+        or (conversation_id and _text(row.get("conversation_id")) == _text(conversation_id))
+    )]
+    if not recent_dialog_rows and not (dialog_id or conversation_id):
+        recent_dialog_rows = list(recent_rows)
+    latest_exchange_row = max(
+        recent_dialog_rows,
+        key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+        default=None,
+    )
+    try:
+        from blocks.interpretation_identity import interpret_request_in_context
+        query_interpretation = interpret_request_in_context(query, latest_exchange_row, query_interpretation)
+    except Exception as exc:
+        _apr_timing_log("latest_exchange_interpretation_fallback", None,
+            error_type=type(exc).__name__)
+    latest_exchange_analysis = query_interpretation.get("latest_exchange_analysis") if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
+    latest_exchange_link = bool(latest_exchange_analysis.get("linked"))
     resume_key = _text(resume_message_id)
+    interpreted_intent_preload = _text(query_interpretation.get("primary_intent")).upper()
+    semantic_memory_preload = bool(
+        query_interpretation.get("requires_memory")
+        or query_interpretation.get("previous_answer_reference")
+        or query_interpretation.get("active_branch_repair")
+        or interpreted_intent_preload in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY"}
+    )
+    explicit_history_preload = bool(query_interpretation.get("history_request"))
+    explicit_prior_pointer_preload = bool(
+        query_interpretation.get("resume_anchor_requested")
+        or query_interpretation.get("history_inventory_request")
+        or query_interpretation.get("has_explicit_time_window")
+        or _text(query_interpretation.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
+    )
+    site_navigation_preload = bool(
+        query_interpretation.get("site_navigation_request")
+        or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION"
+        or ((query_interpretation.get("features") or {}).get("site_navigation_request")
+            if isinstance(query_interpretation.get("features"), dict) else False)
+    )
+    latest_exchange_available = bool(latest_exchange_analysis.get("available"))
+    latest_exchange_independent_request = bool(
+        latest_exchange_available
+        and not latest_exchange_link
+        and latest_exchange_analysis.get("has_independent_payload")
+        and not explicit_history_preload
+        and not resume_key
+        and not explicit_prior_pointer_preload
+    )
+    # The contextual interpretation is authoritative. A stale TOPIC_CONTINUATION
+    # or previous_answer_reference flag from the pre-pass cannot reopen the archive
+    # after the latest-exchange pass has classified this as an independent request.
+    allow_semantic_history_search = bool(
+        explicit_history_preload or resume_key or explicit_prior_pointer_preload
+        or (semantic_memory_preload and not latest_exchange_link
+            and not latest_exchange_independent_request
+            and not site_navigation_preload
+            and not query_interpretation.get("explicit_topic_switch"))
+    )
+    state = hydrate(uid) if allow_semantic_history_search else recent_state
+    all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
     resume_anchor_row = next((row for row in all_rows if (
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
-    query_interpretation = dict(query_interpretation or {})
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
     correction_turn = bool(_looks_like_topic_correction(query) or pragmatic_features.get("correction"))
     retrieval_query = _clarification_target_text(query) if correction_turn else _text(query)
     reference_followup = _looks_like_referential_followup(query) or correction_turn
-    history_request = bool(query_interpretation.get("history_request")) or _is_history_request(query)
-    new_topic_request = _looks_like_new_topic(query)
+    history_request = bool(query_interpretation.get("history_request"))
+    new_topic_request = bool(query_interpretation.get("explicit_topic_switch") or query_interpretation.get("explicit_topic_introduction"))
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
@@ -3454,7 +3532,7 @@ def search_dialogue_context(
     # but do not let generic words such as "применение" switch the active topic.
     topic_bearing = _semantic_tokens(retrieval_query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
     named_rows: list[tuple[float, dict[str, Any]]] = []
-    if not history_request and topic_bearing:
+    if allow_semantic_history_search and not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
         for row in all_rows:
             if _row_is_pending_clarification(row):
@@ -3567,7 +3645,24 @@ def search_dialogue_context(
         key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
         default=None,
     )
-    latest_answer_relation = _latest_answer_relation_vector(query, latest_dialog_row)
+    latest_answer_relation = _latest_answer_relation_vector(query, latest_dialog_row, history_request=history_request)
+    if latest_exchange_independent_request:
+        latest_answer_relation.update({
+            "matched": False,
+            "answer_subject_conflict": True,
+            "semantic_latest_exchange_link": False,
+            "independent_request_boundary": True,
+        })
+        reference_followup = False
+    if latest_exchange_link and latest_dialog_row:
+        latest_answer_relation.update({
+            "matched": True,
+            "answer_subject_conflict": False,
+            "semantic_latest_exchange_link": True,
+            "anchor_role": "LATEST_USER_APRIL_EXCHANGE",
+            "message_id": _text(latest_dialog_row.get("message_id")),
+        })
+        reference_followup = True
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
@@ -3578,7 +3673,8 @@ def search_dialogue_context(
     # anaphora ("Раскажи про Коперника ... как он выглядел"). A pronoun inside
     # the same request must not drag an unrelated old pair into the context.
     self_contained_subject_switch = bool(
-        active_subject_conflict
+        not latest_exchange_link
+        and active_subject_conflict
         and query_subjects
         and len(_semantic_tokens(query)) >= 4
         and interpreted_intent == "NEW_INFORMATION"
@@ -3587,7 +3683,8 @@ def search_dialogue_context(
         and not correction_turn
     )
     semantic_subject_switch = bool(
-        active_subject_conflict
+        not latest_exchange_link
+        and active_subject_conflict
         and (self_contained_subject_switch or (
             interpreted_intent == "NEW_INFORMATION"
             and not reference_followup
@@ -3602,7 +3699,7 @@ def search_dialogue_context(
     }
     explicit_topic_hits = []
     seen_topic_hit_ids: set[str] = set()
-    for row in all_rows:
+    for row in (all_rows if allow_semantic_history_search else []):
         if _row_is_pending_clarification(row):
             continue
         row_subjects = _row_subject_tokens(row)
@@ -3848,6 +3945,7 @@ def search_dialogue_context(
     topic_vector_hits: list[dict[str, Any]] = []
     wants_topic_resume = bool(
         not history_request
+        and not latest_exchange_independent_request
         and not self_contained_new_information
         and not new_topic_request
         and (
@@ -4088,7 +4186,14 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if topic_vector_hits and anchor:
+        if latest_exchange_link and latest_exchange_analysis.get("simple_acknowledgement"):
+            selected_for_context = [_compact_pair(latest_dialog_row)] if latest_dialog_row else []
+            anchor = _candidate_score(
+                query, latest_dialog_row, dialog_id=str(dialog_id or ""),
+                conversation_id=str(conversation_id or ""), reference_followup=True,
+                query_modalities=query_modalities,
+            ) if latest_dialog_row else None
+        elif topic_vector_hits and anchor:
             # The best vector hit identifies the topic branch; it is not the whole
             # conversational context. Expand from that anchor to the latest ten
             # USER↔APRIL pairs belonging to the same topic and dialog/conversation.
@@ -4659,6 +4764,10 @@ def search_dialogue_context(
         "contextual_history_match": contextual_history_match,
         "latest_assistant_anchor": _compact_pair(latest_same_dialog) if latest_same_dialog else {},
         "latest_answer_relation": dict(latest_answer_relation),
+        "latest_exchange_analysis": deepcopy(latest_exchange_analysis),
+        "latest_exchange_independent_request": bool(latest_exchange_independent_request),
+        "effective_interpretation": deepcopy(query_interpretation),
+        "semantic_history_search_allowed": bool(allow_semantic_history_search),
         "last_turn_link": {
             "decision": "CONTINUE" if relation == "CONTINUE" else "NEW",
             "current_request": _text(query)[:320],
@@ -4783,6 +4892,9 @@ def prepare_dialogue_context(
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
         "latest_answer_relation": deepcopy(context.get("latest_answer_relation") or {}),
+        "latest_exchange_analysis": deepcopy(context.get("latest_exchange_analysis") or {}),
+        "effective_interpretation": deepcopy(context.get("effective_interpretation") or {}),
+        "semantic_history_search_allowed": bool(context.get("semantic_history_search_allowed")),
         "last_turn_link": deepcopy(context.get("last_turn_link") or {}),
         "history_selection_method": _text(context.get("history_selection_method")),
         "explicit_render_reference": deepcopy(context.get("explicit_render_reference") or {}),
