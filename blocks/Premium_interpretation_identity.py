@@ -392,7 +392,78 @@ def _is_ui_instruction_request(text: Any) -> bool:
         r"(?:кнопк\w*|значок\w*|меню\s+действи\w*|из\s+чата|в\s+чате\s+april|в\s+интерфейс\w*|нажать|куда\s+нажать|с\s+телефон\w*|на\s+телефон\w*|на\s+устройств\w*)",
         low, re.IGNORECASE,
     ))
-    return attach_photo_tutorial or account_ui or navigation_cue or how_to or (
+    # Semantic walkthrough/audit: a user asks to understand or operate a web/app
+    # surface and its controls. Do not require a specific phrase like "куда нажать".
+    interface_surface = bool(re.search(
+        r"(?:\bweb\b|website|site|веб\w*|сайт\w*|веб[- ]?приложени\w*|приложени\w*|интерфейс\w*|страниц\w*|экран\w*|панел\w*)",
+        low, re.I,
+    ))
+    guided_goal = bool(re.search(
+        r"(?:провед\w*|покаж\w*|объясн\w*|расскаж\w*|опиш\w*|изуч\w*|разбер\w*|помог\w*|как\s+(?:пользоваться|работать|перейти|открыть|отправить|поделиться|сохранить)|"
+        r"guide|walk\s+me|show\s+me|explain|describe|how\s+to|navigate|walkthrough)",
+        low, re.I,
+    ))
+    interaction_goal = bool(re.search(
+        r"(?:функци\w*|возможност\w*|кнопк\w*|переход\w*|перейти|открыть|отправ\w*|подел\w*|скача\w*|сохран\w*|добав\w*|удал\w*|наж\w*|меню|действи\w*|function\w*|control\w*|button\w*|send|share|download|save)",
+        low, re.I,
+    ))
+    semantic_walkthrough = interface_surface and guided_goal and interaction_goal
+    known_ui_objects = bool(re.search(
+        r"(?:истори\w*|диалог\w*|раздел\w*|настройк\w*|профил\w*|аккаунт\w*|сесси\w*|выход|язык\w*|april\s*id|premium\s*id|идентификатор\w*|сообществ\w*|друг\w*|приглашени\w*|контакт\w*|поддержк\w*|тариф\w*|оплат\w*|справк\w*|политик\w*|услови\w*|вложени\w*|скрепк\w*|файл\w*|сообщени\w*|чат\w*|переписк\w*|рабоч\w*\s+поле|голосов\w*|микрофон\w*|ник\w*|имя\s+пользовател\w*|обратн\w*\s+связ\w*|жалоб\w*|отзыв\w*|ответ\w*|артефакт\w*|диаграмм\w*|таблиц\w*|график\w*|картинк\w*|render\w*|history|profile|settings|account|community|support|plan|payment|help|attachment|file|artifact|microphone|voice\s+message)",
+        low, re.I,
+    ))
+    ui_action_verb = bool(re.search(
+        r"(?:откро\w*|открыт\w*|перейд\w*|перейти|зайд\w*|зайти|попаст\w*|найд\w*|покаж\w*|провед\w*|объясн\w*|расскаж\w*|опиш\w*|пользова\w*|отправ\w*|подел\w*|перешл\w*|прикреп\w*|добав\w*|приглас\w*|загруз\w*|запис\w*|диктова\w*|очист\w*|отблагодар\w*|пожалова\w*|оцен\w*|скача\w*|сохран\w*|скопир\w*|измени\w*|поменя\w*|смен\w*|выбер\w*|удал\w*|выйти|выйд\w*|заверш\w*|logout|log\s+out|invite|record|open|navigate|go\s+to|find|show|guide|explain|describe|send|share|attach|upload|download|save|copy|edit|change|select|delete)",
+        low, re.I,
+    ))
+    targeted_ui_action = known_ui_objects and ui_action_verb
+    # Community publishing is a UI workflow even when the user doesn't say
+    # "where do I click". Require a community surface + post/file concept +
+    # an operational verb so this does not hijack requests to write content.
+    community_post_action = (
+        bool(re.search(r"(?:сообществ\w*|community)", low, re.I))
+        and bool(re.search(r"(?:пост\w*|публикац\w*|сообщени\w*|файл\w*|вложени\w*|community\s+post)", low, re.I))
+        and bool(re.search(r"(?:созда\w*|опублику\w*|отправ\w*|прикреп\w*|загруз\w*|добав\w*|подел\w*|publish|post|send|attach|upload|share)", low, re.I))
+    )
+    payment_ui_action = (
+        bool(re.search(r"(?:оплат\w*|купить|приобрест\w*|продл\w*|выбрат\w*.{0,20}(?:пакет|тариф)|pay|purchase|renew)", low, re.I))
+        and bool(re.search(r"(?:premium|премиум|тариф\w*|пакет\w*|28\s*дн\w*|12\s*час\w*)", low, re.I))
+    )
+    identifier_ui_action = (
+        bool(re.search(r"(?:april\s*id|premium\s*id|идентификатор\w*)", low, re.I))
+        and bool(re.search(r"(?:скопир\w*|copy|покаж\w*|найд\w*|где\s+(?:мой|наход)?)", low, re.I))
+    )
+    voice_ui_action = (
+        bool(re.search(r"(?:голосов\w*|микрофон\w*|voice\s+message|microphone)", low, re.I))
+        and bool(re.search(r"(?:запис\w*|отправ\w*|использ\w*|наж\w*|record|send|use|click)", low, re.I))
+    )
+    invite_ui_action = (
+        bool(re.search(r"(?:приглас\w*|invite)", low, re.I))
+        and bool(re.search(r"(?:друг\w*|сообществ\w*|участник\w*|community|friend)", low, re.I))
+    )
+    logout_ui_action = (
+        bool(re.search(r"(?:выйти|выход|заверш\w*|logout|log\s+out)", low, re.I))
+        and bool(re.search(r"(?:аккаунт\w*|профил\w*|сесси\w*|april|account|profile|session)", low, re.I))
+    )
+    clear_chat_ui_action = (
+        bool(re.search(r"(?:очист\w*|стереть|убрать|clear)", low, re.I))
+        and bool(re.search(r"(?:текущ\w*\s+чат|видим\w*\s+(?:чат|переписк)|рабоч\w*\s+поле|метл\w*|чат\s+на\s+экране|current\s+chat|visible\s+chat|workspace)", low, re.I))
+    )
+    response_feedback_ui_action = (
+        bool(re.search(r"(?:пожалова\w*|жалоб\w*|отблагодар\w*|поблагодар\w*|спасибо|оцен\w*|report|thank)", low, re.I))
+        and bool(re.search(r"(?:ответ\w*|сообщени\w*|reply|response)", low, re.I))
+        and bool(re.search(r"(?:куда.{0,35}наж|где.{0,45}(?:наж|кноп|наход)|как.{0,35}(?:наж|сдела|поблагодар|пожалова)|кнопк\w*|where|how\s+to|click)", low, re.I))
+    )
+    support_contact_location = (
+        bool(re.search(r"(?:поддержк\w*|техподдержк\w*|contact\s+support)", low, re.I))
+        and bool(re.search(r"(?:куда.{0,35}(?:напис|обрат)|где.{0,35}(?:напис|откро|найти)|как.{0,40}(?:обрат|напис|отправ)|where|how\s+to\s+contact)", low, re.I))
+    )
+    location_question = known_ui_objects and bool(re.search(
+        r"(?:где\s+(?:наход\w*|располож\w*|открыва\w*|искать|посмотреть)|"
+        r"куда\s+(?:перейти|зайти|открыть)|where\s+(?:is|are|can\s+i\s+find)|where\s+to\s+find)",
+        low, re.I,
+    ))
+    return attach_photo_tutorial or account_ui or navigation_cue or how_to or semantic_walkthrough or targeted_ui_action or community_post_action or payment_ui_action or identifier_ui_action or voice_ui_action or invite_ui_action or logout_ui_action or clear_chat_ui_action or response_feedback_ui_action or support_contact_location or location_question or (
         explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S))
     )
 
@@ -3596,7 +3667,12 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         reason = f"explicit_saved_{saved_artifact_followup_kind}_artifact_followup"
 
     # UI navigation can mention “история диалога”, but it is not a request to retrieve prior conversation content.
-    site_navigation_request = _is_site_navigation_request(source) or _is_feedback_control_help_request(source)
+    ui_instruction_detector = globals().get("_is_ui_instruction_request")
+    site_navigation_request = (
+        _is_site_navigation_request(source)
+        or _is_feedback_control_help_request(source)
+        or (callable(ui_instruction_detector) and bool(ui_instruction_detector(source)))
+    )
     if site_navigation_request:
         primary_intent = "NEW_INFORMATION"
         direction = "ANSWER_NEW_REQUEST"
@@ -3820,6 +3896,14 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
+        "site_navigation_semantics": ({
+            "domain": "april_ui",
+            "action": "EXPLAIN_UI_ROUTE",
+            "user_goal": _text(source)[:320],
+            "grounding_source": "APRIL_SITE_MAP_AND_UI_FUNCTION_CATALOG",
+            "must_explain": ["entry_path", "screen_position", "control_label", "control_purpose", "steps", "expected_result", "availability_and_limits"],
+            "visual_guidance": "source_derived_svg_when_requested_or_useful",
+        } if site_navigation_request else {}),
         "dialogue_profile_request": bool(dialogue_profile_request),
         "explicit_visual_revision": bool(explicit_visual_revision),
     }
@@ -4472,6 +4556,61 @@ def _has_explicit_independent_task_boundaries(text: str) -> bool:
     return False
 
 
+def _infer_april_ui_targets(request: Any) -> list[str]:
+    """Resolve interface objects to verified April UI destinations.
+
+    This is entity resolution for the typed action contract, not a gate deciding
+    whether the user needs UI help. The semantic classifier decides that first.
+    Multiple targets are retained for compound actions.
+    """
+    low = _text(request).lower().replace("ё", "е")
+    targets: list[str] = []
+    rules = [
+        ("response.feedback", r"(?:пожалова\w*.{0,45}(?:ответ|сообщени)|жалоб\w*.{0,45}(?:ответ|сообщени)|отблагодар\w*.{0,45}(?:ответ|сообщени)|поблагодар\w*.{0,45}(?:ответ|сообщени)|спасибо.{0,45}(?:ответ|сообщени)|(?:ответ|сообщени).{0,45}спасибо|оцен\w*.{0,45}(?:ответ|reply)|report.{0,35}(?:answer|response)|thank.{0,35}(?:answer|response))"),
+        ("chat.clear_workspace", r"(?:очист\w*.{0,40}(?:текущ\w*\s+чат|видим\w*\s+(?:чат|переписк)|рабоч\w*\s+поле|чат\s+на\s+экране)|(?:метл\w*|clear\s+(?:current|visible)\s+chat|clear\s+workspace))"),
+        ("dialogue_history", r"(?:истори\w*|сохраненн\w*\s+диалог\w*|прошл\w*\s+диалог\w*|стар\w*\s+бесед\w*|history|previous\s+conversation)"),
+        ("community.invite", r"(?:приглас\w*|invite)"),
+        ("community.private_chat", r"(?:личн\w*\s+чат|приватн\w*\s+чат|написат\w*\s+друг\w*|(?:отправ\w*|пересл\w*|подел\w*).{0,60}друг\w*|друг\w*.{0,60}(?:отправ\w*|пересл\w*|подел\w*)|private\s+chat)"),
+        ("community.friends", r"(?:запрос\w*\s+в\s+друз\w*|добав\w*.{0,35}в\s+друз\w*|приня\w*.{0,35}(?:запрос|дружб)|список\s+друз\w*|управля\w*.{0,30}друз\w*|friend\s+requests?|manage\s+friends)"),
+        ("community.public_post", r"(?:пост\w*|публикац\w*|сообщени\w*\s+в\s+сообществ\w*|публичн\w*.{0,20}(?:пост|сообщени)|community\s+post|publish\w*.{0,30}community)"),
+        ("support.request", r"(?:поддержк\w*|техподдержк\w*|обращени\w*\s+в\s+поддержк\w*|support\s+ticket)"),
+        ("account.delete", r"(?:удален\w*\s+аккаунт\w*|удал\w*\s+(?:свой\s+|april[- ]?)?аккаунт\w*|delete\s+(?:my\s+)?account)"),
+        ("profile.language", r"(?:язык\w*|language|locali[sz]ation)"),
+        ("profile.settings", r"(?:настройк\w*|личн\w*\s+кабинет|профил\w*|(?:выйти|выход|logout|log\s+out).{0,30}(?:аккаунт|профил|сесси|april)|settings|profile)"),
+        ("profile.identifiers", r"(?:april\s*id|premium\s*id|идентификатор\w*)"),
+        ("profile.display_name", r"(?:имя\w*|ник\w*|display\s+name|nickname)"),
+        ("plans.payment", r"(?:оплат\w*|платеж\w*|тариф\w*|пакет\w*|plans?\s*(?:&|and)\s*payments|payment|(?:продл\w*|купить|приобрест\w*).{0,35}premium|premium.{0,35}(?:продл\w*|оплат\w*|купить|28\s*days))"),
+        ("chat.paperclip_picker", r"(?:скрепк\w*|вложени\w*|прикреп\w*\s+(?:файл|фото|изображени)|загруз\w*\s+(?:файл|фото)|attach\w*|upload\w*)"),
+        ("chat.voice_input", r"(?:голос\w*|микрофон\w*|voice\s+message|microphone)"),
+        ("rendered_artifact.actions", r"(?:артефакт\w*|диаграмм\w*|таблиц\w*|график\w*|сгенерированн\w*\s+файл\w*|download\s+artifact)"),
+        ("april.help_information", r"(?:справк\w*|help\s*(?:&|and)\s*information|help\s+center|how\s+to\s+use)"),
+        ("legal.privacy", r"(?:политик\w*\s+конфиденциальност\w*|privacy\s+policy)"),
+        ("legal.terms", r"(?:услови\w*\s+использован\w*|terms\s+of\s+service)"),
+        ("chat.composer", r"(?:основн\w*\s+чат|главн\w*\s+чат|поле\s+сообщени\w*|чат\s+с\s+april|chat\s+with\s+april)"),
+    ]
+    for target, pattern in rules:
+        if re.search(pattern, low, re.I):
+            if target not in targets:
+                targets.append(target)
+    # A file explicitly sent "to the community" is a public-post workflow.
+    # A separate share-with-friend clause makes it a two-lane composite flow;
+    # a plain DM request that only mentions being in the community is not public.
+    community_file_upload = (
+        bool(re.search(r"(?:сообществ\w*|community)", low, re.I))
+        and bool(re.search(r"(?:файл\w*|вложени\w*|attachment)", low, re.I))
+        and bool(re.search(r"(?:отправ\w*|загруз\w*|прикреп\w*|добав\w*|send|upload|attach)", low, re.I))
+        and bool(re.search(r"(?:в\s+сообществ\w*|to\s+(?:the\s+)?community)", low, re.I))
+    )
+    explicit_second_friend_share = bool(re.search(
+        r"(?:и|and).{0,65}(?:подел\w*|отправ\w*|пересл\w*|share|send).{0,45}(?:друг\w*|friend)",
+        low, re.I,
+    ))
+    private_chat_only = bool(re.search(r"(?:личн\w*\s+чат|private\s+chat)", low, re.I)) and not explicit_second_friend_share
+    if community_file_upload and not private_chat_only and "community.public_post" not in targets:
+        targets.append("community.public_post")
+    return targets
+
+
 def _build_action_contract_for_step(request: str, semantics: dict[str, Any], outputs: list[str], index: int) -> dict[str, Any]:
     """Bind each sub-request to a concrete user goal, target, inputs and completion check."""
     low = _text(request).lower().replace("ё", "е")
@@ -4479,7 +4618,13 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
     output_names = [str(x).lower().replace("-", "_") for x in (outputs or ["text"])]
     attach_help = _is_attachment_tutorial_request(request)
     ui_instruction_detector = globals().get("_is_ui_instruction_request")
-    ui_help = _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
+    semantic_features = sem.get("features") if isinstance(sem.get("features"), dict) else {}
+    ui_help = (
+        _is_site_navigation_request(request)
+        or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request)))
+        or attach_help
+        or bool(sem.get("site_navigation_request") or semantic_features.get("site_navigation_request"))
+    )
     composite_detector = globals().get("_detect_image_compositing_request")
     unambiguous_new_image = _should_generate_instead_of_requesting_missing_source(request)
     image_edit = (not unambiguous_new_image) and (_detect_image_modification(request) or (
@@ -4505,6 +4650,9 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         source_requirement = "никакой исходный файл не требуется для инструкции"
     elif ui_help:
         action, domain, target = "EXPLAIN_UI_ROUTE", "april_ui", "verified_site_map"
+        resolved_ui_targets = _infer_april_ui_targets(request)
+        if len(resolved_ui_targets) == 1:
+            target = resolved_ui_targets[0]
         must_not = ["не придумывать кнопку, раздел, URL или тариф", "для страницы без реализации честно описать статус"]
         success = ["назвать стартовый экран и точную кнопку", "описать куда попадёт пользователь", "дать следующий шаг и безопасный путь назад"]
         source_requirement = "APRIL_SITE_MAP и проверенные UI blueprint-описания"
@@ -4538,12 +4686,71 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         must_not = ["не притягивать несвязанные старые темы", "не терять числа, отрицания, ограничения и указанные объекты"]
         success = ["получен прямой ответ на текущий шаг", "непрерывный смысл запроса сохранён"]
         source_requirement = "текущий текст запроса; история только при явной ссылке или подтверждённой зависимости"
-    return {
+    contract = {
         "step_index": int(index), "domain": domain, "action": action, "target": target,
         "output_types": list(outputs or ["text"]),
         "source_requirement": source_requirement, "depends_on_previous": bool(sem.get("parent_context_dependency") or sem.get("inherits_current_request_subject")),
         "must_not": must_not, "success_criteria": success,
     }
+    if domain == "april_ui":
+        # A typed operation is passed to IT Room; it is not a phrase-trigger list.
+        if attach_help:
+            operation = "ATTACH_SOURCE_TO_CHAT"
+        elif any(value in low for value in ("поделись", "поделиться", "отправь", "перешли", "share", "send to", "invite")):
+            operation = "SHARE_OR_SEND_FROM_UI"
+        elif any(value in low for value in ("скачай", "сохранить", "сохрани", "download", "save")):
+            operation = "DOWNLOAD_OR_SAVE_UI_CONTENT"
+        elif any(value in low for value in ("удали", "удалить", "delete")):
+            operation = "CONFIRM_ACCOUNT_OR_CONTENT_DELETION"
+        elif any(value in low for value in ("измени", "поменяй", "сменить", "выбери", "выбрать", "change", "edit", "select")):
+            operation = "CHANGE_UI_SETTING_OR_SELECTION"
+        elif any(value in low for value in ("открой", "перейди", "зайди", "попасть", "navigate", "open", "go to")):
+            operation = "OPEN_UI_ROUTE"
+        else:
+            operation = "EXPLAIN_UI_WORKFLOW"
+        ui_targets = list(resolved_ui_targets) if "resolved_ui_targets" in locals() else ([target] if target != "verified_site_map" else [])
+        target_operations = {
+            "dialogue_history": "OPEN_AND_RESUME_SAVED_DIALOGUE",
+            "profile.language": "CHANGE_LANGUAGE_SETTING",
+            "profile.settings": "OPEN_PROFILE_SETTINGS",
+            "profile.identifiers": "COPY_ACCOUNT_IDENTIFIER",
+            "profile.display_name": "EDIT_DISPLAY_NAME",
+            "plans.payment": "START_ONE_TIME_PAYMENT_CHECKOUT",
+            "community.public_post": "CREATE_PUBLIC_COMMUNITY_POST",
+            "community.invite": "SHARE_INVITATION_LINK",
+            "community.friends": "MANAGE_FRIEND_REQUESTS",
+            "community.private_chat": "OPEN_PRIVATE_CHAT_WITH_SELECTED_FRIEND",
+            "response.feedback": "THANK_OR_REPORT_THE_SELECTED_APRIL_ANSWER",
+            "chat.clear_workspace": "CLEAR_VISIBLE_CHAT_WORKSPACE_ONLY",
+            "support.request": "SUBMIT_SUPPORT_TICKET",
+            "chat.paperclip_picker": "ATTACH_SOURCE_FILE_TO_CHAT",
+            "chat.voice_input": "RECORD_VOICE_MESSAGE",
+            "chat.composer": "SEND_CHAT_MESSAGE",
+            "rendered_artifact.actions": "DOWNLOAD_COPY_OR_SHARE_RENDERED_ARTIFACT",
+            "account.delete": "REVIEW_AND_CONFIRM_APRIL_ACCOUNT_DELETION",
+            "april.help_information": "OPEN_HELP_INFORMATION_AND_SELECT_ARTICLE",
+            "legal.privacy": "OPEN_PRIVACY_POLICY",
+            "legal.terms": "OPEN_TERMS_OF_SERVICE",
+        }
+        operation_sequence = [
+            {"target": ui_target, "operation": target_operations.get(ui_target, operation)}
+            for ui_target in ui_targets
+        ]
+        if len(operation_sequence) > 1:
+            operation = "COMPOSITE_UI_WORKFLOW"
+        elif operation_sequence:
+            operation = operation_sequence[0]["operation"]
+        contract["ui_navigation"] = {
+            "operation": operation,
+            "target": target,
+            "targets": ui_targets,
+            "operation_sequence": operation_sequence,
+            "user_goal": _text(request)[:320],
+            "guided_steps_required": True,
+            "visual_route_allowed": True,
+            "grounding_source": "APRIL_SITE_MAP_AND_UI_FUNCTION_CATALOG",
+        }
+    return contract
 
 
 def _has_explicit_independent_non_ui_action(text: Any) -> bool:
