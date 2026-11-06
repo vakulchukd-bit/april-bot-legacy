@@ -26,6 +26,7 @@ from blocks.Premium_interpretation_identity import (
     extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
     _is_image_discussion_without_new_visual_action, _detect_image_modification,
     _is_explicit_visual_revision_request, _has_independent_nonvisual_artifact_request,
+    interpret_request_in_context,
 )
 
 
@@ -1135,7 +1136,7 @@ def _row_dialogue_content_subject_tokens(row: dict[str, Any]) -> set[str]:
     return _subject_tokens(" ".join(part for part in (user_text[:1800], answer_text[:5200]) if part))
 
 
-def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> dict[str, Any]:
+def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None, *, history_request: bool | None = None) -> dict[str, Any]:
     """Compare the new turn separately with the immediately preceding user ask and APRIL answer.
 
     This is a routing vector, not a semantic-model confidence claim. It keeps the
@@ -1158,9 +1159,8 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None) -> di
     # "What were we talking about?" has no subject of its own. It must be
     # anchored to the immediately preceding April answer, not compared with a
     # vocative such as "Эппл" that happens to appear in a voice transcript.
-    implicit_history_resume = bool(
-        _is_history_recall_question(query) and not _history_query_topic_tokens(query)
-    )
+    semantic_history_request = _is_history_recall_question(query) if history_request is None else bool(history_request)
+    implicit_history_resume = bool(semantic_history_request and not _history_query_topic_tokens(query))
     if implicit_history_resume:
         query_subjects = set()
     answer_subjects = _subject_tokens(answer_text[:5200])
@@ -1343,13 +1343,11 @@ def _user_operation_profile(
     elif is_correction or speech_act in {"CORRECTION_OR_REVISION", "REVISION_REQUEST"} or bool(
         profile.get("active_branch_repair")
         or pragmatic.get("active_branch_repair")
-        or profile.get("previous_answer_reference")
-        or pragmatic.get("previous_answer_reference")
         or profile.get("factual_verification_request")
         or pragmatic.get("factual_verification_request")
     ):
         operation = "CORRECT_OR_VERIFY_PREVIOUS_TURN"
-        evidence = "correction_or_previous_answer_reference"
+        evidence = "correction_or_factual_verification"
     elif communicative_act == "CLARIFICATION" or speech_act == "CLARIFICATION_REQUEST":
         operation = "CLARIFY_PREVIOUS_POINT"
         evidence = "clarification_act"
@@ -1367,9 +1365,11 @@ def _user_operation_profile(
     ):
         operation = "DEVELOP_ACTIVE_BRANCH"
         evidence = "semantic_continuation_intent"
-    elif speech_act in {"EXPLANATION_REQUEST", "REFERENTIAL_CONTINUATION", "CONTINUATION_REQUEST"}:
+    elif speech_act in {"EXPLANATION_REQUEST", "REFERENTIAL_CONTINUATION", "CONTINUATION_REQUEST"} or bool(
+        profile.get("previous_answer_reference") or pragmatic.get("previous_answer_reference")
+    ):
         operation = "EXPLAIN_OR_EXTEND_CURRENT_POINT"
-        evidence = "dialogue_act"
+        evidence = "dialogue_act_or_latest_answer_reference"
     elif intent == "NEW_INFORMATION":
         operation = "REQUEST_NEW_INFORMATION"
         evidence = "new_information_intent"
@@ -5258,100 +5258,37 @@ def _should_probe_hot_branch_first(
     conversation_id: str = "",
     resume_message_id: str = "",
 ) -> bool:
-    """Probe the five most recent pairs before a full-history lookup.
+    """Probe the current branch only when interpretation linked the latest exchange.
 
-    The semantic label is evidence, not a hard gate: long replies can contain many
-    new nouns while still referring to the immediately preceding answer. Only clear
-    history/time requests and an explicit topic boundary bypass this lightweight probe.
+    The caller has already compared the full new turn with the latest saved
+    USER↔APRIL pair. This function must not reclassify the same text with another
+    keyword/trigger pass; it only checks route-level exclusions.
     """
     profile = interpretation if isinstance(interpretation, dict) else {}
     if not (_text(dialog_id) or _text(conversation_id)) or _text(resume_message_id):
         return False
-
     intent = _text(profile.get("primary_intent")).upper()
-    topic_reference = _text(profile.get("topic_reference")).upper()
     features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
-    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
     time_window = profile.get("time_window") if isinstance(profile.get("time_window"), dict) else {}
-    resume_latest_branch = _text(profile.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
-
-    if profile.get("explicit_topic_switch"):
-        return False
+    latest = profile.get("latest_exchange_analysis") if isinstance(profile.get("latest_exchange_analysis"), dict) else {}
     if (
         profile.get("history_request")
         or profile.get("history_inventory_request")
         or intent in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
-        or (_is_history_request(query) and not resume_latest_branch)
         or profile.get("has_explicit_time_window")
         or time_window.get("has_constraint")
         or _text(profile.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
-        or profile.get("site_navigation_request")
+        or profile.get("explicit_topic_switch")
+        or profile.get("explicit_topic_introduction")
     ):
         return False
-
-    low = _text(query).lower().replace("ё", "е")
-    explicit_reopen = bool(profile.get("explicit_closed_branch_reopen"))
-    # Recognize anaphora even when the semantic classifier called the turn
-    # NEW_INFORMATION. Adjectives, domain nouns and modality flags must not erase
-    # this evidence (e.g. “в нём всё нравится: сюжет, флора и фауна”).
-    reference_signal = bool(
-        profile.get("strong_anaphoric_reference")
-        or profile.get("topic_reference_fragment")
+    return bool(
+        latest.get("linked")
         or profile.get("previous_answer_reference")
         or profile.get("active_branch_repair")
-        or features.get("strong_anaphoric_reference")
-        or features.get("topic_reference_fragment")
         or features.get("previous_answer_reference")
         or features.get("active_branch_repair")
-        or pragmatic.get("context_dependent_question")
-        or pragmatic.get("context_dependent_reaction")
-        or re.search(
-            r"\b(?:в\s+н[её]м|в\s+ней|в\s+них|на\s+н[её]м|о\s+н[её]м|"
-            r"у\s+него|у\s+не[её]|для\s+него|с\s+ним|про\s+него|"
-            r"он|она|оно|они|его|ее|её|ему|ей|этот|эта|эту|этого|этой|"
-            r"этим|этом|такая|такой|такое|к\s+этой|к\s+этому|"
-            r"about\s+it|within\s+it|in\s+it|its|he|she|they|that|this)\b",
-            low,
-            re.IGNORECASE,
-        )
-        and not _looks_like_new_topic(query)
     )
-    explicit_boundary = bool(
-        profile.get("explicit_topic_switch")
-        or profile.get("explicit_topic_introduction")
-        or _looks_like_new_topic(query)
-    )
-    # A real topic switch must remain a boundary. But if the classifier's switch
-    # marker was inferred from nouns in a clearly anaphoric sentence, let the
-    # recent-pair probe decide from the actual preceding exchange.
-    if explicit_boundary and not reference_signal and not explicit_reopen and not resume_latest_branch:
-        return False
-
-    continuation = bool(
-        intent in _HOT_BRANCH_FAST_INTENTS
-        or (
-            profile.get("requires_memory")
-            and topic_reference in _HOT_BRANCH_TOPIC_REFERENCES
-        )
-        or profile.get("active_branch_repair")
-        or profile.get("previous_answer_reference")
-        or pragmatic.get("active_branch_repair")
-        or pragmatic.get("previous_answer_reference")
-        or pragmatic.get("context_dependent_question")
-        or pragmatic.get("context_dependent_reaction")
-        or features.get("active_branch_repair")
-        or features.get("explicit_previous_answer_correction")
-        or features.get("answer_followup")
-        or features.get("topic_reference_fragment")
-        or features.get("strong_anaphoric_reference")
-        or _text(profile.get("saved_artifact_followup_kind"))
-        or reference_signal
-    )
-    # The bounded recent check is also used when the interpreter says NEW: it can
-    # confirm a direct connection from the last five pairs, otherwise normal history
-    # routing remains the fallback. This is a lookup, not an unconditional CONTINUE.
-    return bool(continuation or not explicit_boundary or explicit_reopen)
-
 
 def _promote_grounded_recent_anaphoric_candidate(
     result: dict[str, Any] | None,
@@ -6506,6 +6443,86 @@ def search_dialogue_context(
     search_started = time.perf_counter()
     uid = _uid(user_id)
     query_interpretation = dict(query_interpretation or {})
+
+    # Every request first reads a bounded recent view and evaluates the new turn
+    # against the last saved USER↔APRIL pair. This happens before the archive router,
+    # regardless of whether the classifier initially called the turn NEW or CONTINUE.
+    latest_exchange_row_precheck = None
+    latest_exchange_analysis: dict[str, Any] = {}
+    if not query_interpretation.get("_latest_exchange_pass_done"):
+        recent_probe = hydrate(
+            uid, limit=5, dialog_id=str(dialog_id or ""),
+            conversation_id=str(conversation_id or ""),
+            strict_dialog_scope=bool(_text(dialog_id) or _text(conversation_id)),
+        )
+        recent_probe_rows = [row for row in (recent_probe.get("dialogue_pairs") or [])
+                             if isinstance(row, dict) and not _row_is_pending_clarification(row)
+                             and not _is_failed_provider_row(row)]
+        if not recent_probe_rows and not (_text(dialog_id) or _text(conversation_id)):
+            recent_probe_rows = [row for row in (recent_probe.get("dialogue_pairs") or [])
+                                 if isinstance(row, dict) and not _row_is_pending_clarification(row)
+                                 and not _is_failed_provider_row(row)]
+        latest_exchange_row_precheck = max(
+            recent_probe_rows,
+            key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+            default=None,
+        )
+        query_interpretation = interpret_request_in_context(
+            query, latest_exchange_row_precheck, query_interpretation
+        )
+        query_interpretation["_latest_exchange_pass_done"] = True
+    latest_exchange_analysis = (
+        query_interpretation.get("latest_exchange_analysis")
+        if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
+    )
+    latest_exchange_link = bool(latest_exchange_analysis.get("linked"))
+    interpreted_intent_preload = _text(query_interpretation.get("primary_intent")).upper()
+    semantic_memory_preload = bool(
+        query_interpretation.get("requires_memory")
+        or query_interpretation.get("previous_answer_reference")
+        or query_interpretation.get("active_branch_repair")
+        or interpreted_intent_preload in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+    )
+    explicit_history_preload = bool(
+        query_interpretation.get("history_request")
+        or query_interpretation.get("dialogue_profile_request")
+        or query_interpretation.get("history_inventory_request")
+        or interpreted_intent_preload in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+    )
+    explicit_prior_pointer_preload = bool(
+        query_interpretation.get("resume_anchor_requested")
+        or query_interpretation.get("has_explicit_time_window")
+        or _text(query_interpretation.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
+        or _text(resume_message_id)
+    )
+    site_navigation_preload = bool(
+        query_interpretation.get("site_navigation_request")
+        or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION"
+        or ((query_interpretation.get("features") or {}).get("site_navigation_request")
+            if isinstance(query_interpretation.get("features"), dict) else False)
+    )
+    latest_exchange_available = bool(latest_exchange_analysis.get("available"))
+    latest_exchange_independent_request = bool(
+        latest_exchange_available
+        and not latest_exchange_link
+        and latest_exchange_analysis.get("has_independent_payload")
+        and not explicit_history_preload
+        and not explicit_prior_pointer_preload
+    )
+    # Once the latest-exchange interpretation identifies a self-contained request,
+    # stale continuation fields from an earlier classifier cannot authorize a scan.
+    allow_semantic_history_search = bool(
+        explicit_history_preload or explicit_prior_pointer_preload
+        or (semantic_memory_preload and not latest_exchange_link
+            and not latest_exchange_independent_request
+            and not site_navigation_preload
+            and not query_interpretation.get("explicit_topic_switch"))
+    )
+    independent_new_topic_preload = bool(
+        not latest_exchange_link and not allow_semantic_history_search
+        and not explicit_history_preload and not explicit_prior_pointer_preload
+        and _text(query_interpretation.get("primary_intent")).upper() not in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
+    )
     preclassified_artifact_kind = (
         _text(query_interpretation.get("saved_artifact_followup_kind"))
         or _explicit_artifact_followup_kind(query)
@@ -6514,8 +6531,17 @@ def search_dialogue_context(
         preclassified_artifact_kind and _explicit_historical_artifact_reference(query)
     )
 
+    pragmatic_latest = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
+    simple_acknowledgement_turn = bool(
+        latest_exchange_analysis.get("simple_acknowledgement")
+        or ((pragmatic_latest.get("gratitude") or pragmatic_latest.get("positive_evaluation")
+             or pragmatic_latest.get("bare_acknowledgement"))
+            and not pragmatic_latest.get("correction")
+            and not pragmatic_latest.get("negation_or_disagreement")
+            and not pragmatic_latest.get("revision_request"))
+    )
     hot_branch_probe_missed = False
-    if not _hot_branch_only and not explicit_historical_artifact_request and _should_probe_hot_branch_first(
+    if not _hot_branch_only and latest_exchange_link and not simple_acknowledgement_turn and not explicit_historical_artifact_request and _should_probe_hot_branch_first(
         query, query_interpretation,
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
@@ -6584,7 +6610,13 @@ def search_dialogue_context(
             fallback="FULL_HISTORY",
         )
         hot_branch_probe_missed = True
+        # A semantically linked turn stays anchored to the latest exchange even if
+        # a persisted branch cannot be fully expanded. Do not widen to all history
+        # merely because the local hot-branch probe was inconclusive.
 
+    # A latest-exchange miss on a self-contained NEW request is a topic boundary,
+    # not permission to scan every historical topic. The regular path below receives
+    # a five-pair view containing only the most recent exchange in this case.
     retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_visual_revision = _is_explicit_visual_revision_request(query)
     visual_misroute_correction = _is_visual_misroute_correction(query)
@@ -6611,7 +6643,7 @@ def search_dialogue_context(
     )
     state = hydrate(
         uid,
-        limit=5 if _hot_branch_only else (16 if targeted_active_repair else 0),
+        limit=5 if (_hot_branch_only or independent_new_topic_preload or not allow_semantic_history_search) else (16 if targeted_active_repair else 0),
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
         strict_dialog_scope=bool(_hot_branch_only),
@@ -6621,6 +6653,14 @@ def search_dialogue_context(
     # dictionaries directly could let concurrent turns overwrite one another's context.
     # Nested JSON payloads remain shared read-only to avoid copying large image/diagram data.
     all_rows = [dict(row) for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    if independent_new_topic_preload:
+        latest_id = _text((latest_exchange_row_precheck or {}).get("message_id"))
+        if latest_id:
+            all_rows = [row for row in all_rows if _text(row.get("message_id")) == latest_id]
+        elif latest_exchange_row_precheck:
+            all_rows = [dict(latest_exchange_row_precheck)]
+        else:
+            all_rows = []
     if targeted_active_repair:
         same_dialog_rows = [row for row in all_rows if (
             (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
@@ -6680,13 +6720,13 @@ def search_dialogue_context(
     # lookup if an explicitly requested time interval contains no saved dialogue pairs.
     retained_rows = list(all_rows)
     resume_key = _text(resume_message_id)
-    reference_followup = _looks_like_referential_followup(query)
+    reference_followup = _looks_like_referential_followup(query) or latest_exchange_link
     dialogue_profile_request = bool(query_interpretation.get("dialogue_profile_request"))
     resume_latest_branch = _text(query_interpretation.get("dialogue_history_intent_kind")).upper() == "RESUME_LATEST_BRANCH"
-    history_request = (
+    history_request = bool(
         dialogue_profile_request
-        or bool(query_interpretation.get("history_request"))
-        or (_is_history_request(query) and not resume_latest_branch)
+        or query_interpretation.get("history_request")
+        or (interpreted_intent_preload in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"} and not resume_latest_branch)
     )
     # Resume requests follow a strict two-stage, read-only route: first the latest
     # assistant turn and active branch (the bounded probe above); only after a miss,
@@ -6699,10 +6739,9 @@ def search_dialogue_context(
         history_request = True
     # In normal Premium routing the interpretation result is authoritative.
     # The lexical helper remains only as compatibility fallback for direct legacy callers.
-    new_topic_request = (
-        bool(query_interpretation.get("explicit_topic_switch"))
-        if "explicit_topic_switch" in query_interpretation
-        else _looks_like_new_topic(query)
+    new_topic_request = bool(
+        query_interpretation.get("explicit_topic_switch")
+        or query_interpretation.get("explicit_topic_introduction")
     )
     interpreted_topic_closure = (
         bool(query_interpretation.get("explicit_topic_closure"))
@@ -6738,10 +6777,8 @@ def search_dialogue_context(
     is_correction = bool(
         pragmatic_features.get("correction")
         or pragmatic_features.get("active_branch_repair")
-        or pragmatic_features.get("previous_answer_reference")
         or pragmatic_features.get("factual_verification_request")
         or query_interpretation.get("active_branch_repair")
-        or query_interpretation.get("previous_answer_reference")
         or query_interpretation.get("factual_verification_request")
         or speech_act in {"CORRECTION_OR_REVISION", "FRUSTRATION_OR_DISSATISFACTION", "NEGATION_OR_DISAGREEMENT"}
         or communicative_act in {"REVISE_PREVIOUS_RESPONSE", "RESPOND_TO_DISAGREEMENT"}
@@ -7022,7 +7059,7 @@ def search_dialogue_context(
         # Do not launch a cross-history named-topic search for its predicates.
         topic_bearing = set()
     named_rows: list[tuple[float, dict[str, Any]]] = []
-    if not history_request and topic_bearing:
+    if allow_semantic_history_search and not history_request and topic_bearing:
         scoped_ids = {_text(row.get("message_id")) for row in scoped_rows}
         for row in all_rows:
             if _row_is_pending_clarification(row):
@@ -7676,7 +7713,7 @@ def search_dialogue_context(
         and not is_correction and not is_short_acknowledgement
         and not short_contextual_turn
     )
-    repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
+    repair_active_branch = bool(is_correction and latest_same_dialog and not new_topic_request and not history_request)
     # A correction may explicitly name a choice from a prior assistant list after
     # an intervening misinterpretation created a false active branch. Locate only a
     # same-dialog answer that actually offered a numbered list and shares the named
@@ -9827,7 +9864,6 @@ def search_dialogue_context(
     route_is_repair = bool(
         is_correction
         or query_interpretation.get("active_branch_repair")
-        or query_interpretation.get("previous_answer_reference")
         or route_features.get("active_branch_repair")
         or route_pragmatic.get("active_branch_repair")
     )
@@ -9901,7 +9937,15 @@ def search_dialogue_context(
         route_is_repair = True
         route_is_contextual = True
     latest_route_subjects = _row_dialogue_content_subject_tokens(latest_route_row) if latest_route_row else set()
-    latest_answer_relation = _latest_answer_relation_vector(query, latest_route_row)
+    latest_answer_relation = _latest_answer_relation_vector(query, latest_route_row, history_request=history_request)
+    if latest_exchange_link and latest_route_row:
+        latest_answer_relation.update({
+            "matched": True,
+            "answer_subject_conflict": False,
+            "semantic_latest_exchange_link": True,
+            "anchor_role": "LATEST_USER_APRIL_EXCHANGE",
+            "message_id": _text(latest_route_row.get("message_id")),
+        })
     # If the user refers to the current subject by pronoun/deixis and does not
     # introduce another subject, nouns naming the requested output or an attribute
     # ("picture", "discoveries", "law") are not independent topic names. Keep those
@@ -10031,10 +10075,12 @@ def search_dialogue_context(
         and not route_blocked
     )
     prefer_hot_branch = bool(
-        not hot_branch_probe_missed
+        (not hot_branch_probe_missed or latest_exchange_link)
         and not route_blocked
         and latest_route_row
         and (
+            latest_exchange_link
+            or (
             not query_modalities
             or same_subject_active_revisit
             or latest_answer_followup
@@ -10047,7 +10093,9 @@ def search_dialogue_context(
                 and not new_work_root_request
                 and not query_interpretation.get("explicit_topic_introduction")
             )
+            )
         )
+        and not latest_exchange_independent_request
         and not query_interpretation.get("explicit_topic_switch")
         and (
             (
@@ -10116,7 +10164,8 @@ def search_dialogue_context(
                     hot_work_match_reason = "detached_stale_work_branch_latest_topic_wins"
         route_decision = "ACTIVE_BRANCH_FIRST"
     elif (
-        not route_blocked
+        allow_semantic_history_search
+        and not route_blocked
         and (route_query_subjects or (hot_branch_probe_missed and route_history_subjects))
     ):
         # The active-branch test above has already failed. Search the user's full
@@ -10276,6 +10325,7 @@ def search_dialogue_context(
     if (
         branch_route_kind
         and selected_for_context
+        and not simple_acknowledgement_turn
         and not history_request
         and not time_filter.get("applied")
     ):
@@ -10776,6 +10826,10 @@ def search_dialogue_context(
         "continuation_marker": marker,
         "referential_followup": reference_followup,
         "history_request": history_request,
+        "latest_exchange_analysis": deepcopy(latest_exchange_analysis),
+        "latest_exchange_independent_request": bool(latest_exchange_independent_request),
+        "effective_interpretation": deepcopy(query_interpretation),
+        "semantic_history_search_allowed": bool(allow_semantic_history_search),
         "implicit_latest_branch_resume": bool(resume_latest_branch and not history_request),
         "contextual_history_match": contextual_history_match,
         "historical_artifact_reactivation": bool(historical_artifact_reactivation),
@@ -10958,6 +11012,9 @@ def prepare_dialogue_context(
         "topic_context_expansion": deepcopy(context.get("topic_context_expansion") or {}),
         "known_topic_count": int(context.get("known_topic_count") or 0),
         "history_request": bool(context.get("history_request")),
+        "latest_exchange_analysis": deepcopy(context.get("latest_exchange_analysis") or {}),
+        "effective_interpretation": deepcopy(context.get("effective_interpretation") or {}),
+        "semantic_history_search_allowed": bool(context.get("semantic_history_search_allowed")),
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 10),
