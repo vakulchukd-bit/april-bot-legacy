@@ -1973,9 +1973,9 @@ def _has_explicit_history_topic_reference(text: Any) -> bool:
 def _dialogue_history_intent_kind(text: Any) -> str:
     """Classify implicit and subject-specific requests to retrieve past dialogue.
 
-    A subjectless "what were we talking about?" first resumes from April's latest
-    answer and active branch. A named subject is searched across retained history.
-    Both retrieval paths are read-only.
+    General questions about what was discussed inspect the retained topic inventory.
+    Explicit stopping-point requests ("where did we leave off?") resume the latest
+    assistant answer and active branch. Both retrieval paths are read-only.
     """
     low = re.sub(r"\s+", " ", _text(text).lower().replace("ё", "е")).strip()
     if not low or _has_explicit_topic_switch(low):
@@ -2011,13 +2011,12 @@ def _dialogue_history_intent_kind(text: Any) -> str:
         r"\bwe\s+(?:talked|spoke|discussed)\b.{0,45}\b(?:before|earlier|already)\b",
     )
     if any(re.search(pattern, low, re.IGNORECASE | re.DOTALL) for pattern in history_check_patterns):
-        # An unnamed reference to the past belongs to the latest assistant answer
-        # first. Only a genuinely named subject should launch an all-history search.
-        return (
-            "CHECK_DIALOGUE_HISTORY"
-            if _has_explicit_history_topic_reference(low)
-            else "RESUME_LATEST_BRANCH"
-        )
+        # A general question about the conversation asks for a read-only inventory
+        # of recent topic/branch continuums. A branch-resume request is handled by
+        # the explicit resume_patterns above ("where did we leave off?"). A named
+        # subject is retained as a filter by the history ranker, not as a reason to
+        # change this operation into an active-branch-only lookup.
+        return "CHECK_DIALOGUE_HISTORY"
     return ""
 
 
@@ -2403,7 +2402,17 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
         r"получил\w*|вывел\w*|доказал\w*|обосновал\w*)\b",
         r"\bкак\s+получил\w*\s+(?:этот\s+|такой\s+)?результат\b",
         r"\bпочему\s+(?:ты|вы)\s+(?:так|это)\b",
+        # Questions about April's own preceding speech act are references to the
+        # exact previous answer, not standalone requests and not a search for a
+        # random historical occurrence of the word "ответ".
+        r"\b(?:а\s+)?(?:ты|вы)\s+(?:что|какой\s+ответ|какую\s+информацию)\s+"
+        r"(?:ответил\w*|сказал\w*|написал\w*|предложил\w*|назвал\w*|сообщил\w*)\b",
+        r"\b(?:что|какой\s+ответ|какую\s+информацию)\s+(?:ты|вы)\s+"
+        r"(?:ответил\w*|сказал\w*|написал\w*|предложил\w*|назвал\w*|сообщил\w*)\b",
+        r"\b(?:а\s+)?(?:ты|вы)\s+(?:ответил\w*|сказал\w*|написал\w*|"
+        r"предложил\w*|назвал\w*|сообщил\w*)\b.{0,32}\b(?:что|какой|какую)\b",
         r"\b(?:explain|walk\s+me\s+through)\s+(?:that|this|it|the\s+result)\b",
+        r"\bwhat\s+(?:did|have)\s+you\s+(?:answer|say|write|suggest|recommend|name)\b",
     )
     if any(re.search(pattern, low) for pattern in patterns):
         return True
@@ -3171,13 +3180,42 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         r"обсужд\w*|истори\w*|запрос\w*|topics?|conversations?|chats?|discussion\w*|history)\b",
         low, re.IGNORECASE,
     ))
-    explicit_topic_inventory = bool(re.search(
-        r"(?:последн\w*\s+тем\w*|какие\s+тем\w*|список\s+тем\w*|"
-        r"тем\w*.{0,28}(?:из\s+истори\w*|мы\s+обсужда\w*|мы\s+говорил\w*)|"
-        r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|найт\w*|найд\w*|ищ\w*|search|find|locate|list|show|summariz\w*).{0,36}"
-        r"(?:тем\w*|topics?|history|conversations?))",
+    # Inventory intent is a relation between a request to enumerate and an object
+    # that denotes prior dialogue subjects. It must survive ordinary word-order
+    # variation: "назови темы, о которых мы общались" and "темы назови о которых
+    # общались" describe the same operation without relying on one exact phrase.
+    has_topic_inventory_object = bool(re.search(
+        r"\b(?:тем\w*|тематик\w*|вопрос\w*|направлени\w*|разговор\w*|"
+        r"обсуждени\w*|топик\w*|topics?|subjects?|conversations?|discussions?)\b",
         low, re.IGNORECASE,
     ))
+    has_inventory_operation = bool(re.search(
+        r"\b(?:назов\w*|перечисл\w*|покаж\w*|вывед\w*|состав\w*|"
+        r"собер\w*|напомн\w*|вспомн\w*|список|list|show|name|enumerat\w*|"
+        r"summari[sz]e|recap)\b",
+        low, re.IGNORECASE,
+    ))
+    has_dialogue_past_relation = bool(re.search(
+        r"\b(?:общал\w*|говорил\w*|разговаривал\w*|обсуждал\w*|"
+        r"рассматривал\w*|упоминал\w*|затрагивал\w*|в\s+диалог\w*|"
+        r"в\s+разговор\w*|из\s+истори\w*|из\s+переписк\w*|"
+        r"we\s+(?:talked|spoke|discussed)|our\s+(?:conversation|discussion))\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_topic_inventory = bool(
+        re.search(r"\bпоследн\w*\s+тем\w*|\bкакие\s+тем\w*|\bсписок\s+тем\w*", low, re.I)
+        or (has_topic_inventory_object and has_inventory_operation and has_dialogue_past_relation)
+        or re.search(
+            r"\bтем\w*.{0,42}(?:из\s+истори\w*|мы\s+обсужда\w*|мы\s+говорил\w*|"
+            r"о\s+котор\w*.{0,24}(?:общал\w*|говорил\w*|обсуждал\w*))",
+            low, re.IGNORECASE | re.DOTALL,
+        )
+        or re.search(
+            r"(?:покаж\w*|перечисл\w*|вывед\w*|напомн\w*|найт\w*|найд\w*|ищ\w*|search|find|locate|list|show|summariz\w*).{0,36}"
+            r"(?:тем\w*|topics?|history|conversations?)",
+            low, re.IGNORECASE | re.DOTALL,
+        )
+    )
     # Identify an unnamed time-scoped overview separately from a lookup for a
     # particular subject. Strip discourse/time words first, so "physics ... 2h ago"
     # remains targeted while "what did we discuss 2h ago" becomes an inventory.
@@ -3232,15 +3270,18 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     # ("we/our") plus a dialogue/decision word was enough to set HISTORY_LOOKUP;
     # this routed operational follow-ups to the history-topic fallback when Provider
     # returned no answer. Require an actual recollection signal for these two paths.
-    explicit_discussion_recall = bool(re.search(
-        r"(?:\b(?:что|о\s+чем|про\s+что|какие\s+темы|какой\s+вопрос|какие\s+вопросы)\b"
-        r".{0,65}\b(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b|"
-        r"\b(?:что\s+было|о\s+чем\s+мы\s+говорили|what\s+did\s+we\s+discuss|"
-        r"what\s+have\s+we\s+discussed|what\s+were\s+we\s+discussing|"
-        r"what\s+did\s+we\s+talk\s+about|what\s+were\s+we\s+talking|"
-        r"what\s+happened\s+in\s+our\s+conversation)\b)",
-        low, re.IGNORECASE,
-    ))
+    explicit_discussion_recall = bool(
+        explicit_topic_inventory
+        or re.search(
+            r"(?:\b(?:что|о\s+чем|про\s+что|какие\s+темы|какой\s+вопрос|какие\s+вопросы)\b"
+            r".{0,65}\b(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b|"
+            r"\b(?:что\s+было|о\s+чем\s+мы\s+говорили|what\s+did\s+we\s+discuss|"
+            r"what\s+have\s+we\s+discussed|what\s+were\s+we\s+discussing|"
+            r"what\s+did\s+we\s+talk\s+about|what\s+were\s+we\s+talking|"
+            r"what\s+happened\s+in\s+our\s+conversation)\b)",
+            low, re.IGNORECASE,
+        )
+    )
     explicit_prior_decision_recall = bool(re.search(
         r"\b(?:что|какое|какие|к\s+чему)\b.{0,55}\b"
         r"(?:решил\w*|договорил\w*|выбрал\w*|принял\w*|постановил\w*|согласовал\w*|пришл\w*)\b|"
@@ -3327,7 +3368,11 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     )
     context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction")) or explicit_request_restatement_repair
     active_branch_repair = bool(dialogue_act_profile.get("active_branch_repair")) or explicit_request_restatement_repair
-    previous_answer_reference = bool(dialogue_act_profile.get("previous_answer_reference")) or explicit_request_restatement_repair
+    previous_answer_reference = (
+        bool(dialogue_act_profile.get("previous_answer_reference"))
+        or bool(answer_followup)
+        or explicit_request_restatement_repair
+    )
     if explicit_request_restatement_repair:
         dialogue_act_profile = dict(dialogue_act_profile)
         pragmatic_features = dict(dialogue_act_profile.get("pragmatic_features") or {})
@@ -3755,6 +3800,8 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "plan_action": bool(plan_action),
         "continuation_action": bool(continuation_action or saved_artifact_followup_kind),
         "answer_followup": bool(answer_followup),
+        "previous_assistant_output_reference": bool(answer_followup),
+        "history_inventory_request": bool(history_inventory_request),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction or retrospective_image_discussion),
         "strong_anaphoric_reference": bool(dialogue_act_profile.get("strong_anaphoric_reference")),
