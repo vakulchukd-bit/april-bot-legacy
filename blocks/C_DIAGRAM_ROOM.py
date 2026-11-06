@@ -1572,9 +1572,11 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
     nodes_raw = payload.get("nodes") or payload.get("components") or payload.get("vertices")
     if not isinstance(nodes_raw, list) or not nodes_raw:
         return ""
+    requested_screen = _text(payload.get("screen_id") or payload.get("ui_screen") or "").lower()
+    node_limit = 18 if requested_screen == "overview" else 10
     normalized = []
     seen = set()
-    for index, raw in enumerate(nodes_raw[:10]):
+    for index, raw in enumerate(nodes_raw[:node_limit]):
         node = dict(raw) if isinstance(raw, dict) else {"label": _text(raw)}
         node_id = _text(node.get("id") or node.get("key") or f"node_{index + 1}")
         href = _text(node.get("href") or node.get("path"))
@@ -1590,14 +1592,26 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
         return ""
 
     title_text = _text(title or payload.get("title") or "Карта переходов April")
-    screen_id = _text(payload.get("screen_id") or payload.get("ui_screen") or "").lower()
+    screen_id = requested_screen
     route_ids = {str(value).strip().lower() for value in (payload.get("selected_route_ids") or []) if str(value).strip()} if isinstance(payload.get("selected_route_ids"), list) else set()
     highlight_target_id = _text(payload.get("highlight_target_id") or payload.get("highlight_route_id")).lower()
-    highlight_color = _text(payload.get("highlight_color") or "#58d7a6")
+    # April Night is the canonical visual identity for user-facing route diagrams.
+    # The payload may override tokens only with validated six-digit hex values.
+    theme_raw = payload.get("visual_theme") if isinstance(payload.get("visual_theme"), dict) else {}
+    theme_defaults = {
+        "background": "#05060a", "surface": "#14141e", "surface_alt": "#1b2028",
+        "border": "#2d3542", "foreground": "#f7f8fb", "muted": "#a1a1aa",
+        "primary": "#7dff8f", "secondary": "#7de7ff", "danger": "#fda4af", "warning": "#fcd34d",
+    }
+    theme = {}
+    for token, default in theme_defaults.items():
+        value = _text(theme_raw.get(token) or default)
+        theme[token] = value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else default
+    highlight_color = _text(payload.get("highlight_color") or theme["primary"])
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", highlight_color):
-        highlight_color = "#58d7a6"
+        highlight_color = theme["primary"]
     low_source = " ".join([title_text, str(payload.get("description") or ""), str(payload.get("matched_query") or "")]).lower().replace("ё", "е")
-    if screen_id not in {"profile", "chat", "attachments", "help", "history", "community", "support", "plans", "deletion", "legal"}:
+    if screen_id not in {"overview", "profile", "plans-payment", "profile-identifiers", "profile-language", "profile-name", "chat-voice", "chat-clear", "chat-text", "chat", "artifact-actions", "direct", "community-flow", "attachments", "help", "history", "community", "support", "plans", "deletion", "legal"}:
         if any(term in low_source for term in ("скрепк", "вложен", "camera", "камера", "изображения", "файлы", "attachment")):
             screen_id = "attachments"
         elif route_ids.intersection({"guide", "help-center", "how-to-use", "privacy", "terms"}) or "справк" in low_source or "help" in low_source:
@@ -1616,6 +1630,32 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
             screen_id = "chat"
         else:
             screen_id = "profile"
+
+    def apply_april_theme(svg: str) -> str:
+        """Apply coherent palette tokens to existing SVG chrome and preserve layout."""
+        color_map = {
+            "#080a10": theme["background"],
+            "#171922": theme["surface"], "#151922": theme["surface"], "#13161e": theme["surface"],
+            "#11141b": theme["surface"], "#141720": theme["surface"], "#15161c": theme["surface"],
+            "#20232d": theme["surface_alt"], "#20222b": theme["surface_alt"], "#22252e": theme["surface_alt"],
+            "#1b1e27": theme["surface_alt"], "#171922": theme["surface"],
+            "#242a35": theme["border"], "#30333e": theme["border"], "#343844": theme["border"],
+            "#252a33": theme["border"], "#2e3a51": theme["border"], "#282d37": theme["border"],
+            "#9becc5": theme["primary"], "#a4f3c1": theme["primary"], "#8ae2b1": theme["primary"],
+            "#8de2b0": theme["primary"], "#a3efc0": theme["primary"], "#a4efc3": theme["primary"],
+            "#c0f6d6": theme["primary"], "#82dcb4": theme["primary"], "#79dcb1": theme["primary"],
+            "#58d7a6": theme["primary"], "#7bd9e5": theme["secondary"],
+            "#f3f4f6": theme["foreground"], "#f4f5f8": theme["foreground"], "#f1f3f7": theme["foreground"],
+            "#edf1f5": theme["foreground"], "#eef1f5": theme["foreground"], "#edf4f1": theme["foreground"],
+            "#f0f0e8": theme["foreground"], "#eceff4": theme["foreground"],
+            "#9ca3af": theme["muted"], "#9aa2af": theme["muted"], "#9ba4b2": theme["muted"],
+            "#8d95a4": theme["muted"], "#9097a4": theme["muted"], "#9ca5b3": theme["muted"],
+            "#aab0bb": theme["muted"], "#9299a5": theme["muted"],
+        }
+        for old_color, new_color in color_map.items():
+            svg = svg.replace(old_color, new_color)
+        # The title band and numbered route markers reinforce the April accent.
+        return svg.replace('aria-label="', 'data-april-theme="April Night" aria-label="', 1)
 
     def esc(value: Any) -> str:
         return html.escape(_text(value), quote=True)
@@ -1679,6 +1719,210 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
         f'<rect width="{width}" height="420" rx="24" fill="#080a10" stroke="#242a35" stroke-width="2"/>',
     ]
 
+    # A whole-site request gets a directory of real destinations, not a misleading
+    # profile/attachment mock. The text answer carries detailed steps for every item.
+    if screen_id == "overview":
+        title_text = title_text or "Карта пользовательского интерфейса April"
+        parts.extend(header("Карта функций April", "Разделы сайта · реальные маршруты из исходников"))
+        card_w, card_h = 190, 68
+        x_positions = (22, 228)
+        y0, row_gap = 108, 10
+        for index, item in enumerate(normalized[:18]):
+            col = index % 2
+            row = index // 2
+            x = x_positions[col]
+            y = y0 + row * (card_h + row_gap)
+            area_id = item["id"].lower()
+            accent = theme["secondary"] if area_id in {"settings", "history", "space", "support"} else theme["primary"]
+            parts.extend([
+                f'<rect x="{x}" y="{y}" width="{card_w}" height="{card_h}" rx="14" fill="{theme["surface"]}" stroke="{theme["border"]}" stroke-width="1.2"/>',
+                f'<circle cx="{x+18}" cy="{y+19}" r="10" fill="{theme["surface_alt"]}" stroke="{accent}" stroke-width="1.2"/>',
+                f'<text x="{x+18}" y="{y+23}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="700" fill="{accent}">{index+1}</text>',
+                f'<text x="{x+34}" y="{y+22}" font-family="Inter,Arial,sans-serif" font-size="11.5" font-weight="700" fill="{theme["foreground"]}">{esc(item["label"][:24])}</text>',
+                f'<text x="{x+14}" y="{y+47}" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="{theme["secondary"]}">{esc(item["href"] or "Действие внутри чата")}</text>',
+            ])
+        overview_height = y0 + ((len(normalized[:18]) + 1) // 2) * (card_h + row_gap) + 16
+        parts[0] = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{overview_height}" viewBox="0 0 {width} {overview_height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="{esc(title_text)}">'
+        parts[1] = '<defs><linearGradient id="april-ui-brand" x1="0" x2="1"><stop offset="0" stop-color="#7dff8f"/><stop offset="1" stop-color="#7de7ff"/></linearGradient></defs>'
+        parts.append("</svg>")
+        return apply_april_theme("".join(parts))
+
+    if screen_id == "plans-payment":
+        parts.extend(header("Настройки · CURRENT PLAN", "Профиль → тариф → защищённая оплата"))
+        parts.extend([
+            '<rect x="24" y="110" width="392" height="58" rx="15" fill="#14141e" stroke="#2d3542" stroke-width="1.3"/>',
+            '<circle cx="52" cy="139" r="16" fill="#1b2028" stroke="#7de7ff"/>',
+            '<text x="52" y="144" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#7de7ff">P</text>',
+            '<text x="78" y="135" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#f7f8fb">Profile · кнопка профиля</text>',
+            '<text x="78" y="153" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">В правой части верхней панели чата</text>',
+            '<path d="M220 168 L220 184" stroke="#7dff8f" stroke-width="2" marker-end="url(#april-ui-arrow)"/>',
+            '<rect x="24" y="190" width="392" height="186" rx="18" fill="#14141e" stroke="#7dff8f" stroke-width="1.4"/>',
+            '<text x="44" y="218" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" letter-spacing="1" fill="#7dff8f">CURRENT PLAN</text>',
+            '<text x="44" y="242" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="700" fill="#f7f8fb">Текущий тариф · Free / Premium</text>',
+            '<text x="44" y="261" font-family="Inter,Arial,sans-serif" font-size="11" fill="#a1a1aa">Time remaining · оставшееся время</text>',
+            '<rect x="42" y="277" width="356" height="36" rx="10" fill="#183528" stroke="#7dff8f" stroke-width="1.2"/>',
+            '<text x="220" y="300" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#e8fff0">28 дней · $25</text>',
+            '<rect x="42" y="320" width="356" height="36" rx="10" fill="#172d38" stroke="#7de7ff" stroke-width="1.2"/>',
+            '<text x="220" y="343" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#e8faff">12 часов · $3</text>',
+            '<text x="220" y="397" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Кнопки могут быть скрыты в Google Play-сборке или недоступны для текущего статуса</text>',
+            '<text x="220" y="414" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Выберите пакет → завершите Fondy checkout → дождитесь подтверждения</text>',
+            '</svg>'
+        ])
+        return apply_april_theme("".join(parts).replace('height="420"', 'height="432"', 1).replace('viewBox="0 0 440 420"', 'viewBox="0 0 440 432"', 1))
+
+    if screen_id in {"chat-voice", "chat-text", "chat-clear"}:
+        if screen_id == "chat-voice":
+            parts.extend(header("Основной чат April", "Микрофон находится справа от поля сообщения"))
+        elif screen_id == "chat-clear":
+            parts.extend(header("Основной чат April", "Очистка видимой области, не удаление истории"))
+        else:
+            parts.extend(header("Основной чат April", "Текстовое поле и отправка"))
+        parts.extend([
+            '<rect x="22" y="118" width="396" height="190" rx="18" fill="#10141b" stroke="#2d3542" stroke-width="1.2"/>',
+            '<text x="220" y="153" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="650" fill="#f7f8fb">Область текущего диалога</text>',
+            '<text x="220" y="178" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Ответы и вложения отображаются здесь</text>',
+        ])
+        if screen_id == "chat-clear":
+            parts.extend([
+                '<rect x="24" y="82" width="392" height="30" rx="10" fill="#14141e" stroke="#2d3542"/>',
+                '<text x="42" y="102" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Верхняя панель</text>',
+                '<rect x="304" y="87" width="98" height="20" rx="8" fill="#1b2028" stroke="#7dff8f"/>',
+                '<text x="353" y="101" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" font-weight="700" fill="#7dff8f">Метла · Clear</text>',
+                '<path d="M353 108 L353 126" stroke="#7dff8f" stroke-width="1.6" stroke-dasharray="3 3"/>',
+                '<rect x="34" y="333" width="372" height="47" rx="13" fill="#172d25" stroke="#7dff8f"/>',
+                '<text x="220" y="353" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" font-weight="650" fill="#e8fff0">Очищается только видимый чат на странице</text>',
+                '<text x="220" y="369" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Сохранённые беседы остаются в /history</text>',
+            ])
+        else:
+            parts.extend([
+                '<rect x="24" y="330" width="392" height="60" rx="24" fill="#1b2028" stroke="#2d3542" stroke-width="1.2"/>',
+                '<circle cx="48" cy="360" r="16" fill="#20232d" stroke="#7de7ff"/>',
+                '<text x="48" y="365" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#7de7ff">⌁</text>',
+                '<text x="72" y="364" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Message April</text>',
+                '<circle cx="326" cy="360" r="15" fill="#173d28" stroke="#7dff8f"/>',
+                '<text x="326" y="366" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#7dff8f">→</text>',
+            ])
+            if screen_id == "chat-voice":
+                parts.extend([
+                    '<circle cx="390" cy="360" r="17" fill="#173d28" stroke="#7dff8f" stroke-width="1.8"/>',
+                    '<text x="390" y="365" text-anchor="middle" font-family="Arial,sans-serif" font-size="15" fill="#e8fff0">MIC</text>',
+                    '<path d="M390 338 L390 322" stroke="#7dff8f" stroke-width="1.7" stroke-dasharray="3 3"/>',
+                    '<text x="390" y="314" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" font-weight="700" fill="#7dff8f">Голос</text>',
+                    '<text x="220" y="414" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Нажмите MIC → разрешите микрофон → говорите → остановите запись</text>',
+                ])
+            else:
+                parts.append('<text x="220" y="414" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Введите сообщение · Enter отправляет · Shift+Enter переносит строку</text>')
+        parts.append('</svg>')
+        rendered = "".join(parts).replace('height="420"', 'height="432"', 1).replace('viewBox="0 0 440 420"', 'viewBox="0 0 440 432"', 1)
+        return apply_april_theme(rendered)
+
+    if screen_id in {"profile-identifiers", "profile-language", "profile-name"}:
+        parts.extend(header("Настройки и профиль", "Показана область, связанная с вашим действием"))
+        if screen_id == "profile-identifiers":
+            parts.extend([
+                '<rect x="24" y="112" width="392" height="194" rx="18" fill="#14141e" stroke="#7de7ff" stroke-width="1.4"/>',
+                '<text x="44" y="141" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7de7ff">ВЕРХНЯЯ ЧАСТЬ ПРОФИЛЯ</text>',
+                '<text x="44" y="174" font-family="Inter,Arial,sans-serif" font-size="12" fill="#f7f8fb">April ID</text>',
+                '<rect x="302" y="154" width="96" height="29" rx="9" fill="#172d25" stroke="#7dff8f"/>',
+                '<text x="350" y="173" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="700" fill="#7dff8f">Copy</text>',
+                '<path d="M44 190 L396 190" stroke="#2d3542"/>',
+                '<text x="44" y="224" font-family="Inter,Arial,sans-serif" font-size="12" fill="#f7f8fb">Premium ID · если Premium активен</text>',
+                '<rect x="302" y="238" width="96" height="29" rx="9" fill="#172d25" stroke="#7dff8f"/>',
+                '<text x="350" y="257" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="700" fill="#7dff8f">Copy</text>',
+                '<text x="220" y="340" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Нажмите Copy рядом с тем ID, который нужно скопировать</text>',
+            ])
+        elif screen_id == "profile-language":
+            parts.extend([
+                '<rect x="24" y="112" width="392" height="226" rx="18" fill="#14141e" stroke="#7de7ff" stroke-width="1.4"/>',
+                '<text x="44" y="142" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7de7ff">ЯЗЫКОВАЯ СЕКЦИЯ</text>',
+                '<text x="44" y="165" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Ниже USER и CURRENT PLAN · прокрутите вниз</text>',
+                '<rect x="42" y="184" width="356" height="36" rx="10" fill="#1b2028" stroke="#2d3542"/>',
+                '<text x="58" y="207" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#f7f8fb">Видимые варианты языка</text>',
+                '<rect x="42" y="230" width="356" height="38" rx="10" fill="#172d25" stroke="#7dff8f"/>',
+                '<text x="220" y="254" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" font-weight="700" fill="#e8fff0">More languages</text>',
+                '<text x="220" y="297" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Выберите язык; настройка сохраняется для пользователя</text>',
+            ])
+        else:
+            parts.extend([
+                '<rect x="24" y="112" width="392" height="194" rx="18" fill="#14141e" stroke="#7de7ff" stroke-width="1.4"/>',
+                '<text x="44" y="142" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7de7ff">USER</text>',
+                '<text x="44" y="175" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#f7f8fb">Имя пользователя</text>',
+                '<rect x="42" y="188" width="356" height="42" rx="10" fill="#1b2028" stroke="#2d3542"/>',
+                '<text x="58" y="214" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#a1a1aa">Поле имени</text>',
+                '<rect x="42" y="244" width="166" height="36" rx="10" fill="#172d25" stroke="#7dff8f"/>',
+                '<text x="125" y="267" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="11.5" font-weight="700" fill="#e8fff0">Edit / Save</text>',
+                '<text x="220" y="340" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Сначала Edit, после изменения — Save</text>',
+            ])
+        parts.append('</svg>')
+        rendered = "".join(parts)
+        return apply_april_theme(rendered)
+
+    if screen_id == "community-flow":
+        parts.extend(header("Два способа отправить файл", "Публичный пост и личный чат — разные маршруты"))
+        parts.extend([
+            '<rect x="24" y="112" width="392" height="130" rx="16" fill="#14141e" stroke="#7dff8f" stroke-width="1.3"/>',
+            '<text x="42" y="137" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7dff8f">1 · PUBLIC COMMUNITY POST</text>',
+            '<rect x="42" y="151" width="356" height="38" rx="10" fill="#1b2028" stroke="#2d3542"/>',
+            '<circle cx="61" cy="170" r="11" fill="#20232d" stroke="#7de7ff"/>',
+            '<text x="61" y="174" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#7de7ff">⌁</text>',
+            '<text x="80" y="174" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#f7f8fb">Attach a file · слева</text>',
+            '<text x="382" y="175" text-anchor="end" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#7dff8f">Send →</text>',
+            '<text x="42" y="218" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Пост и вложение видны участникам сообщества · до 3 МБ</text>',
+            '<rect x="24" y="254" width="392" height="143" rx="16" fill="#14141e" stroke="#7de7ff" stroke-width="1.3"/>',
+            '<text x="42" y="279" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7de7ff">2 · PRIVATE CHAT WITH A FRIEND</text>',
+            '<rect x="42" y="293" width="356" height="38" rx="10" fill="#1b2028" stroke="#2d3542"/>',
+            '<text x="58" y="317" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#f7f8fb">Private chat → Attach file</text>',
+            '<text x="382" y="317" text-anchor="end" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#7de7ff">Send →</text>',
+            '<text x="42" y="355" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Сначала взаимная дружба · файл только выбранному другу</text>',
+            '<text x="42" y="375" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Один файл до 3 МБ · исполняемые файлы запрещены</text>',
+            '</svg>'
+        ])
+        svg = "".join(parts).replace('height="420"', 'height="420"', 1)
+        return apply_april_theme(svg)
+
+    if screen_id == "direct":
+        parts.extend(header("Личный чат April", "Private chat · отправка другу"))
+        parts.extend([
+            '<rect x="24" y="110" width="392" height="235" rx="18" fill="#14141e" stroke="#2d3542" stroke-width="1.4"/>',
+            '<text x="42" y="137" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="700" fill="#7de7ff">BACK TO COMMUNITY · ДРУГ</text>',
+            '<rect x="42" y="154" width="224" height="48" rx="14" fill="#1b2028" stroke="#2d3542"/>',
+            '<text x="56" y="174" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#f7f8fb">Сообщение друга</text>',
+            '<rect x="174" y="213" width="224" height="48" rx="14" fill="#14231b" stroke="#7dff8f"/>',
+            '<text x="188" y="233" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#f7f8fb">Ваше сообщение</text>',
+            '<text x="188" y="249" font-family="Inter,Arial,sans-serif" font-size="9.5" fill="#a1a1aa">Вложение можно скачать в переписке</text>',
+            '<rect x="24" y="358" width="392" height="48" rx="22" fill="#1b2028" stroke="#2d3542"/>',
+            '<circle cx="49" cy="382" r="15" fill="#20232d" stroke="#7de7ff"/>',
+            '<text x="49" y="387" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#7de7ff">⌁</text>',
+            '<text x="74" y="386" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Message your friend…</text>',
+            '<circle cx="389" cy="382" r="15" fill="#173d28" stroke="#7dff8f"/>',
+            '<text x="389" y="387" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#7dff8f">→</text>',
+            '<text x="220" y="430" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Attach file слева · до 3 МБ · Send справа</text>',
+            '</svg>'
+        ])
+        return apply_april_theme("".join(parts).replace('height="420"', 'height="442"', 1).replace('viewBox="0 0 440 420"', 'viewBox="0 0 440 442"', 1))
+
+    if screen_id == "artifact-actions":
+        parts.extend(header("Действия с результатом April", "Меню относится к конкретной карточке артефакта"))
+        parts.extend([
+            '<rect x="24" y="112" width="392" height="266" rx="18" fill="#14141e" stroke="#2d3542" stroke-width="1.4"/>',
+            '<text x="42" y="139" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="700" fill="#7de7ff">ОТВЕТ APRIL</text>',
+            '<rect x="42" y="153" width="356" height="62" rx="12" fill="#1b2028" stroke="#2d3542"/>',
+            '<text x="58" y="178" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#f7f8fb">Готовая диаграмма / таблица / файл</text>',
+            '<text x="58" y="198" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Откройте меню на этой же карточке</text>',
+            '<rect x="316" y="121" width="82" height="26" rx="9" fill="#1b2028" stroke="#7de7ff" stroke-width="1.4"/>',
+            '<text x="357" y="139" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="750" fill="#7de7ff">⋯ Actions</text>',
+            '<path d="M357 147 L357 226" stroke="#7de7ff" stroke-width="1.8" stroke-dasharray="4 4"/>',
+            '<rect x="57" y="229" width="326" height="37" rx="10" fill="#1b2028" stroke="#7dff8f"/>',
+            '<text x="76" y="253" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="650" fill="#f7f8fb">Download · сохранить файл</text>',
+            '<rect x="57" y="274" width="326" height="37" rx="10" fill="#1b2028" stroke="#7de7ff"/>',
+            '<text x="76" y="298" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="650" fill="#f7f8fb">Share · поделиться / отправить</text>',
+            '<rect x="57" y="319" width="326" height="37" rx="10" fill="#1b2028" stroke="#2d3542"/>',
+            '<text x="76" y="343" font-family="Inter,Arial,sans-serif" font-size="12.5" font-weight="650" fill="#f7f8fb">Copy · копировать (если есть)</text>',
+            '<text x="220" y="397" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#a1a1aa">Набор команд зависит от типа блока и его обработчиков</text>',
+            '</svg>'
+        ])
+        return apply_april_theme("".join(parts))
+
     # Content is derived from the actual route IDs/visible-control blueprint.
     if screen_id == "attachments":
         title_text = "Добавить вложение"
@@ -1708,7 +1952,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
             '</svg>'
         ])
         # Set the dynamic viewBox to the contents' actual height.
-        return "".join(parts).replace('height="420" style=', 'height="420" style=', 1)
+        return apply_april_theme("".join(parts).replace('height="420" style=', 'height="420" style=', 1))
 
     if screen_id == "chat":
         parts.extend(header("Основной чат", "Текст · голос · изображения · память"))
@@ -1726,7 +1970,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
             '<text x="401" y="364" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" fill="#eceff4">♟</text>',
             '</svg>'
         ])
-        return "".join(parts)
+        return apply_april_theme("".join(parts))
 
     if screen_id == "help" or screen_id == "legal":
         parts.extend(header("Помощь и информация", "Инструкции, аккаунт и правила сервиса"))
@@ -1753,7 +1997,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
         parts.append('</svg>')
         # Seven compact cards need a taller intrinsic canvas, rather than shrinking into the corner.
         rendered = "".join(parts).replace('height="420"', 'height="440"', 1).replace('viewBox="0 0 440 420"', 'viewBox="0 0 440 440"', 1)
-        return rendered
+        return apply_april_theme(rendered)
 
     if screen_id == "history":
         parts.extend(header("Saved dialogues / История диалогов", "Найдите запись и продолжите беседу"))
@@ -1773,7 +2017,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
             '<text x="60" y="367" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="650" fill="#c8f3d7">Memory Status · Connected</text>',
             '</svg>'
         ])
-        return "".join(parts)
+        return apply_april_theme("".join(parts))
 
     if screen_id == "community":
         parts.extend(header("April · Community / Сообщество", "Публичные сообщения и личные диалоги"))
@@ -1799,12 +2043,16 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
                 f'<text x="94" y="{y+65}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="10.5" font-weight="650" fill="#f1e6bd">Private chat</text>',
             ])
         parts.extend([
-            '<rect x="68" y="365" width="304" height="31" rx="16" fill="#20222b" stroke="#353944"/>',
-            '<text x="86" y="385" font-family="Inter,Arial,sans-serif" font-size="11.5" fill="#9299a5">Ask a question or share a solution…</text>',
-            '<text x="350" y="385" text-anchor="middle" font-family="Arial,sans-serif" font-size="18" fill="#d3d7e0">→</text>',
+            '<circle cx="47" cy="380" r="14" fill="#20222b" stroke="#7de7ff"/>',
+            '<text x="47" y="385" text-anchor="middle" font-family="Arial,sans-serif" font-size="16" fill="#7de7ff">⌁</text>',
+            '<rect x="68" y="365" width="290" height="31" rx="16" fill="#20222b" stroke="#353944"/>',
+            '<text x="82" y="385" font-family="Inter,Arial,sans-serif" font-size="10.5" fill="#9299a5">Ask a question or share a solution…</text>',
+            '<circle cx="390" cy="380" r="14" fill="#173d28" stroke="#7dff8f"/>',
+            '<text x="390" y="386" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#7dff8f">→</text>',
+            '<text x="220" y="411" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="9.5" fill="#a1a1aa">Attach a file слева · Send справа · файл до 3 МБ</text>',
             '</svg>'
         ])
-        return "".join(parts)
+        return apply_april_theme("".join(parts))
 
     if screen_id == "deletion":
         parts.extend(header("Удаление аккаунта April", "Внимательно проверьте последствия"))
@@ -1819,7 +2067,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
             '<text x="220" y="311" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="700" fill="#ef9eaf">Удалить аккаунт</text>',
             '</svg>'
         ])
-        return "".join(parts)
+        return apply_april_theme("".join(parts))
 
     # Default is the screenshot-verified profile card and quick navigation links.
     profile = next((item for item in normalized if item["id"].lower() == "settings" or item["href"] == "/settings"), None)
@@ -1906,7 +2154,7 @@ def _build_navigation_ui_svg(payload: dict[str, Any], *, title: str = "") -> str
         else:
             parts.append(f'<text x="{width-36}" y="{cy+5}" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="18" fill="{arrow_text}">→</text>')
     parts.append('</svg>')
-    return ''.join(parts)
+    return apply_april_theme(''.join(parts))
 
 
 def diagram_payload_has_concrete_visual(payload: Any) -> bool:
