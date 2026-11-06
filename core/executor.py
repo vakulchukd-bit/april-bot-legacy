@@ -1936,6 +1936,20 @@ async def execute(
             prepare_dialogue_context,
             uid, current_text, query_interpretation=single_semantics, **search_kwargs
         )
+        # State Manager performs a second, grounded local discourse pass against
+        # the exact latest USER↔APRIL pair. Keep that result authoritative for
+        # question decomposition and the Provider request; do not let the earlier
+        # context-free semantic pass overwrite a short acknowledgement/correction.
+        effective_semantics = dialogue_context.get("effective_interpretation")
+        if isinstance(effective_semantics, dict) and effective_semantics:
+            single_semantics.update(effective_semantics)
+            semantic_interpretation.update(effective_semantics)
+            if question_sequence and isinstance(question_sequence[0], dict):
+                question_sequence[0]["semantic_intent"] = single_semantics.get("primary_intent")
+                question_sequence[0]["search_direction"] = single_semantics.get("direction")
+                question_sequence[0]["history_request"] = bool(single_semantics.get("history_request"))
+                question_sequence[0]["requires_memory"] = bool(single_semantics.get("requires_memory"))
+                question_sequence[0]["semantic_reason"] = single_semantics.get("reason")
         if question_sequence:
             question_sequence[0]["dialogue_search"] = _compact_question_search(
                 dialogue_context, current_text, single_semantics
