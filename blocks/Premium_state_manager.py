@@ -2387,16 +2387,19 @@ def _explicit_followup_anchor(
 
 
 def _is_history_request(query: str) -> bool:
-    low = _text(query).lower().replace("ё", "е")
-    if not low:
+    """Use the semantic interpreter as the sole history-intent authority.
+
+    A raw marker match is unsafe here: phrases such as "я не про историю
+    диалога спрашивал" contain history vocabulary but explicitly reject a
+    history lookup. Keeping this helper semantic also prevents the state manager
+    from overriding a correction/short reaction already resolved upstream.
+    """
+    if not _text(query).strip():
         return False
-    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
-        return True
-    # Keep direct/legacy callers on the same intent logic as Exkrutor. The import
-    # is lazy to avoid changing module initialization order.
     try:
         from blocks.Premium_interpretation_identity import interpret_request_semantics
-        return bool(interpret_request_semantics(query).get("history_request"))
+        result = interpret_request_semantics(query)
+        return bool(result.get("history_request")) if isinstance(result, dict) else False
     except Exception:
         return False
 
@@ -6752,6 +6755,36 @@ def search_dialogue_context(
         and not history_request
         and not new_topic_request
     )
+    semantic_features_for_reaction = (
+        query_interpretation.get("features")
+        if isinstance(query_interpretation.get("features"), dict) else {}
+    )
+    # Short reactions and elliptical follow-ups belong first to April's latest
+    # answer, not to an arbitrary active-work marker or the full archive. This is
+    # only a routing hint: a named independent task, explicit topic switch, or
+    # deliberate history request keeps its normal precedence.
+    short_contextual_turn = bool(
+        len(_tokens(query)) <= 12
+        and not pragmatic_features.get("has_independent_payload")
+        and not history_request
+        and not new_topic_request
+        and not query_interpretation.get("explicit_topic_switch")
+        and (
+            query_interpretation.get("context_dependent_reaction")
+            or pragmatic_features.get("context_dependent_reaction")
+            or semantic_features_for_reaction.get("context_dependent_reaction")
+            or semantic_features_for_reaction.get("context_dependent_question")
+            or pragmatic_features.get("gratitude")
+            or pragmatic_features.get("positive_evaluation")
+            or pragmatic_features.get("acknowledgement_or_agreement")
+            or pragmatic_features.get("negation_or_disagreement")
+            or pragmatic_features.get("frustration_or_dissatisfaction")
+            or pragmatic_features.get("correction")
+            or pragmatic_features.get("clarification_request")
+            or pragmatic_features.get("explanation_request")
+            or pragmatic_features.get("deictic_reference")
+        )
+    )
     # In a correction, a rejected entity ("not Mendeleev") is not the intended
     # search subject. If the user supplies a positive replacement ("I mean math"),
     # resolve subjects from that replacement clause only.
@@ -7293,7 +7326,7 @@ def search_dialogue_context(
     # written from the relevant speaker perspective; use the existing relevance and
     # recency ordering for all other turns. No fixed score gate is introduced.
     matches.sort(key=lambda item: (
-        int(bool((is_correction or is_short_acknowledgement) and item.get("same_dialog"))),
+        int(bool((is_correction or is_short_acknowledgement or short_contextual_turn) and item.get("same_dialog"))),
         int(item.get("participant_alignment") or 0) if not query_subjects else 0,
         float(item["score"]), float(item["recency"]), int(item["turn_index"])
     ), reverse=True)
@@ -7415,7 +7448,10 @@ def search_dialogue_context(
     # Artifact branch inference parses structured_response payloads. For a normal
     # text request with an explicit subject, it cannot improve the answer and may
     # accidentally resurrect an old image/code task from another topic.
-    should_scan_active_work = bool(needs_structured_search or not query_subjects)
+    should_scan_active_work = bool(
+        (needs_structured_search or not query_subjects)
+        and not short_contextual_turn
+    )
     if should_scan_active_work and not history_request and not time_filter.get("applied") and not resume_key:
         scoped_work_rows = [
             row for row in all_rows
@@ -7470,7 +7506,11 @@ def search_dialogue_context(
             "active_work_branch_scan",
             user_key=_apr_diag_ref(uid),
             scanned=bool(should_scan_active_work),
-            reason=("structured_or_elliptical_request" if should_scan_active_work else "named_text_request_skips_artifact_branch"),
+            reason=(
+                "short_contextual_turn_uses_latest_answer" if short_contextual_turn
+                else "structured_or_elliptical_request" if should_scan_active_work
+                else "named_text_request_skips_artifact_branch"
+            ),
             scoped_rows=len(scoped_work_rows),
             matched=bool(active_work_pair),
         )
@@ -7631,7 +7671,11 @@ def search_dialogue_context(
     # A successfully matched topic pointer explicitly refers to that prior topic,
     # even when the latest turn is about something else. Preserve the raw switch
     # diagnostic, but don't let the latest topic veto the user's resolved pointer.
-    decision_subject_switch = bool(semantic_subject_switch and not topic_pointer_match and not is_correction and not is_short_acknowledgement)
+    decision_subject_switch = bool(
+        semantic_subject_switch and not topic_pointer_match
+        and not is_correction and not is_short_acknowledgement
+        and not short_contextual_turn
+    )
     repair_active_branch = bool((is_correction or is_short_acknowledgement) and latest_same_dialog and not new_topic_request and not history_request)
     # A correction may explicitly name a choice from a prior assistant list after
     # an intervening misinterpretation created a false active branch. Locate only a
@@ -10755,7 +10799,12 @@ def search_dialogue_context(
         "anchor": anchor_payload,
         "latest_assistant_anchor": (_compact_pair(latest_route_row) if latest_route_row else {}),
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
-        "selected": selected_for_context[:12 if (history_request or resume_anchor_row or repair_active_branch or (explicit_artifact_followup and artifact_source_row) or branch_context_expanded) else 2],
+        "selected": selected_for_context[:12 if (
+            history_request or resume_anchor_row
+            or (repair_active_branch and not short_contextual_turn)
+            or (explicit_artifact_followup and artifact_source_row)
+            or branch_context_expanded
+        ) else 2],
         "history_topics": history_topics,
         "topic_index": topic_index,
         "known_topic_count": len(topics),
@@ -10793,6 +10842,7 @@ def search_dialogue_context(
         active_repair_evidence_count=len(selected_for_context) if repair_active_branch else 0,
         active_repair_selection_method=history_selection_method if repair_active_branch else "",
         short_acknowledgement=bool(is_short_acknowledgement),
+        short_contextual_turn=bool(short_contextual_turn),
         selected_section_heading=_text(selected_section.get("heading")), clarification_needed=clarification_needed,
         clarification_status=_text(clarification_resolution.get("status")),
         selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_for_context if isinstance(x, dict) and x.get("message_id")],
