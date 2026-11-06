@@ -208,6 +208,18 @@ sections. Do not answer a follow-up by merely summarizing or repeating the previ
 develop the requested part and preserve all requested details.
 For NEW with no ACTIVE_WORK_BRANCH, answer independently and do not let old context override the request. When ACTIVE_WORK_BRANCH is explicitly supplied, first honor the matched task state described above.
 
+TOPIC CONTINUUM AND BRANCH IDENTITY: A persisted topic_id represents one continuous subject thread
+across its related turns, even when the user temporarily switches topics and later returns. It is
+not a one-turn label. branch_ids identify work sub-branches inside that topic (including code,
+files, diagrams, tables, images, revisions and unfinished steps); active_branch_id identifies the
+currently active sub-branch when known. Treat a topic and its branches as one coherent topic with
+separately addressable branches. For a general history inventory, list each distinct topic once and
+briefly nest/name its relevant branches instead of counting every branch as a separate topic. For a
+request to resume, inspect the matching topic_id and then the matching branch_id, keeping each
+artifact and source_message_id attached to its originating branch. Never substitute an artifact
+from another branch merely because the labels or wording look similar. Missing branch metadata
+must not erase a valid topic-level match.
+
 For a history_request, use DIALOGUE_HISTORY_TOPICS / DIALOGUE_TABLE_MARKDOWN as an index over
 the retained dialogue. Never claim that the dialogue is unavailable when the index contains
 topics. If the supplied index is empty, say that no records are available in the retained history and do not invent topics. Show up to 10 topics by default, ordered by relevance for a named subject or by recency for a general overview. For an overview, show all available topics up to 10; when at least five exist, show at least five. The user may then name a topic or give a hint and April should continue
@@ -424,7 +436,7 @@ selected dialogue_memory evidence; respect source completeness flags and do not 
 If CLARIFICATION_RESOLUTION exists, fulfill original_request and treat CURRENT_REQUEST as the user's
 clarification reply, not a replacement intent. For status topic_not_found or needs_more_detail, apologize and say no clear match
 was found in saved history without claiming the topic definitely never came up; don't repeat old options, ask for one or two hints.
-Keep any resolved topic active. NEW does not force continuation state, but semantically matched DIALOGUE_TOPIC_INDEX / CONTINUATION_CONTEXT may be used as grounded historical evidence; never import unrelated topics. For a history request, honor HISTORY_TIME_WINDOW and HISTORY_TOPIC_MINIMUM/HISTORY_TOPIC_COUNT (never invent topics); preserve topic_id/origin_message_id/source_message_id so associated data stays attached to its originating topic and section. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
+Keep any resolved topic active. NEW does not force continuation state, but semantically matched DIALOGUE_TOPIC_INDEX / CONTINUATION_CONTEXT may be used as grounded historical evidence; never import unrelated topics. For a history request, honor HISTORY_TIME_WINDOW and HISTORY_TOPIC_MINIMUM/HISTORY_TOPIC_COUNT (never invent topics); preserve topic_id/branch_ids/active_branch_id/origin_message_id/source_message_id so each topic remains a continuum and its branches and associated data stay attached to their originating topic and branch. For a history request naming a person, subject or previous task, use matching DIALOGUE_TOPIC_INDEX, DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT as evidence even if the relation remains NEW. Ask for hints only when no matching stored entry/pair is supplied; list multiple topics only for a general history overview.
 Graph family is chosen by INTERPRETATION.graph_policy. Ordinary x/y data stays 2D: line for trends/time series and bar for categorical comparisons. Use 3D only for an explicit 3D request or actual XYZ coordinates, a numeric surface grid/function z=f(x,y), or structured spatial objects. Never invent a missing z value or display a 2D series as generic P1/P2 3D markers; when 3D data is not valid, use graph_policy.fallback_representation. Carry graph_policy and the true axis labels in the graph payload. For time-series edits, preserve every exact date/value and intermediate point from PROTECTED_STRUCTURED_DATA / CONTINUATION_CONTEXT; use the selected saved graph as the base and never ask the user to resend values already stored. When known measurements have gaps in a multi-day requested range, fill missing dates by interpolation by default, retaining exact source points and putting a point-level label such as "interpolated estimate" on each inferred point and noting the estimate in the graph description and explanatory text rather than presenting it as an observed market price. Never extrapolate beyond available endpoints or invent a trend from one/no numeric value. Respect requested weekday/date boundaries, create one point per requested day when daily granularity is expected, use actual dates when present (weekday labels where supplied, otherwise neutral day indices), and label X with date/day and Y with the quantity and unit. When the user explicitly requests a 3D graph, return a structured render_blocks item of type="graph" with renderer="GraphBlock" and payload coordinates, objects_3d/spheres, or surface_grid as appropriate. Never claim that a chart was created if only prose is returned; use the existing SceneContract route.
 3D VIEW/FIELD CONTRACT: Keep the user-requested objects and real axis meanings. Web supplies an independent z=0 reference grid plus top/side camera controls; use show_zero_plane=false only on an explicit request. For a requested wave effect, provide a matching surface_function/z_function or numeric surface_grid and set surface_mode="wave", wave_effect=true, color_scale="wave_cool_to_hot". For an explicitly requested temperature field, set surface_mode="temperature", temperature_field=true, color_scale="thermal_cool_to_hot". Do not add colored thermal/wave styling to unrelated graphs; if the wave formula is illustrative rather than user-supplied, describe it as a schematic model.
 Analyze supplied images from pixels and files from attached source. Keep each asset tied to filename,
@@ -2400,7 +2412,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "last_question": _semantic_compress(topic.get("last_question"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                      "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
                      "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
-                     "last_at": topic.get("last_at")}
+                     "last_at": topic.get("last_at"), "branch_ids": list(topic.get("branch_ids") or [])[:8],
+                     "active_branch_id": topic.get("active_branch_id")}
                     for topic in (task_search.get("history_topics") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic_index": [
@@ -2408,7 +2421,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                      "summary": _semantic_compress(topic.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
                      "message_id": topic.get("message_id"), "topic_id": topic.get("topic_id"),
                      "origin_message_id": topic.get("origin_message_id"), "first_at": topic.get("first_at"),
-                     "last_at": topic.get("last_at")}
+                     "last_at": topic.get("last_at"), "branch_ids": list(topic.get("branch_ids") or [])[:8],
+                     "active_branch_id": topic.get("active_branch_id")}
                     for topic in (task_search.get("topic_index") or [])[:max(1, min(10, int(task_search.get("requested_topic_count") or requested_topic_count or 10)))] if isinstance(topic, dict)
                 ] if task_search.get("history_request") else [],
                 "topic": _semantic_compress(task_search.get("topic"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
@@ -2538,6 +2552,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         "origin_turn": item.get("origin_turn"),
                         "first_at": item.get("first_at") or item.get("topic_origin_at"),
                         "last_at": item.get("last_at") or item.get("topic_last_at"),
+                        "branch_ids": list(item.get("branch_ids") or [])[:8],
+                        "active_branch_id": item.get("active_branch_id"),
                         "sections": [
                             {"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                              "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
@@ -2634,6 +2650,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                  "s": _semantic_compress(item.get("summary"), max(_scaled_prompt_tokens(12), summary_budget)),
                  "id": item.get("topic_id"), "origin_id": item.get("origin_message_id"),
                  "first_at": item.get("first_at"), "last_at": item.get("last_at"),
+                 "branch_ids": list(item.get("branch_ids") or [])[:8],
+                 "active_branch_id": item.get("active_branch_id"),
                  "sections": [{"h": _semantic_compress(sec.get("heading"), max(_scaled_prompt_tokens(8), summary_budget // 2)),
                                "s": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                                "id": sec.get("message_id"), "src": sec.get("source_message_id") or sec.get("message_id"),
@@ -3090,6 +3108,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "origin_message_id": topic.get("origin_message_id") or topic.get("origin_id"),
                     "first_at": topic.get("first_at"),
                     "last_at": topic.get("last_at"),
+                    "branch_ids": list(topic.get("branch_ids") or [])[:8],
+                    "active_branch_id": topic.get("active_branch_id"),
                     "sections": _emergency_sections(topic.get("sections"), limit=2),
                 }
                 normalized_topics.append({k: v for k, v in record.items() if v not in (None, "", [], {})})
@@ -3652,6 +3672,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "origin_turn": item.get("origin_turn"),
             "first_at": item.get("first_at") or item.get("topic_origin_at"),
             "last_at": item.get("last_at") or item.get("topic_last_at"),
+            "branch_ids": list(item.get("branch_ids") or [])[:8],
+            "active_branch_id": item.get("active_branch_id"),
             "sections": [
                 {"heading": _clip(sec.get("heading"), 180), "summary": _clip(sec.get("summary"), 260),
                  "order": sec.get("order"), "message_id": sec.get("message_id"),
@@ -3687,6 +3709,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "first_at": item.get("first_at") or item.get("topic_origin_at"),
             "last_at": item.get("last_at") or item.get("topic_last_at"),
             "message_ids": list(item.get("message_ids") or [])[:40],
+            "branch_ids": list(item.get("branch_ids") or [])[:8],
+            "active_branch_id": item.get("active_branch_id"),
             "sections": [
                 {"heading": _clip(sec.get("heading"), 180), "summary": _clip(sec.get("summary"), 260),
                  "order": sec.get("order"), "message_id": sec.get("message_id"),
