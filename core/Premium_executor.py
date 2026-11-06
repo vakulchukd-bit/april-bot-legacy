@@ -4855,6 +4855,25 @@ async def execute(
     request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
     request_structure["semantic_interpretation_version"] = "april_request_semantics_v6_transition_analysis"
     request_structure["question_search_count"] = len(question_sequence)
+    # Prepare the April Web guide from the current typed Interpretation/action_contract
+    # before room selection and renderer planning. This keeps UI navigation semantic,
+    # request-scoped, and independent of a second model call.
+    try:
+        from blocks.C_IT_ROOM import prepare_site_help_interpretation as _prepare_site_help_interpretation
+        _site_help_prepared = _prepare_site_help_interpretation(
+            interpretation,
+            original or current_text,
+            question_sequence=question_sequence,
+            recent_context=dialogue_context,
+        )
+    except Exception as _site_help_prepare_error:
+        _site_help_prepared = False
+        _apr_timing_log(
+            "site_help_interpretation_prepare_error",
+            interpretation_started,
+            error=type(_site_help_prepare_error).__name__,
+        )
+    request_structure["site_navigation_help"] = bool(_site_help_prepared)
     request_structure["question_relations"] = [
         {
             "step_index": item.get("step_index"),
@@ -4876,6 +4895,8 @@ async def execute(
         previous_answer_reference=bool(semantic_interpretation.get("previous_answer_reference")),
         factual_verification_request=bool(semantic_interpretation.get("factual_verification_request")),
         history_request=bool(semantic_interpretation.get("history_request")),
+        site_navigation_help=bool(_site_help_prepared),
+        site_navigation_diagram=bool((interpretation.get("intent") or {}).get("wants_diagram")),
     )
 
     selected_rooms = _select_rooms(interpretation)
