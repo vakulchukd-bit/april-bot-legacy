@@ -1632,6 +1632,8 @@ def _compact_question_search(
                 "first_at": item.get("first_at"),
                 "last_at": item.get("last_at"),
                 "pair_count": item.get("pair_count") or item.get("turns"),
+                "branch_ids": list(item.get("branch_ids") or [])[:8],
+                "active_branch_id": _text(item.get("active_branch_id"))[:120],
                 "sections": [
                     {
                         "heading": _text(sec.get("heading"))[:100],
@@ -1660,6 +1662,8 @@ def _compact_question_search(
             "first_at": item.get("first_at"),
             "last_at": item.get("last_at"),
             "pair_count": item.get("pair_count") or item.get("turns"),
+            "branch_ids": list(item.get("branch_ids") or [])[:8],
+            "active_branch_id": _text(item.get("active_branch_id"))[:120],
         }
         for item in (context.get("history_topics") or [])[:requested_topic_count] if isinstance(item, dict)
     ] if history_request else []
