@@ -80,7 +80,7 @@ IT_PROVIDERS = [
 # Only describe existing functionality; do not promise a control absent from the UI.
 APRIL_SITE_MAP = {
     "schema": "april.site_navigation.v2",
-    "source": "audited aprill-web-main source archive plus user-provided screenshots; production deployment was not directly inspected; card-level URLs are only direct when explicitly listed below",
+    "source": "audited aprill-web-main source archive (routes, page components, handlers and labels); production deployment was not directly inspected; archive contains no full-page screenshot set; card-level URLs are only direct when explicitly listed below",
     "areas": [
         {
             "id": "chat", "path": "/", "label": "Основной чат April",
@@ -89,10 +89,10 @@ APRIL_SITE_MAP = {
             "related": ["history", "settings", "guide", "response-feedback"]
         },
         {
-            "id": "response-feedback", "path": "/", "label": "Кнопки обратной связи под ответом",
-            "purpose": "Это элементы прямо под каждым ответом April в основном чате, а не отдельная страница и не часть поля ввода. В русской локализации исходника видны кнопки «Жалоба» и «Спасибо». «Спасибо» показывает короткое подтверждение; «Жалоба» открывает форму выбора причины и отправки отчёта.",
-            "steps": ["Откройте основной чат / и найдите именно тот ответ April, который хотите оценить.", "Прокрутите до самого низа этого ответа — под текстом и относящимися к нему блоками расположена строка обратной связи.", "Нажмите «Спасибо», чтобы показать благодарность. На экране появится краткое подтверждение «Спасибо за обратную связь»; вводить отдельное сообщение и прикреплять фото не нужно.", "Чтобы сообщить о проблеме, нажмите «Жалоба». В форме выберите причину: вредный ответ, оскорбительный, вводящий в заблуждение или другое; затем нажмите кнопку отправки формы.", "Если этих кнопок нет под текущим ответом, проверьте, что вы на сайте April и что ответ полностью отрисовался. Для точного разбора отличающегося интерфейса приложите скриншот только тогда, когда он действительно нужен."],
-            "related": ["chat"]
+            "id": "response-feedback", "path": "/", "label": "Действия под ответом April",
+            "purpose": "Под каждым отрисованным ответом April в основном чате расположена строка из трёх действий: «Жалоба», «Спасибо» и зелёная круглая кнопка со стрелкой вверх «Опубликовать в сообществе». Последняя отправляет текущий ответ April прямо в общую ленту Community; это не кнопка отправки сообщения из нижнего поля Community и не ручное копирование текста. «Спасибо» показывает краткое подтверждение, а «Жалоба» открывает форму выбора причины.",
+            "steps": ["Откройте основной чат / и найдите именно тот ответ April, который хотите оценить или опубликовать.", "Прокрутите до самого низа выбранного ответа — после его текста и прикреплённых блоков находится строка действий.", "Нажмите «Спасибо», чтобы поблагодарить April; появится краткое подтверждение.", "Нажмите «Жалоба», выберите причину (вредный, оскорбительный, вводящий в заблуждение или другое ответ) и отправьте форму.", "Чтобы опубликовать сам ответ April, нажмите зелёную круглую стрелку вверх с подписью/подсказкой «Опубликовать в сообществе». Текст текущего ответа и поддерживаемый материал, если он прикреплён и доступен для публикации, отправятся через /api/community в общую ленту; копировать текст вручную и открывать нижний редактор Community не требуется.", "Дождитесь встроенного сообщения «Сообщение отправлено в сообщество.» Если отправка не прошла, интерфейс покажет ошибку; проверьте вход в аккаунт, содержимое и доступность вложения, затем повторите позже.", "Перед публикацией проверьте ответ: публикация предназначена для общей ленты Community и видна участникам. Не отправляйте пароли, ключи API или личные данные."],
+            "related": ["chat", "space"]
         },
         {
             "id": "attachments", "path": "/", "label": "Прикрепить фото или файл к сообщению",
@@ -105,6 +105,12 @@ APRIL_SITE_MAP = {
             "purpose": "Управление уже отрисованным материалом в основном чате. Общий RenderActionMenu используется для поддерживаемых render-блоков (изображения, таблицы, графики, код и другие блоки): кнопка меню обычно расположена в верхней правой части карточки/панели блока. Набор действий зависит от типа блока и переданных обработчиков; доступны Скачать, Поделиться и Копировать там, где соответствующее действие реализовано. Для изображения используется GalleryBlock.", 
             "steps": ["Откройте основной чат April (/), где уже показана нужная картинка.", "Найдите на карточке изображения маленькую квадратную кнопку меню действий в правом верхнем углу картинки. Её доступное название в интерфейсе — Open content actions menu / Открыть меню действий с материалом.", "Нажмите эту кнопку. В меню изображения выберите «Скачать на устройство» (Download to device), чтобы сохранить файл, либо «Поделиться» (Share), чтобы передать его через доступные на телефоне приложения.", "Если меню не открылось, изображение не появилось или кнопки нет на текущей версии экрана, не удерживайте палец на самой картинке в надежде на системное меню: отправьте April скриншот текущего экрана и попросите уточнить путь именно для этой версии интерфейса."],
             "related": ["chat", "guide", "support"]
+        },
+        {
+            "id": "graph-controls", "path": "/", "label": "Управление графиками и 3D-визуализацией",
+            "purpose": "Это не отдельная страница: контролы появляются непосредственно в карточке соответствующего графика в основном чате. Для линейного графика может быть флажок «Показать описание и данные». Для 3D-графика предусмотрены масштаб, ракурсы, сброс вида и, только для поддерживаемого волнового графика, пауза/продолжение анимации.",
+            "steps": ["Откройте основной чат / и найдите уже отрисованный график.", "Для линейного графика используйте флажок «Показать описание и данные», чтобы раскрыть или скрыть подпись и таблицу данных.", "Для 3D-графика используйте − и + для масштаба; кнопки слева, справа, сзади, сверху и сбоку меняют ракурс.", "Кнопка 3D задаёт наклонный ракурс; «Сбросить вид» возвращает исходную камеру.", "На поддерживаемом волновом графике нажмите «Приостановить волну» или «Продолжить движение волны». Эти кнопки появляются не у каждого графика.", "Для сохранения или передачи графика откройте отдельное меню действий карточки и выберите Download или Share, если эти действия доступны."],
+            "related": ["chat", "image-controls"]
         },
         {
             "id": "history", "path": "/history", "label": "История диалогов",
@@ -220,6 +226,12 @@ APRIL_USER_JOURNEYS = {
         "steps": ["Откройте основной чат и найдите конкретный ответ April.", "Под этим ответом найдите кнопки «Жалоба» и «Спасибо» — они находятся ниже ответа, а не в поле ввода.", "Нажмите «Спасибо»: появится краткое сообщение «Спасибо за обратную связь».", "Для жалобы нажмите «Жалоба», выберите причину и отправьте форму."],
         "finish": "Это действия обратной связи. «Спасибо» не отправляет новый запрос April и не запускает оплату; фото или файл для этого не нужны.",
     },
+    "response-share-community": {
+        "aliases": ["опубликовать ответ April в сообществе", "поделиться ответом April в сообществе", "отправить твой ответ в сообщество", "share April reply to community"],
+        "action": "PUBLISH_CURRENT_APRIL_RESPONSE_TO_COMMUNITY", "availability": "Кнопка находится под ответом April в основном чате; отдельного Premium-гейта на сам контрол в компоненте нет; для отправки требуется доступ к Community API.",
+        "steps": ["Откройте основной чат / и найдите нужный ответ April.", "Под ответом, рядом с «Жалоба» и «Спасибо», найдите зелёную круглую стрелку вверх с подписью/подсказкой «Опубликовать в сообществе».", "Проверьте содержимое ответа и нажмите эту зелёную стрелку. Текст и поддерживаемое вложение ответа отправляются напрямую в Community; копировать вручную не нужно.", "Дождитесь «Сообщение отправлено в сообщество.» и откройте /space, чтобы проверить публикацию."],
+        "finish": "Это именно публикация текущего ответа April. Не путать её с нижней кнопкой Send в Community, которая публикует текст, введённый пользователем в редактор.",
+    },
     "attach_image": {
         "aliases": ["добавить фото", "прикрепить картинку", "чтобы ты увидела фото", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить изображение в чат", "paperclip", "attach image"],
         "action": "GUIDE_ATTACH_IMAGE", "availability": "Free и Premium; пользователь вручную прикрепляет файл",
@@ -273,10 +285,12 @@ APRIL_USER_JOURNEYS = {
 
 # Detailed user-facing function inventory. Positions are relative to the responsive
 # screen (top bar / page card / bottom composer), never invented pixel coordinates.
-# Each record is based on the supplied aprill-web-main source snapshot.
+# Each record is based on the supplied aprill-web-main source snapshot. The
+# response-share button is verified in ReportAIResponse.tsx (aria-label/title,
+# shareToCommunity handler) and RenderMessage.tsx (current answer/assets passed in).
 APRIL_UI_FUNCTION_CATALOG = {
     "schema": "april.ui_function_catalog.v1",
-    "source_note": "Source-derived from the uploaded aprill-web-main archive. Layout can reflow on mobile/desktop; production may differ. Relative positions identify UI regions, not exact pixels.",
+    "source_note": "Verified against the uploaded aprill-web-main source snapshot: routes, component labels, UI handlers and access checks. This archive contains no full screenshot library, so visuals are route diagrams, not screenshots. Mobile/desktop layouts reflow; positions are relative regions, not pixel coordinates; production may differ.",
     "functions": [
         {"id":"chat_text_send", "areas":["chat"], "screen":"Основной чат /", "entry":"Откройте / или нажмите логотип APRIL, если уже на странице чата.", "position":"Нижняя закреплённая панель чата; текстовое поле по центру, стрелка отправки справа.", "control":"Поле Message April / поле сообщения и кнопка со стрелкой.", "does":"Отправляет текстовый запрос в текущий диалог.", "how_to_use":["Нажмите поле сообщения.", "Введите вопрос или задачу; для новой строки используйте Shift+Enter.", "Нажмите стрелку отправки справа или Enter без Shift."], "result":"Сообщение появляется в текущей переписке, затем отображается ответ April.", "availability":"Основная функция авторизованного чата.", "limits":"Не нажимайте очистку рабочего поля вместо отправки; не вставляйте пароли, API-токены и приватные ключи."},
         {"id":"chat_voice_input", "areas":["chat"], "screen":"Основной чат /", "entry":"Основной чат.", "position":"Справа в области нижнего поля ввода, рядом с текстовым вводом/отправкой.", "control":"Кнопка микрофона.", "does":"Записывает голосовое сообщение для последующего распознавания и обработки как запроса.", "how_to_use":["Нажмите микрофон и разрешите доступ браузеру, если он спросит.", "Произнесите запрос.", "Дождитесь завершения записи/распознавания и проверьте действие, которое показывает интерфейс."], "result":"Голос поступает в диалог; ответ April появляется в той же переписке.", "availability":"Основной чат при наличии разрешения микрофона.", "limits":"При отказе в разрешении проверьте разрешения сайта в браузере; голос не заменяет отправку вложенного файла."},
@@ -285,6 +299,7 @@ APRIL_UI_FUNCTION_CATALOG = {
         {"id":"chat_open_profile", "areas":["chat","settings"], "screen":"Основной чат → Настройки /settings", "entry":"Основной чат /.", "position":"Верхняя панель, правый край — значок профиля/пользователя.", "control":"Profile / кнопка пользователя.", "does":"Открывает страницу профиля и настроек; если пользователь не вошёл, открывает модальное окно авторизации.", "how_to_use":["Нажмите значок профиля вверху справа.", "Если появилось окно входа, войдите через Google.", "После авторизации откроется /settings."], "result":"Появляется личный кабинет.", "availability":"На верхней панели.", "limits":"Не путайте профиль с кнопкой очистки чата в верхней панели."},
         {"id":"logo_help_center", "areas":["chat","guide","help-center","how-to-use"], "screen":"Основной чат → Help & Information /aprill", "entry":"Основной чат /.", "position":"Логотип APRIL вверху слева.", "control":"Логотип APRIL.", "does":"Открывает справочную страницу Help & Information, а не новый чат.", "how_to_use":["Нажмите логотип APRIL.", "На /aprill выберите нужную карточку справки.", "Чтобы вернуться к диалогу, откройте /."], "result":"Переход на страницу справки.", "availability":"Навигационная ссылка в верхней панели.", "limits":"Карточки статьи могут открываться на той же странице через выбор/якорь, а не иметь отдельный URL."},
         {"id":"response_feedback", "areas":["chat","response-feedback"], "screen":"Основной чат /", "entry":"Найдите нужный ответ April.", "position":"Под нижней частью конкретного ответа, после его текста и прикреплённых render-блоков.", "control":"Спасибо и Жалоба / Report.", "does":"Позволяет отметить полезный ответ или сообщить о проблеме в нём.", "how_to_use":["Прокрутите именно к нужному ответу.", "Нажмите Спасибо для благодарности.", "Нажмите Жалоба, выберите причину и отправьте форму."], "result":"Отправляется оценка либо жалоба, связанная с этим ответом.", "availability":"Под ответом, когда блок обратной связи отрисован.", "limits":"Это не форма Contact Support и не поле нового сообщения."},
+        {"id":"assistant_response_share", "areas":["chat","response-feedback","space"], "screen":"Основной чат → Community /space", "entry":"Найдите ответ April, который хотите опубликовать, в основном чате /.", "position":"В строке действий непосредственно под конкретным ответом, рядом с «Жалоба» и «Спасибо»; зелёная круглая кнопка со стрелкой вверх.", "control":"aria-label/title: «Опубликовать в сообществе»; после успешной отправки: «Сообщение отправлено в сообщество.»", "does":"Одним нажатием отправляет текст текущего ответа April и поддерживаемый материал ответа (если он есть и доступен для публикации) в общую ленту через POST /api/community с action=send_message.", "how_to_use":["Откройте основной чат / и найдите нужный ответ April.", "Проверьте текст и прикреплённые материалы: нажатие публикует содержимое в Community, поэтому не размещайте секреты и личные данные.", "Нажмите зелёную круглую стрелку вверх под этим ответом. Не путайте её с отдельной стрелкой отправки в нижней панели чата или Community.", "Дождитесь подтверждения «Сообщение отправлено в сообщество.»; при ошибке появится сообщение о неудачной отправке."], "result":"Текущий ответ появляется как публикация в общей ленте April Community (/space); ручное копирование в поле Community для этого сценария не требуется.", "availability":"Контрол отрисовывается под ответом в основном чате; в коде компонента нет отдельного условия Premium для самой кнопки. Для публикации требуется доступ к авторизованному Community API.", "limits":"Текст отправляется с ограничением 3 800 символов. Для вложения используется первый переданный публикационный материал; после преобразования размер должен быть не более 3 MiB. Приватный/непубликуемый материал блокирует небезопасный переход к публикации одного только текста. Успех подтверждается сообщением UI; это не гарантирует, что пользователь открыл ленту."},
         {"id":"rendered_artifact_menu", "areas":["chat","image-controls"], "screen":"Основной чат / — карточка render-блока", "entry":"Откройте ответ с нужным артефактом.", "position":"Кнопка меню действий в верхней правой части карточки/панели соответствующего блока; визуальное положение зависит от renderer.", "control":"Open content actions menu / меню действий с материалом.", "does":"Открывает доступные операции над готовым блоком: Download, Share и/или Copy.", "how_to_use":["Найдите именно тот блок, который нужно сохранить или передать.", "Нажмите меню действий в его правом верхнем углу.", "Выберите доступное действие: Download сохраняет файл; Share вызывает системный Web Share, если браузер поддерживает, иначе для текстовых блоков возможна копия в буфер; Copy копирует содержимое, если обработчик предусмотрен."], "result":"Действие применяется к выбранному существующему результату.", "availability":"Зависит от типа блока и набора обработчиков у renderer.", "limits":"Нельзя обещать одновременное наличие всех пунктов у каждого типа артефакта. Если Share не поддержан, используйте Download или Copy, если они отображаются."},
         {"id":"settings_display_name", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → значок профиля сверху справа.", "position":"Секция USER в профиле; поле имени и кнопка Edit/Save.", "control":"Edit → поле имени → Save.", "does":"Меняет отображаемое имя пользователя в профиле/сообществах.", "how_to_use":["Откройте /settings.", "В секции USER нажмите Edit.", "Измените имя и нажмите Save.", "Проверьте обновлённое значение после сохранения."], "result":"Новое имя становится отображаемым именем пользователя.", "availability":"После авторизации.", "limits":"Не является заменой April ID или Google-аккаунта."},
         {"id":"settings_copy_ids", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → Profile.", "position":"В верхней части профиля рядом с идентификаторами аккаунта.", "control":"April ID / Premium ID и кнопка Copy.", "does":"Копирует соответствующий идентификатор в буфер обмена.", "how_to_use":["Откройте /settings.", "Найдите строку April ID или Premium ID.", "Нажмите Copy рядом с нужным ID.", "Вставьте его в безопасное место/форму, если это действительно требуется."], "result":"Идентификатор копируется; секреты или пароль кнопка не показывает.", "availability":"April ID для вошедшего пользователя; Premium ID — при наличии Premium.", "limits":"ID — идентификатор, не пароль. Не публикуйте его без необходимости."},
@@ -302,16 +317,110 @@ APRIL_UI_FUNCTION_CATALOG = {
     ],
 }
 
+# Additional controls verified in page-level source handlers (not inferred from visual sketches).
+APRIL_UI_FUNCTION_CATALOG["functions"].extend([
+    {
+        "id": "chat_side_panels", "areas": ["chat", "settings", "history"], "screen": "Основной чат / — боковые панели",
+        "entry": "Откройте основной чат /. Панели присутствуют в широком/альбомном рабочем режиме.",
+        "position": "Крайние боковые панели рабочего пространства; у каждой панели собственная кнопка-стрелка сворачивания/разворачивания.",
+        "control": "Collapse/Expand profile menu; для активного Premium также Collapse/Expand history menu.",
+        "does": "Сворачивает или раскрывает боковую панель профиля; отдельная панель истории показывает /history в том же рабочем пространстве.",
+        "how_to_use": ["В широком/альбомном режиме найдите боковую панель профиля и её кнопку со стрелками.", "Нажмите её, чтобы свернуть панель; повторное нажатие раскрывает её снова.", "При действующем Premium доступна отдельная панель истории с собственным переключателем; Free-пользователям эта история не показывается.", "Если экран телефона не показывает боковые панели, используйте обычные страницы /settings и /history (последняя требует Premium)."],
+        "result": "Меняется ширина боковой панели; история не удаляется и не очищается.",
+        "availability": "Профильная панель — в поддерживаемом широком/альбомном workspace; панель истории — только при активном Premium entitlement.",
+        "limits": "Кнопки панелей не выполняют переход между темами и не удаляют сообщения. Отображение панели зависит от ширины/ориентации экрана."
+    },
+    {
+        "id": "chat_free_media_referral", "areas": ["chat", "settings"], "screen": "Основной чат / — окно лимита Free",
+        "entry": "Появляется, когда исчерпан общий лимит Free на анализ вложений и генерацию изображений.",
+        "position": "Модальное окно поверх основного чата; в нём размещены Share an invite link, Wait and continue и Go to Premium.",
+        "control": "Поделиться ссылкой с другом / Share an invite link; Copy link; I sent the link; Cancel; Retry; Go to Premium.",
+        "does": "Позволяет дождаться восстановления общего медиалimitа или отправить приглашение; после подтверждённой отправки приглашения Free получает 6 дополнительных медиаопераций.",
+        "how_to_use": ["Прочитайте окно «Лимит Free исчерпан»: текстовый чат с April остаётся доступен; анализ вложений и генерация изображений используют общий медиалimit.", "Нажмите «Поделиться ссылкой с другом» — при поддержке устройства откроется системное меню приложений/мессенджеров.", "Если системное меню недоступно, используйте резервную операцию Copy link и затем подтвердите «Я отправил ссылку»; не закрывайте окно до подтверждения, если хотите получить бонус.", "После успешной фиксации приглашения появится сообщение о 6 дополнительных Free медиаоперациях; одна ссылка может быть активирована только одним новым аккаунтом.", "Кнопка «Подождать и продолжить» возвращает к ожиданию восстановления лимита; «Перейти на Premium» открывает /settings.", "«Повторить» подготавливает новое приглашение, если предыдущее уже активировал другой новый пользователь; «Отмена» закрывает приглашение."],
+        "result": "После подтверждённой отправки приглашения интерфейс обновляет Free quota; текстовый чат доступен и при исчерпанном медиалimitе.",
+        "availability": "Только Free при достижении лимита медиаопераций; приглашение требует авторизованный April ID.",
+        "limits": "По source snapshot лимит восстанавливается после пятичасового ожидания; приглашение даёт 6 дополнительных операций. Повторный бонус за тот же аккаунт не начисляется; ссылка предназначена одному новому аккаунту."
+    },
+    {
+        "id": "rendered_graph_controls", "areas": ["chat", "graph-controls"], "screen": "Карточка графика в основном чате /",
+        "entry": "Найдите уже отрисованный соответствующий график в ответе April.",
+        "position": "Панель управления встроена в область карточки 3D-графика; флажок описания/данных находится в заголовке линейного графика.",
+        "control": "− / +; слева / справа / сзади / сверху / сбоку; 3D; Сбросить вид; Приостановить волну / Продолжить движение волны; Show description and data.",
+        "does": "Меняет масштаб и точку обзора 3D-графика, сбрасывает ракурс, управляет поддерживаемой анимацией или раскрывает детали линейного графика.",
+        "how_to_use": ["Откройте ответ April с графиком.", "Для 3D-графика нажмите + или −, чтобы изменить масштаб.", "Выберите нужное положение: слева, справа, сзади, сверху, сбоку либо 3D (наклонный ракурс).", "Нажмите «Сбросить вид», чтобы вернуть исходную камеру.", "Если график поддерживает волну, используйте «Приостановить волну»/«Продолжить движение волны».", "На линейном графике переключите «Показать описание и данные», чтобы открыть или скрыть пояснение и таблицу точек."],
+        "result": "Вид графика меняется прямо в карточке; исходные данные графика не редактируются этими кнопками.",
+        "availability": "3D controls — только у 3D-рендеров; pause/resume — только при canAnimateWave; details checkbox — у линейных графиков.",
+        "limits": "Не каждый график поддерживает каждый контрол. Для скачивания/поделиться используйте отдельное меню Download or share graph, если оно отображается."
+    },
+    {
+        "id": "settings_logout", "areas": ["settings"], "screen": "Настройки и профиль /settings",
+        "entry": "Основной чат → значок профиля → /settings.",
+        "position": "В верхней карточке Google-аккаунта под адресом учётной записи.",
+        "control": "Выйти / Log out.",
+        "does": "Завершает текущую сессию April Web; Google-аккаунт Google не удаляется.",
+        "how_to_use": ["Откройте /settings.", "В карточке Google-аккаунта нажмите «Выйти».", "Для повторного входа используйте кнопку профиля и вход через Google."],
+        "result": "Текущая сессия сайта завершается.",
+        "availability": "Для вошедшего пользователя Free и Premium.",
+        "limits": "Выход не удаляет April ID, Google-аккаунт или данные April; для удаления April-профиля предназначен отдельный раздел Delete account."
+    },
+    {
+        "id": "community_personal_profile", "areas": ["space"], "screen": "Community /space",
+        "entry": "Откройте /space и войдите через Google, если потребуется.",
+        "position": "В верхней части страницы — раскрываемый раздел Personal profile / Личный профиль.",
+        "control": "Personal profile → поле Community nickname → Save nickname → Invite a friend.",
+        "does": "Позволяет задать ник, который показывается рядом с публикациями, и подготовить приглашение для друга.",
+        "how_to_use": ["Откройте /space.", "Раскройте Personal profile.", "Введите ник длиной 2–32 символа и сохраните его.", "Для приглашения нажмите Invite a friend; передача ссылки зависит от системного меню Share или копирования ссылки."],
+        "result": "Ник сохраняется на сервере; приглашение формируется отдельно.",
+        "availability": "Для авторизованных Free и Premium пользователей.",
+        "limits": "Ник должен соответствовать допустимому формату и не быть зарезервированным. Приглашение не является отправкой публичного поста."
+    },
+    {
+        "id": "community_post_actions", "areas": ["space"], "screen": "Публичная лента Community /space",
+        "entry": "Откройте /space и найдите конкретную карточку сообщения.",
+        "position": "Внутри карточки публикации рядом с текстом/вложением и областью действий.",
+        "control": "Download file / Скачать файл; Report / Пожаловаться; Delete your message / Удалить своё сообщение.",
+        "does": "Скачивает прикреплённый файл, отправляет жалобу на чужое сообщение или позволяет автору удалить собственную публикацию.",
+        "how_to_use": ["Откройте нужное сообщение в общей ленте.", "Для вложения нажмите Download file.", "Для жалобы нажмите Report и подтвердите действие.", "Для собственной публикации нажмите Delete your message и подтвердите удаление."],
+        "result": "Файл скачивается, жалоба регистрируется или собственное сообщение удаляется.",
+        "availability": "Лента доступна участникам; удаление отображается только для собственного сообщения.",
+        "limits": "Report относится к сообщению Community, а не к ответу April в основном чате. Delete your message удаляет публикацию и связанное вложение; подтверждайте удаление внимательно."
+    },
+    {
+        "id": "support_history_view", "areas": ["support"], "screen": "Premium Support /insights?room=support",
+        "entry": "Откройте /aprill → Contact Support или доступную ссылку поддержки в профиле.",
+        "position": "Список обращений расположен в верхней/боковой области; выбранное обращение открывается в панели деталей.",
+        "control": "История обращений → выбранное сообщение → ответ техподдержки.",
+        "does": "Показывает сохранённую переписку пользователя с поддержкой и ответами.",
+        "how_to_use": ["Откройте /insights?room=support.", "Выберите обращение из списка истории.", "Просмотрите текст и ответ; при непрочитанном ответе страница отмечает его прочитанным.", "Возврат к профилю выполняется кнопкой Back to profile."],
+        "result": "Открывается выбранная сохранённая переписка.",
+        "availability": "В пользовательской ветке текущего исходника раздел связан с Premium Support; фактический доступ проверяется сервером.",
+        "limits": "Не путать с публичной лентой Community или Report под ответом April. История обращений и отправка нового обращения — разные действия."
+    },
+    {
+        "id": "support_new_request", "areas": ["support"], "screen": "Premium Support /insights?room=support",
+        "entry": "Откройте /insights?room=support через Help & Information → Contact Support.",
+        "position": "Нижняя часть области поддержки под историей сообщений.",
+        "control": "Describe the issue… → Attach screenshot → Send to support.",
+        "does": "Создаёт новое обращение в техподдержку с текстом и необязательным скриншотом.",
+        "how_to_use": ["Проверьте, что аккаунт имеет активный Premium.", "Когда нет периода ожидания, опишите проблему в поле до 4000 символов.", "При необходимости приложите один PNG/JPG/WebP скриншот и проверьте предпросмотр.", "Нажмите Send to support и дождитесь подтверждения."],
+        "result": "Обращение добавляется в историю; ответ открывается в той же комнате поддержки.",
+        "availability": "Текущий source snapshot показывает форму только при active Premium; одно новое сообщение доступно раз в 24 часа.",
+        "limits": "При cooldown отправка заблокирована до указанного времени. Отдельная форма отправки в Settings в этом архиве выключена условием false; используйте страницу /insights?room=support."
+    },
+])
+
+
 _UI_AREA_FUNCTION_IDS = {
-    "chat": ["chat_text_send", "chat_voice_input", "chat_attach_file", "chat_clear_workspace", "chat_open_profile", "logo_help_center", "response_feedback", "rendered_artifact_menu"],
+    "chat": ["chat_text_send", "chat_voice_input", "chat_attach_file", "chat_clear_workspace", "chat_open_profile", "logo_help_center", "response_feedback", "assistant_response_share", "rendered_artifact_menu", "chat_side_panels", "chat_free_media_referral", "rendered_graph_controls"],
     "attachments": ["chat_attach_file"],
     "image-controls": ["rendered_artifact_menu"],
-    "response-feedback": ["response_feedback"],
+    "graph-controls": ["rendered_graph_controls"],
+    "response-feedback": ["response_feedback", "assistant_response_share"],
     "settings": ["chat_open_profile", "settings_display_name", "settings_copy_ids", "settings_language", "settings_plan_payment", "history_resume", "support_send_ticket", "account_delete"],
-    "history": ["history_resume"],
-    "space": ["community_public_post", "community_invite", "community_friend_manage", "community_private_chat"],
+    "history": ["history_resume", "chat_side_panels"],
+    "space": ["community_public_post", "community_invite", "community_friend_manage", "community_private_chat", "community_personal_profile", "community_post_actions"],
     "direct": ["community_private_chat"],
-    "support": ["support_send_ticket"],
+    "support": ["support_send_ticket", "support_history_view", "support_new_request"],
     "guide": ["logo_help_center", "help_article_navigation"],
     "help-center": ["help_article_navigation"],
     "how-to-use": ["help_article_navigation"],
@@ -324,6 +433,138 @@ _UI_AREA_FUNCTION_IDS = {
 }
 
 
+def _site_request_intent_layers(machine_request: Any) -> List[Dict[str, Any]]:
+    """Collect only known Interpretation envelope layers from a request."""
+    if isinstance(machine_request, dict):
+        root = machine_request
+    else:
+        root_value = getattr(machine_request, "intent", {})
+        root = root_value if isinstance(root_value, dict) else {}
+    sources: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = [root]
+    seen: set[int] = set()
+    while pending and len(sources) < 12:
+        source = pending.pop(0)
+        if not isinstance(source, dict) or id(source) in seen:
+            continue
+        seen.add(id(source))
+        sources.append(source)
+        for key in ("intent", "interpretation", "request_structure", "semantic_interpretation", "features", "intent_features"):
+            child = source.get(key)
+            if isinstance(child, dict):
+                pending.append(child)
+        semantic = source.get("semantic_interpretation")
+        if isinstance(semantic, dict):
+            pending.append(semantic)
+            for feature_key in ("features", "intent_features"):
+                features = semantic.get(feature_key)
+                if isinstance(features, dict):
+                    pending.append(features)
+    return sources
+
+
+def _site_navigation_semantics(machine_request: Any) -> Dict[str, Any]:
+    """Find the typed April-UI navigation interpretation regardless of wrapper depth."""
+    for source in _site_request_intent_layers(machine_request):
+        direct = source.get("site_navigation_semantics")
+        if isinstance(direct, dict):
+            return direct
+        semantic = source.get("semantic_interpretation")
+        if isinstance(semantic, dict):
+            features = {}
+            for feature_key in ("features", "intent_features"):
+                candidate = semantic.get(feature_key)
+                if isinstance(candidate, dict):
+                    features.update(candidate)
+            nested = features.get("site_navigation_semantics") or semantic.get("site_navigation_semantics")
+            if isinstance(nested, dict):
+                return nested
+        for feature_key in ("features", "intent_features"):
+            nested = source.get(feature_key)
+            if isinstance(nested, dict) and isinstance(nested.get("site_navigation_semantics"), dict):
+                return nested["site_navigation_semantics"]
+    return {}
+
+
+def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_ids: Any = None) -> Dict[str, List[str]]:
+    """Resolve an already-interpreted UI operation to the source-derived control catalog.
+
+    This is a target resolver, not an entry trigger: it only runs after the semantic
+    layer has classified the request as an April UI route explanation.
+    """
+    if not isinstance(semantic, dict):
+        return {"function_ids": [], "semantic_targets": [], "area_ids": []}
+    domain = _text(semantic.get("domain")).lower()
+    action = _text(semantic.get("action")).upper()
+    if domain != "april_ui" or action not in {"EXPLAIN_UI_ROUTE", "GUIDE_UI_ACTION", "GUIDE_ATTACH_IMAGE"}:
+        return {"function_ids": [], "semantic_targets": [], "area_ids": []}
+    goal = _text(semantic.get("user_goal"))
+    combined = f"{query} {goal}".lower().replace("ё", "е")
+    inferred_areas = list(area_ids) if isinstance(area_ids, (list, tuple, set)) else []
+    for _score, area_id in _semantic_site_area_scores(combined):
+        if area_id not in inferred_areas:
+            inferred_areas.append(area_id)
+    # The semantic operation and object are known here: publish a message in the
+    # public Community surface. Do not infer private chat or unrelated profile actions.
+    public_feed_operation = bool(
+        re.search(r"(?:отправ\w*|публикац\w*|опубликов\w*|размест\w*|созда\w*|написа\w*|поделит\w*|post\w*|publish\w*|create\w*|write\w*|send\w*)", combined)
+        and re.search(r"(?:сообщен\w*|пост\w*|публикац\w*|текст\w*|ответ\w*|community|сообществ\w*)", combined)
+        and "space" in inferred_areas
+    )
+    if re.search(r"(?:3d\s*(?:график|graph)|график|график\w*|graph|ракурс|масштаб)", combined, re.I) and re.search(r"(?:кнопк|управл|поверн|ракурс|масштаб|приблиз|увелич|уменьш|сброс|данн|описан|zoom|rotate|view)", combined, re.I):
+        return {"function_ids": ["rendered_graph_controls"], "semantic_targets": ["rendered_graph.controls"], "area_ids": ["graph-controls", "chat"]}
+    if re.search(r"(?:боков\w*\s+панел|панел\w*\s+профил|панел\w*\s+истори|свернут\w*\s+панел|развернут\w*\s+панел|панел\w*\s+слева|side\s+panel|collapse\s+profile|history\s+panel)", combined, re.I):
+        return {"function_ids": ["chat_side_panels"], "semantic_targets": ["chat.side_panels"], "area_ids": ["chat", "settings", "history"]}
+    free_media_quota_context = bool(re.search(
+        r"(?:лимит\w*.{0,40}(?:free|медиа|вложен|изображ|операц)|"
+        r"(?:free|бесплатн\w*).{0,40}(?:лимит|медиа|quota|operations)|"
+        r"media.{0,20}(?:limit|quota)|quota.{0,20}(?:media|free)|"
+        r"6\s+(?:дополнительн\w*\s+)?медиа.?операц|6\s+additional\s+media\s+operations)", combined, re.I,
+    ))
+    free_referral_action = bool(re.search(
+        r"(?:приглаш\w*|ссылк\w*|бонус\w*|дополнительн\w*\s+операц|"
+        r"invite|referral|share\s+(?:an?\s+)?(?:invite\s+)?link)", combined, re.I,
+    ))
+    if free_media_quota_context and free_referral_action:
+        return {"function_ids": ["chat_free_media_referral"], "semantic_targets": ["chat.free_media_referral"], "area_ids": ["chat", "settings"]}
+    # Resolve the other Community controls independently. A normal friend
+    # invitation must not be mistaken for the Free media-referral modal.
+    community_context = "space" in inferred_areas or bool(re.search(r"(?:community|сообществ\w*|\bspace\b)", combined, re.I))
+    if community_context and re.search(r"(?:личн\w*\s+чат|приватн\w*\s+чат|private\s+chat|direct\s+message|написат\w*.{0,40}друг\w*)", combined, re.I):
+        return {"function_ids": ["community_private_chat"], "semantic_targets": ["community.private_chat"], "area_ids": ["space", "direct"]}
+    if community_context and re.search(r"(?:найти\w*.{0,30}друз|поиск\w*.{0,30}друз|добав\w*.{0,30}друз|запрос\w*.{0,30}друз|принят\w*.{0,30}запрос|accept\s+friend|add\s+friend|search\s+friends|block|unblock)", combined, re.I):
+        return {"function_ids": ["community_friend_manage"], "semantic_targets": ["community.friends"], "area_ids": ["space"]}
+    if community_context and re.search(r"(?:личн\w*\s+профил|community\s+profile|никнейм|ник\b|nickname|save\s+nickname)", combined, re.I):
+        return {"function_ids": ["community_personal_profile"], "semantic_targets": ["community.personal_profile"], "area_ids": ["space"]}
+    if community_context and re.search(r"(?:удал\w*.{0,50}(?:сво[юеё]\s+)?(?:сообщен|публикац|пост)|жалоб\w*.{0,40}(?:пост|публикац|сообщен)|пожалова\w*.{0,40}(?:пост|публикац)|скача\w*.{0,40}(?:вложен|файл)|delete\s+(?:your\s+)?(?:post|message)|report\s+(?:a\s+)?post|download\s+file)", combined, re.I):
+        return {"function_ids": ["community_post_actions"], "semantic_targets": ["community.post_actions"], "area_ids": ["space"]}
+    if community_context and re.search(r"(?:приглас\w*.{0,40}друг|друг\w*.{0,40}приглас\w*|invite\s+(?:a\s+)?friend|friend\s+invitation)", combined, re.I):
+        return {"function_ids": ["community_invite"], "semantic_targets": ["community.invite"], "area_ids": ["space"]}
+    if public_feed_operation:
+        # The semantic object role matters: a request to publish "your/April's
+        # answer" maps to the green action beneath an assistant reply, while a
+        # request to write a new post maps to the Community composer.
+        assistant_owned_content = bool(re.search(
+            r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:ответ|сообщен\w*)|"
+            r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
+            r"\b(?:your|my|our)\s+(?:april\s+)?(?:reply|response|message)\b|"
+            r"\bapril(?:'s)?\s+(?:reply|response|message)\b)",
+            combined, re.I,
+        ))
+        if assistant_owned_content:
+            return {
+                "function_ids": ["assistant_response_share", "community_public_post"],
+                "semantic_targets": ["response.share_to_community", "community.public_post"],
+                "area_ids": ["response-feedback", "chat", "space"],
+            }
+        return {
+            "function_ids": ["community_public_post"],
+            "semantic_targets": ["community.public_post"],
+            "area_ids": ["space"],
+        }
+    return {"function_ids": [], "semantic_targets": [], "area_ids": inferred_areas[:4]}
+
+
 def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) -> Dict[str, Any]:
     """Select function-level help from the semantic route and action targets."""
     areas = site_map.get("areas") if isinstance(site_map, dict) else []
@@ -332,7 +573,25 @@ def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) 
     overview = bool(_SITE_INTERFACE_OVERVIEW_RE.search(query))
     requested: set[str] = set()
     contracts = _site_ui_action_contracts(machine_request)
-    if not contracts and not overview:
+    intent_sources = _site_request_intent_layers(machine_request)
+    carried_function_ids: List[str] = []
+    carried_semantic_targets: List[str] = []
+    for source in intent_sources:
+        for value in source.get("site_navigation_target_functions", []) if isinstance(source.get("site_navigation_target_functions"), list) else []:
+            if isinstance(value, str) and value not in carried_function_ids:
+                carried_function_ids.append(value)
+        for value in source.get("site_navigation_semantic_targets", []) if isinstance(source.get("site_navigation_semantic_targets"), list) else []:
+            if isinstance(value, str) and value not in carried_semantic_targets:
+                carried_semantic_targets.append(value)
+    semantic_navigation = _site_navigation_semantics(machine_request)
+    semantic_resolved = _site_semantic_function_targets(query, semantic_navigation, area_ids)
+    for value in semantic_resolved.get("function_ids", []):
+        if value not in carried_function_ids:
+            carried_function_ids.append(value)
+    for value in semantic_resolved.get("semantic_targets", []):
+        if value not in carried_semantic_targets:
+            carried_semantic_targets.append(value)
+    if not contracts and not overview and not carried_function_ids and not carried_semantic_targets:
         return {
             "schema": APRIL_UI_FUNCTION_CATALOG["schema"],
             "source_note": APRIL_UI_FUNCTION_CATALOG["source_note"],
@@ -341,7 +600,8 @@ def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) 
             "full_inventory": False,
             "semantic_targets": [],
         }
-    semantic_targets: list[str] = []
+    semantic_targets: list[str] = list(carried_semantic_targets)
+    requested.update(carried_function_ids)
     for contract in contracts:
         ui_navigation = contract.get("ui_navigation") if isinstance(contract.get("ui_navigation"), dict) else {}
         values = ui_navigation.get("targets") if isinstance(ui_navigation.get("targets"), list) else []
@@ -352,11 +612,15 @@ def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) 
                 semantic_targets.append(value)
     target_functions = {
         "response.feedback": ["response_feedback"],
+        "response.share_to_community": ["assistant_response_share"],
         "chat.clear_workspace": ["chat_clear_workspace"],
         "chat.paperclip_picker": ["chat_attach_file"],
         "chat.voice_input": ["chat_voice_input"],
         "chat.composer": ["chat_text_send"],
         "rendered_artifact.actions": ["rendered_artifact_menu"],
+        "rendered_graph.controls": ["rendered_graph_controls"],
+        "chat.side_panels": ["chat_side_panels"],
+        "chat.free_media_referral": ["chat_free_media_referral"],
         "profile.display_name": ["settings_display_name"],
         "profile.settings": ["chat_open_profile"],
         "profile.language": ["settings_language"],
@@ -398,7 +662,7 @@ APRIL_ACCESS_MATRIX = {
     "free": ["Основной чат и поддерживаемые вложения", "Сообщество /space", "Профиль и настройки /settings", "Справка /aprill", "Редактирование исходного изображения за одну бонусную операцию приглашения на каждую правку", "Активный контекст до 12 часов по проектной политике"],
     "premium": ["Функции Free", "История диалогов /history — проверка Premium обязательна", "Редактирование существующих изображений согласно политике бота", "Активный контекст до 24 часов по проектной политике"],
     "not_promised": ["Автоматическое списание/авто-продление: в исходнике указаны разовые покупки без recurring charges", "Внешний Fondy/Google Pay checkout в Google Play-сборке: кнопки внешней оплаты там скрыты", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
-    "source_note": "Матрица восстановлена по загруженным ZIP исходникам и скриншоту; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
+    "source_note": "Матрица восстановлена по текущему Web source snapshot и трём пользовательским изображениям только как контекст для проверки. В репозитории нет полного набора настоящих экранных снимков; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
 }
 
 
@@ -407,6 +671,16 @@ def _select_user_journeys(query: str) -> list[dict]:
     low = _text(query).lower().replace("ё", "е")
     if _is_external_community_topic(low):
         return []
+    assistant_owned_content = bool(re.search(
+        r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:ответ|сообщен\w*)|"
+        r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
+        r"\b(?:your|my|our)\s+(?:april\s+)?(?:reply|response|message)\b|\bapril(?:'s)?\s+(?:reply|response|message)\b)",
+        low, re.I,
+    ))
+    public_post_intent = bool(re.search(r"(?:отправ\w*|пересыл\w*|опубликов\w*|публикац\w*|размест\w*|post\w*|publish\w*|send\w*)", low, re.I)) and bool(re.search(r"(?:сообществ\w*|community)", low, re.I))
+    if assistant_owned_content and public_post_intent:
+        journey = APRIL_USER_JOURNEYS.get("response-share-community")
+        return [{"id": "response-share-community", **journey}] if isinstance(journey, dict) else []
     result = []
     feedback_target = bool(re.search(r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|наж|где|куда)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response))", low, re.I))
     feedback_location = bool(re.search(r"(?:куда.{0,40}наж|где.{0,70}(?:кноп|наход|это)|кноп\w*.{0,60}(?:под\s+(?:ответ|сообщ)|где|наж)|покажи.{0,60}(?:где|куда|путь)|where.{0,60}(?:click|button|find))", low, re.I | re.S))
@@ -447,14 +721,20 @@ def _select_user_journeys(query: str) -> list[dict]:
     return result[:3]
 
 
-# Screen blueprints reconstructed from the supplied April UI screenshots and existing route map.
-# They are knowledge records for retrieval/rendering, not route-specific answer templates.
+# Screen blueprints are source-derived control inventories used internally for semantic retrieval.
+# They are not screenshots or visual mockups and are never passed as rendered screen panels.
 APRIL_UI_BLUEPRINTS = {
+    "graph-controls": {
+        "screen_id": "graph-controls", "screen_title": "Управление графиком в чате",
+        "visible_controls": ["Карточка графика", "Show description and data checkbox для линейного графика", "− и + для масштаба 3D-графика", "Ракурсы: слева, справа, сзади, сверху, сбоку", "3D / наклонный ракурс", "Reset view / Сбросить вид", "Pause wave / Resume wave только для поддерживаемой волны", "Меню Download or share graph"],
+        "screen_flow": ["Открыть ответ с графиком в основном чате /", "Определить тип графика: линейный или 3D", "Линейный: открыть/закрыть описание и таблицу данных", "3D: изменить масштаб и выбрать нужный ракурс", "При необходимости сбросить камеру или приостановить/продолжить поддерживаемую анимацию", "Для экспорта отдельно открыть меню графика и выбрать Download или Share"],
+        "semantic_concepts": ["управлять графиком", "увеличить 3d график", "уменьшить график", "повернуть график", "ракурс графика", "сбросить вид графика", "показать данные графика", "остановить волну", "3d graph controls", "zoom graph", "rotate graph", "graph view"],
+    },
     "response-feedback": {
-        "screen_id": "response-feedback", "screen_title": "Обратная связь под ответом April",
-        "visible_controls": ["Текст и блоки конкретного ответа April", "Кнопка «Жалоба»", "Кнопка «Спасибо»", "Форма выбора причины жалобы: вредный, оскорбительный, вводящий в заблуждение, другое", "Кнопка отправки формы"],
-        "screen_flow": ["Открыть основной чат /", "Найти нужный ответ April", "Под ответом нажать «Спасибо» для краткого подтверждения либо «Жалоба» для открытия формы", "Для жалобы выбрать причину и отправить форму"],
-        "semantic_concepts": ["отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "feedback", "report response", "thank button"],
+        "screen_id": "response-feedback", "screen_title": "Действия под ответом April",
+        "visible_controls": ["Текст и render-блоки конкретного ответа April", "Кнопка «Жалоба»", "Кнопка «Спасибо»", "Зелёная круглая стрелка вверх с aria-label/title «Опубликовать в сообществе»", "Форма выбора причины жалобы: вредный, оскорбительный, вводящий в заблуждение, другое", "Встроенное подтверждение публикации или ошибка"],
+        "screen_flow": ["Открыть основной чат /", "Найти нужный ответ April", "Под ответом выбрать действие: «Спасибо», «Жалоба» либо зелёная стрелка «Опубликовать в сообществе»", "Для жалобы выбрать причину и отправить форму", "Для публикации проверить ответ и нажать зелёную стрелку; компонент отправляет текущий ответ в Community без ручного копирования", "После успеха появляется текстовое подтверждение; для просмотра публикации открыть /space"],
+        "semantic_concepts": ["отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "опубликовать ответ April в сообществе", "поделиться ответом April в сообществе", "зелёная стрелка под ответом", "кнопка публикации под ответом", "feedback", "report response", "thank button", "share April reply to community"],
     },
     "chat": {
         "screen_id": "chat", "screen_title": "Основной чат April",
@@ -549,6 +829,8 @@ for _area in APRIL_SITE_MAP.get("areas", []):
         _blueprint_key = "attachments"
     elif _area_id == "image-controls":
         _blueprint_key = "image-controls"
+    elif _area_id == "graph-controls":
+        _blueprint_key = "graph-controls"
     elif _area_id == "response-feedback":
         _blueprint_key = "response-feedback"
     elif _area_id == "history":
@@ -569,7 +851,7 @@ _SITE_CONCEPT_ALIASES = {
     "settings": ("личный кабинет", "учётная запись", "параметры аккаунта", "поменять ник", "сменить имя", "язык интерфейса", "тариф", "подписка", "april id", "premium id"),
     "attachments": ("скрепка", "прикрепить", "прикрепить фото", "добавить картинку в чат", "добавить фото в чат", "загрузить фото", "загрузить файл", "выбрать фото", "сфотографировать", "документ", "camera", "image picker", "file upload", "attach an image", "upload a photo"),
     "image-controls": ("скачать картинку в чате", "сохранить изображение", "скопировать картинку из чата", "поделиться изображением", "меню изображения", "кнопка скачивания картинки", "download image", "save picture", "share image"),
-    "response-feedback": ("кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "поблагодарить за ответ", "feedback button", "report response", "thank the answer"),
+    "response-feedback": ("кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "поблагодарить за ответ", "зелёная стрелка под ответом", "опубликовать ответ в сообществе", "поделиться ответом April", "feedback button", "report response", "thank the answer", "share April reply to community"),
     "help": ("инструкция", "документация", "частые вопросы", "правила сервиса", "как пользоваться", "справочный раздел", "help center", "how to use"),
     "support": ("пожаловаться", "обратиться за помощью", "сообщить об ошибке", "зависла", "залипла", "ошибка интерфейса", "support request"),
     "deletion": ("стереть информацию", "удалить профиль", "удалить сведения", "delete account", "data deletion"),
@@ -762,7 +1044,8 @@ _SITE_AREA_HINTS = {
     "chat": ("главный чат", "основной чат", "чат с april", "chat", "написать april", "поле сообщения", "отправить вопрос", "голос"),
     "attachments": ("скрепк", "прикрепить фото", "добавить картинку в чат", "фото чтобы ты увидела", "фото чтобы ты увидел", "картинку чтобы ты увидела", "добавить картинку для того чтобы", "в твоем пространстве добавить картинку", "загрузить фото", "выбрать изображение", "камера", "image picker", "file upload"),
     "image-controls": ("скачать картинку", "сохранить изображение", "скопировать картинку", "поделиться изображением", "меню изображения", "кнопка действий", "download image", "save picture", "share image"),
-    "response-feedback": ("отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "где спасибо", "где жалоба", "feedback button", "report response", "thank button"),
+    "graph-controls": ("график", "3d график", "график слева", "график справа", "ракурс", "масштаб графика", "сбросить вид", "волна", "graph", "zoom", "rotate"),
+    "response-feedback": ("отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "где спасибо", "где жалоба", "зелёная стрелка под ответом", "опубликовать ответ в сообществе", "поделиться ответом April", "feedback button", "report response", "thank button", "share April reply to community"),
     "history": ("истор", "history", "сохраненн", "прошл", "старый диалог", "предыдущ", "восстанов", "продолж", "saved dialogues", "saved dialogs"),
     "memory": ("памят", "memory", "запом", "срок хранения", "окно памяти"),
     "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен"),
@@ -14356,6 +14639,8 @@ _SITE_EXPLICIT_RASTER_REQUEST_RE = re.compile(
     r"(?:нарису\w*|созда\w*|сгенериру\w*|изобрази)\s+(?:мне\s+)?(?:реальн\w*\s+|настоящ\w*\s+|текущ\w*\s+)?(?:скриншот\w*|снимок\s+экрана|экран\w*\s+(?:april|април)|интерфейс\w*)|"
     r"(?:покажи\s+(?:это|путь|интерфейс|меню|куда).{0,70}на\s+(?:картинк\w*|изображени\w*|скриншот\w*))|"
     r"(?:покажи\s+(?:полный\s+)?(?:реальн\w*\s+)?(?:скриншот|снимок).{0,70}(?:реальн\w*|настоящ\w*|интерфейс|экран))|"
+    r"(?:покажи|предоставь|пришли|дай).{0,50}(?:реальн\w*|настоящ\w*).{0,50}(?:скриншот\w*|снимок\s+экрана|экран)|"
+    r"(?:(?:реальн\w*|настоящ\w*).{0,50}(?:скриншот\w*|снимок\s+экрана))|"
     r"(?:real|actual)\s+(?:current\s+)?(?:april\s+)?(?:interface|screen|screenshot)|"
     r"(?:show\s+(?:me\s+)?(?:a\s+)?(?:real|actual|current)\s+(?:screenshot|screen)|show\s+(?:me\s+)?(?:this|the\s+path|the\s+interface).{0,60}(?:in\s+an?\s+image|as\s+an?\s+image|screenshot))|"
     r"(?:draw|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:real\s+|actual\s+|current\s+)?(?:screenshot|screen|interface)\b",
@@ -14433,14 +14718,137 @@ def _recent_context_texts(context: Any) -> List[str]:
     for pair in (context.get("selected_pairs") or [])[:2] if isinstance(context.get("selected_pairs"), list) else []:
         if not isinstance(pair, dict):
             continue
-        for key in ("topic", "user", "april", "source_user_text", "source_april_text"):
+        for key in (
+            "topic", "user", "april", "source_user_text", "source_april_text",
+            "assistant_last_message", "assistant_answer", "last_assistant_answer",
+        ):
             child = pair.get(key)
             if isinstance(child, str) and child.strip():
-                out.append(child.strip()[:900])
+                out.append(child.strip()[:1800])
+        # Only safe, compact descriptors are inspected. Binary assets are not
+        # restored or converted into screenshots by the IT room.
+        for key in ("assistant_structured_output", "assistant_artifact_index", "artifact_index"):
+            child = pair.get(key)
+            if isinstance(child, (dict, list)) and child:
+                out.append(str(child)[:1800])
     # Avoid scanning topic indexes or older general history: only the active window
     # and the first two selected pairs may re-anchor an elliptical navigation follow-up.
-    return out[:12]
+    return out[:18]
 
+
+
+def _interpretation_semantic_features(interpretation: Any) -> Dict[str, Any]:
+    """Read semantic features from the current Interpretation envelope."""
+    if not isinstance(interpretation, dict):
+        return {}
+    request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    semantics = request_structure.get("semantic_interpretation") if isinstance(request_structure.get("semantic_interpretation"), dict) else {}
+    if not semantics and isinstance(interpretation.get("semantic_interpretation"), dict):
+        semantics = interpretation.get("semantic_interpretation")
+    if not semantics and isinstance(interpretation.get("intent_features"), dict):
+        semantics = {"intent_features": interpretation.get("intent_features")}
+    return dict(semantics) if isinstance(semantics, dict) else {}
+
+
+def _active_site_ui_followup(interpretation: Any, query: str, recent_context: Any) -> Dict[str, Any]:
+    """Recover a site-help referent only when semantic interpretation links this turn to it.
+
+    This deliberately does not turn every short reply into a site-help request:
+    the State Manager must first say CONTINUE, current Interpretation must identify
+    a context-dependent question/answer reference, and the selected active branch
+    must contain a prior April UI-help exchange with a verified route.
+    """
+    if not isinstance(recent_context, dict) or not isinstance(interpretation, dict):
+        return {}
+    relation = _text(recent_context.get("relation")).upper()
+    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+    relation = relation or _text(dialogue.get("relation")).upper()
+    if relation not in {"CONTINUE", "FOLLOWUP", "CONTINUATION"}:
+        return {}
+    semantics = _interpretation_semantic_features(interpretation)
+    features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
+    if not features and isinstance(semantics.get("intent_features"), dict):
+        features = semantics.get("intent_features")
+    interaction = dialogue.get("interaction_profile") if isinstance(dialogue.get("interaction_profile"), dict) else {}
+    context_question = bool(
+        features.get("context_dependent_question")
+        or features.get("previous_assistant_output_reference")
+        or features.get("strong_anaphoric_reference")
+        or interaction.get("previous_answer_reference")
+    )
+    if not context_question:
+        return {}
+    if semantics.get("explicit_topic_switch") or features.get("explicit_topic_switch") or semantics.get("history_request"):
+        return {}
+
+    selected_pairs = recent_context.get("selected_pairs") if isinstance(recent_context.get("selected_pairs"), list) else []
+    prior_ui_user = ""
+    prior_ui_text = ""
+    for pair in selected_pairs[:3]:
+        if not isinstance(pair, dict):
+            continue
+        user_text = _text(pair.get("user") or pair.get("source_user_text"))
+        assistant_text = _text(
+            pair.get("assistant_last_message") or pair.get("source_april_text") or pair.get("april")
+        )
+        pair_text = " ".join((user_text, assistant_text))
+        # The selected branch must carry an actual April-site help exchange, not
+        # merely mention a generic word such as "button" or "community".
+        if user_text and is_site_help_query(user_text):
+            if _referenced_site_area_ids({"selected_pairs": [pair], "relation": relation}):
+                prior_ui_user = user_text
+                prior_ui_text = pair_text
+                break
+    if not prior_ui_user:
+        return {}
+
+    area_ids = _referenced_site_area_ids(recent_context)
+    if not area_ids:
+        area_ids = _referenced_site_area_ids({"selected_pairs": [
+            {"user": prior_ui_user, "assistant_last_message": prior_ui_text}
+        ]})
+    if not area_ids:
+        return {}
+
+    prior_low = prior_ui_user.lower().replace("ё", "е")
+    function_ids: List[str] = []
+    semantic_targets: List[str] = []
+    if "space" in area_ids and re.search(
+        r"(?:отправ\w*|пересыл\w*|опубликов\w*|публикац\w*|post\w*|send\w*).{0,90}(?:сообществ\w*|community)|(?:сообществ\w*|community).{0,90}(?:сообщен\w*|пост\w*|опубликов\w*|send\w*)",
+        prior_low, re.I | re.S,
+    ):
+        assistant_owned_content = bool(re.search(
+            r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:ответ|сообщен\w*)|"
+            r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
+            r"\b(?:your|my|our)\s+(?:april\s+)?(?:reply|response|message)\b|"
+            r"\bapril(?:'s)?\s+(?:reply|response|message)\b)",
+            prior_low, re.I,
+        ))
+        if assistant_owned_content:
+            function_ids.extend(["assistant_response_share", "community_public_post"])
+            semantic_targets.extend(["response.share_to_community", "community.public_post"])
+        else:
+            function_ids.append("community_public_post")
+            semantic_targets.append("community.public_post")
+    elif "space" in area_ids and re.search(r"(?:личн\w*\s+чат|приватн\w*\s+чат|private\s+chat|friend.{0,40}message)", prior_low, re.I):
+        function_ids.append("community_private_chat")
+        semantic_targets.append("community.private_chat")
+    elif "space" in area_ids and re.search(r"(?:друз\w*|контакт\w*|найти\s+пользоват|add\s+friend|search\s+friends)", prior_low, re.I):
+        function_ids.append("community_friend_manage")
+        semantic_targets.append("community.friends")
+    elif "space" in area_ids and re.search(r"(?:приглаш\w*|invite\s+a\s+friend)", prior_low, re.I):
+        function_ids.append("community_invite")
+        semantic_targets.append("community.invite")
+
+    return {
+        "relation": relation,
+        "area_ids": (["response-feedback", "chat", "space"] if "assistant_response_share" in function_ids else area_ids)[:4],
+        "function_ids": function_ids[:4],
+        "semantic_targets": semantic_targets[:4],
+        "prior_user_request": prior_ui_user[:360],
+        "prior_answer_excerpt": prior_ui_text[:900],
+        "source": "selected_active_dialogue_branch",
+    }
 
 def _referenced_site_area_ids(context: Any) -> List[str]:
     rows = _recent_context_texts(context)
@@ -14529,7 +14937,7 @@ def _site_navigation_visual_brief(query: str, referenced_area_ids: Any = None) -
         if item and item.get("path") and "[" not in str(item.get("path")) and "/Admin-profile" != item.get("path"):
             routes.append({"label": _text(item.get("label")), "path": _text(item.get("path")), "steps": list(item.get("steps") or [])[:3]})
     return {
-        "purpose": "Create a source-derived SVG navigation guide. This is not a captured screenshot and must never be passed to an image generator as if it were the real deployed screen.",
+        "purpose": "Create a source-derived route flowchart from verified page components and handlers. This is not a captured screenshot and must never be passed to an image generator as if it were the real deployed screen.",
         "screen_id": screen,
         "screen_title": _text(blueprint.get("screen_title")),
         "visible_controls": list(blueprint.get("visible_controls") or [])[:18],
@@ -14600,6 +15008,10 @@ def _site_contract_target_ids(contracts: Any) -> List[str]:
     result: List[str] = []
     mapping = {
         "response.feedback": ["response-feedback", "chat"],
+        "response.share_to_community": ["response-feedback", "chat", "space"],
+        "rendered_graph.controls": ["graph-controls", "chat"],
+        "chat.side_panels": ["chat", "settings", "history"],
+        "chat.free_media_referral": ["chat", "settings"],
         "chat.clear_workspace": ["chat"],
         "chat.paperclip_picker": ["attachments", "chat"],
         "chat.voice_input": ["chat"],
@@ -14615,6 +15027,8 @@ def _site_contract_target_ids(contracts: Any) -> List[str]:
         "community.public_post": ["space"],
         "community.invite": ["space"],
         "community.friends": ["space"],
+        "community.personal_profile": ["space"],
+        "community.post_actions": ["space"],
         "community.private_chat": ["space", "direct"],
         "support.request": ["support"],
         "april.help_information": ["guide"],
@@ -14651,8 +15065,23 @@ def prepare_site_help_interpretation(
     if removed_negative_clause:
         query = effective_query
     action_contracts = _site_ui_action_contracts(interpretation)
-    direct_match = bool(action_contracts) or is_site_help_query(query)
     referent_ids: List[str] = _site_contract_target_ids(action_contracts)
+    contextual_ui_followup = {}
+    semantic_nav = _site_navigation_semantics(interpretation)
+    semantic_function_resolution = _site_semantic_function_targets(query, semantic_nav, referent_ids)
+    # A typed April-UI action from the semantic interpreter is sufficient to
+    # enter this help room even when the user's wording does not contain a
+    # literal UI keyword (e.g. "how do I zoom this graph?"). The resolver only
+    # returns function ids after validating domain=april_ui and an allowed
+    # navigation action, so this is not a raw phrase trigger.
+    direct_match = bool(action_contracts) or bool(semantic_function_resolution.get("function_ids")) or is_site_help_query(query)
+    if semantic_function_resolution.get("area_ids") and not referent_ids:
+        referent_ids = list(semantic_function_resolution.get("area_ids") or [])
+    if not direct_match and not removed_negative_clause:
+        contextual_ui_followup = _active_site_ui_followup(interpretation, query, recent_context)
+        if contextual_ui_followup:
+            referent_ids = list(contextual_ui_followup.get("area_ids") or [])
+            direct_match = bool(referent_ids)
     if not direct_match and not removed_negative_clause and _ELLIPTICAL_SITE_FOLLOWUP_RE.search(str(query or "")):
         relation = _text(recent_context.get("relation")).upper() if isinstance(recent_context, dict) else ""
         if relation in {"CONTINUE", "FOLLOWUP", "CONTINUATION"}:
@@ -14668,7 +15097,13 @@ def prepare_site_help_interpretation(
     outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
     source_image_edit = _interpretation_has_concrete_image_edit(interpretation)
     attachment_help = _is_attachment_instruction_query(query) or any(_text(item.get("action")).upper() == "GUIDE_ATTACH_IMAGE" for item in action_contracts)
-    navigation_visual_request = _site_navigation_picture_request(query, referent_ids) or attachment_help or bool(action_contracts)
+    navigation_visual_request = (
+        _site_navigation_picture_request(query, referent_ids)
+        or attachment_help
+        or bool(action_contracts)
+        or bool(semantic_function_resolution.get("function_ids"))
+        or bool(contextual_ui_followup)
+    )
     route_picture = navigation_visual_request and not source_image_edit
     explicit_raster_requested = bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(str(query or "")))
     # The application source cannot capture the user's live browser. A UI screenshot
@@ -14736,6 +15171,14 @@ def prepare_site_help_interpretation(
     intent["site_navigation_help"] = True
     intent["site_navigation_contracts"] = action_contracts[:8]
     intent["site_navigation_target_ids"] = list(referent_ids)
+    if semantic_function_resolution.get("function_ids"):
+        intent["site_navigation_target_functions"] = list(semantic_function_resolution.get("function_ids") or [])
+        intent["site_navigation_semantic_targets"] = list(semantic_function_resolution.get("semantic_targets") or [])
+    if contextual_ui_followup:
+        intent["site_navigation_context_followup"] = True
+        intent["site_navigation_target_functions"] = list(contextual_ui_followup.get("function_ids") or [])
+        intent["site_navigation_semantic_targets"] = list(contextual_ui_followup.get("semantic_targets") or [])
+        intent["site_navigation_context_source"] = "selected_active_dialogue_branch"
     intent["adaptive_visual_policy"] = True
     if explicit_raster_requested and not source_image_edit:
         intent["real_screenshot_unavailable"] = True
@@ -14813,6 +15256,10 @@ def prepare_site_help_interpretation(
     if isinstance(structure, dict):
         structure["site_navigation_help"] = True
         structure["site_navigation_diagram_required"] = wants_diagram
+        if contextual_ui_followup:
+            structure["site_navigation_context_followup"] = True
+            structure["site_navigation_target_functions"] = list(contextual_ui_followup.get("function_ids") or [])
+            structure["site_navigation_semantic_targets"] = list(contextual_ui_followup.get("semantic_targets") or [])
         if route_picture:
             structure["history_request"] = False
             structure["requested_outputs"] = ["text", "diagram", *(["image"] if explicit_raster else [])]
@@ -14908,8 +15355,8 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         selected_ids = ["attachments", "chat"]
     elif any(phrase in query for phrase in _SITE_CONCEPT_ALIASES.get("attachments", ())):
         selected_ids = ["attachments", "chat", *[value for value in selected_ids if value not in {"attachments", "chat"}]]
-    intent = machine_request.get("intent") if isinstance(machine_request, dict) and isinstance(machine_request.get("intent"), dict) else getattr(machine_request, "intent", {})
-    intent = intent if isinstance(intent, dict) else {}
+    intent_sources = _site_request_intent_layers(machine_request)
+    intent = intent_sources[0] if intent_sources else {}
     ui_action_contracts = _site_ui_action_contracts(machine_request)
     contract_targets = _site_contract_target_ids(ui_action_contracts)
     semantic_ui_targets: list[str] = []
@@ -14919,18 +15366,52 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
             _target = _text(_target)
             if _target and _target not in semantic_ui_targets:
                 semantic_ui_targets.append(_target)
+    carried_targets: List[str] = []
+    carried_function_ids: List[str] = []
+    for source in intent_sources:
+        values = source.get("site_navigation_semantic_targets") if isinstance(source.get("site_navigation_semantic_targets"), list) else []
+        for value in values:
+            value = _text(value)
+            if value and value not in carried_targets:
+                carried_targets.append(value)
+        values = source.get("site_navigation_target_functions") if isinstance(source.get("site_navigation_target_functions"), list) else []
+        for value in values:
+            value = _text(value)
+            if value and value not in carried_function_ids:
+                carried_function_ids.append(value)
+    semantic_resolved = _site_semantic_function_targets(query, _site_navigation_semantics(machine_request), selected_ids)
+    for value in semantic_resolved.get("semantic_targets", []):
+        if value not in carried_targets:
+            carried_targets.append(value)
+    for value in semantic_resolved.get("function_ids", []):
+        if value not in carried_function_ids:
+            carried_function_ids.append(value)
+    for _target in carried_targets:
+        if _target and _target not in semantic_ui_targets:
+            semantic_ui_targets.append(_target)
+    target_function_ids = carried_function_ids
     # A typed answer-feedback action belongs to controls beneath the response,
     # not to the general Contact Support ticket page even when the user says "жалоба".
     if "response-feedback" in contract_targets:
         feedback_help = True
-    referent_ids = intent.get("site_navigation_referent") if isinstance(intent.get("site_navigation_referent"), list) else []
-    referent_ids = [str(value) for value in referent_ids if str(value) in {str(area.get("id")) for area in APRIL_SITE_MAP["areas"]}]
+    referent_ids: List[str] = []
+    for source in intent_sources:
+        for key in ("site_navigation_referent", "site_navigation_target_ids"):
+            values = source.get(key) if isinstance(source.get(key), list) else []
+            for value in values:
+                value = str(value)
+                if value not in referent_ids:
+                    referent_ids.append(value)
+    for value in semantic_resolved.get("area_ids", []):
+        if value not in referent_ids:
+            referent_ids.append(value)
+    referent_ids = [value for value in referent_ids if value in {str(area.get("id")) for area in APRIL_SITE_MAP["areas"]}]
     if referent_ids:
         selected_ids = referent_ids + [area_id for area_id in selected_ids if area_id not in referent_ids and area_id != "guide"]
     if not selected_ids:
         selected_ids = ["guide", "chat", "settings", "history"]
-    # Target route order follows the user's wording. The screenshots confirm that
-    # History, Support and Community are quick links inside the profile/CURRENT PLAN card.
+    # Target route order follows the user's wording. The uploaded profile image
+    # is one user-provided example; the complete route/control inventory comes from Web handlers.
     if not referent_ids and selected_ids and not feedback_help:
         targets = [area_id for area_id in selected_ids if area_id not in {"settings", "chat", "guide", "memory"}]
         targets.sort(key=lambda area_id: min((query.find(hint) for hint in _SITE_AREA_HINTS.get(area_id, ()) if query.find(hint) >= 0), default=10**6))
@@ -15057,7 +15538,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                 pending.append(related)
     # Specific route questions get only the profile gateway and requested destinations;
     # do not clutter their diagram with unrelated related routes such as Memory or Support.
-    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "attachments", "image-controls", "history", "memory", "space", "direct", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "tools", "response-feedback"}]
+    query_targets = [area_id for area_id in selected_ids if area_id in {"settings", "chat", "attachments", "image-controls", "graph-controls", "history", "memory", "space", "direct", "support", "guide", "help-center", "how-to-use", "plans", "deletion", "privacy", "terms", "tools", "response-feedback"}]
     if contract_targets or any(area_id not in {"settings", "chat", "guide"} for area_id in query_targets):
         pending = query_targets
     else:
@@ -15069,6 +15550,14 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         pending = ["settings"]
     if feedback_help and not referent_ids:
         pending = ["response-feedback", "chat"]
+    if "response.share_to_community" in semantic_ui_targets:
+        pending = ["response-feedback", "chat", "space"]
+        selected_ids = ["response-feedback", "chat", "space"]
+        feedback_help = False
+    elif "community.public_post" in semantic_ui_targets:
+        pending = ["space"]
+        selected_ids = ["space"]
+        feedback_help = False
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
     selected_ids_final = [str(area.get("id")) for area in chosen]
     screen_id = _site_screen_for_query(query, selected_ids_final, semantic_ui_targets)
@@ -15094,6 +15583,10 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         "access_matrix": APRIL_ACCESS_MATRIX,
         "screen_id": screen_id,
         "screen_blueprints": blueprints,
+        "target_function_ids": target_function_ids[:8],
+        "semantic_targets": semantic_ui_targets[:8],
+        "context_followup": any(bool(source.get("site_navigation_context_followup")) for source in intent_sources),
+        "context_source": next((_text(source.get("site_navigation_context_source")) for source in intent_sources if source.get("site_navigation_context_source")), ""),
         "broad_self_help": bool((broad_self_help or full_interface_overview) and not referent_ids),
         "full_interface_overview": bool(full_interface_overview and not referent_ids),
         "matched_query_cases": [{"case_id": item.get("case_id"), "intent_family": item.get("intent_family"), "expected_path": item.get("expected_path"), "expected_outputs": list(item.get("expected_outputs") or [])} for item in matched_cases[:3]],
@@ -15109,6 +15602,14 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None, semantic_t
     low = str(query or "").lower().replace("ё", "е")
     ids = {str(value) for value in (selected_area_ids or [])} if isinstance(selected_area_ids, (list, tuple, set)) else set()
     semantic = {str(value) for value in (semantic_targets or [])} if isinstance(semantic_targets, (list, tuple, set)) else set()
+    if "response.share_to_community" in semantic:
+        return "response-share-community"
+    if "rendered_graph.controls" in semantic or "graph-controls" in ids:
+        return "graph-controls"
+    if "chat.side_panels" in semantic:
+        return "chat-side-panels"
+    if "chat.free_media_referral" in semantic:
+        return "free-media-referral"
     if "plans.payment" in semantic:
         return "plans-payment"
     if "profile.identifiers" in semantic:
@@ -15127,8 +15628,16 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None, semantic_t
         return "community-flow"
     if "community.private_chat" in semantic:
         return "direct"
+    if "community.invite" in semantic:
+        return "community-invite"
+    if "community.friends" in semantic:
+        return "community-friends"
+    if "community.personal_profile" in semantic:
+        return "community-profile"
+    if "community.post_actions" in semantic:
+        return "community-post-actions"
     if "community.public_post" in semantic:
-        return "community"
+        return "community-post"
     # Profile/CURRENT PLAN is the real gateway for known shortcuts, but use it only
     # when the user asks where to enter/click or requests a multi-destination map.
     # A request about continuing a saved dialogue should show the History screen.
@@ -15195,20 +15704,40 @@ def _site_help_requested(machine_request: Any) -> bool:
         return True
 
     if query:
-        # The only inherited UI route allowed is a genuinely elliptical follow-up
-        # whose current interpretation contains a concrete, still-valid UI referent.
+        # A follow-up remains in the IT room only if the current turn's semantic
+        # Interpretation explicitly inherited a concrete active UI referent.
+        if isinstance(machine_request, dict):
+            intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
+        else:
+            intent = getattr(machine_request, "intent", {})
+            intent = intent if isinstance(intent, dict) else {}
+        nested = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else {}
+        nested_intent = intent.get("intent") if isinstance(intent.get("intent"), dict) else {}
+        nested_structure = intent.get("request_structure") if isinstance(intent.get("request_structure"), dict) else {}
+        nested_dialogue = intent.get("dialogue") if isinstance(intent.get("dialogue"), dict) else {}
+        nested_semantics = nested_structure.get("semantic_interpretation") if isinstance(nested_structure.get("semantic_interpretation"), dict) else {}
+        nested_features = nested_semantics.get("features") if isinstance(nested_semantics.get("features"), dict) else {}
+        if not nested_features and isinstance(nested_semantics.get("intent_features"), dict):
+            nested_features = nested_semantics.get("intent_features")
+        valid_ids = {str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
+        sources = (intent, nested, nested_intent, nested_structure)
+        for source in sources:
+            inherited = bool(source.get("site_navigation_context_followup"))
+            refs = source.get("site_navigation_referent") or source.get("site_navigation_target_ids")
+            if inherited and isinstance(refs, list) and any(str(ref) in valid_ids for ref in refs):
+                relation = _text(nested_dialogue.get("relation") or intent.get("dialogue", {}).get("relation") if isinstance(intent.get("dialogue"), dict) else nested_dialogue.get("relation")).upper()
+                semantically_contextual = bool(
+                    nested_features.get("context_dependent_question")
+                    or nested_features.get("previous_assistant_output_reference")
+                    or nested_features.get("strong_anaphoric_reference")
+                    or _text(nested_semantics.get("primary_intent") or nested_semantics.get("semantic_intent") or nested_semantics.get("intent")).upper() in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+                )
+                if relation in {"CONTINUE", "FOLLOWUP", "CONTINUATION"} and semantically_contextual:
+                    return True
+        # Backward-compatible path for older serialized interpretations.
         if _ELLIPTICAL_SITE_FOLLOWUP_RE.search(query):
-            if isinstance(machine_request, dict):
-                intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
-            else:
-                intent = getattr(machine_request, "intent", {})
-                intent = intent if isinstance(intent, dict) else {}
-            nested = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else {}
-            nested_intent = intent.get("intent") if isinstance(intent.get("intent"), dict) else {}
-            nested_interpretation_intent = nested.get("intent") if isinstance(nested.get("intent"), dict) else {}
-            valid_ids = {str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
-            for source in (intent, nested, nested_intent, nested_interpretation_intent):
-                refs = source.get("site_navigation_referent")
+            for source in sources:
+                refs = source.get("site_navigation_referent") if isinstance(source, dict) else None
                 if isinstance(refs, list) and any(str(ref) in valid_ids for ref in refs):
                     return True
         return False
@@ -15233,7 +15762,7 @@ def _site_help_requested(machine_request: Any) -> bool:
 
 
 def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: Any) -> Dict[str, Any]:
-    """Deterministically add clickable route links and a real route diagram to UI-help answers.
+    """Deterministically add clickable route links and a source-derived route diagram to UI-help answers.
 
     This runs after the provider response is decoded but before the canonical SceneContract
     normalizer. It guarantees that navigation help does not depend on the model choosing a
@@ -15322,6 +15851,87 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     heading = "Проверенные переходы" if is_ru_or_uk else "Verified links"
     effective_route_query, _removed_negative_route_clause = _effective_site_help_query(_current_user_query(machine_request))
     query_for_routes = effective_route_query.lower().replace("ё", "е")
+    target_function_ids = site_map.get("target_function_ids") if isinstance(site_map.get("target_function_ids"), list) else []
+    contextual_site_followup = bool(site_map.get("context_followup"))
+    if "assistant_response_share" in target_function_ids and is_ru_or_uk:
+        answer = (
+            "Да — зелёная круглая стрелка вверх находится **под каждым ответом April**, рядом с кнопками «Жалоба» и «Спасибо». "
+            "Её точная подпись/подсказка в Web: **«Опубликовать в сообществе»**. Это отдельная кнопка публикации именно текущего ответа April, "
+            "а не стрелка отправки в нижнем поле чата и не кнопка отправки нового поста в Community.\n\n"
+            "1. Найдите ответ April, который хотите опубликовать.\n"
+            "2. Проверьте его текст и прикреплённые материалы: публикация попадёт в общую ленту Community.\n"
+            "3. Нажмите зелёную круглую стрелку вверх **под этим ответом**. April отправит текст ответа и доступный для публикации материал напрямую; копировать текст вручную и вставлять его в редактор Community не нужно.\n"
+            "4. Дождитесь сообщения **«Сообщение отправлено в сообщество.»**; затем откройте [Community / Сообщество](/space), чтобы увидеть публикацию.\n\n"
+            "Если публикация не удалась, появится сообщение об ошибке. Вложение публикуется только если оно поддерживается и проходит проверку размера; приватный/непубликуемый материал не должен молча превращаться в публикацию одного текста. "
+            "Перед нажатием убедитесь, что в ответе нет личных данных, паролей или ключей API."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif "community_public_post" in target_function_ids and is_ru_or_uk:
+        if contextual_site_followup:
+            answer = (
+                "Зелёная круглая стрелка **«Отправить»** — это кнопка публикации в нижней панели **Community / Сообщество**. "
+                "Она отправляет текст, который вы ввели или вставили в поле публикации, и выбранное вложение в общую ленту. "
+                "Она **не пересылает автоматически** уже готовый ответ April из основного чата.\n\n"
+                "Чтобы опубликовать мой ответ: скопируйте его текст в чате, откройте [Сообщество April](/space), "
+                "прокрутите к нижней панели, вставьте текст в поле «Опишите вопрос или поделитесь решением…» и нажмите зелёную стрелку **«Отправить»**. "
+                "Публикация станет видна участникам сообщества. Перед отправкой проверьте текст: не добавляйте пароли, ключи API и личные данные.\n\n"
+                "Скрепка слева от поля — отдельная необязательная функция «Прикрепить файл»; файл ограничен 3 МБ."
+            )
+        else:
+            answer = (
+                "Чтобы разместить мой ответ в общей ленте, сначала скопируйте его текст из основного чата — "
+                "в просмотренном исходнике нет отдельной кнопки автоматической пересылки ответа April в Community.\n\n"
+                "1. Откройте [Сообщество April](/space) напрямую. Также его можно найти через [Настройки и профиль](/settings) → карточку CURRENT PLAN → **Community / Сообщество**.\n"
+                "2. Прокрутите ленту до нижней закреплённой панели. В поле «Опишите вопрос или поделитесь решением…» вставьте скопированный ответ.\n"
+                "3. При необходимости нажмите слева **«Прикрепить файл»** и выберите один разрешённый файл до 3 МБ.\n"
+                "4. Нажмите справа зелёную круглую стрелку **«Отправить»**. Текст и вложение появятся в общей ленте и будут видны участникам.\n\n"
+                "Не публикуйте пароли, ключи API и личные данные. Кнопка Community Send публикует введённый черновик, а не пересылает ответ April автоматически."
+            )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif "assistant_response_share" in target_function_ids and not is_ru_or_uk:
+        answer = (
+            "The green round up-arrow is directly **under each April reply**, beside the Report and Thanks controls. "
+            "Its source label is **Share in community**. It publishes that specific April response to the public Community feed; "
+            "it is not the Send arrow in the chat composer or the Community post composer.\n\n"
+            "1. Find the April reply you want to publish and review its text and attached material.\n"
+            "2. Click the green round arrow directly under that reply. April sends the response and any supported shareable material without manual copy/paste.\n"
+            "3. Wait for **Message sent to the community.**, then open [Community](/space) to view the post.\n\n"
+            "If publication fails, the control shows an error. Attachments must be supported and pass the size check; do not publish personal data, passwords or API keys."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif "community_public_post" in target_function_ids and not is_ru_or_uk:
+        if contextual_site_followup:
+            answer = (
+                "The green round **Send** arrow is the publish button in the fixed bottom composer on **Community**. "
+                "It posts the text you typed or pasted, plus any selected attachment, to the public feed. "
+                "It does **not** automatically forward an existing April reply from the main chat.\n\n"
+                "To post my reply, copy its text in the main chat, open [April Community](/space), scroll to the bottom composer, "
+                "paste it into the question field and click the green **Send** arrow. The post is visible to community members. "
+                "Do not include passwords, API keys or personal data."
+            )
+        else:
+            answer = (
+                "Copy the text of my reply from the main chat first; the inspected source does not contain a one-click control "
+                "that automatically forwards an April reply to Community.\n\n"
+                "1. Open [April Community](/space), or go through [Profile and Settings](/settings) → CURRENT PLAN → **Community**.\n"
+                "2. Scroll to the fixed composer at the bottom and paste the reply into the question field.\n"
+                "3. Optionally use **Attach a file** for one supported file up to 3 MB.\n"
+                "4. Click the green round **Send** arrow. The post appears in the public feed and is visible to community members. "
+                "Never post passwords, API keys or personal data."
+            )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
     feedback_help = bool(re.search(
         r"(?:отблагодар\w*|поблагодар\w*|спасибо.{0,45}(?:кноп|где|куда|наж)|пожалова\w*|жалоб\w*|feedback\s+button|report\s+(?:button|response)|thank(?:s|ing)?\s+button)",
         query_for_routes, re.I,
@@ -15535,10 +16145,28 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             _target = _text(_target)
             if _target and _target not in current_ui_targets:
                 current_ui_targets.append(_target)
+    # Keep the semantic target selected by Interpretation all the way through
+    # the final SVG pass. URL-only area ids are insufficient when several
+    # controls live under the same route, e.g. / chat response controls.
+    for _target in site_map.get("semantic_targets", []) if isinstance(site_map.get("semantic_targets"), list) else []:
+        _target = _text(_target)
+        if _target and _target not in current_ui_targets:
+            current_ui_targets.append(_target)
     screen_id = "overview" if full_interface_overview else _site_screen_for_query(current_route_query, all_selected_area_ids, current_ui_targets)
-    pointer_requested = feedback_help or bool(re.search(r"(?:стрелк\w*|указател\w*|укаж\w*|отмет\w*|подсвет\w*|arrow|pointer|point\s+to)", current_route_query, re.IGNORECASE))
-    pointer_target = ""
-    if re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
+    pointer_requested = screen_id in {"response-share-community", "graph-controls", "chat-side-panels", "free-media-referral", "community-invite", "community-friends", "community-profile", "community-post-actions"} or feedback_help or bool(re.search(r"(?:стрелк\w*|указател\w*|укаж\w*|отмет\w*|подсвет\w*|arrow|pointer|point\s+to)", current_route_query, re.IGNORECASE))
+    pointer_target = (
+        "share" if screen_id == "response-share-community" else
+        "invite" if screen_id == "community-invite" else
+        "search" if screen_id == "community-friends" else
+        "nickname" if screen_id == "community-profile" else
+        "post" if screen_id == "community-post-actions" else
+        "graph" if screen_id == "graph-controls" else
+        "history-panel" if screen_id == "chat-side-panels" and re.search(r"(?:истори\w*|history)", current_route_query, re.I) else
+        "profile-panel" if screen_id == "chat-side-panels" else
+        "invite" if screen_id == "free-media-referral" else
+        ""
+    )
+    if not pointer_target and re.search(r"(?:истори\w*\s+диалог\w*|saved\s+dialogues?|\bhistory\b)", current_route_query, re.IGNORECASE):
         pointer_target = "history"
     elif re.search(r"(?:сообществ\w*|community)", current_route_query, re.IGNORECASE):
         pointer_target = "space"
@@ -15621,6 +16249,26 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
 
     selected_area_ids = [str(row.get("id") or "") for row in diagram_route_rows]
+    if screen_id == "community-post":
+        nodes = [
+            {"id": "space", "label": "Community / Сообщество\n/space", "kind": "start", "href": "/space"},
+            {"id": "feed", "label": "Общая лента публикаций", "kind": "step"},
+            {"id": "composer", "label": "Нижняя закреплённая панель\nполе «Опишите вопрос или поделитесь решением…»", "kind": "step"},
+            {"id": "paste", "label": "Вставить скопированный текст ответа April", "kind": "action"},
+            {"id": "attach", "label": "Скрепка «Прикрепить файл»\nнеобязательно · файл до 3 МБ", "kind": "action"},
+            {"id": "send", "label": "Зелёная круглая стрелка\n«Отправить»", "kind": "action"},
+            {"id": "published", "label": "Пост опубликован\nвиден участникам сообщества", "kind": "result"},
+        ]
+        edges = [
+            {"from": "space", "to": "feed", "label": "Открыть страницу"},
+            {"from": "feed", "to": "composer", "label": "Прокрутить к низу ленты"},
+            {"from": "composer", "to": "paste", "label": "Вставить текст"},
+            {"from": "composer", "to": "attach", "label": "Прикрепить при необходимости"},
+            {"from": "paste", "to": "send", "label": "Нажать после проверки"},
+            {"from": "send", "to": "published", "label": "Публикация в общей ленте"},
+        ]
+        node_by_area = {"space": "space"}
+        selected_area_ids = ["space"]
     if screen_id == "community-flow":
         nodes = [
             {"id": "space", "label": "Community /space", "kind": "start", "href": "/space"},
@@ -15742,6 +16390,150 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         ]
         node_by_area = {"chat": "chat", "image-controls": "action_menu"}
         selected_area_ids = ["chat", "image-controls"]
+    if screen_id == "graph-controls":
+        nodes = [
+            {"id": "chat", "label": "Основной чат April\n/", "kind": "start", "href": "/"},
+            {"id": "graph", "label": "Открыть ответ с графиком", "kind": "step"},
+            {"id": "zoom", "label": "3D: − / +\nмасштаб", "kind": "action"},
+            {"id": "views", "label": "Ракурс: слева · справа · сзади\nсверху · сбоку · 3D", "kind": "action"},
+            {"id": "reset", "label": "Сбросить вид", "kind": "action"},
+            {"id": "data", "label": "Линейный график: «Показать описание и данные»", "kind": "action"},
+            {"id": "wave", "label": "Волна: пауза / продолжить\nтолько если поддерживается", "kind": "action"},
+        ]
+        edges = [
+            {"from": "chat", "to": "graph", "label": "Найти карточку"},
+            {"from": "graph", "to": "zoom", "label": "Масштаб"},
+            {"from": "graph", "to": "views", "label": "Выбрать ракурс"},
+            {"from": "views", "to": "reset", "label": "Вернуть исходный вид"},
+            {"from": "graph", "to": "data", "label": "Только линейные графики"},
+            {"from": "graph", "to": "wave", "label": "Только поддерживаемая анимация"},
+        ]
+        node_by_area = {"chat": "chat", "graph-controls": "graph"}
+        selected_area_ids = ["chat", "graph-controls"]
+    if screen_id == "chat-side-panels":
+        nodes = [
+            {"id": "chat", "label": "Основной чат April\n/", "kind": "start", "href": "/"},
+            {"id": "profile-panel", "label": "Боковая панель профиля\nСвернуть / Развернуть", "kind": "action"},
+            {"id": "profile", "label": "Профиль и настройки\n/settings", "kind": "destination", "href": "/settings"},
+            {"id": "premium-check", "label": "Проверка активного Premium", "kind": "condition"},
+            {"id": "history-panel", "label": "Отдельная панель истории\nСвернуть / Развернуть", "kind": "action"},
+            {"id": "history", "label": "История диалогов\n/history", "kind": "destination", "href": "/history"},
+        ]
+        edges = [
+            {"from": "chat", "to": "profile-panel", "label": "Панель рабочего пространства"},
+            {"from": "profile-panel", "to": "profile", "label": "Открыть профиль"},
+            {"from": "chat", "to": "premium-check", "label": "Если entitlement активен"},
+            {"from": "premium-check", "to": "history-panel", "label": "Только Premium"},
+            {"from": "history-panel", "to": "history", "label": "Открыть историю"},
+        ]
+        node_by_area = {"chat": "chat", "settings": "profile", "history": "history"}
+        selected_area_ids = ["chat", "settings", "history"]
+    if screen_id == "free-media-referral":
+        nodes = [
+            {"id": "chat", "label": "Основной чат April\n/", "kind": "start", "href": "/"},
+            {"id": "quota", "label": "Окно: лимит медиа Free исчерпан", "kind": "condition"},
+            {"id": "text-chat", "label": "Текстовый чат остаётся доступен", "kind": "result"},
+            {"id": "invite", "label": "Поделиться ссылкой с другом", "kind": "action"},
+            {"id": "system-share", "label": "Системное меню мессенджеров\nили Copy link", "kind": "step"},
+            {"id": "confirm", "label": "Подтвердить: «Я отправил ссылку»", "kind": "action"},
+            {"id": "bonus", "label": "+6 медиаопераций Free\nдля одного нового аккаунта", "kind": "result"},
+            {"id": "wait", "label": "Подождать восстановления квоты\n5 часов по source snapshot", "kind": "step"},
+            {"id": "premium", "label": "Перейти на Premium\n/settings", "kind": "destination", "href": "/settings"},
+        ]
+        edges = [
+            {"from": "chat", "to": "quota", "label": "При исчерпании общего медиалimitа"},
+            {"from": "quota", "to": "text-chat", "label": "Текст доступен"},
+            {"from": "quota", "to": "invite", "label": "Получить бонус"},
+            {"from": "invite", "to": "system-share", "label": "Открыть Share / Copy link"},
+            {"from": "system-share", "to": "confirm", "label": "Подтвердить отправку"},
+            {"from": "confirm", "to": "bonus", "label": "После серверного подтверждения"},
+            {"from": "quota", "to": "wait", "label": "Вместо приглашения"},
+            {"from": "quota", "to": "premium", "label": "Альтернатива"},
+        ]
+        node_by_area = {"chat": "quota", "settings": "premium"}
+        selected_area_ids = ["chat", "settings"]
+    if screen_id == "community-invite":
+        nodes = [
+            {"id": "space", "label": "April Community\n/space", "kind": "start", "href": "/space"},
+            {"id": "profile", "label": "Personal profile\nЛичный профиль", "kind": "step"},
+            {"id": "invite", "label": "Invite a friend\nПригласить друга", "kind": "action"},
+            {"id": "share", "label": "Системное меню Share\nили Copy link", "kind": "step"},
+            {"id": "friend", "label": "Отправить ссылку другу", "kind": "result"},
+        ]
+        edges = [
+            {"from": "space", "to": "profile", "label": "Раскрыть профиль сообщества"},
+            {"from": "profile", "to": "invite", "label": "Нажать Invite a friend"},
+            {"from": "invite", "to": "share", "label": "Открыть доступный способ передачи"},
+            {"from": "share", "to": "friend", "label": "Выбрать мессенджер или скопировать"},
+        ]
+        node_by_area = {"space": "invite"}
+        selected_area_ids = ["space"]
+    if screen_id == "community-friends":
+        nodes = [
+            {"id": "space", "label": "April Community\n/space", "kind": "start", "href": "/space"},
+            {"id": "search", "label": "Search friends\nПоиск друзей", "kind": "action"},
+            {"id": "add", "label": "Add friend\nДобавить друга", "kind": "action"},
+            {"id": "pending", "label": "Request sent\nЗапрос отправлен", "kind": "result"},
+            {"id": "accept", "label": "Incoming request → Accept", "kind": "action"},
+            {"id": "block", "label": "Block / Unblock", "kind": "action"},
+        ]
+        edges = [
+            {"from": "space", "to": "search", "label": "Найти участника"},
+            {"from": "search", "to": "add", "label": "Отправить запрос"},
+            {"from": "add", "to": "pending", "label": "Ожидать ответ"},
+            {"from": "space", "to": "accept", "label": "Принять входящий запрос"},
+            {"from": "space", "to": "block", "label": "Управлять блокировкой"},
+        ]
+        node_by_area = {"space": "search"}
+        selected_area_ids = ["space"]
+    if screen_id == "community-profile":
+        nodes = [
+            {"id": "space", "label": "April Community\n/space", "kind": "start", "href": "/space"},
+            {"id": "profile", "label": "Personal profile\nЛичный профиль", "kind": "step"},
+            {"id": "nickname", "label": "Community nickname\nполе имени", "kind": "action"},
+            {"id": "save", "label": "Save nickname\nСохранить ник", "kind": "action"},
+            {"id": "saved", "label": "Ник показывается рядом с публикациями", "kind": "result"},
+        ]
+        edges = [
+            {"from": "space", "to": "profile", "label": "Раскрыть Personal profile"},
+            {"from": "profile", "to": "nickname", "label": "Изменить имя"},
+            {"from": "nickname", "to": "save", "label": "Сохранить"},
+            {"from": "save", "to": "saved", "label": "После успешного сохранения"},
+        ]
+        node_by_area = {"space": "profile"}
+        selected_area_ids = ["space"]
+    if screen_id == "community-post-actions":
+        nodes = [
+            {"id": "space", "label": "April Community\n/space", "kind": "start", "href": "/space"},
+            {"id": "post", "label": "Найти карточку публикации", "kind": "step"},
+            {"id": "download", "label": "Download file\nСкачать вложение", "kind": "action"},
+            {"id": "report", "label": "Report\nПожаловаться на чужой пост", "kind": "action"},
+            {"id": "delete", "label": "Delete your message\nУдалить свою публикацию", "kind": "action"},
+        ]
+        edges = [
+            {"from": "space", "to": "post", "label": "Открыть нужную публикацию"},
+            {"from": "post", "to": "download", "label": "Если есть вложение"},
+            {"from": "post", "to": "report", "label": "Для чужой публикации"},
+            {"from": "post", "to": "delete", "label": "Только для своей публикации"},
+        ]
+        node_by_area = {"space": "post"}
+        selected_area_ids = ["space"]
+    if screen_id == "response-share-community":
+        nodes = [
+            {"id": "chat", "label": "Основной чат April\n/", "kind": "start", "href": "/"},
+            {"id": "reply", "label": "Найти конкретный ответ April", "kind": "step"},
+            {"id": "share", "label": "Зелёная круглая стрелка вверх\n«Опубликовать в сообществе»", "kind": "action"},
+            {"id": "status", "label": "Подтверждение\n«Сообщение отправлено в сообщество.»", "kind": "result"},
+            {"id": "space", "label": "Общая лента Community\n/space", "kind": "destination", "href": "/space"},
+        ]
+        edges = [
+            {"from": "chat", "to": "reply", "label": "Выбрать ответ"},
+            {"from": "reply", "to": "share", "label": "Строка действий под ответом"},
+            {"from": "share", "to": "status", "label": "Отправка текущего ответа"},
+            {"from": "status", "to": "space", "label": "Проверить публикацию в ленте"},
+        ]
+        node_by_area = {"chat": "chat", "response-feedback": "share", "space": "space"}
+        selected_area_ids = ["chat", "response-feedback", "space"]
     if screen_id == "response-feedback":
         # The controls are inside the response card, not separate URL destinations.
         # Represent the actual interaction sequence instead of collapsing all '/' paths.
@@ -15765,7 +16557,16 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "artifact-actions": "Как сохранить или поделиться артефактом",
         "direct": "Личный чат · отправка файла другу",
         "community-flow": "Сообщество: публичный пост и личное сообщение",
-        "response-feedback": "Куда нажать: «Спасибо» или «Жалоба»",
+        "community-post": "Сообщество: кнопка публикации в общей ленте",
+        "response-share-community": "Как опубликовать ответ April зелёной стрелкой",
+        "community-invite": "Как пригласить друга в April Community",
+        "community-friends": "Как найти друзей и управлять запросами",
+        "community-profile": "Как изменить имя в Community",
+        "community-post-actions": "Действия с публикациями Community",
+        "graph-controls": "Как изменить масштаб и ракурс графика",
+        "chat-side-panels": "Боковые панели профиля и истории",
+        "free-media-referral": "Лимит Free: приглашение и восстановление медиаопераций",
+        "response-feedback": "Действия под ответом April: «Спасибо» и «Жалоба»",
         "profile": "Настройки и профиль · Быстрые переходы",
         "plans-payment": "Оплата Premium · CURRENT PLAN",
         "profile-identifiers": "April ID и Premium ID · Copy",
@@ -15788,12 +16589,27 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     diagram_title = screen_titles.get(screen_id, blueprint_title or "Карта переходов April")
     diagram_payload = {
         "title": diagram_title,
-        "description": "Схема построена по проверенным маршрутам и видимым элементам интерфейса April; это источник-обусловленная схема, а не реальный скриншот текущего экрана и не управляющее действие.",
-        "representation": "navigation_flow",
+        "description": "СХЕМА НАВИГАЦИИ ПО ИСХОДНИКАМ APRIL · НЕ СКРИНШОТ. Показывает подтверждённый порядок переходов и действий; это не копия экрана и не выполняет клики.",
+        "representation": "route_flowchart",
+        "visual_kind": "SOURCE_DERIVED_NAVIGATION_FLOW",
+        "not_a_screenshot": True,
+        "source_evidence": [
+            "aprill-web-main/app/page.tsx",
+            "aprill-web-main/app/settings/page.tsx",
+            "aprill-web-main/app/space/page.tsx",
+            "aprill-web-main/app/space/direct/[friendId]/page.tsx",
+            "aprill-web-main/app/history/page.tsx",
+            "aprill-web-main/app/aprill/page.tsx",
+            "aprill-web-main/app/insights/page.tsx",
+            "aprill-web-main/app/Component/RenderActions.tsx",
+            "aprill-web-main/app/Component/ReportAIResponse.tsx",
+        ],
         "screen_id": screen_id,
         "selected_route_ids": selected_area_ids,
         "matched_query": current_route_query[:260],
-        "screen_blueprints": site_map.get("screen_blueprints", []),
+        # Empty by design: screen blueprints are retrieval hints, not captured screens.
+        # The renderer must use only the explicit source-derived route nodes and edges below.
+        "control_inventory": [],
         "visual_theme": {
             "name": "April Night",
             "background": "#05060a", "surface": "#14141e", "surface_alt": "#1b2028",
@@ -15801,7 +16617,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             "primary": "#7dff8f", "secondary": "#7de7ff", "danger": "#fda4af",
             "warning": "#fcd34d",
         },
-        "position_guide": "Нумерация показывает порядок; верх/низ и левое/правое положение даны относительно экрана. Нажимайте реальные элементы в Web, схема не кликабельна.",
+        "position_guide": "Это маршрутная схема, не макет экрана: нумерация показывает порядок действий. Положение описано относительно области страницы, без выдуманных координат и пиксельной имитации. Открывайте настоящие элементы в Web.",
         # The portrait layout stays readable on phone screens. SVG is generated
         # from these same route nodes/edges; this is not a pre-baked topic diagram.
         "layout": {"direction": "TB", "rankdir": "TB", "spacing": "comfortable", "responsive": True},
@@ -15812,7 +16628,23 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     }
     if pointer_requested:
         target_id = ""
-        if screen_id == "response-feedback" and re.search(r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+спасибо|thank(?:s|ing)?)", current_route_query, re.IGNORECASE):
+        if screen_id == "response-share-community":
+            target_id = "share"
+        elif screen_id == "community-invite":
+            target_id = "invite"
+        elif screen_id == "community-friends":
+            target_id = "search"
+        elif screen_id == "community-profile":
+            target_id = "nickname"
+        elif screen_id == "community-post-actions":
+            target_id = "post"
+        elif screen_id == "graph-controls":
+            target_id = "graph"
+        elif screen_id == "chat-side-panels":
+            target_id = "history-panel" if re.search(r"(?:истори\w*|history)", current_route_query, re.I) else "profile-panel"
+        elif screen_id == "free-media-referral":
+            target_id = "invite"
+        elif screen_id == "response-feedback" and re.search(r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+спасибо|thank(?:s|ing)?)", current_route_query, re.IGNORECASE):
             target_id = "thanks"
         elif screen_id == "response-feedback" and re.search(r"(?:пожалова\w*|жалоб\w*|report)", current_route_query, re.IGNORECASE):
             target_id = "report"
@@ -15882,7 +16714,10 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
             canonical_kind = output_aliases.get(block_kind, block_kind)
             if canonical_kind in {"image", "graph", "code", "formula", "table", "flow"} and canonical_kind not in allowed_outputs:
                 continue
-            if canonical_kind == "image" and not _has_site_image_source(block) and "image" not in allowed_outputs:
+            if canonical_kind == "image" and not source_image_edit:
+                # A page map must never be represented by a fabricated screenshot or
+                # a generated image. User-uploaded screenshots can be annotated only
+                # through the separately authorized source-image edit path.
                 continue
             cleaned_blocks.append(block)
         blocks = cleaned_blocks
@@ -16046,7 +16881,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
     ]
     if help_active:
         prompt_fragments.extend([
-            "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal; use site_navigation_map and site_function_catalog to resolve the real visible control. Phrase aliases are fallback only, never a required fixed trigger.",
+            "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map and site_function_catalog to resolve the real visible control. Phrase aliases are fallback only, never a required fixed trigger.",
             "For every requested function, explain: exact starting page and how to reach it, relative screen position, visible button/field label, what it does, ordered click/input steps, expected result, availability/plan conditions and important limits.",
             "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person.",
             "When the user asks to be guided or asks what to click, include the relevant function-catalog entries; do not output only a list of route names.",
@@ -16071,7 +16906,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         requested_outputs = _requested_outputs_from_machine_request(machine_request)
         if _site_should_render_diagram(effective_query, requested_outputs):
             prompt_fragments.extend([
-                "Complement site-navigation help with a clearly labelled source-derived April UI diagram built from the query-relevant screen blueprint and function catalog; show the starting region, numbered controls, relative positions and directed route; keep written steps primary and never invent controls not present in sources.",
+                "Complement site-navigation help with a clearly labelled source-derived April UI route flowchart built from verified page handlers and function catalog. Do not draw a fake screenshot or a mock screen panel: use sequential flowchart nodes/edges only, label it 'Схема по исходникам April — не скриншот', show the actual starting route, visible control label, ordered action and expected result. Keep written instructions primary.",
                 "Use one portrait/mobile SVG for a short path; for a long procedure use two ordered, non-repeating diagrams that continue the route. Keep visible card/button labels and exact verified relative paths.",
                 "A source-image edit request takes precedence over a route diagram. Never replace an image-edit task with a generic map. Empty SVG/diagram shells must be dropped before SceneContract.",
             ])
