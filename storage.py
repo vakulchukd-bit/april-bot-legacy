@@ -1314,8 +1314,7 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                 owner_ids = _dialogue_owner_ids_cursor(cur, uid)
                 if not owner_ids:
                     return []
-                cur.execute(
-                    """
+                query = """
                     SELECT id, user_id, created_at, retention_hours, turn_index, user_text, april_text, user_text_en, april_text_en,
                            language, relation, dialog_id, conversation_id, message_id, interpretation_id,
                            structured_request, structured_response
@@ -1323,11 +1322,20 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     WHERE user_id = ANY(%s)
                       AND created_at <= %s
                       AND created_at + (GREATEST(12, LEAST(24, COALESCE(retention_hours, 12))) * INTERVAL '1 hour') > %s
-                    ORDER BY created_at ASC, turn_index ASC, id ASC
-                    """,
-                    (owner_ids, current, current),
-                )
+                """
+                params: tuple[Any, ...] = (owner_ids, current, current)
+                if limit:
+                    # Select the newest rows in SQL, then restore chronological order
+                    # for discourse processing. This avoids fetching the entire 12h
+                    # Free archive just to inspect the latest answer.
+                    query += " ORDER BY created_at DESC, turn_index DESC, id DESC LIMIT %s"
+                    params = (owner_ids, current, current, max(1, min(32, int(limit))))
+                else:
+                    query += " ORDER BY created_at ASC, turn_index ASC, id ASC"
+                cur.execute(query, params)
                 rows = [dict(row) for row in cur.fetchall()]
+                if limit:
+                    rows.reverse()
                 for row in rows:
                     # Present one canonical identity to downstream state/search code,
                     # even when the underlying retained row used the old public alias.
