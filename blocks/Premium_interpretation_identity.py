@@ -2105,8 +2105,8 @@ def _is_attachment_tutorial_request(text: Any) -> bool:
 _SITE_NAVIGATION_REQUEST_RE = re.compile(
     r"(?:\bгде\b.{0,90}\b(?:вход|кнопк|ссылк|раздел|страниц|находится|расположен|открыть|посмотреть|найти|зайти)\b|"
     r"\bкуда\b.{0,45}\b(?:зайти|нажать|перейти|открыть)\b|"
-    r"\bкак\b.{0,55}\b(?:попасть|зайти|открыть|перейти|найти|просмотреть|добавить|прикрепить|загрузить|выбрать)\b|"
-    r"покажи.{0,55}(?:куда|путь|интерфейс|меню|на\s+картинк|на\s+изображен|по\s+шагам)|"
+    r"\bкак\b.{0,85}\b(?:попасть|пройти|добраться|зайти|открыть|перейти|найти|просмотреть|пользоваться|воспользоваться|добавить|прикрепить|загрузить|выбрать)\b|"
+    r"(?:покажи|подскажи|объясни|расскажи).{0,75}(?:куда|путь|интерфейс|меню|как\s+(?:попасть|пройти|зайти|открыть|перейти|найти)|на\s+картинк|на\s+изображен|по\s+шагам)|"
     r"проведи.{0,55}(?:интерфейс|сайт|раздел)|"
     r"(?:where\s+(?:is|can\s+i|do\s+i)|how\s+do\s+i\s+(?:open|find|navigate)|show\s+me\s+where)"
     r")",
@@ -3399,9 +3399,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         or history_inventory_request
         or dialogue_history_intent_kind == "CHECK_DIALOGUE_HISTORY"
     ) and not future_topic_question
-    # Exact recall phrases activate history search even when grammar differs by language.
-    if any(marker.replace("ё", "е") in low for marker in _HISTORY_MARKERS):
-        history_recall = True
+    # A history noun or phrase fragment is not a retrieval command by itself.
+    # The semantic checks above require a recall operation, dialogue-question
+    # shape, or explicit inventory/time request.
 
     context_dependent_question = (
         _looks_like_context_dependent_question(
@@ -4052,6 +4052,318 @@ def _transition_answer_summary(value: Any, limit: int = 460) -> str:
     if len(chosen) < 90 and len(sentences) > 2:
         chosen = " ".join(part.strip() for part in sentences[:3] if part.strip())
     return chosen[:limit].rstrip()
+
+
+
+def interpret_request_in_context(
+    text: Any,
+    latest_exchange: dict[str, Any] | None,
+    semantic_interpretation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Interpret a new turn against the latest USER↔APRIL exchange first.
+
+    This is a local, deterministic discourse pass: it makes no model/API call and
+    does not perform memory retrieval. It enriches the request interpretation with
+    evidence from the last saved user turn and April answer, leaving the raw request
+    untouched. State Manager decides whether a matched older branch is needed only
+    after this latest-exchange pass.
+    """
+    source = _text(text)
+    profile = dict(semantic_interpretation or interpret_request_semantics(source) or {})
+    row = latest_exchange if isinstance(latest_exchange, dict) else {}
+    previous_user = _text(
+        row.get("user_text") or row.get("user") or row.get("user_request")
+        or row.get("request") or row.get("question")
+    )
+    previous_answer = _text(
+        row.get("april_text") or row.get("april") or row.get("assistant_last_message")
+        or row.get("assistant_answer") or row.get("answer") or row.get("april_summary")
+    )
+    if not (previous_user or previous_answer) or not source.strip():
+        profile.setdefault("latest_exchange_analysis", {
+            "available": bool(previous_user or previous_answer),
+            "linked": False,
+            "reason": "no_latest_exchange_or_empty_request",
+        })
+        return profile
+
+    low, current_tokens_list = _semantic_normalize(source)
+    previous_user_tokens = set(_semantic_normalize(previous_user)[1])
+    previous_answer_tokens = set(_semantic_normalize(previous_answer[:9000])[1])
+    current_tokens = set(current_tokens_list)
+
+    # Function words and pronouns are not enough to connect two different tasks.
+    # Retain content nouns, verbs and a separately measured shared speech-act term.
+    neutral = {
+        "я", "меня", "мне", "мной", "мой", "моя", "мое", "моё", "мои",
+        "ты", "тебя", "тебе", "тобой", "твой", "твоя", "твое", "твоё", "твои",
+        "мы", "нас", "нам", "нами", "наш", "наша", "наше", "наши", "вы", "вас", "вам",
+        "и", "а", "но", "да", "нет", "ну", "так", "это", "этот", "эта", "эти", "того", "этого",
+        "для", "при", "про", "что", "чем", "чего", "как", "где", "когда", "почему", "зачем",
+        "мне", "моя", "свой", "своя", "свои", "своего", "своей", "своем", "своём",
+        "the", "a", "an", "i", "me", "my", "you", "your", "we", "our", "us",
+        "and", "or", "but", "what", "which", "how", "where", "when", "why", "for", "to", "of", "in", "on",
+    }
+    dialogue_verbs = (
+        "сказ", "говор", "спрос", "ответ", "благодар", "спасиб", "поблагодар",
+        "повтор", "переповтор", "пересказ", "объясн", "уточн", "поясн",
+        "said", "tell", "asked", "answered", "thank", "repeat", "restate", "explain",
+    )
+
+    def content_terms(tokens: set[str]) -> set[str]:
+        result = set()
+        for token in tokens:
+            if token in neutral or len(token) < 3:
+                continue
+            if any(token.startswith(root) for root in dialogue_verbs):
+                continue
+            if _is_context_signature_generic(token):
+                # Interpersonal terms (gratitude/praise) are retained separately
+                # below because they can identify what the user is referring to.
+                continue
+            result.add(token[:6] if len(token) > 6 else token)
+        return result
+
+    current_content = content_terms(current_tokens)
+    prior_user_content = content_terms(previous_user_tokens)
+    prior_answer_content = content_terms(previous_answer_tokens)
+
+    def overlap(current: set[str], previous: set[str]) -> tuple[float, int]:
+        if not current or not previous:
+            return 0.0, 0
+        common = 0
+        for item in current:
+            if item in previous or any(
+                len(other) >= 4 and len(item) >= 4
+                and (item.startswith(other[:5]) or other.startswith(item[:5]))
+                for other in previous
+            ):
+                common += 1
+        return common / max(1, min(len(current), len(previous))), common
+
+    user_overlap, user_common = overlap(current_content, prior_user_content)
+    answer_overlap, answer_common = overlap(current_content, prior_answer_content)
+    quoted_spans = re.findall(r"[\"'«“](.{1,100}?)[\"'»”]", source)
+    quoted_terms = set()
+    for quoted_span in quoted_spans:
+        quoted_terms.update(_semantic_normalize(quoted_span)[1])
+    quoted_user_matches = quoted_terms & previous_user_tokens
+    if quoted_user_matches:
+        user_overlap = max(user_overlap, 0.30)
+        user_common += len(quoted_user_matches)
+
+    pragmatic = profile.get("pragmatic_features") if isinstance(profile.get("pragmatic_features"), dict) else {}
+    act_profile = profile.get("dialogue_act_profile") if isinstance(profile.get("dialogue_act_profile"), dict) else {}
+    act_pragmatic = act_profile.get("pragmatic_features") if isinstance(act_profile.get("pragmatic_features"), dict) else {}
+    features = profile.get("features") if isinstance(profile.get("features"), dict) else {}
+    # Merge both known shapes: Free and Premium have evolved independently over time.
+    signals = dict(act_pragmatic)
+    signals.update(pragmatic)
+
+    # Social/pragmatic intent comes from the interpretation layer's speech-act
+    # profile. This pass only binds that act to the latest saved exchange.
+    gratitude = bool(signals.get("gratitude"))
+    positive = bool(signals.get("positive_evaluation"))
+    acknowledgement = bool(signals.get("acknowledgement_or_agreement") or signals.get("waiting_acknowledgement"))
+    disagreement = bool(signals.get("negation_or_disagreement") or signals.get("correction"))
+    dissatisfaction = bool(signals.get("frustration_or_dissatisfaction") or signals.get("revision_request"))
+    contextual_question = bool(
+        profile.get("context_dependent_question")
+        or signals.get("context_dependent_question")
+        or features.get("context_dependent_question")
+    )
+    contextual_reaction = bool(
+        profile.get("context_dependent_reaction")
+        or signals.get("context_dependent_reaction")
+        or features.get("context_dependent_reaction")
+    )
+    previous_answer_reference = bool(
+        profile.get("previous_answer_reference")
+        or profile.get("active_branch_repair")
+        or features.get("previous_answer_reference")
+        or features.get("active_branch_repair")
+        or signals.get("previous_answer_reference")
+        or signals.get("active_branch_repair")
+    )
+    explicit_switch = bool(profile.get("explicit_topic_switch") or profile.get("explicit_topic_introduction"))
+
+    # A complaint about April repeating/restating history mentions the same words
+    # as a recall request, but its communicative act is correction of the last answer.
+    assistant_repetition_feedback = bool(
+        re.search(r"\b(?:ты|вы|you)\b.{0,110}\b(?:повтор\w*|переповтор\w*|пересказ\w*|повторя\w*|repeat\w*|restate\w*)\b", low, re.I | re.S)
+        and re.search(r"\b(?:истори\w*|диалог\w*|разговор\w*|переписк\w*|history|conversation|chat)\b", low, re.I)
+        and re.search(r"\b(?:зачем|почему|опять|снова|постоянно|why|again|always)\b", low, re.I)
+    )
+    if assistant_repetition_feedback:
+        profile["history_request"] = False
+        profile["history_recall"] = False
+        profile["requires_memory"] = True
+        profile["search_scope"] = "LATEST_EXCHANGE"
+        profile["primary_intent"] = "TOPIC_CONTINUATION"
+        profile["direction"] = "RECHECK_PREVIOUS_ANSWER"
+        profile["topic_reference"] = "PREVIOUS_ASSISTANT_ANSWER"
+        profile["time_scope"] = "ACTIVE_DIALOGUE"
+        profile["relation_hint"] = "CONTINUE"
+        profile["active_branch_repair"] = True
+        profile["previous_answer_reference"] = True
+        profile["reason"] = "assistant_response_feedback_not_history_recall"
+        signals.update({
+            "correction": True,
+            "frustration_or_dissatisfaction": True,
+            "active_branch_repair": True,
+            "previous_answer_reference": True,
+            "context_dependent_reaction": True,
+        })
+        disagreement = True
+        dissatisfaction = True
+        contextual_reaction = True
+
+    # A self-contained new request wins unless it is demonstrably tied to the
+    # immediately preceding exchange. Short social acts are context-bound when
+    # they carry no independent subject/deliverable of their own.
+    signature = _context_signature(source)
+    output_forms = signature.get("output_forms") if isinstance(signature.get("output_forms"), list) else []
+    numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
+    has_independent_payload = bool(
+        signals.get("has_independent_payload")
+        or output_forms
+        or numeric_anchors
+        or (len(current_content) >= 2 and not (gratitude or positive or acknowledgement or disagreement))
+    )
+    short_social_only = bool(
+        (gratitude or positive or acknowledgement or disagreement or dissatisfaction)
+        and not output_forms and not numeric_anchors
+        and not bool(profile.get("interrogative"))
+        and len(current_content) <= 1
+    )
+    continuation_action = bool(
+        signals.get("continuation_action")
+        or signals.get("answer_followup")
+        or features.get("continuation_action")
+        or features.get("answer_followup")
+        or _text(profile.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+    )
+    short_continuation_action = bool(
+        continuation_action and not has_independent_payload
+        and len(current_tokens_list) <= 7
+        and not output_forms and not numeric_anchors
+        and not explicit_switch
+    )
+    linked_by_user_turn = bool(user_common and user_overlap >= 0.22)
+    linked_by_answer = bool(answer_common and answer_overlap >= 0.30)
+    explicit_context_signal = bool(
+        contextual_reaction or previous_answer_reference
+        or features.get("answer_followup") or features.get("topic_reference_fragment")
+        or features.get("strong_anaphoric_reference")
+    )
+    # A second-person reference plus an elliptical question can address April's
+    # immediately preceding answer. Self-possessives such as "свой кабинет" do not.
+    direct_april_reference = bool(
+        contextual_question and re.search(
+            r"\b(?:у\s+тебя\s+же|ты\s+же|твоя|твой|твое|твоё|твои|"
+            r"you\s+have\s+that|your\s+(?:button|answer|message|option))\b",
+            low, re.IGNORECASE,
+        )
+    )
+    explicit_context_signal = bool(explicit_context_signal or direct_april_reference)
+    latest_exchange_link = bool(
+        not profile.get("history_request")
+        and not explicit_switch
+        and (
+            short_social_only
+            or short_continuation_action
+            or assistant_repetition_feedback
+            or linked_by_user_turn
+            or linked_by_answer
+            or (explicit_context_signal and (
+                not has_independent_payload or linked_by_user_turn or linked_by_answer
+                or direct_april_reference
+                or features.get("strong_anaphoric_reference")
+                or features.get("previous_answer_reference")
+                or previous_answer_reference
+            ))
+        )
+    )
+
+    analysis = {
+        "available": True,
+        "linked": latest_exchange_link,
+        "route": "LATEST_EXCHANGE_FIRST" if latest_exchange_link else "CHECK_FOR_PRIOR_BRANCH_OR_NEW_TOPIC",
+        "reason": (
+            "assistant_response_feedback" if assistant_repetition_feedback else
+            "social_or_pragmatic_reaction" if short_social_only else
+            "short_continuation_action" if short_continuation_action else
+            "semantic_link_to_previous_user_turn" if linked_by_user_turn else
+            "semantic_link_to_previous_april_answer" if linked_by_answer else
+            "explicit_april_reference_to_latest_exchange" if latest_exchange_link and direct_april_reference else
+            "contextual_reference_validated_against_latest_exchange" if latest_exchange_link else
+            "self_contained_or_unmatched_request"
+        ),
+        "user_turn_overlap": round(user_overlap, 3),
+        "answer_overlap": round(answer_overlap, 3),
+        "user_shared_terms": user_common,
+        "answer_shared_terms": answer_common,
+        "social_act": bool(gratitude or positive or acknowledgement or disagreement or dissatisfaction),
+        "has_independent_payload": has_independent_payload,
+    }
+    profile["latest_exchange_analysis"] = analysis
+
+    if latest_exchange_link:
+        profile["history_request"] = False
+        profile["history_recall"] = False
+        profile["requires_memory"] = True
+        profile["search_scope"] = "LATEST_EXCHANGE"
+        profile["primary_intent"] = "TOPIC_CONTINUATION"
+        profile["direction"] = "RESOLVE_AGAINST_LATEST_EXCHANGE"
+        profile["topic_reference"] = "PREVIOUS_ASSISTANT_ANSWER"
+        profile["time_scope"] = "ACTIVE_DIALOGUE"
+        profile["relation_hint"] = "CONTINUE"
+        profile["previous_answer_reference"] = True
+        profile["reason"] = analysis["reason"]
+        features = dict(features)
+        features.update({
+            "latest_exchange_link": True,
+            "previous_answer_reference": True,
+            "context_dependent_reaction": bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
+            "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
+        })
+        profile["features"] = features
+        signals.update({
+            "latest_exchange_link": True,
+            "previous_answer_reference": True,
+            "context_dependent_reaction": bool(short_social_only or contextual_reaction or assistant_repetition_feedback),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
+            "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
+        })
+        profile["pragmatic_features"] = signals
+        profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback)
+        profile["previous_answer_reference"] = True
+        profile["active_branch_repair"] = bool(assistant_repetition_feedback or disagreement or dissatisfaction or profile.get("active_branch_repair"))
+        profile["dialogue_act"] = profile.get("dialogue_act") or profile.get("speech_act") or "REFERENTIAL_CONTINUATION"
+    elif (
+        _text(profile.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "ACTIVE_BRANCH_REPAIR"}
+        and has_independent_payload
+        and not explicit_context_signal
+        and not profile.get("history_request")
+        and not explicit_switch
+        and not assistant_repetition_feedback
+    ):
+        # The interpreter inferred continuity from generic question wording, but
+        # the current turn has its own subject/deliverable and no verified link to
+        # the latest exchange. Let State Manager start a clean topic rather than
+        # searching the archive just because a word looked referential.
+        profile["primary_intent"] = "NEW_INFORMATION"
+        profile["direction"] = "ANSWER_NEW_REQUEST"
+        profile["topic_reference"] = "UNSPECIFIED"
+        profile["time_scope"] = "UNSPECIFIED"
+        profile["requires_memory"] = False
+        profile["history_request"] = False
+        profile["search_scope"] = "CURRENT_DIALOGUE"
+        profile["relation_hint"] = "NEW"
+        profile["reason"] = "self_contained_request_without_latest_exchange_link"
+
+    return profile
 
 
 def analyze_dialogue_transition(
