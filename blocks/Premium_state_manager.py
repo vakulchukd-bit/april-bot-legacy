@@ -2581,6 +2581,27 @@ def _dialogue_thread_metadata(row: dict[str, Any]) -> dict[str, Any]:
                 if key not in result and value not in (None, "", [], {}):
                     result[key] = value
 
+    # Some canonical rows (especially records written during older migrations)
+    # retain the durable topic/branch manifest only in structured_request.memory.
+    # Recover its compact identity here as well; otherwise the lightweight topic
+    # index would split a topic whenever the response-side dialogue_thread is absent.
+    if stored_topic_context:
+        topic_context_fallbacks = {
+            "topic_id": stored_topic_context.get("topic_id"),
+            "topic": stored_topic_context.get("topic"),
+            "topic_origin_message_id": stored_topic_context.get("root_message_id"),
+            "origin_message_id": stored_topic_context.get("root_message_id"),
+            "branch_id": stored_topic_context.get("active_branch_id"),
+            "active_branch_id": stored_topic_context.get("active_branch_id"),
+            "topic_summary": stored_topic_context.get("summary"),
+        }
+        for key, value in topic_context_fallbacks.items():
+            if result.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+                result[key] = value
+        # Keep the compact manifest available to the indexer even when it carries
+        # identity fields only, not a branches/artifacts array.
+        result["stored_topic_context"] = stored_topic_context
+
     # Newer turns persist the full topic index inside dialogue_thread. Older
     # records may have only that nested manifest, so expose its durable root/ID
     # without overwriting exact topic/branch fields stored on the individual pair.
@@ -2602,11 +2623,6 @@ def _dialogue_thread_metadata(row: dict[str, Any]) -> dict[str, Any]:
             if result.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
                 result[key] = value
         result["topic_context_manifest"] = manifest
-    if stored_topic_context and (
-        isinstance(stored_topic_context.get("branches"), list)
-        or isinstance(stored_topic_context.get("artifact_index"), list)
-    ):
-        result["stored_topic_context"] = stored_topic_context
     return result
 
 
@@ -2807,13 +2823,28 @@ def _build_topic_index(
         label = _topic_label(row) if include_structured else _topic_label_lightweight(row)
         tokens = _topic_tokens(label)
         relation = _text(row.get("relation") or "NEW").upper()
-        thread = _dialogue_thread_metadata(row) if include_structured else {}
+        # Topic/branch identity is compact routing metadata, not deep structured
+        # content. Read it in both index modes: disabling expensive section and
+        # modality analysis must never erase a durable topic continuum on larger
+        # histories (the previous behavior split one topic into unrelated rows).
+        thread = _dialogue_thread_metadata(row)
         row_topic_id = _text(thread.get("topic_id"))
         row_origin_id = _text(
             thread.get("topic_origin_message_id") or thread.get("origin_message_id")
             or row.get("message_id")
         )
         row_branch_id = _text(thread.get("branch_id") or thread.get("work_id"))
+        stored_topic_context = thread.get("stored_topic_context") if isinstance(thread.get("stored_topic_context"), dict) else {}
+        row_branch_ids = [row_branch_id] if row_branch_id else []
+        stored_branches = stored_topic_context.get("branches") if isinstance(stored_topic_context.get("branches"), list) else []
+        for branch_item in stored_branches:
+            if not isinstance(branch_item, dict):
+                continue
+            branch_id = _text(
+                branch_item.get("branch_id") or branch_item.get("id") or branch_item.get("work_id")
+            )
+            if branch_id and branch_id not in row_branch_ids:
+                row_branch_ids.append(branch_id)
         same_as_prev = False
         if groups:
             prev = groups[-1]
@@ -2865,8 +2896,8 @@ def _build_topic_index(
                 "origin_turn": int(row.get("turn_index") or 0),
                 "message_ids": [_text(row.get("message_id"))] if _text(row.get("message_id")) else [],
                 "topic_id": row_topic_id,
-                "branch_ids": [row_branch_id] if row_branch_id else [],
-                "active_branch_id": row_branch_id,
+                "branch_ids": list(row_branch_ids),
+                "active_branch_id": row_branch_id or (row_branch_ids[-1] if row_branch_ids else ""),
                 "dialog_id": _text(row.get("dialog_id")),
                 "conversation_id": _text(row.get("conversation_id")),
                 "modalities": sorted(_row_modalities(row)) if include_structured else [],
@@ -2894,9 +2925,9 @@ def _build_topic_index(
             row_message_id = _text(row.get("message_id"))
             if row_message_id and row_message_id not in (group.get("message_ids") or []):
                 group.setdefault("message_ids", []).append(row_message_id)
-            if row_branch_id:
-                group["branch_ids"] = list(dict.fromkeys((group.get("branch_ids") or []) + [row_branch_id]))
-                group["active_branch_id"] = row_branch_id
+            if row_branch_ids:
+                group["branch_ids"] = list(dict.fromkeys((group.get("branch_ids") or []) + row_branch_ids))
+                group["active_branch_id"] = row_branch_id or row_branch_ids[-1]
             group["summary"] = _merge_compact_summaries(
                 group.get("summary"),
                 _compact_memory_summary(row) if include_structured else _compact_memory_summary_lightweight(row),
@@ -2983,6 +3014,8 @@ def _build_topic_index(
             "message_ids": list(dict.fromkeys(_text(x) for x in (item.get("message_ids") or []) if _text(x)))[:40],
             "message_id": _text(item.get("message_id")),
             "dialog_id": _text(item.get("dialog_id")),
+            "branch_ids": list(dict.fromkeys(_text(x) for x in (item.get("branch_ids") or []) if _text(x)))[:12],
+            "active_branch_id": _text(item.get("active_branch_id")),
             "conversation_id": _text(item.get("conversation_id")),
             "branch_ids": list(dict.fromkeys(_text(x) for x in (item.get("branch_ids") or []) if _text(x)))[:12],
             "active_branch_id": _text(item.get("active_branch_id"))[:120],
@@ -4188,6 +4221,7 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "мы", "нам", "наше", "наши", "наш", "нашу", "мне", "мои", "мой",
     "последних", "последние", "час", "часа", "часов", "минут", "минуты", "дней", "дня", "недели",
     "назад", "хоть", "примерно", "около", "время", "времени", "помни", "помниш", "помнишь", "вспоминаешь",
+    "назови", "назовите", "назвать", "перечисли", "перечислите", "выведи", "составь", "которых", "который", "которые",
     "list", "topic", "topics", "show", "history", "conversation", "conversations", "talked", "talking", "discuss", "discussed",
     "тем", "темами", "темах", "топик", "топика", "топики", "топиков", "диалогов", "разговоров", "обсуждении", "обсуждение",
     "список", "списка", "поводу", "проект", "проекта", "проекту", "проекте", "проектов", "project", "содержание", "содержания",
@@ -4340,20 +4374,32 @@ def _strip_history_operation_words(query: Any) -> str:
         r"\b(?:что|какие\s+темы|какую\s+тему|что\s+именно)\s+(?:(?:мы|мы\s+с\s+тобой)\s+)?"
         r"(?:обсуждал\w*|говорил\w*|рассматривал\w*|упоминал\w*|затрагивал\w*)\b",
         r"\b(?:напомни|вспомни|расскажи|перескажи|резюмируй|суммируй|пожалуйста|"
-        r"вообще|нету|ничего|мне|нам|мы|тобой|так|покажи|перечисли|список)\w*\b",
+        r"вообще|нету|ничего|мне|нам|мы|тобой|так|покажи|перечисли|перечислите|"
+        r"назови|назовите|назвать|выведи|составь|список|темы|тематику|которых|который|которые)\w*\b",
     ):
         low = re.sub(pattern, " ", low, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", low).strip(" ,;:.!?-")
 
 
 def _is_history_recall_question(query: str) -> bool:
-    """Return true for subjectless or subject-specific requests to recall dialogue.
+    """Return true for user turns whose operation is inspection of prior dialogue.
 
-    Subject-specific recall still searches its named topic. A subjectless request
-    is routed to the latest assistant answer first by the Premium intent classifier.
+    Use the same semantic classifier as the executor so reordered topic-inventory
+    requests and time-first phrasings are excluded from the topic index too. This
+    prevents history-navigation prompts from becoming fake subjects on the next
+    history scan. Previous-answer follow-ups are deliberately not history inventories.
     """
     if _is_broad_history_overview_query(query):
         return True
+    try:
+        from blocks.Premium_interpretation_identity import interpret_request_semantics
+        semantics = interpret_request_semantics(query)
+        if semantics.get("history_request") and semantics.get("primary_intent") in {
+            "HISTORY_RECALL", "HISTORY_SUMMARY", "HISTORY_SEARCH", "PRIOR_DECISION_RECALL", "PLAN_RECALL",
+        }:
+            return True
+    except Exception:
+        pass
     low = re.sub(r"\s+", " ", _text(query).lower().replace("ё", "е")).strip()
     return bool(re.search(
         r"(?:\bчто\s+(?:мы\s+)?(?:сегодня\s+|вчера\s+|раньше\s+)?(?:говорили|обсуждали|решили|делали)\b|"
@@ -7311,6 +7357,7 @@ def search_dialogue_context(
             "topic_origin_at": topic.get("first_at"),
             "topic_last_at": topic.get("last_at"),
             "topic_summary": _text(topic.get("summary"))[:440],
+            "topic_branch_ids": list(topic.get("branch_ids") or [])[:8],
         })
         for section in match.get("sections") or []:
             if isinstance(section, dict):
@@ -7327,12 +7374,16 @@ def search_dialogue_context(
     # only semantically matching topics. Broad history requests fall back to
     # recency ordering after the explicit temporal filter has narrowed the rows.
     history_query_tokens = _history_query_topic_tokens(query)
+    # An inventory operation can still name a subject ("list the topics about
+    # API"). Only a subjectless request is a chronological overview; otherwise
+    # retain the named subject as the history ranker's filter.
     broad_history_overview = bool(
-        history_request and (
+        history_request
+        and not history_query_tokens
+        and (
             query_interpretation.get("history_inventory_request")
-            or _text(query_interpretation.get("primary_intent")).upper() == "HISTORY_SUMMARY"
+            or _text(query_interpretation.get("primary_intent")).upper() in {"HISTORY_SUMMARY", "HISTORY_RECALL"}
             or _is_broad_history_overview_query(query)
-            or not history_query_tokens
         )
     )
     topic_index = _rank_history_topics(query, topics, 10, fallback=broad_history_overview)
