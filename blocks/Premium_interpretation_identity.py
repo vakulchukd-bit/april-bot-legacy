@@ -2506,7 +2506,13 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
         r"(?:это|так|научно|пошагово|подробнее|почему|как|scientifically|step\s+by\s+step)\s*[.!?]*\s*",
         low,
     )
-    return bool(qualifier_only and len(tokens) <= 5)
+    standalone_qualifier = bool(re.fullmatch(
+        r"\s*(?:а\s+|и\s+|ну\s+)?(?:подробнее|детальнее|подробней|"
+        r"более\s+подробно|more|more\s+detail|in\s+more\s+detail)\s*[?!…]*\s*",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    return standalone_qualifier or bool(qualifier_only and len(tokens) <= 5)
 
 
 def _looks_like_selection_followup(text: str) -> bool:
@@ -2662,6 +2668,18 @@ def _looks_like_topic_reference_fragment(
     )
     if pointer:
         return True
+
+    # Definition/identity questions contain their own subject and predicate.
+    # They are complete new requests even when short and sent without punctuation;
+    # they must not open a dialogue-history lookup just because the subject is a name.
+    self_contained_definition_question = bool(re.match(
+        r"^\s*(?:а\s+)?(?:кто\s+так(?:ой|ая|ое|ие)|что\s+такое|"
+        r"что\s+(?:значит|означает)|кто\s+был)\s+\S+",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    if self_contained_definition_question:
+        return False
 
     # A terse noun/name (for example, “Эйнштейна”) can be the user's answer to a
     # clarification or a pointer back to a previously discussed topic. Search for
@@ -4139,7 +4157,10 @@ def interpret_request_in_context(
                 for other in previous
             ):
                 common += 1
-        return common / max(1, min(len(current), len(previous))), common
+        # Measure how much of the CURRENT request is explained by the prior
+        # turn. Dividing by the smaller set made a new request look like a match
+        # whenever it reused two generic terms from an older, shorter question.
+        return common / max(1, len(current)), common
 
     user_overlap, user_common = overlap(current_content, prior_user_content)
     answer_overlap, answer_common = overlap(current_content, prior_answer_content)
@@ -4249,8 +4270,11 @@ def interpret_request_in_context(
         and not output_forms and not numeric_anchors
         and not explicit_switch
     )
-    linked_by_user_turn = bool(user_common and user_overlap >= 0.22)
-    linked_by_answer = bool(answer_common and answer_overlap >= 0.30)
+    # A lexical match is evidence only when it covers most of the new request.
+    # One shared noun/action must not drag a separately specified request into
+    # the previous branch (for example, a new product named in the same sentence).
+    linked_by_user_turn = bool(user_common and user_overlap >= 0.75)
+    linked_by_answer = bool(answer_common and answer_overlap >= 0.75)
     explicit_context_signal = bool(
         contextual_reaction or previous_answer_reference
         or features.get("answer_followup") or features.get("topic_reference_fragment")
