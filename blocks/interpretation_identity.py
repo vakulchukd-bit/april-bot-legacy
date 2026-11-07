@@ -1421,7 +1421,87 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
         r"(?:это|так|научно|пошагово|подробнее|почему|как|scientifically|step\s+by\s+step)\s*[.!?]*\s*",
         low,
     )
-    return bool(qualifier_only and len(tokens) <= 5)
+    standalone_qualifier = bool(re.fullmatch(
+        r"\s*(?:а\s+|и\s+|ну\s+)?(?:подробнее|детальнее|подробней|"
+        r"более\s+подробно|more|more\s+detail|in\s+more\s+detail)\s*[?!…]*\s*",
+        low,
+        flags=re.IGNORECASE,
+    ))
+    return standalone_qualifier or bool(qualifier_only and len(tokens) <= 5)
+
+
+
+
+def _looks_like_topic_reference_fragment(
+    text: str,
+    *,
+    explicit_topic_introduction: bool = False,
+) -> bool:
+    """Recognise a short, explicit pointer to a topic that may exist in memory.
+
+    This is a retrieval hint only. State Manager must verify a real matching
+    branch and must return to a new topic when no match exists.
+    """
+    low, tokens = _semantic_normalize(text)
+    if not low or len(tokens) > 10 or explicit_topic_introduction:
+        return False
+    if re.fullmatch(
+        r"(?:привет|здравствуй\w*|здравствуйте|доброе утро|добрый день|добрый вечер|hello|hi|hey|thanks|thank you)",
+        low,
+    ):
+        return False
+    if _detect_requested_outputs(text) != ["text"]:
+        return False
+
+    # "Кто такой X?" / "Что такое X?" is a complete factual question, not
+    # an answer fragment or an instruction to search prior dialogue.
+    if re.match(
+        r"^\s*(?:а\s+)?(?:кто\s+так(?:ой|ая|ое|ие)|что\s+такое|"
+        r"что\s+(?:значит|означает)|кто\s+был)\s+\S+",
+        low,
+        flags=re.IGNORECASE,
+    ):
+        return False
+
+    action = re.search(
+        r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
+        r"покажи|построй|создай|сделай|вычисли|сравни|найди|проверь|проанализируй|"
+        r"продолжи|продолжай|продолжим|перечисли|нарисуй|развивай|раскрой|разверни|"
+        r"углуби|расширь|дополни|tell|describe|explain|write|show|build|create|"
+        r"make|calculate|compare|find|check|analyze|continue|develop|expand|elaborate)\b",
+        low,
+    )
+    correction_pointer = bool(re.search(
+        r"\b(?:я\s+)?(?:имел|имела|имели)\s+в\s+виду\b|"
+        r"\bя\s+говорю\s+про\b|\bя\s+именно\s+про\b|"
+        r"\bне\s+это\s+имел\w*\s+в\s+виду\b",
+        low,
+    ))
+    if correction_pointer:
+        return True
+    if action:
+        return False
+    if re.match(
+        r"^(?:(?:а|и|ну|так|нет|не)\s+)?(?:(?:я|мы)\s+)?(?:именно\s+)?"
+        r"(?:про|об|обо|насч[её]т|относительно|по\s+поводу|about|regarding)\s+\S+",
+        low,
+    ):
+        return True
+
+    bare_topic_noise = {
+        "а", "и", "ну", "так", "да", "нет", "ок", "окей", "спасибо", "пожалуйста",
+        "дальше", "далее", "продолжай", "продолжим", "еще", "ещё", "подробнее",
+        "что", "чем", "где", "когда", "почему", "как", "зачем", "кто", "какой", "какая",
+        "тема", "темы", "тему", "вопрос", "вопросы", "расскажи", "объясни", "покажи",
+        "сделай", "создай", "найди", "проверь", "help", "thanks", "please", "continue", "more",
+    }
+    if len(tokens) <= 4 and not re.search(r"[?!？]", _text(text)) and not action:
+        signature = _context_signature(text)
+        subjects = signature.get("subject_terms") if isinstance(signature, dict) else []
+        meaningful = {token for token in tokens if token not in bare_topic_noise}
+        if subjects and meaningful:
+            return True
+    return False
 
 
 def _looks_like_context_dependent_question(
@@ -1495,7 +1575,7 @@ def _infer_dialogue_act_profile(
     non_topical_roots = (
         "понят", "спаси", "хорош", "ладн", "молод", "отлич", "соглас",
         "правиль", "точн", "верн", "ага", "угу", "да", "нет", "неа",
-        "отнюд", "подроб", "поясн", "объясн", "уточн", "разъясн",
+        "отнюд", "подро", "подроб", "поясн", "объясн", "уточн", "разъясн",
         "расшифр", "докаж", "обоснуй", "обоснуйте", "имел", "имела",
         "виду", "друго", "смысл", "так", "это",
     )
@@ -1797,6 +1877,9 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         source, interrogative=interrogative,
         explicit_topic_introduction=explicit_topic_introduction,
     )
+    topic_reference_fragment = _looks_like_topic_reference_fragment(
+        source, explicit_topic_introduction=explicit_topic_introduction,
+    )
     dialogue_act_profile = _infer_dialogue_act_profile(
         source,
         interrogative=interrogative,
@@ -1839,6 +1922,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             reason = "dialogue_reference_detected_semantically"
         relation_hint = "HISTORY_LOOKUP"
         time_scope = "TODAY" if today_reference else ("RECENT_WINDOW" if recent_reference else ("PAST_DIALOGUE" if past_reference else ("FUTURE_PLAN_CONTEXT" if temporal_future else "AVAILABLE_HISTORY")))
+    elif topic_reference_fragment:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "TOPIC_FRAGMENT"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 4
+        relation_hint = "CONTINUE"
+        reason = "short_topic_pointer_requires_history_match"
     elif context_dependent_reaction:
         # Bare agreement/disagreement belongs to the active turn unless it
         # introduces an independent subject or concrete deliverable.
@@ -1934,6 +2028,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "plan_action": bool(plan_action),
         "continuation_action": bool(continuation_action),
         "answer_followup": bool(answer_followup),
+        "topic_reference_fragment": bool(topic_reference_fragment),
         "context_dependent_question": bool(context_dependent_question),
         "context_dependent_reaction": bool(context_dependent_reaction),
         "self_reference": bool(self_reference),
@@ -1967,6 +2062,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "direction": direction,
         "time_scope": time_scope,
         "topic_reference": topic_reference,
+        "topic_reference_fragment": bool(topic_reference_fragment),
         "requires_memory": bool(requires_memory),
         "history_request": bool(history_request),
         "search_scope": search_scope,
@@ -2650,7 +2746,10 @@ def interpret_request_in_context(
                 for other in previous
             ):
                 common += 1
-        return common / max(1, min(len(current), len(previous))), common
+        # Measure how much of the CURRENT request is explained by the prior
+        # turn. Dividing by the smaller set made a new request look like a match
+        # whenever it reused two generic terms from an older, shorter question.
+        return common / max(1, len(current)), common
 
     user_overlap, user_common = overlap(current_content, prior_user_content)
     answer_overlap, answer_common = overlap(current_content, prior_answer_content)
@@ -2760,8 +2859,11 @@ def interpret_request_in_context(
         and not output_forms and not numeric_anchors
         and not explicit_switch
     )
-    linked_by_user_turn = bool(user_common and user_overlap >= 0.22)
-    linked_by_answer = bool(answer_common and answer_overlap >= 0.30)
+    # A lexical match is evidence only when it covers most of the new request.
+    # One shared noun/action must not drag a separately specified request into
+    # the previous branch (for example, a new product named in the same sentence).
+    linked_by_user_turn = bool(user_common and user_overlap >= 0.75)
+    linked_by_answer = bool(answer_common and answer_overlap >= 0.75)
     explicit_context_signal = bool(
         contextual_reaction or previous_answer_reference
         or features.get("answer_followup") or features.get("topic_reference_fragment")
