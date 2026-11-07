@@ -2535,6 +2535,12 @@ def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id
 
 
 def _render_requested_outputs(values: Any) -> set[str]:
+    """Normalize outputs selected by Interpretation, never by a room identifier.
+
+    Room identities provide domain knowledge and artifact provenance only. A room
+    ID (including C_DIAGRAM_ROOM or C_GRAPH_ROOM) must not select or trigger a
+    renderer; requested_outputs and concrete same-turn evidence do that.
+    """
     if not isinstance(values, (list, tuple, set)):
         return set()
     aliases = {
@@ -3035,6 +3041,127 @@ def _weekly_axis_labels(existing_x: Any = None) -> List[str]:
             ]
     return ["Начало недели", "День 2", "День 3", "День 4", "День 5", "День 6", "Конец недели"]
 
+
+
+def _geometry_diagram_payload_from_request(
+    current_request: str,
+    answer: str = "",
+) -> Dict[str, Any]:
+    """Create small SVG drawings for explicitly named elementary geometry.
+
+    Shape identity comes from the current request. Dimension labels are shown
+    only when the user supplies them; no unspecified side lengths are invented.
+    """
+    request_text = str(current_request or "").strip()
+    text = "\n".join(part for part in (request_text, str(answer or "").strip()) if part)
+    if not text:
+        return {}
+    low = text.lower()
+
+    if re.search(r"треугол|triangle", low):
+        shape = "triangle"
+    elif re.search(r"квадрат|square", low):
+        shape = "square"
+    elif re.search(r"прямоугольник|прямоугольн|rectangle", low):
+        shape = "rectangle"
+    elif re.search(r"окружност|круг|circle", low):
+        shape = "circle"
+    else:
+        return {}
+
+    measures = re.findall(
+        r"(?<![\w])(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|meter|meters|m)\b",
+        request_text,
+        re.IGNORECASE,
+    )
+    def label_measure(item: tuple[str, str]) -> str:
+        value = item[0].replace(",", ".")
+        unit = item[1].lower()
+        unit_map = {"cm": "см", "mm": "мм", "m": "м", "meter": "м", "meters": "м"}
+        return f"{value} {unit_map.get(unit, unit)}"
+
+    side_labels: list[str] = []
+    per_each_match = re.search(
+        r"(?i)(?:по|each|every side(?: is)?)\s*(\d+(?:[.,]\d+)?)\s*(см|cm|мм|mm|м|m)\b",
+        request_text,
+    )
+    if per_each_match and shape in {"triangle", "square"}:
+        side_labels = [label_measure((per_each_match.group(1), per_each_match.group(2)))] * (3 if shape == "triangle" else 4)
+    elif measures:
+        side_labels = [label_measure(item) for item in measures[:4]]
+
+    if shape == "triangle":
+        polygon = '<polygon points="260,48 78,318 442,318" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3" stroke-linejoin="round"/>'
+        labels = ""
+        if side_labels:
+            labels_data = [
+                (160, 172, side_labels[0]),
+                (360, 172, side_labels[min(1, len(side_labels)-1)]),
+                (260, 342, side_labels[min(2, len(side_labels)-1)]),
+            ]
+            labels = "".join(
+                f'<text x="{x}" y="{y}" text-anchor="middle" fill="#e5e7eb" font-size="18" font-family="Arial,sans-serif">{value}</text>'
+                for x, y, value in labels_data
+            )
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="370" viewBox="0 0 520 370">'
+            '<title>Чертёж треугольника</title>'
+            '<line x1="260" y1="48" x2="78" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            '<line x1="260" y1="48" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            '<line x1="78" y1="318" x2="442" y2="318" stroke="#67e8f9" stroke-width="3"/>'
+            f'{labels}'
+            '<text x="260" y="25" text-anchor="middle" fill="#e5e7eb" font-size="16" font-family="Arial,sans-serif">Треугольник</text>'
+            '</svg>'
+        )
+        equilateral = len(side_labels) >= 3 and len(set(side_labels[:3])) == 1
+        return {
+            "representation": "diagram",
+            "shape": "equilateral_triangle" if equilateral else "triangle",
+            "diagram_type": "geometry",
+            "title": "Чертёж равностороннего треугольника" if equilateral else "Чертёж треугольника",
+            "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематический треугольник; размеры сторон не задавались.",
+            "svg": svg,
+            "source": "current_request_geometry_fallback",
+        }
+
+    if shape == "square":
+        side = side_labels[0] if side_labels else ""
+        svg_shape = (
+            '<rect x="135" y="65" width="250" height="250" rx="1" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        )
+        labels = f'<text x="260" y="52" text-anchor="middle" fill="#e5e7eb" font-size="18">{side}</text>' if side else ""
+        title = "Чертёж квадрата"
+        shape_name = "square"
+    elif shape == "rectangle":
+        left = side_labels[0] if side_labels else ""
+        right = side_labels[1] if len(side_labels) > 1 else ""
+        svg_shape = '<rect x="90" y="95" width="340" height="190" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        labels = (
+            (f'<text x="260" y="82" text-anchor="middle" fill="#e5e7eb" font-size="18">{left}</text>' if left else "")
+            + (f'<text x="448" y="196" text-anchor="middle" fill="#e5e7eb" font-size="18">{right}</text>' if right else "")
+        )
+        title = "Чертёж прямоугольника"
+        shape_name = "rectangle"
+    else:
+        radius = side_labels[0] if side_labels else ""
+        svg_shape = '<circle cx="260" cy="190" r="120" fill="rgba(103,232,249,0.08)" stroke="#67e8f9" stroke-width="3"/>'
+        labels = f'<text x="260" y="190" text-anchor="middle" fill="#e5e7eb" font-size="18">{radius}</text>' if radius else ""
+        title = "Чертёж окружности"
+        shape_name = "circle"
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">'
+        f'<title>{title}</title>{svg_shape}{labels}</svg>'
+    )
+    return {
+        "representation": "diagram",
+        "shape": shape_name,
+        "diagram_type": "geometry",
+        "title": title,
+        "description": "Размеры подписаны только по данным текущего запроса." if side_labels else "Схематическая геометрическая фигура; размеры не задавались.",
+        "svg": svg,
+        "source": "current_request_geometry_fallback",
+    }
 
 
 def _graph_payload_from_request(
@@ -4788,7 +4915,10 @@ def prepare_render_blocks_for_room_dispatch(
     This is a deterministic adapter, not a second route. It promotes a structure
     only when Interpretation requested it OR the same-turn answer already contains
     an unambiguous representation (Markdown table, fenced source code, Mermaid
-    flowchart, delimited math, or literal URL). It never invents data or assets.
+    flowchart, delimited math, or literal URL). Room identifiers are provenance and
+    domain metadata only; they are never renderer triggers. Preserve every valid
+    requested block and its SceneContract payload without inferring a new output
+    from the selected room. This adapter never invents data or assets.
     """
     requested = _render_requested_outputs(requested_outputs)
     interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
@@ -4803,11 +4933,14 @@ def prepare_render_blocks_for_room_dispatch(
     mermaid_match = re.search(r"```\s*mermaid\s*\n([\s\S]*?)\n```", source_answer, re.IGNORECASE)
     mermaid_from_answer = mermaid_match.group(1).strip() if mermaid_match else ""
     diagram_from_answer = _mermaid_payload(mermaid_from_answer) if mermaid_from_answer else {}
+    # Elementary geometry is rendered only when Interpretation requested a diagram.
+    # The shape comes from this turn's request; room identity never triggers it.
+    diagram_from_request = _geometry_diagram_payload_from_request(current_request, source_answer) if "diagram" in requested else {}
     code_match = re.search(r"```([\w.+-]*)\s*\n([\s\S]*?)\n```", source_answer)
     if code_match and code_match.group(1).strip().lower() in {"mermaid", "diagram"}:
         code_match = None
-    # Diagram objects come from the model's structured scene payload or explicit
-    # same-turn Mermaid source; request wording alone never creates geometry.
+    # Diagram objects come from structured scene payload, explicit same-turn
+    # Mermaid source, or an elementary shape named in the same-turn request.
     if code_match and "graph" in requested and _is_ascii_line_chart_fence(code_match.group(2)):
         # This code fence is a visual representation of the graph, not source code.
         # Values are transferred to GraphBlock below; don't render it a second time.
@@ -4971,6 +5104,9 @@ def prepare_render_blocks_for_room_dispatch(
             if parsed:
                 payload = {**payload, **parsed}
                 block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
+            elif diagram_from_request:
+                payload = {**payload, **deepcopy(diagram_from_request)}
+                block["source_room"] = block.get("source_room") or "C_DIAGRAM_ROOM"
         elif block_type == "gallery" and not _has_render_payload("gallery", payload):
             if markdown_images:
                 payload = {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"}
@@ -5035,6 +5171,13 @@ def prepare_render_blocks_for_room_dispatch(
             "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
             "viewer": "DiagramRenderer", "payload": deepcopy(diagram_from_answer),
             "source_room": "C_DIAGRAM_ROOM", "source": "same_turn_mermaid_source",
+        })
+        existing_types.add("diagram")
+    if "diagram" in requested and diagram_from_request and "diagram" not in existing_types:
+        prepared.append({
+            "type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer",
+            "viewer": "DiagramRenderer", "payload": deepcopy(diagram_from_request),
+            "source_room": "C_DIAGRAM_ROOM", "source": "current_request_geometry_fallback",
         })
         existing_types.add("diagram")
     # An outline diagram is opt-in. Automatically drawing the answer's headings
@@ -6855,6 +6998,8 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
             route_meta = (scene.metadata or {}).get("route") if isinstance((scene.metadata or {}).get("route"), dict) else {}
             selected_rooms = route_meta.get("selected_rooms") or (scene.metadata or {}).get("selected_rooms") or []
             registration = get_web_renderer_registration(str(block.get("type") or block.get("artifact_type") or "text"))
+            # Preserve origin/room labels for provenance and later inspection only.
+            # These fields are deliberately not consulted to choose any renderer.
             source_room = str(block.get("source_room") or block.get("room_source") or "")
             payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
             identity_signal = {
