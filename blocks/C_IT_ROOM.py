@@ -290,7 +290,7 @@ APRIL_USER_JOURNEYS = {
 # shareToCommunity handler) and RenderMessage.tsx (current answer/assets passed in).
 APRIL_UI_FUNCTION_CATALOG = {
     "schema": "april.ui_function_catalog.v1",
-    "source_note": "Verified against the uploaded aprill-web-main source snapshot: routes, component labels, UI handlers and access checks. This archive contains no full screenshot library, so visuals are route diagrams, not screenshots. Mobile/desktop layouts reflow; positions are relative regions, not pixel coordinates; production may differ.",
+    "source_note": "Verified against the uploaded aprill-web-main source snapshot: routes, component labels, UI handlers and access checks. Search audit: this snapshot has a Search friends control only inside Community /space; no global site-wide search field or search control on /history was found. For dialogue retrieval by topic/time, ask April in chat; this is semantic conversation retrieval, not a website search box. This archive contains no full screenshot library, so visuals are route diagrams, not screenshots. Mobile/desktop layouts reflow; positions are relative regions, not pixel coordinates; production may differ.",
     "functions": [
         {"id":"chat_text_send", "areas":["chat"], "screen":"Основной чат /", "entry":"Откройте / или нажмите логотип APRIL, если уже на странице чата.", "position":"Нижняя закреплённая панель чата; текстовое поле по центру, стрелка отправки справа.", "control":"Поле Message April / поле сообщения и кнопка со стрелкой.", "does":"Отправляет текстовый запрос в текущий диалог.", "how_to_use":["Нажмите поле сообщения.", "Введите вопрос или задачу; для новой строки используйте Shift+Enter.", "Нажмите стрелку отправки справа или Enter без Shift."], "result":"Сообщение появляется в текущей переписке, затем отображается ответ April.", "availability":"Основная функция авторизованного чата.", "limits":"Не нажимайте очистку рабочего поля вместо отправки; не вставляйте пароли, API-токены и приватные ключи."},
         {"id":"chat_voice_input", "areas":["chat"], "screen":"Основной чат /", "entry":"Основной чат.", "position":"Справа в области нижнего поля ввода, рядом с текстовым вводом/отправкой.", "control":"Кнопка микрофона.", "does":"Записывает голосовое сообщение для последующего распознавания и обработки как запроса.", "how_to_use":["Нажмите микрофон и разрешите доступ браузеру, если он спросит.", "Произнесите запрос.", "Дождитесь завершения записи/распознавания и проверьте действие, которое показывает интерфейс."], "result":"Голос поступает в диалог; ответ April появляется в той же переписке.", "availability":"Основной чат при наличии разрешения микрофона.", "limits":"При отказе в разрешении проверьте разрешения сайта в браузере; голос не заменяет отправку вложенного файла."},
@@ -298,7 +298,7 @@ APRIL_UI_FUNCTION_CATALOG = {
         {"id":"chat_clear_workspace", "areas":["chat"], "screen":"Основной чат /", "entry":"Основной чат.", "position":"В верхней панели, ближе к центру; значок метлы.", "control":"Кнопка очистки рабочего поля.", "does":"Убирает сообщения из текущего видимого состояния страницы.", "how_to_use":["Нажмите значок метлы в верхней панели.", "Учитывайте, что это очистка отображаемой переписки на экране."], "result":"Текущая область чата становится пустой.", "availability":"Если кнопка отображается в верхней панели.", "limits":"Не удаляет сохранённую историю из базы данных и не является удалением аккаунта. Для старых диалогов используйте /history."},
         {"id":"chat_open_profile", "areas":["chat","settings"], "screen":"Основной чат → Настройки /settings", "entry":"Основной чат /.", "position":"Верхняя панель, правый край — значок профиля/пользователя.", "control":"Profile / кнопка пользователя.", "does":"Открывает страницу профиля и настроек; если пользователь не вошёл, открывает модальное окно авторизации.", "how_to_use":["Нажмите значок профиля вверху справа.", "Если появилось окно входа, войдите через Google.", "После авторизации откроется /settings."], "result":"Появляется личный кабинет.", "availability":"На верхней панели.", "limits":"Не путайте профиль с кнопкой очистки чата в верхней панели."},
         {"id":"logo_help_center", "areas":["chat","guide","help-center","how-to-use"], "screen":"Основной чат → Help & Information /aprill", "entry":"Основной чат /.", "position":"Логотип APRIL вверху слева.", "control":"Логотип APRIL.", "does":"Открывает справочную страницу Help & Information, а не новый чат.", "how_to_use":["Нажмите логотип APRIL.", "На /aprill выберите нужную карточку справки.", "Чтобы вернуться к диалогу, откройте /."], "result":"Переход на страницу справки.", "availability":"Навигационная ссылка в верхней панели.", "limits":"Карточки статьи могут открываться на той же странице через выбор/якорь, а не иметь отдельный URL."},
-        {"id":"response_feedback", "areas":["chat","response-feedback"], "screen":"Основной чат /", "entry":"Найдите нужный ответ April.", "position":"Под нижней частью конкретного ответа, после его текста и прикреплённых render-блоков.", "control":"Спасибо и Жалоба / Report.", "does":"Позволяет отметить полезный ответ или сообщить о проблеме в нём.", "how_to_use":["Прокрутите именно к нужному ответу.", "Нажмите Спасибо для благодарности.", "Нажмите Жалоба, выберите причину и отправьте форму."], "result":"Отправляется оценка либо жалоба, связанная с этим ответом.", "availability":"Под ответом, когда блок обратной связи отрисован.", "limits":"Это не форма Contact Support и не поле нового сообщения."},
+        {"id":"response_feedback", "areas":["chat","response-feedback"], "screen":"Основной чат /", "entry":"Откройте основной чат и найдите конкретный ответ April.", "position":"Непосредственно под содержимым выбранного ответа — после текста и всех его render-блоков; на узком экране строка может переноситься.", "control":"«Жалоба» (Report) и «Спасибо» (Thanks). Рядом находится отдельная зелёная круглая стрелка «Опубликовать в сообществе». ", "does":"«Спасибо» только показывает локальное подтверждение «Спасибо за обратную связь.» примерно на 2,2 секунды и не отправляет отдельную оценку на сервер. «Жалоба» раскрывает форму выбора причины и отправляет обращение через POST /api/content-report.", "how_to_use":["Прокрутите именно к тому ответу, по которому хотите выполнить действие.", "Нажмите «Спасибо»: под кнопками на короткое время появится подтверждение; дополнительных шагов нет.", "Нажмите «Жалоба»: раскроется форма с вопросом о причине и списком вариантов — вредный/опасный, оскорбительный, вводящий в заблуждение или другая проблема.", "Выберите причину и нажмите «Отправить жалобу». Чтобы отказаться, нажмите «Отмена».", "Дождитесь сообщения об успешной отправке либо ошибки. Для технического обращения о работе сайта используйте Contact Support отдельно."], "result":"«Спасибо» показывает временный локальный toast; «Жалоба» после успешного ответа сервера показывает «Жалоба отправлена. Спасибо.»; при сбое — сообщение об ошибке.", "availability":"Компонент ReportAIResponse отрисовывается под каждым сообщением assistant в RenderMessage.tsx; в этом месте исходника нет проверки тарифа Free/Premium.", "limits":"Кнопка «Спасибо» не сохраняет рейтинг и не делает сетевой запрос в компоненте. Жалоба отправляет messageId, выбранную причину и короткий фрагмент ответа (до 2 000 символов); это не публичный пост и не отдельная форма Contact Support."},
         {"id":"assistant_response_share", "areas":["chat","response-feedback","space"], "screen":"Основной чат → Community /space", "entry":"Найдите ответ April, который хотите опубликовать, в основном чате /.", "position":"В строке действий непосредственно под конкретным ответом, рядом с «Жалоба» и «Спасибо»; зелёная круглая кнопка со стрелкой вверх.", "control":"aria-label/title: «Опубликовать в сообществе»; после успешной отправки: «Сообщение отправлено в сообщество.»", "does":"Одним нажатием отправляет текст текущего ответа April и поддерживаемый материал ответа (если он есть и доступен для публикации) в общую ленту через POST /api/community с action=send_message.", "how_to_use":["Откройте основной чат / и найдите нужный ответ April.", "Проверьте текст и прикреплённые материалы: нажатие публикует содержимое в Community, поэтому не размещайте секреты и личные данные.", "Нажмите зелёную круглую стрелку вверх под этим ответом. Не путайте её с отдельной стрелкой отправки в нижней панели чата или Community.", "Дождитесь подтверждения «Сообщение отправлено в сообщество.»; при ошибке появится сообщение о неудачной отправке."], "result":"Текущий ответ появляется как публикация в общей ленте April Community (/space); ручное копирование в поле Community для этого сценария не требуется.", "availability":"Контрол отрисовывается под ответом в основном чате; в коде компонента нет отдельного условия Premium для самой кнопки. Для публикации требуется доступ к авторизованному Community API.", "limits":"Текст отправляется с ограничением 3 800 символов. Для вложения используется первый переданный публикационный материал; после преобразования размер должен быть не более 3 MiB. Приватный/непубликуемый материал блокирует небезопасный переход к публикации одного только текста. Успех подтверждается сообщением UI; это не гарантирует, что пользователь открыл ленту."},
         {"id":"rendered_artifact_menu", "areas":["chat","image-controls"], "screen":"Основной чат / — карточка render-блока", "entry":"Откройте ответ с нужным артефактом.", "position":"Кнопка меню действий в верхней правой части карточки/панели соответствующего блока; визуальное положение зависит от renderer.", "control":"Open content actions menu / меню действий с материалом.", "does":"Открывает доступные операции над готовым блоком: Download, Share и/или Copy.", "how_to_use":["Найдите именно тот блок, который нужно сохранить или передать.", "Нажмите меню действий в его правом верхнем углу.", "Выберите доступное действие: Download сохраняет файл; Share вызывает системный Web Share, если браузер поддерживает, иначе для текстовых блоков возможна копия в буфер; Copy копирует содержимое, если обработчик предусмотрен."], "result":"Действие применяется к выбранному существующему результату.", "availability":"Зависит от типа блока и набора обработчиков у renderer.", "limits":"Нельзя обещать одновременное наличие всех пунктов у каждого типа артефакта. Если Share не поддержан, используйте Download или Copy, если они отображаются."},
         {"id":"settings_display_name", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → значок профиля сверху справа.", "position":"Секция USER в профиле; поле имени и кнопка Edit/Save.", "control":"Edit → поле имени → Save.", "does":"Меняет отображаемое имя пользователя в профиле/сообществах.", "how_to_use":["Откройте /settings.", "В секции USER нажмите Edit.", "Измените имя и нажмите Save.", "Проверьте обновлённое значение после сохранения."], "result":"Новое имя становится отображаемым именем пользователя.", "availability":"После авторизации.", "limits":"Не является заменой April ID или Google-аккаунта."},
@@ -486,11 +486,35 @@ def _site_navigation_semantics(machine_request: Any) -> Dict[str, Any]:
     return {}
 
 
+def _site_is_assistant_owned_content(value: Any) -> bool:
+    """Recognize an April-owned answer/message even when adjectives intervene."""
+    text = str(value or "").lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:[\w-]+\s+){0,3}(?:ответ|сообщен\w*|реплик\w*)|"
+        r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
+        r"\b(?:your|my|our)\s+(?:(?:latest|last|previous|earlier)\s+){0,2}(?:april\s+)?(?:reply|response|message)\b|"
+        r"\bapril(?:'s)?\s+(?:latest\s+|last\s+|previous\s+)?(?:reply|response|message)\b)",
+        text, re.I,
+    ))
+
+
+def _site_control_reference_kind(value: Any) -> str:
+    """Classify a short follow-up only when it names a concrete known control."""
+    text = str(value or "").lower().replace("ё", "е")
+    if re.search(r"(?:зел[её]н\w*.{0,24}(?:кнопк\w*|стрелк\w*)|(?:кнопк\w*|стрелк\w*).{0,24}зел[её]н\w*|опубликов\w*.{0,40}сообществ\w*)", text, re.I | re.S):
+        return "assistant_response_share"
+    if re.search(r"(?:поблагодар\w*|отблагодар\w*|кнопк\w*.{0,20}спасибо|спасибо.{0,20}кнопк\w*|thanks?\s+button)", text, re.I | re.S):
+        return "response_feedback_thanks"
+    if re.search(r"(?:жалоб\w*|пожалова\w*|кнопк\w*.{0,20}report|report\s+button)", text, re.I | re.S):
+        return "response_feedback_report"
+    return ""
+
+
 def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_ids: Any = None) -> Dict[str, List[str]]:
     """Resolve an already-interpreted UI operation to the source-derived control catalog.
 
-    This is a target resolver, not an entry trigger: it only runs after the semantic
-    layer has classified the request as an April UI route explanation.
+    The caller supplies the typed April-UI interpretation (or a validated active-UI
+    follow-up). This resolver maps intent to controls; it does not infer live state.
     """
     if not isinstance(semantic, dict):
         return {"function_ids": [], "semantic_targets": [], "area_ids": []}
@@ -509,7 +533,7 @@ def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_i
     public_feed_operation = bool(
         re.search(r"(?:отправ\w*|публикац\w*|опубликов\w*|размест\w*|созда\w*|написа\w*|поделит\w*|post\w*|publish\w*|create\w*|write\w*|send\w*)", combined)
         and re.search(r"(?:сообщен\w*|пост\w*|публикац\w*|текст\w*|ответ\w*|community|сообществ\w*)", combined)
-        and "space" in inferred_areas
+        and ("space" in inferred_areas or bool(re.search(r"(?:community|сообществ\w*)", combined, re.I)))
     )
     if re.search(r"(?:3d\s*(?:график|graph)|график|график\w*|graph|ракурс|масштаб)", combined, re.I) and re.search(r"(?:кнопк|управл|поверн|ракурс|масштаб|приблиз|увелич|уменьш|сброс|данн|описан|zoom|rotate|view)", combined, re.I):
         return {"function_ids": ["rendered_graph_controls"], "semantic_targets": ["rendered_graph.controls"], "area_ids": ["graph-controls", "chat"]}
@@ -527,13 +551,64 @@ def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_i
     ))
     if free_media_quota_context and free_referral_action:
         return {"function_ids": ["chat_free_media_referral"], "semantic_targets": ["chat.free_media_referral"], "area_ids": ["chat", "settings"]}
+    # A question about the complete row must resolve to the complete row before
+    # single-control matching gets a chance to select only the green publish action.
+    feedback_row_question = bool(
+        (
+            re.search(r"(?:три\s+кнопк\w*|three\s+buttons|жалоб\w*|поблагодар\w*|спасибо)", combined, re.I)
+            and re.search(r"(?:кнопк\w*|под\s+(?:ответ\w*|сообщен\w*)|reply|response)", combined, re.I)
+        )
+        or re.search(
+            r"(?:все\s+(?:эти\s+)?кнопк\w*|all\s+(?:these\s+)?buttons).{0,65}(?:под\s+(?:ответ\w*|сообщен\w*)|under\s+(?:the\s+)?(?:answer|reply|message))",
+            combined, re.I | re.S,
+        )
+    )
+    if feedback_row_question:
+        return {
+            "function_ids": ["response_feedback", "assistant_response_share"],
+            "semantic_targets": ["response.feedback", "response.share_to_community"],
+            "area_ids": ["response-feedback", "chat", "space"],
+        }
+    # A known control mentioned in an interpreted April-UI request maps to its exact
+    # source component. This is deliberately based on label/position semantics, not colour alone.
+    control_kind = _site_control_reference_kind(combined)
+    if control_kind == "assistant_response_share":
+        return {
+            "function_ids": ["assistant_response_share"],
+            "semantic_targets": ["response.share_to_community"],
+            "area_ids": ["response-feedback", "chat", "space"],
+        }
+    if control_kind in {"response_feedback_thanks", "response_feedback_report"}:
+        return {
+            "function_ids": ["response_feedback"],
+            "semantic_targets": ["response.feedback"],
+            "area_ids": ["response-feedback", "chat"],
+        }
     # Resolve the other Community controls independently. A normal friend
     # invitation must not be mistaken for the Free media-referral modal.
     community_context = "space" in inferred_areas or bool(re.search(r"(?:community|сообществ\w*|\bspace\b)", combined, re.I))
     if community_context and re.search(r"(?:личн\w*\s+чат|приватн\w*\s+чат|private\s+chat|direct\s+message|написат\w*.{0,40}друг\w*)", combined, re.I):
         return {"function_ids": ["community_private_chat"], "semantic_targets": ["community.private_chat"], "area_ids": ["space", "direct"]}
-    if community_context and re.search(r"(?:найти\w*.{0,30}друз|поиск\w*.{0,30}друз|добав\w*.{0,30}друз|запрос\w*.{0,30}друз|принят\w*.{0,30}запрос|accept\s+friend|add\s+friend|search\s+friends|block|unblock)", combined, re.I):
+    history_search_ui_question = bool(re.search(
+        r"(?:где\s+(?:находится\s+)?поиск|есть\s+ли\s+поиск|поле\s+поиска|как\s+(?:найти|открыть|пользоваться)\s+(?:строк\w*\s+)?поиск|search\s+(?:field|box))",
+        combined, re.I,
+    )) and bool(re.search(r"(?:истори\w*|диалог\w*|history|conversation)", combined, re.I))
+    if history_search_ui_question:
+        return {"function_ids": ["history_resume"], "semantic_targets": ["dialogue_history.search_availability"], "area_ids": ["history", "chat"]}
+    site_wide_search_question = bool(re.search(
+        r"(?:поиск\w*.{0,35}(?:по\s+)?(?:вс\w*\s+)?сайт\w*|поиск\w*.{0,35}глобальн\w*|глобальн\w*.{0,35}поиск|search\s+(?:the\s+)?(?:whole\s+)?site|site[- ]wide\s+search)",
+        combined, re.I | re.S,
+    ))
+    community_member_search_question = bool(re.search(
+        r"(?:найти\w*.{0,30}(?:друз|пользоват)|поиск\w*.{0,30}(?:друз|пользоват)|добав\w*.{0,30}друз|запрос\w*.{0,30}друз|принят\w*.{0,30}запрос|accept\s+friend|add\s+friend|search\s+friends|block|unblock)",
+        combined, re.I,
+    ))
+    if community_context and community_member_search_question:
         return {"function_ids": ["community_friend_manage"], "semantic_targets": ["community.friends"], "area_ids": ["space"]}
+    if site_wide_search_question:
+        # There is no global site-search control in this Web source snapshot.
+        # Point to the only real search field while clearly stating its narrow scope.
+        return {"function_ids": ["community_friend_manage"], "semantic_targets": ["site.search_availability"], "area_ids": ["space"]}
     if community_context and re.search(r"(?:личн\w*\s+профил|community\s+profile|никнейм|ник\b|nickname|save\s+nickname)", combined, re.I):
         return {"function_ids": ["community_personal_profile"], "semantic_targets": ["community.personal_profile"], "area_ids": ["space"]}
     if community_context and re.search(r"(?:удал\w*.{0,50}(?:сво[юеё]\s+)?(?:сообщен|публикац|пост)|жалоб\w*.{0,40}(?:пост|публикац|сообщен)|пожалова\w*.{0,40}(?:пост|публикац)|скача\w*.{0,40}(?:вложен|файл)|delete\s+(?:your\s+)?(?:post|message)|report\s+(?:a\s+)?post|download\s+file)", combined, re.I):
@@ -544,17 +619,11 @@ def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_i
         # The semantic object role matters: a request to publish "your/April's
         # answer" maps to the green action beneath an assistant reply, while a
         # request to write a new post maps to the Community composer.
-        assistant_owned_content = bool(re.search(
-            r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:ответ|сообщен\w*)|"
-            r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
-            r"\b(?:your|my|our)\s+(?:april\s+)?(?:reply|response|message)\b|"
-            r"\bapril(?:'s)?\s+(?:reply|response|message)\b)",
-            combined, re.I,
-        ))
+        assistant_owned_content = _site_is_assistant_owned_content(combined)
         if assistant_owned_content:
             return {
-                "function_ids": ["assistant_response_share", "community_public_post"],
-                "semantic_targets": ["response.share_to_community", "community.public_post"],
+                "function_ids": ["assistant_response_share"],
+                "semantic_targets": ["response.share_to_community"],
                 "area_ids": ["response-feedback", "chat", "space"],
             }
         return {
@@ -570,8 +639,13 @@ def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) 
     areas = site_map.get("areas") if isinstance(site_map, dict) else []
     area_ids = [str(item.get("id")) for item in areas if isinstance(item, dict) and item.get("id")]
     query = _current_user_query(machine_request).lower().replace("ё", "е")
-    overview = bool(_SITE_INTERFACE_OVERVIEW_RE.search(query))
+    overview = _site_full_interface_overview_requested(query)
     requested: set[str] = set()
+    search_target = _site_search_availability_target(query)
+    if search_target == "global":
+        requested.add("community_friend_manage")
+    elif search_target == "history":
+        requested.add("history_resume")
     contracts = _site_ui_action_contracts(machine_request)
     intent_sources = _site_request_intent_layers(machine_request)
     carried_function_ids: List[str] = []
@@ -661,7 +735,7 @@ def _select_ui_function_catalog(machine_request: Any, site_map: Dict[str, Any]) 
 APRIL_ACCESS_MATRIX = {
     "free": ["Основной чат и поддерживаемые вложения", "Сообщество /space", "Профиль и настройки /settings", "Справка /aprill", "Редактирование исходного изображения за одну бонусную операцию приглашения на каждую правку", "Активный контекст до 12 часов по проектной политике"],
     "premium": ["Функции Free", "История диалогов /history — проверка Premium обязательна", "Редактирование существующих изображений согласно политике бота", "Активный контекст до 24 часов по проектной политике"],
-    "not_promised": ["Автоматическое списание/авто-продление: в исходнике указаны разовые покупки без recurring charges", "Внешний Fondy/Google Pay checkout в Google Play-сборке: кнопки внешней оплаты там скрыты", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
+    "not_promised": ["Глобальный поиск по всему сайту и поисковое поле на /history: в исходном архиве не найдены; реальный Search friends есть только в Community /space", "Автоматическое списание/авто-продление: в исходнике указаны разовые покупки без recurring charges", "Внешний Fondy/Google Pay checkout в Google Play-сборке: кнопки внешней оплаты там скрыты", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
     "source_note": "Матрица восстановлена по текущему Web source snapshot и трём пользовательским изображениям только как контекст для проверки. В репозитории нет полного набора настоящих экранных снимков; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
 }
 
@@ -721,126 +795,8 @@ def _select_user_journeys(query: str) -> list[dict]:
     return result[:3]
 
 
-# Screen blueprints are source-derived control inventories used internally for semantic retrieval.
-# They are not screenshots or visual mockups and are never passed as rendered screen panels.
-APRIL_UI_BLUEPRINTS = {
-    "graph-controls": {
-        "screen_id": "graph-controls", "screen_title": "Управление графиком в чате",
-        "visible_controls": ["Карточка графика", "Show description and data checkbox для линейного графика", "− и + для масштаба 3D-графика", "Ракурсы: слева, справа, сзади, сверху, сбоку", "3D / наклонный ракурс", "Reset view / Сбросить вид", "Pause wave / Resume wave только для поддерживаемой волны", "Меню Download or share graph"],
-        "screen_flow": ["Открыть ответ с графиком в основном чате /", "Определить тип графика: линейный или 3D", "Линейный: открыть/закрыть описание и таблицу данных", "3D: изменить масштаб и выбрать нужный ракурс", "При необходимости сбросить камеру или приостановить/продолжить поддерживаемую анимацию", "Для экспорта отдельно открыть меню графика и выбрать Download или Share"],
-        "semantic_concepts": ["управлять графиком", "увеличить 3d график", "уменьшить график", "повернуть график", "ракурс графика", "сбросить вид графика", "показать данные графика", "остановить волну", "3d graph controls", "zoom graph", "rotate graph", "graph view"],
-    },
-    "response-feedback": {
-        "screen_id": "response-feedback", "screen_title": "Действия под ответом April",
-        "visible_controls": ["Текст и render-блоки конкретного ответа April", "Кнопка «Жалоба»", "Кнопка «Спасибо»", "Зелёная круглая стрелка вверх с aria-label/title «Опубликовать в сообществе»", "Форма выбора причины жалобы: вредный, оскорбительный, вводящий в заблуждение, другое", "Встроенное подтверждение публикации или ошибка"],
-        "screen_flow": ["Открыть основной чат /", "Найти нужный ответ April", "Под ответом выбрать действие: «Спасибо», «Жалоба» либо зелёная стрелка «Опубликовать в сообществе»", "Для жалобы выбрать причину и отправить форму", "Для публикации проверить ответ и нажать зелёную стрелку; компонент отправляет текущий ответ в Community без ручного копирования", "После успеха появляется текстовое подтверждение; для просмотра публикации открыть /space"],
-        "semantic_concepts": ["отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "опубликовать ответ April в сообществе", "поделиться ответом April в сообществе", "зелёная стрелка под ответом", "кнопка публикации под ответом", "feedback", "report response", "thank button", "share April reply to community"],
-    },
-    "chat": {
-        "screen_id": "chat", "screen_title": "Основной чат April",
-        "visible_controls": ["APRIL header", "profile / Log in", "paperclip attachment", "message field", "send arrow", "microphone", "square image-action menu in the top-right of a rendered gallery image", "Download to device", "Share"],
-        "screen_flow": ["Верхняя панель April и профиль", "Рабочая область разговора", "Нижняя панель: вложение, поле сообщения, отправка и голос", "Для уже отрисованной картинки нажать квадратную кнопку меню действий в правом верхнем углу карточки и выбрать «Скачать на устройство» или «Поделиться»", "Если ответ неполный или не по запросу, уточнить пропущенную часть в той же беседе; не требуется повторять всю задачу или использовать конкретную команду-слово", "Для правки созданного изображения сослаться на картинку из текущего контекста и описать желаемый вид, объект и цвет; при наличии оригинала и разрешённого тарифа править источник, а не заменять его декоративной картинкой", "Если ответ пустой/завис, дождаться окончания операции и один раз обновить страницу; при повторении перейти в Contact Support из профиля или справки"],
-        "semantic_concepts": ["написать April", "отправить вопрос", "пустой чат", "поле ввода", "голосовое сообщение", "начать беседу", "ответ завис", "крутится индикатор", "пустой ответ", "не отвечает", "продолжи", "я жду", "покажи на этой картинке", "скачать изображение", "меню изображения", "поделиться картинкой", "image annotation", "message", "send", "microphone", "login", "log in"]
-    },
-    "image-controls": {
-        "screen_id": "image-controls", "screen_title": "Действия с изображением в чате",
-        "visible_controls": ["Карточка уже созданного изображения", "Квадратная кнопка меню действий в правом верхнем углу карточки", "Открыть меню действий с материалом", "Скачать на устройство", "Поделиться"],
-        "screen_flow": ["Открыть основной чат и найти уже созданную картинку", "Нажать квадратную кнопку меню действий в правом верхнем углу карточки изображения", "В меню выбрать «Скачать на устройство» либо «Поделиться»", "Не запускать повторную генерацию только для того, чтобы скачать существующую картинку; если кнопка отсутствует, проверить версию экрана и приложить скриншот"],
-        "semantic_concepts": ["скачать картинку", "сохранить изображение", "скопировать картинку", "поделиться картинкой", "меню действий изображения", "кнопка скачать", "download image", "save image", "share image"],
-    },
-    "attachments": {
-        "screen_id": "attachments", "screen_title": "Добавить вложение",
-        "visible_controls": ["Скрепка слева от поля сообщения", "Камера", "Изображения", "Файлы", "крестик вверху", "Отмена"],
-        "screen_flow": ["Открыть основной чат /", "Нажать скрепку слева от поля сообщения", "В модальном окне выбрать Камера для нового снимка, Изображения для выбора фото или Файлы для документа", "Закрыть крестиком/Отмена без прикрепления или вернуться к сообщению и отправить его", "Убедиться, что выбранный файл действительно появился во вложениях, прежде чем просить April анализировать/редактировать его", "Если нужен указатель на существующей картинке, сформулировать, какой объект и каким цветом отметить. При наличии источника и доступного тарифа выполняется редактирование этого источника; иначе April должна честно предложить поддерживаемую схему и объяснить ограничение"],
-        "semantic_concepts": ["скрепка", "вложение", "прикрепить документ", "загрузить фото", "выбрать изображение", "открыть камеру", "файл в чат", "куда нажать чтобы прикрепить", "файл не прикрепляется", "изображение не загрузилось", "почему вложение не отправляется", "attachment", "upload", "camera", "image picker", "file picker", "cancel"]
-    },
-    "settings": {
-        "screen_id": "profile", "screen_title": "Настройки и профиль",
-        "visible_controls": ["Google account", "Выйти", "April ID", "Premium ID", "Копировать", "Имя в пространстве", "Изменить", "CURRENT PLAN", "Time remaining", "Кнопки пакетов 28 дней · $25 и 12 часов · $3 (если доступны)", "More languages", "Dialog history", "Contact support", "Community", "Exit / Log out", "Delete account", "Язык: первые варианты + More languages"],
-        "screen_flow": ["Открыть /settings кнопкой профиля в правой части верхней панели основного чата", "Сверху проверить Google account, April ID и Premium ID; Copy копирует идентификатор", "В USER нажать Edit, изменить имя и сохранить", "В CURRENT PLAN проверить тариф и Time remaining", "Если показаны кнопки оплаты 28 дней · $25 или 12 часов · $3, выбрать пакет и дождаться подтверждения платёжного шлюза; кнопки скрыты в Google Play distribution", "Для языка выбрать видимый вариант или More languages; настройка сохраняется для April ID", "Dialog history доступна при Premium; Contact support — Premium и cooldown; Community открывает /space", "Важно: плитка Chat with April в исходнике ведёт на /aprill, а не на /; основной чат открывается по /", "Exit завершает сессию; Delete account подтверждает удаление April-аккаунта, не Google-аккаунта"],
-        "semantic_concepts": ["профиль", "личный кабинет", "аккаунт", "выход", "сменить имя", "ник", "язык интерфейса", "поменять язык", "апрель id", "april id", "premium id", "копировать id", "тариф", "подписка", "оставшееся время", "продлить", "оплата", "renew", "выйти", "logout", "google account"]
-    },
-    "history": {
-        "screen_id": "history", "screen_title": "Saved dialogues / История диалогов",
-        "visible_controls": ["Saved dialogues", "карточка диалога", "дата и время", "фрагмент разговора", "Continue this dialogue", "Memory Status"],
-        "screen_flow": ["Открыть /history напрямую или через Settings / профайл → CURRENT PLAN → Dialog history.", "Просмотреть карточки по заголовку, фрагменту разговора и дате/времени; в предоставленном скриншоте отдельного поля поиска на странице не видно, поэтому не обещать несуществующую кнопку.", "Нажать Continue this dialogue у конкретной карточки, а не просто открыть другую карточку.", "Продолжить в исходной теме; краткое «Жду», «а дальше?» или правка ответа должны продолжать связанную активную задачу, а не заставлять пользователя повторять запрос.", "Если требуется найти тему по смыслу или времени, попросить April в основном чате найти её в доступной истории; не утверждать, что это кнопка веб-интерфейса."],
-        "semantic_concepts": ["старый разговор", "предыдущая беседа", "восстановить диалог", "вернуться к теме", "сохранённые сообщения", "история переписки", "saved conversation", "resume dialogue"]
-    },
-    "community": {
-        "screen_id": "community", "screen_title": "April · Community / Сообщество",
-        "visible_controls": ["Personal profile", "публичные карточки сообщений", "FREE/PREMIUM", "Private chat", "Delete your message", "paperclip", "поле сообщения", "send arrow"],
-        "screen_flow": ["Открыть сообщество", "Для публичной записи ввести текст в нижнее поле и отправить", "Для личного разговора нажать Private chat в карточке пользователя", "Свой пост можно удалить через Delete your message"],
-        "semantic_concepts": ["люди", "другие пользователи", "публичная переписка", "пост", "участник", "личное сообщение", "private chat", "community post"]
-    },
-    "help": {
-        "screen_id": "help", "screen_title": "Help & Information / Помощь и информация",
-        "visible_controls": ["Help Center", "How to Use April", "Privacy Policy", "Terms of Service", "Plans & Payments", "Account & Data Deletion", "Contact Support"],
-        "screen_flow": ["Открыть /aprill", "Выбрать карточку по теме", "Если у карточки нет подтверждённого отдельного URL, открыть её с родительской страницы"],
-        "semantic_concepts": ["справка", "инструкция", "руководство", "частые вопросы", "правила сервиса", "конфиденциальность", "платежи", "удаление данных", "техподдержка", "help", "documentation"]
-    },
-    "support": {
-        "screen_id": "support", "screen_title": "Contact Support / Поддержка",
-        "visible_controls": ["история обращений", "ответы техподдержки", "Contact Support"],
-        "screen_flow": ["Открыть карточку Contact Support в справке или быстрый переход профиля", "Просмотреть историю обращений и ответы"],
-        "semantic_concepts": ["жалоба", "пожаловаться", "ошибка", "не работает", "зависло", "сообщить о проблеме", "обращение", "support ticket"]
-    },
-    "plans": {
-        "screen_id": "profile", "screen_title": "Тарифы и платежи",
-        "visible_controls": ["CURRENT PLAN", "Free/Premium", "Time remaining", "Renew"],
-        "screen_flow": ["Открыть /settings", "Посмотреть текущий тариф и оставшееся время", "Если кнопка Renew действительно появилась в текущем интерфейсе, прочитать условия и подтвердить продление самостоятельно; если checkout отсутствует, объяснить, что покупка/продление сейчас не подтверждены"],
-        "semantic_concepts": ["цена", "оплата", "подписка", "продлить", "renew", "сколько осталось", "Free", "Premium", "тариф"]
-    },
-    "deletion": {
-        "screen_id": "deletion", "screen_title": "Account & Data Deletion",
-        "visible_controls": ["пояснение об удалении", "подтверждение удаления April-аккаунта"],
-        "screen_flow": ["Открыть /account-deletion", "Прочитать перечень удаляемых данных", "Подтвердить только если намерены удалить аккаунт April; аккаунт Google не удаляется"],
-        "semantic_concepts": ["стереть данные", "удалить профиль", "удаление аккаунта", "privacy request", "delete account"]
-    },
-    "legal": {
-        "screen_id": "legal", "screen_title": "Юридические документы",
-        "visible_controls": ["Privacy Policy", "Terms of Service"],
-        "screen_flow": ["Открыть нужный документ из справки или перейти по проверенному адресу"],
-        "semantic_concepts": ["права пользователя", "правила", "условия", "личные данные", "конфиденциальность"]
-    },
-}
-
-# Attach the relevant screen model to the existing canonical map. Duplicate parent
-# paths remain separate cards (for example all seven help cards use /aprill).
-for _area in APRIL_SITE_MAP.get("areas", []):
-    if not isinstance(_area, dict):
-        continue
-    _area_id = str(_area.get("id") or "")
-    _blueprint_key = _area_id
-    if _area_id in {"guide", "help-center", "how-to-use", "privacy", "terms"}:
-        _blueprint_key = "help" if _area_id in {"guide", "help-center", "how-to-use"} else "legal"
-    elif _area_id == "space":
-        _blueprint_key = "community"
-    elif _area_id == "direct":
-        _blueprint_key = "community"
-    elif _area_id == "support":
-        _blueprint_key = "support"
-    elif _area_id == "deletion":
-        _blueprint_key = "deletion"
-    elif _area_id == "plans":
-        _blueprint_key = "plans"
-    elif _area_id == "chat":
-        _blueprint_key = "chat"
-    elif _area_id == "attachments":
-        _blueprint_key = "attachments"
-    elif _area_id == "image-controls":
-        _blueprint_key = "image-controls"
-    elif _area_id == "graph-controls":
-        _blueprint_key = "graph-controls"
-    elif _area_id == "response-feedback":
-        _blueprint_key = "response-feedback"
-    elif _area_id == "history":
-        _blueprint_key = "history"
-    elif _area_id in {"settings", "memory"}:
-        _blueprint_key = "settings"
-    if _blueprint_key in APRIL_UI_BLUEPRINTS:
-        _area["ui_blueprint"] = APRIL_UI_BLUEPRINTS[_blueprint_key]
-        _area["visible_controls"] = list(APRIL_UI_BLUEPRINTS[_blueprint_key].get("visible_controls", []))
-        _area["semantic_concepts"] = list(APRIL_UI_BLUEPRINTS[_blueprint_key].get("semantic_concepts", []))
+# Interface visuals are deliberately not represented as screen mockups.
+# Verified controls live in APRIL_UI_FUNCTION_CATALOG; routes live in APRIL_SITE_MAP.
 
 _SITE_STOPWORDS = {
     "а", "и", "или", "но", "в", "во", "на", "к", "ко", "по", "из", "за", "с", "со", "у", "от", "до", "для", "про", "при", "что", "как", "где", "куда", "мне", "меня", "моя", "мой", "мое", "мои", "тебе", "тебя", "ты", "вы", "вас", "это", "этот", "эта", "эту", "там", "тут", "есть", "будет", "быть", "ли", "пожалуйста", "подскажи", "покажи", "расскажи", "объясни", "можно", "нужно", "надо", "април", "april", "please", "tell", "show", "where", "how", "can", "could", "the", "to", "in", "on", "at", "and", "or", "is", "are", "me", "my", "you", "your"
@@ -921,7 +877,7 @@ APRIL_API_ARCHITECTURE = {
         "Do not expose APRIL_WEB_TO_BOT_TOKEN or any API secret to users; do not advise them to paste secrets into chat.",
         "Do not tell the user to browse /api/v1/chat in order to use a feature; their normal entry point is the Web UI.",
         "The attached repository shows architecture, not live service health, production credentials, or runtime entitlement for a particular account.",
-        "A request for a real current screenshot cannot be fulfilled from server source alone: return an SVG route guide grounded in APRIL_UI_BLUEPRINTS and ask for an uploaded screenshot if exact pixel-level marking is needed.",
+        "A request for a real current screenshot cannot be fulfilled from source code alone: return a route/control SVG grounded only in APRIL_SITE_MAP and APRIL_UI_FUNCTION_CATALOG; never draw a mock screenshot. Ask for an uploaded screenshot only when pixel-level annotation is requested.",
     ],
 }
 
@@ -1013,8 +969,13 @@ def _semantic_site_area_scores(query: str) -> list[tuple[float, str]]:
         area_id = str(area.get("id") or "")
         if area_id == "admin-support":
             continue
-        blueprint = area.get("ui_blueprint") if isinstance(area.get("ui_blueprint"), dict) else {}
-        fields = [area.get("label"), area.get("purpose"), area.get("path"), *area.get("steps", []), *area.get("visible_controls", []), *area.get("semantic_concepts", []), *blueprint.get("screen_flow", []), *blueprint.get("semantic_concepts", [])]
+        fields = [area.get("label"), area.get("purpose"), area.get("path"), *area.get("steps", [])]
+        for function in APRIL_UI_FUNCTION_CATALOG.get("functions", []):
+            if isinstance(function, dict) and area_id in (function.get("areas") or []):
+                fields.extend([
+                    function.get("screen"), function.get("entry"), function.get("position"),
+                    function.get("control"), function.get("does"), *function.get("how_to_use", []),
+                ])
         searchable = " ".join(str(item) for item in fields if item)
         a_words = _site_words(searchable)
         intersection = q_words & a_words
@@ -14593,6 +14554,39 @@ _SITE_INTERFACE_OVERVIEW_RE = re.compile(
 )
 
 
+def _site_search_availability_target(value: Any) -> str:
+    """Return the real search surface a user is asking about, not a full-site tour."""
+    low = str(value or "").lower().replace("ё", "е")
+    history_search_ui = bool(re.search(
+        r"(?:где\s+(?:находится\s+)?поиск|есть\s+ли\s+поиск|поле\s+поиска|как\s+(?:найти|открыть|пользоваться)\s+(?:строк\w*\s+)?поиск|search\s+(?:field|box))",
+        low, re.I,
+    )) and bool(re.search(r"(?:истори\w*|диалог\w*|history|conversation)", low, re.I))
+    if history_search_ui:
+        return "history"
+    global_search_ui = bool(re.search(
+        r"(?:где\s+(?:находится\s+)?поиск|есть\s+ли\s+поиск|поле\s+поиска|search\s+(?:field|box))",
+        low, re.I,
+    )) and bool(re.search(r"(?:по\s+всему\s+сайт\w*|поиск\w*.{0,35}(?:по\s+)?(?:вс\w*\s+)?сайт\w*|глобальн\w*\s+поиск|whole\s+site|site[- ]wide)", low, re.I | re.S))
+    return "global" if global_search_ui else ""
+
+
+def _site_full_interface_overview_requested(value: Any) -> bool:
+    """Distinguish a whole-site inventory from a complete row/card of controls."""
+    low = str(value or "").lower().replace("ё", "е")
+    if _site_search_availability_target(low):
+        return False
+    # "All three buttons under the answer" is a complete local control row,
+    # not a request to dump the entire site's navigation/function inventory.
+    focused_control_group = bool(re.search(
+        r"(?:кнопк\w*|элемент\w*|control\w*).{0,65}(?:под\s+(?:ответ\w*|сообщен\w*)|рядом\s+с\s+(?:ответ\w*|сообщен\w*)|under\s+(?:the\s+)?(?:answer|reply|message)|beneath\s+(?:the\s+)?(?:answer|reply|message))|"
+        r"(?:под\s+(?:ответ\w*|сообщен\w*)|under\s+(?:the\s+)?(?:answer|reply|message)).{0,65}(?:кнопк\w*|элемент\w*|control\w*)",
+        low, re.I | re.S,
+    ))
+    if focused_control_group:
+        return False
+    return bool(_SITE_INTERFACE_OVERVIEW_RE.search(low))
+
+
 def is_site_help_query(query: str) -> bool:
     """Detect positive April self-help/navigation requests, excluding rejected routes."""
     effective_query, _removed_negative_clause = _effective_site_help_query(query)
@@ -14602,6 +14596,18 @@ def is_site_help_query(query: str) -> bool:
     if _is_external_community_topic(low):
         return False
     if _is_attachment_instruction_query(low):
+        return True
+    # Explicit questions about the presence/location of search fields are UI help,
+    # not requests to search private dialogue content on the user's behalf.
+    history_search_ui_question = bool(re.search(
+        r"(?:где\s+(?:находится\s+)?поиск|есть\s+ли\s+поиск|поле\s+поиска|как\s+(?:найти|открыть|пользоваться)\s+(?:строк\w*\s+)?поиск|search\s+(?:field|box))",
+        low, re.I,
+    )) and bool(re.search(r"(?:истори\w*|диалог\w*|history|conversation)", low, re.I))
+    site_wide_search_ui_question = bool(re.search(
+        r"(?:где\s+(?:находится\s+)?поиск|есть\s+ли\s+поиск|поле\s+поиска|search\s+(?:field|box))",
+        low, re.I,
+    )) and bool(re.search(r"(?:вс\w*\s+сайт\w*|глобальн\w*\s+поиск|по\s+всему\s+сайт\w*|whole\s+site|site[- ]wide)", low, re.I))
+    if history_search_ui_question or site_wide_search_ui_question:
         return True
     # Direct route/section names are enough: a user can simply type "Сообщество".
     if any(term in low for term in _SITE_ROUTE_WORDS):
@@ -14751,103 +14757,112 @@ def _interpretation_semantic_features(interpretation: Any) -> Dict[str, Any]:
 
 
 def _active_site_ui_followup(interpretation: Any, query: str, recent_context: Any) -> Dict[str, Any]:
-    """Recover a site-help referent only when semantic interpretation links this turn to it.
+    """Resolve an elliptical control question against the active April-UI exchange.
 
-    This deliberately does not turn every short reply into a site-help request:
-    the State Manager must first say CONTINUE, current Interpretation must identify
-    a context-dependent question/answer reference, and the selected active branch
-    must contain a prior April UI-help exchange with a verified route.
+    A state-manager relation label is advisory, not a hard gate: the semantic
+    pre-interpreter can label "what does the green button do?" as NEW even when
+    the selected active pair is plainly an April interface explanation.
     """
     if not isinstance(recent_context, dict) or not isinstance(interpretation, dict):
-        return {}
-    relation = _text(recent_context.get("relation")).upper()
-    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
-    relation = relation or _text(dialogue.get("relation")).upper()
-    if relation not in {"CONTINUE", "FOLLOWUP", "CONTINUATION"}:
         return {}
     semantics = _interpretation_semantic_features(interpretation)
     features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
     if not features and isinstance(semantics.get("intent_features"), dict):
         features = semantics.get("intent_features")
+    dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
     interaction = dialogue.get("interaction_profile") if isinstance(dialogue.get("interaction_profile"), dict) else {}
+    if semantics.get("explicit_topic_switch") or features.get("explicit_topic_switch") or semantics.get("history_request"):
+        return {}
+
+    control_kind = _site_control_reference_kind(query)
     context_question = bool(
         features.get("context_dependent_question")
         or features.get("previous_assistant_output_reference")
         or features.get("strong_anaphoric_reference")
         or interaction.get("previous_answer_reference")
+        or control_kind
     )
     if not context_question:
         return {}
-    if semantics.get("explicit_topic_switch") or features.get("explicit_topic_switch") or semantics.get("history_request"):
-        return {}
 
     selected_pairs = recent_context.get("selected_pairs") if isinstance(recent_context.get("selected_pairs"), list) else []
-    prior_ui_user = ""
-    prior_ui_text = ""
-    for pair in selected_pairs[:3]:
+    candidates = []
+    for pair in selected_pairs[:5]:
         if not isinstance(pair, dict):
             continue
         user_text = _text(pair.get("user") or pair.get("source_user_text"))
         assistant_text = _text(
-            pair.get("assistant_last_message") or pair.get("source_april_text") or pair.get("april")
+            pair.get("assistant_last_message") or pair.get("source_april_text") or
+            pair.get("assistant_answer") or pair.get("april")
         )
+        if not user_text:
+            continue
         pair_text = " ".join((user_text, assistant_text))
-        # The selected branch must carry an actual April-site help exchange, not
-        # merely mention a generic word such as "button" or "community".
-        if user_text and is_site_help_query(user_text):
-            if _referenced_site_area_ids({"selected_pairs": [pair], "relation": relation}):
-                prior_ui_user = user_text
-                prior_ui_text = pair_text
-                break
-    if not prior_ui_user:
+        # Require a previous positively identified April UI-help turn. Do not use
+        # unrelated history just because it contains the word "button".
+        pair_control = _site_control_reference_kind(pair_text)
+        prior_is_site_help = is_site_help_query(user_text) or bool(pair_control)
+        if not prior_is_site_help:
+            continue
+        area_ids = _referenced_site_area_ids({"selected_pairs": [pair]})
+        if pair_control == "assistant_response_share":
+            area_ids = list(dict.fromkeys(["response-feedback", "chat", "space", *area_ids]))
+        elif pair_control in {"response_feedback_thanks", "response_feedback_report"}:
+            area_ids = list(dict.fromkeys(["response-feedback", "chat", *area_ids]))
+        if not area_ids:
+            continue
+        candidates.append((user_text, assistant_text, pair_text, area_ids))
+    if not candidates:
         return {}
 
-    area_ids = _referenced_site_area_ids(recent_context)
-    if not area_ids:
-        area_ids = _referenced_site_area_ids({"selected_pairs": [
-            {"user": prior_ui_user, "assistant_last_message": prior_ui_text}
-        ]})
-    if not area_ids:
+    # Current control wording determines the exact action. For a follow-up that
+    # only says "what does it do?", fall back to a unique control described in
+    # the active pair's answer, not to every item on that page.
+    resolved_ids: List[str] = []
+    resolved_targets: List[str] = []
+    if control_kind == "assistant_response_share":
+        resolved_ids = ["assistant_response_share"]
+        resolved_targets = ["response.share_to_community"]
+    elif control_kind in {"response_feedback_thanks", "response_feedback_report"}:
+        resolved_ids = ["response_feedback"]
+        resolved_targets = ["response.feedback"]
+    else:
+        active_text = " ".join(item[2] for item in candidates[:2])
+        prior_control = _site_control_reference_kind(active_text)
+        if prior_control == "assistant_response_share":
+            resolved_ids = ["assistant_response_share"]
+            resolved_targets = ["response.share_to_community"]
+        elif prior_control in {"response_feedback_thanks", "response_feedback_report"}:
+            resolved_ids = ["response_feedback"]
+            resolved_targets = ["response.feedback"]
+
+    if not resolved_ids:
+        # Generic contextual questions are accepted only when the selected active
+        # answer contains a single concrete site-control target and the current
+        # turn is an explicit anaphoric continuation.
+        semantic = {
+            "domain": "april_ui", "action": "EXPLAIN_UI_ROUTE",
+            "user_goal": " ".join((query, candidates[0][2])),
+        }
+        matched = _site_semantic_function_targets(query, semantic, candidates[0][3])
+        resolved_ids = list(matched.get("function_ids") or [])
+        resolved_targets = list(matched.get("semantic_targets") or [])
+    if not resolved_ids:
         return {}
 
-    prior_low = prior_ui_user.lower().replace("ё", "е")
-    function_ids: List[str] = []
-    semantic_targets: List[str] = []
-    if "space" in area_ids and re.search(
-        r"(?:отправ\w*|пересыл\w*|опубликов\w*|публикац\w*|post\w*|send\w*).{0,90}(?:сообществ\w*|community)|(?:сообществ\w*|community).{0,90}(?:сообщен\w*|пост\w*|опубликов\w*|send\w*)",
-        prior_low, re.I | re.S,
-    ):
-        assistant_owned_content = bool(re.search(
-            r"(?:\b(?:тво[её]|ваш|ваше|мой|мое|моё|наш|наше)\s+(?:ответ|сообщен\w*)|"
-            r"\bответ\w*\s+(?:април\w*|april)\b|\bсообщен\w*\s+(?:април\w*|april)\b|"
-            r"\b(?:your|my|our)\s+(?:april\s+)?(?:reply|response|message)\b|"
-            r"\bapril(?:'s)?\s+(?:reply|response|message)\b)",
-            prior_low, re.I,
-        ))
-        if assistant_owned_content:
-            function_ids.extend(["assistant_response_share", "community_public_post"])
-            semantic_targets.extend(["response.share_to_community", "community.public_post"])
-        else:
-            function_ids.append("community_public_post")
-            semantic_targets.append("community.public_post")
-    elif "space" in area_ids and re.search(r"(?:личн\w*\s+чат|приватн\w*\s+чат|private\s+chat|friend.{0,40}message)", prior_low, re.I):
-        function_ids.append("community_private_chat")
-        semantic_targets.append("community.private_chat")
-    elif "space" in area_ids and re.search(r"(?:друз\w*|контакт\w*|найти\s+пользоват|add\s+friend|search\s+friends)", prior_low, re.I):
-        function_ids.append("community_friend_manage")
-        semantic_targets.append("community.friends")
-    elif "space" in area_ids and re.search(r"(?:приглаш\w*|invite\s+a\s+friend)", prior_low, re.I):
-        function_ids.append("community_invite")
-        semantic_targets.append("community.invite")
-
+    prior_user, prior_answer, _pair_text, prior_areas = candidates[0]
+    area_ids = ["response-feedback", "chat", "space"] if "assistant_response_share" in resolved_ids else ["response-feedback", "chat"]
+    if not area_ids:
+        area_ids = prior_areas
+    relation = _text(recent_context.get("relation") or dialogue.get("relation")).upper()
     return {
         "relation": relation,
-        "area_ids": (["response-feedback", "chat", "space"] if "assistant_response_share" in function_ids else area_ids)[:4],
-        "function_ids": function_ids[:4],
-        "semantic_targets": semantic_targets[:4],
-        "prior_user_request": prior_ui_user[:360],
-        "prior_answer_excerpt": prior_ui_text[:900],
-        "source": "selected_active_dialogue_branch",
+        "area_ids": area_ids[:4],
+        "function_ids": resolved_ids[:4],
+        "semantic_targets": resolved_targets[:4],
+        "prior_user_request": prior_user[:360],
+        "prior_answer_excerpt": prior_answer[:900],
+        "source": "active_site_help_pair_semantic_control_match",
     }
 
 def _referenced_site_area_ids(context: Any) -> List[str]:
@@ -14857,10 +14872,11 @@ def _referenced_site_area_ids(context: Any) -> List[str]:
         return []
     ids: List[str] = []
     # Specific current-route clues take precedence over generic words such as "chat".
-    for area_id in ("space", "settings", "history", "support", "guide", "deletion", "privacy", "terms", "plans", "how-to-use", "help-center", "memory", "direct", "chat", "tools"):
+    for area_id in ("response-feedback", "space", "settings", "history", "support", "guide", "deletion", "privacy", "terms", "plans", "how-to-use", "help-center", "memory", "direct", "chat", "tools"):
         hints = _SITE_AREA_HINTS.get(area_id, ())
         if any(hint in source for hint in hints) or any(
             marker in source for marker in {
+                "response-feedback": ("response-feedback", "жалоб", "пожалова", "поблагодар", "отблагодар", "спасибо", "зелёная стрелка", "зеленая стрелка", "опубликовать в сообществе", "reportairesponse"),
                 "space": ("/space", "community", "сообществ", "private chat"),
                 "settings": ("/settings", "личный кабинет", "профиль", "current plan"),
                 "history": ("/history", "saved dialogues", "история диалогов", "continue this dialogue"),
@@ -14922,36 +14938,69 @@ def _interpretation_has_concrete_image_edit(interpretation: Any) -> bool:
 
 
 def _site_navigation_visual_brief(query: str, referenced_area_ids: Any = None) -> Dict[str, Any]:
-    """Evidence ledger for a source-derived SVG route guide, not for raster imitation."""
-    scores = _semantic_site_area_scores(str(query or "").lower().replace("ё", "е"))
+    """Return source-verified control/route facts for a schematic SVG, never a screen mockup."""
+    low = str(query or "").lower().replace("ё", "е")
+    scores = _semantic_site_area_scores(low)
     ids = [area_id for score, area_id in scores if score >= 2.8]
     if isinstance(referenced_area_ids, (list, tuple, set)):
-        ids = [str(item) for item in referenced_area_ids if str(item)] + [item for item in ids if item not in referenced_area_ids]
-    screen = _site_screen_for_query(query, ids)
-    blueprint_key = screen if screen in APRIL_UI_BLUEPRINTS else "settings"
-    blueprint = APRIL_UI_BLUEPRINTS[blueprint_key]
-    full_areas = {str(item.get("id")): item for item in APRIL_SITE_MAP.get("areas", []) if isinstance(item, dict)}
-    routes = []
-    for area_id in ids[:5]:
-        item = full_areas.get(area_id)
-        if item and item.get("path") and "[" not in str(item.get("path")) and "/Admin-profile" != item.get("path"):
-            routes.append({"label": _text(item.get("label")), "path": _text(item.get("path")), "steps": list(item.get("steps") or [])[:3]})
+        ids = list(dict.fromkeys([str(item) for item in referenced_area_ids if str(item)] + ids))
+    semantic = {"domain": "april_ui", "action": "EXPLAIN_UI_ROUTE", "user_goal": query}
+    resolved = _site_semantic_function_targets(query, semantic, ids)
+    wanted_function_ids = set(resolved.get("function_ids") or [])
+    area_index = {str(item.get("id")): item for item in APRIL_SITE_MAP.get("areas", []) if isinstance(item, dict)}
+    route_rows = []
+    for area_id in ids[:8]:
+        item = area_index.get(area_id)
+        path = _text(item.get("path")) if item else ""
+        if item and path and "[" not in path and path.lower().rstrip("/") != "/admin-profile":
+            route_rows.append({
+                "area_id": area_id,
+                "label": _text(item.get("label")),
+                "path": path,
+                "entry": _text(item.get("entry")),
+                "position": _text(item.get("position")),
+                "steps": list(item.get("steps") or [])[:6],
+            })
+    controls = []
+    for item in APRIL_UI_FUNCTION_CATALOG.get("functions", []):
+        if not isinstance(item, dict):
+            continue
+        item_id = _text(item.get("id"))
+        item_areas = {str(value) for value in (item.get("areas") or [])}
+        if wanted_function_ids and item_id not in wanted_function_ids:
+            continue
+        if not wanted_function_ids and ids and not item_areas.intersection(ids):
+            continue
+        controls.append({
+            "function_id": item_id,
+            "screen": _text(item.get("screen")),
+            "entry": _text(item.get("entry")),
+            "position": _text(item.get("position")),
+            "control_label": _text(item.get("control")),
+            "purpose": _text(item.get("does")),
+            "steps": list(item.get("how_to_use") or [])[:7],
+            "expected_result": _text(item.get("result")),
+            "availability": _text(item.get("availability")),
+            "limits": _text(item.get("limits")),
+        })
+        if len(controls) >= 18:
+            break
     return {
-        "purpose": "Create a source-derived route flowchart from verified page components and handlers. This is not a captured screenshot and must never be passed to an image generator as if it were the real deployed screen.",
-        "screen_id": screen,
-        "screen_title": _text(blueprint.get("screen_title")),
-        "visible_controls": list(blueprint.get("visible_controls") or [])[:18],
-        "screen_flow": list(blueprint.get("screen_flow") or [])[:8],
-        "verified_routes": routes,
+        "visual_kind": "SOURCE_DERIVED_CONTROL_MAP",
+        "not_a_screenshot": True,
+        "source": "APRIL_SITE_MAP + APRIL_UI_FUNCTION_CATALOG, both audited against uploaded aprill-web-main components/routes/handlers",
+        "purpose": "Show the actual route and interaction sequence using only verified controls. Never draw or imply a screenshot, mock screen, invented navigation panel or pixel layout.",
+        "selected_area_ids": ids[:8],
+        "verified_routes": route_rows,
+        "verified_controls": controls,
         "visual_rules": [
-            "Render as an explicitly schematic SVG with a small label: 'Схема по исходникам April — не снимок экрана'.",
-            "Show only source-confirmed controls and labels; never infer pixel positions from route names or invent tabs, portraits, banners or icons.",
-            "Use a clear arrow to show a route from the verified entry point to the named destination.",
-            "Keep labels readable; for a multi-step path use sequential panels rather than squeezing the entire interface into one panel.",
-            "Text links and the actual user-provided screenshot, if one is attached, are the source of truth; this schema is not a real screenshot.",
+            "Render a simple route/control flowchart, not a page mockup or screenshot imitation.",
+            "Use only the exact labels, relative positions, paths and actions present in verified_controls and verified_routes.",
+            "Describe position relationally (under the answer, beside the field, in the profile section); never invent pixel coordinates or unverified screen regions.",
+            "Label the SVG: 'Схема по исходникам April — не снимок экрана'.",
+            "If the source does not verify a control or its current production availability, say that it is not verified instead of filling the gap.",
         ],
     }
-
 
 
 def _site_ui_action_contracts(source: Any) -> List[Dict[str, Any]]:
@@ -15075,7 +15124,10 @@ def prepare_site_help_interpretation(
     # returns function ids after validating domain=april_ui and an allowed
     # navigation action, so this is not a raw phrase trigger.
     direct_match = bool(action_contracts) or bool(semantic_function_resolution.get("function_ids")) or is_site_help_query(query)
-    if semantic_function_resolution.get("area_ids") and not referent_ids:
+    if semantic_function_resolution.get("area_ids") and not referent_ids and (not _site_full_interface_overview_requested(query)):
+        # Broad all-controls requests must remain a complete inventory. Semantic
+        # area scores are helpful for a focused question, but must not be promoted
+        # to explicit referents that truncate the whole-site route map.
         referent_ids = list(semantic_function_resolution.get("area_ids") or [])
     if not direct_match and not removed_negative_clause:
         contextual_ui_followup = _active_site_ui_followup(interpretation, query, recent_context)
@@ -15183,7 +15235,7 @@ def prepare_site_help_interpretation(
     if explicit_raster_requested and not source_image_edit:
         intent["real_screenshot_unavailable"] = True
         intent["real_screenshot_policy"] = (
-            "The service has source code and UI blueprints, but no captured image of the user's current browser screen. "
+            "The service has source code and a verified route/control catalog, but no captured image of the user's current browser screen. "
             "Return a clearly labelled source-derived SVG map, explain that it is a scheme rather than a screenshot, "
             "and ask the user to attach the actual screenshot for pixel-level annotation. Never call the raster image generator for this purpose."
         )
@@ -15214,7 +15266,7 @@ def prepare_site_help_interpretation(
         "derive_nodes_from_query_relevant_map_routes": True,
         "route_selection_source": "typed_interpretation_action_contract_then_semantic_site_map",
         "show_relative_control_positions": True,
-        "screen_fidelity": "use existing APRIL_UI_BLUEPRINTS and source-confirmed relative paths; never invent controls or route names",
+        "screen_fidelity": "do not create screen mockups; use only APRIL_SITE_MAP routes and APRIL_UI_FUNCTION_CATALOG controls with relational positions",
         "annotate_existing_source_image_when_authorized": True,
         "requested_arrow_colour_is_exact": True,
         "one_diagram_per_logical_stage_only": True,
@@ -15333,7 +15385,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     score_by_id = {area_id: score for score, area_id in semantic_scores}
     attachment_help = _is_attachment_instruction_query(query)
     feedback_help = bool(re.search(
-        r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+(?:спасибо|жалоб)|пожалова\w*.{0,80}(?:ответ|кноп|куда|где)|feedback\s+button|report\s+(?:button|response))",
+        r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+(?:спасибо|жалоб)|(?:все|три)\s+кнопк\w*.{0,55}(?:под\s+(?:ответ|сообщен)|under\s+(?:the\s+)?(?:answer|reply))|пожалова\w*.{0,80}(?:ответ|кноп|куда|где)|feedback\s+button|report\s+(?:button|response))",
         query, re.I | re.S,
     )) and bool(re.search(r"(?:куда.{0,40}наж|где.{0,60}(?:кноп|наход|это)|покажи.{0,50}(?:где|куда|путь)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи|where.{0,50}(?:click|button|find))", query, re.I | re.S))
     direct_hint_ids = [area_id for area_id, hints in _SITE_AREA_HINTS.items() if any(hint in query for hint in hints)]
@@ -15403,7 +15455,9 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                 if value not in referent_ids:
                     referent_ids.append(value)
     for value in semantic_resolved.get("area_ids", []):
-        if value not in referent_ids:
+        # Area scores are provisional navigation suggestions, not explicit
+        # referents. A whole-site request must keep the complete route inventory.
+        if value not in referent_ids and (not _site_full_interface_overview_requested(query)):
             referent_ids.append(value)
     referent_ids = [value for value in referent_ids if value in {str(area.get("id")) for area in APRIL_SITE_MAP["areas"]}]
     if referent_ids:
@@ -15436,7 +15490,8 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         query, re.IGNORECASE,
     ):
         broad_self_help = True
-    full_interface_overview = bool(_SITE_INTERFACE_OVERVIEW_RE.search(query))
+    search_availability_target = _site_search_availability_target(query)
+    full_interface_overview = _site_full_interface_overview_requested(query)
     if full_interface_overview:
         broad_self_help = True
     elif contract_targets:
@@ -15497,6 +15552,14 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
             "space", "direct", "support", "guide", "help-center", "how-to-use",
             "plans", "deletion", "privacy", "terms", "tools",
         ]
+    elif search_availability_target == "global":
+        # No global search exists in this snapshot: show only the one real search surface.
+        selected_ids = ["space"]
+        referent_ids = ["space"]
+    elif search_availability_target == "history":
+        # The History page has cards and continuation, but no search box.
+        selected_ids = ["history", "chat"]
+        referent_ids = ["history"]
 
     # Exact query-catalog matches are a route regression corpus, not a reason to
     # discard the user's requested destination. Earlier broad capability wording
@@ -15504,7 +15567,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     # a single-page question into the whole site. Keep the named route focused.
     # A literal tariff/price question is the exception: open Plans & Payments while
     # retaining the feature route so the answer can explain both plan and feature.
-    if matched_cases and not referent_ids and not meta_overview_query and not _SITE_INTERFACE_OVERVIEW_RE.search(query):
+    if matched_cases and not referent_ids and not meta_overview_query and (not _site_full_interface_overview_requested(query)):
         exact_case = matched_cases[0]
         exact_area = str(exact_case.get("area_id") or "") if isinstance(exact_case, dict) else ""
         known_area_ids = {str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
@@ -15561,19 +15624,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
     selected_ids_final = [str(area.get("id")) for area in chosen]
     screen_id = _site_screen_for_query(query, selected_ids_final, semantic_ui_targets)
-    blueprints = []
-    seen_blueprints = set()
-    for area in chosen:
-        blueprint = area.get("ui_blueprint") if isinstance(area.get("ui_blueprint"), dict) else None
-        if blueprint:
-            key = str(blueprint.get("screen_id") or "")
-            if key and key not in seen_blueprints:
-                seen_blueprints.add(key)
-                blueprints.append(blueprint)
-    # Attachment picker is a modal over the chat, but its controls are documented
-    # from the screenshot and are not advertised as a separate route.
-    if screen_id == "attachments":
-        blueprints = [APRIL_UI_BLUEPRINTS["attachments"]] + [item for item in blueprints if item.get("screen_id") == "chat"]
+    # No screen mockups are returned; all visual guidance comes from the verified control catalog.
     return {
         "schema": APRIL_SITE_MAP["schema"],
         "source": APRIL_SITE_MAP["source"],
@@ -15582,7 +15633,7 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         "user_journeys": _select_user_journeys(query),
         "access_matrix": APRIL_ACCESS_MATRIX,
         "screen_id": screen_id,
-        "screen_blueprints": blueprints,
+        "screen_blueprints": [],
         "target_function_ids": target_function_ids[:8],
         "semantic_targets": semantic_ui_targets[:8],
         "context_followup": any(bool(source.get("site_navigation_context_followup")) for source in intent_sources),
@@ -15647,7 +15698,7 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None, semantic_t
         low, re.IGNORECASE,
     ))
     shortcut_targets = ids.intersection({"history", "space", "support", "plans", "deletion", "privacy", "terms", "guide", "help-center", "how-to-use"})
-    if _SITE_INTERFACE_OVERVIEW_RE.search(low):
+    if _site_full_interface_overview_requested(low):
         return "overview"
     if "response-feedback" in ids or (re.search(r"(?:отблагодар\w*|поблагодар\w*|кнопк\w*\s+(?:спасибо|жалоб)|пожалова\w*)", low, re.I) and re.search(r"(?:куда.{0,35}наж|где.{0,60}(?:кноп|наход)|покажи.{0,50}(?:где|куда)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи)", low, re.I | re.S)):
         return "response-feedback"
@@ -15721,10 +15772,24 @@ def _site_help_requested(machine_request: Any) -> bool:
             nested_features = nested_semantics.get("intent_features")
         valid_ids = {str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
         sources = (intent, nested, nested_intent, nested_structure)
+        known_function_ids = {
+            str(item.get("id")) for item in APRIL_UI_FUNCTION_CATALOG.get("functions", [])
+            if isinstance(item, dict) and item.get("id")
+        }
         for source in sources:
             inherited = bool(source.get("site_navigation_context_followup"))
             refs = source.get("site_navigation_referent") or source.get("site_navigation_target_ids")
             if inherited and isinstance(refs, list) and any(str(ref) in valid_ids for ref in refs):
+                carried_functions = source.get("site_navigation_target_functions")
+                carried_functions = carried_functions if isinstance(carried_functions, list) else []
+                verified_functions = [str(value) for value in carried_functions if str(value) in known_function_ids]
+                context_source = _text(source.get("site_navigation_context_source"))
+                # A validated active-branch match may arrive with relation=NEW when
+                # the upstream state manager misclassifies an elliptical UI follow-up.
+                # Trust only the local C_IT_ROOM resolution with a concrete catalog ID;
+                # do not make arbitrary NEW turns inherit stale UI history.
+                if context_source == "selected_active_dialogue_branch" and verified_functions:
+                    return True
                 relation = _text(nested_dialogue.get("relation") or intent.get("dialogue", {}).get("relation") if isinstance(intent.get("dialogue"), dict) else nested_dialogue.get("relation")).upper()
                 semantically_contextual = bool(
                     nested_features.get("context_dependent_question")
@@ -15965,7 +16030,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         r"(?:объясни|расскажи).{0,90}(?:april|април).{0,60}(?:free|premium|премиум|куда\s+нажать)|"
         r"how\s+(?:does|to\s+use)\s+april.{0,100}(?:free|premium|step|click|navigate))",
         query_for_routes, re.IGNORECASE | re.DOTALL,
-    )) and bool(re.search(r"(?:объясн|расскаж|покажи|по\s+шагам|пошаг|куда\s+нажать|как\s+польз|how|guide|step[- ]by[- ]step|click)", query_for_routes, re.I))
+    )) and bool(re.search(r"(?:объясн|расскаж|покажи|по\s+шагам|пошаг|куда\s+нажать|как\s+польз|how|guide|step[- ]by[- ]step|click)", query_for_routes, re.I)) and not full_interface_overview
     if product_walkthrough:
         if is_ru_or_uk:
             answer = (
@@ -16585,8 +16650,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "plans": "Тарифы и платежи",
         "legal": "Правила и конфиденциальность",
     }
-    blueprint_title = _text((site_map.get("screen_blueprints") or [{}])[0].get("screen_title")) if isinstance((site_map.get("screen_blueprints") or [{}])[0], dict) else ""
-    diagram_title = screen_titles.get(screen_id, blueprint_title or "Карта переходов April")
+    diagram_title = screen_titles.get(screen_id, "Карта переходов April")
     diagram_payload = {
         "title": diagram_title,
         "description": "СХЕМА НАВИГАЦИИ ПО ИСХОДНИКАМ APRIL · НЕ СКРИНШОТ. Показывает подтверждённый порядок переходов и действий; это не копия экрана и не выполняет клики.",
@@ -16767,7 +16831,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         # when an authorized source-image edit is the requested visual deliverable.
         if (full_interface_overview or (bool(site_map.get("broad_self_help")) and screen_id == "profile")) and not pointer_requested and not source_image_edit:
             full_area_index = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
-            help_ids = ["guide", "help-center", "how-to-use", "privacy", "terms", "plans", "deletion", "support"]
+            help_ids = ["guide", "help-center", "how-to-use", "privacy", "terms", "plans", "deletion", "support", "memory", "tools"]
             help_nodes = []
             help_edges = []
             for help_id in help_ids:
@@ -16784,7 +16848,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                     help_edges.append({"from": help_nodes[0]["id"], "to": help_node["id"], "label": "Карточка справки"})
                 help_payload = {
                     "title": "Help & Information / Справка и документы",
-                    "description": "Вторая часть карты: карточки справки, документы, тарифы и удаление данных. Это отдельная страница, не кнопки внутри профиля.",
+                    "description": "Вторая часть карты: справка, документы, тарифы, удаление данных и страницы Memory/Tools. В текущем Web source snapshot /memory и /tools открываются как пустые страницы без пользовательских рабочих функций.",
                     "representation": "navigation_flow", "screen_id": "help",
                     "selected_route_ids": help_ids, "matched_query": current_route_query[:260],
                     "navigation_map_schema": site_map.get("schema", "april.site_navigation.v1"),
@@ -16857,7 +16921,7 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         context["site_function_catalog"] = _select_ui_function_catalog(machine_request, context["site_navigation_map"])
         effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
         query = effective_query.lower().replace("ё", "е")
-        full_interface_overview = bool(_SITE_INTERFACE_OVERVIEW_RE.search(query))
+        full_interface_overview = _site_full_interface_overview_requested(query)
         # Keep the user-facing site walkthrough separate from internal architecture.
         # A full tour of buttons/pages does not implicitly request room internals or API routes.
         if _SITE_GUIDE_TOPIC_RE.search(query) or re.search(r"(?:какие комнаты|список комнат|внутренн\w* комнат|room directory|что есть внутри april|структур\w* april)", query, re.I):
