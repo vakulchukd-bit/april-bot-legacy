@@ -5380,31 +5380,48 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
         conn.close()
 
 
-def get_community_display_name(user_id: Any) -> str:
-    """Return the authenticated user's saved April display name, if available."""
+def get_community_profile(user_id: Any) -> dict[str, Any]:
+    """Read the authenticated user's canonical display name from PostgreSQL."""
     uid = _community_canonical_user(user_id)
     if not uid:
-        return ""
+        return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
     conn = get_conn()
     if not conn:
-        return ""
+        return {"success": False, "error": "DATABASE_UNAVAILABLE"}
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT CASE WHEN COALESCE(p.is_custom, FALSE) = TRUE
-                                     THEN NULLIF(p.display_name, '') ELSE NULL END AS display_name
+                    """SELECT u.name, u.april_id, p.display_name, p.is_custom
                        FROM users u
                        LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id = %s
-                       LIMIT 1""",
+                       WHERE u.user_id = %s LIMIT 1""",
                     (uid,),
                 )
-                row = cur.fetchone() or {}
-                return str(row.get("display_name") or "").strip()[:80]
+                row = dict(cur.fetchone() or {})
+                if not row:
+                    return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                default_name = str(row.get("name") or "").strip()
+                if not default_name:
+                    default_name = f"Участник {str(row.get('april_id') or uid)[-4:]}"
+                display_name = str(row.get("display_name") or default_name).strip()[:32]
+                if not row.get("display_name"):
+                    cur.execute(
+                        """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
+                           VALUES (%s, %s, FALSE, CURRENT_TIMESTAMP)
+                           ON CONFLICT (user_id) DO NOTHING""",
+                        (uid, display_name),
+                    )
+                return {
+                    "success": True,
+                    "profile": {
+                        "display_name": display_name,
+                        "is_custom": bool(row.get("is_custom")),
+                    },
+                }
     except Exception as exc:
-        print(f"[APRIL_PROFILE] DISPLAY_NAME_LOOKUP_FAILED type={type(exc).__name__}", flush=True)
-        return ""
+        print(f"[APRIL_COMMUNITY] PROFILE_READ_FAILED type={type(exc).__name__}", flush=True)
+        return {"success": False, "error": "COMMUNITY_UNAVAILABLE"}
     finally:
         conn.close()
 
