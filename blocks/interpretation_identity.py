@@ -16,6 +16,57 @@ from uuid import uuid4
 import re
 
 
+# Identity and command semantics live in this existing interpreter module.
+def is_april_identity_question(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip()
+    if not text:
+        return False
+    subject = r"(?:април\w*|aprill?\b|ты\b|тебя\b|твой\b|твоя\b|вас\b|вы\b|your\b|you\b|yourself\b)"
+    authorship = r"(?:создател\w*|создал\w*|создан\w*|разработчик\w*|разработал\w*|разработан\w*|автор\w*|основател\w*|основал\w*|придумал\w*|производител\w*|произвел\w*|сделал\w*|сделан\w*|built\b|made\b|created\b|developed\b|creator\b|developer\b|manufacturer\b|author\b|founder\b)"
+    patterns = (
+        rf"\bкто\s+(?:именно\s+)?(?:тебя|вас)\s+(?:{authorship})",
+        rf"\bкто\s+(?:именно\s+)?(?:твой|ваш)\s+{authorship}",
+        rf"\bкто\s+(?:именно\s+)?(?:является\s+)?{authorship}\s+(?:(?:проекта|продукта|системы)\s+)?(?:април\w*|aprill?)\b",
+        rf"\bкто\s+{authorship}\s+(?:ты|тебя|вас)\b",
+        rf"\bкто\s+{authorship}\s+(?:проект\s+)?(?:април\w*|aprill?)\b",
+        rf"\b{authorship}\s+(?:април\w*|aprill?)\b",
+        rf"\bкто\s+(?:создал|разработал|сделал|придумал|основал|автор)\s+(?:(?:проект|продукт|систему)\s+)?(?:април\w*|aprill?)\b",
+        rf"\bкем\s+(?:создан\w*|разработан\w*|сделан\w*)\s+(?:(?:проект|продукт|система)\s+)?(?:април\w*|aprill?)\b",
+        rf"\b(?:чья|чей|кому\s+принадлежит)\s+(?:април\w*|aprill?)\b",
+        r"\bкто\s+(?:стоит\s+за|владелец\s+(?:проекта\s+)?)\s+(?:проектом?\s+)?(?:април\w*|aprill?)\b",
+        rf"\bwho\s+(?:created|made|built|developed|authored|owns?)\s+(?:you|yourself|april)\b",
+        rf"\bwho\s+is\s+your\s+(?:creator|developer|manufacturer|author)\b",
+        rf"\b(?:creator|developer|manufacturer|author)\s+of\s+(?:you|april)\b",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+def is_bare_visual_command(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip(" \t\r\n.,!?;:")
+    if not text:
+        return False
+    return bool(re.fullmatch(
+        r"(?:(?:ну|давай|пожалуйста|мне|нам|тут|здесь|просто|тогда)\s+)*"
+        r"(?:нарисуй(?:те)?|нарисовать|изобрази(?:те)?|изобразить|покажи(?:те)?|показать|"
+        r"отобрази(?:те)?|визуализируй(?:те)?|draw|show|depict|sketch|illustrate|visualize|visualise)"
+        r"(?:\s+(?:мне|нам|пожалуйста|тут|здесь|ну|давай))*",
+        text, re.IGNORECASE,
+    ))
+
+def is_current_user_name_question(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip()
+    if not text:
+        return False
+    return bool(re.search(
+        r"(?:\bкак\s+меня\s+зовут\b|\bкак\s+мое\s+имя\b|\bкакое\s+у\s+меня\s+имя\b|"
+        r"\bкакое\s+имя\s+(?:указано|стоит)\s+(?:у\s+меня\s+)?(?:в\s+)?(?:настройках|профиле)\b|"
+        r"\bмое\s+(?:отображаемое\s+)?имя\b|\bназови\s+мое\s+имя\b|"
+        r"\bты\s+знаешь\s+(?:как\s+меня\s+зовут|мое\s+имя)\b|\bкак\s+ты\s+меня\s+называешь\b|"
+        r"\bwhat\s+is\s+my\s+name\b)",
+        text, re.IGNORECASE,
+    ))
+
+
+
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
     """Low-overhead diagnostic timing; logging must never affect the request path."""
@@ -544,6 +595,8 @@ def _is_feedback_control_help_request(text: Any) -> bool:
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
+    if is_april_identity_question(low):
+        return ["text"]
     if _is_feedback_control_help_request(low):
         # A route diagram is useful for "where do I click?"; photo/graph/code
         # words in the same sentence are examples of earlier answers, not deliverables.
@@ -671,9 +724,12 @@ def _file_delivery_mode(text: Any, requested_outputs: Any = None) -> str:
 def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[str]:
     """Add only high-confidence structured views implied by the user's task.
 
-    This never infers image generation, invented data, or external-source URLs.
+    A room is never an output trigger: only the current semantic request selects
+    renderers. Bare drawing imperatives ask for clarification, not fabricated art.
     """
     low = _text(text).lower().replace("ё", "е")
+    if is_april_identity_question(low) or is_current_user_name_question(low) or is_bare_visual_command(low):
+        return ["text"]
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     explicit_image_request = _detect_image_generation_request(low)
 
@@ -732,7 +788,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # illustration wording or unmistakable artistic/photorealistic intent.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|add|place|put|remove|replace|"
-        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
+        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда(?!тель)\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
         low,
     ))
     # Geometry, measured figures and mathematical constructions are structured
@@ -791,13 +847,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"digital painting|concept art|anime style|comic style|poster|album cover|"
         r"фотореалист\w*|акварел\w*|маслян\w*\s+живопис\w*|"
         r"цифров\w*\s+живопис\w*|концепт[- ]арт|стил\w*\s+аниме|"
-        r"комиксн\w*\s+стил\w*|постер|обложк\w*|селфи|аватар\w*|лиц\w*|"
+        r"комиксн\w*\s+стил\w*|постер|обложк\w*|"
         r"ui\s+mockup|app\s+mockup|interface\s+design|user interface|screen design|smartphone mockup|"
-        r"макет\w*\s+(?:интерфейс\w*|телефон\w*)|интерфейс\w*\s+приложен\w*|дизайн\w*\s+телефон\w*|"
-        r"\b(?:cat|kitten|dog|puppy|person|portrait|landscape|sunset|forest|city|spacecraft|car|bird|flower|animal|building|house|planet|selfie|avatar|face|smartphone)\b|"
-        r"кот\w*|собак\w*|портрет\w*|пейзаж\w*|закат\w*|лес\w*|город\w*|"
-        r"космическ\w*\s+корабл\w*|автомобил\w*|машин\w*|птиц\w*|цвет\w*|"
-        r"персонаж\w*|животн\w*|здани\w*|дом\w*|планет\w*)",
+        r"макет\w*\s+(?:интерфейс\w*|телефон\w*)|интерфейс\w*\s+приложен\w*|дизайн\w*\s+телефон\w*)",
         low, re.I,
     ))
     if (
@@ -1761,6 +1813,27 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     intact; this profile supplies intent hints and auditable reasons.
     """
     source = _text(text)
+    if is_april_identity_question(source) or is_current_user_name_question(source) or is_bare_visual_command(source):
+        identity_question = is_april_identity_question(source)
+        user_name_question = is_current_user_name_question(source)
+        identity_topic = "APRIL_PROJECT_IDENTITY" if identity_question else ("CURRENT_USER_PROFILE" if user_name_question else "UNSPECIFIED")
+        identity_reason = ("independent_april_project_identity_question" if identity_question else ("authenticated_user_name_question" if user_name_question else "bare_visual_command_needs_subject"))
+        return {
+            "schema": "april_request_semantics_v1", "method": "april_identity_isolated_v1",
+            "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "time_scope": "UNSPECIFIED", "topic_reference": identity_topic,
+            "topic_reference_fragment": False, "requires_memory": False,
+            "history_request": False, "search_scope": "CURRENT_DIALOGUE", "relation_hint": "NEW",
+            "intent_score": 0, "speech_act": "QUESTION", "communicative_act": "INFORMATION_REQUEST",
+            "pragmatic_intent": "INFORMATION_REQUEST", "message_function": "ASK_ABOUT_APRIL_IDENTITY" if identity_question else ("ASK_CURRENT_USER_NAME" if user_name_question else "BARE_VISUAL_COMMAND_NEEDS_OBJECT"),
+            "pragmatic_features": {"context_dependent_question": False, "answer_followup": False, "previous_answer_reference": False, "active_branch_repair": False, "has_independent_payload": True, "explicit_topic_switch": True},
+            "tone": "NEUTRAL", "recommended_response_action": "ANSWER_NORMALLY",
+            "features": {"context_dependent_question": False, "context_dependent_reaction": False, "answer_followup": False, "past_reference": False, "explicit_topic_switch": True, "has_independent_payload": True},
+            "reason": identity_reason,
+            "context_signature": identity_topic,
+            "retrieval_profile": {"mode": "NEW_TOPIC", "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST", "topic_reference": identity_topic, "prefer_active_branch": False, "prefer_named_history": False, "previous_answer_reference": False, "active_branch_repair": False, "avoid_cross_topic_injection": True, "coverage_policy": "answer_new_request"},
+            "explicit_topic_switch": True,
+        }
     low, tokens = _semantic_normalize(source)
     token_set = set(tokens)
     if not low:
@@ -2677,6 +2750,29 @@ def interpret_request_in_context(
     """
     source = _text(text)
     profile = dict(semantic_interpretation or interpret_request_semantics(source) or {})
+    if is_april_identity_question(source) or is_current_user_name_question(source) or is_bare_visual_command(source):
+        identity_question = is_april_identity_question(source)
+        user_name_question = is_current_user_name_question(source)
+        identity_topic = "APRIL_PROJECT_IDENTITY" if identity_question else ("CURRENT_USER_PROFILE" if user_name_question else "UNSPECIFIED")
+        identity_reason = ("independent_april_project_identity_question" if identity_question else ("authenticated_user_name_question" if user_name_question else "bare_visual_command_needs_subject"))
+        profile.update({
+            "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "topic_reference": identity_topic, "requires_memory": False,
+            "history_request": False, "search_scope": "CURRENT_DIALOGUE", "relation_hint": "NEW",
+            "explicit_topic_switch": True, "explicit_topic_introduction": True,
+            "previous_answer_reference": False, "active_branch_repair": False,
+            "reason": identity_reason,
+            "latest_exchange_analysis": {
+                "available": bool(latest_exchange), "linked": False,
+                "reason": "explicit_april_identity_question_is_independent_of_previous_topic" if identity_question else ("current_user_name_question_uses_authenticated_profile" if user_name_question else "bare_visual_command_waits_for_object"),
+                "has_independent_payload": True,
+            },
+            "features": {**(profile.get("features") if isinstance(profile.get("features"), dict) else {}),
+                         "context_dependent_question": False, "context_dependent_reaction": False,
+                         "answer_followup": False, "explicit_topic_switch": True,
+                         "has_independent_payload": True},
+        })
+        return profile
     row = latest_exchange if isinstance(latest_exchange, dict) else {}
     previous_user = _text(
         row.get("user_text") or row.get("user") or row.get("user_request")
