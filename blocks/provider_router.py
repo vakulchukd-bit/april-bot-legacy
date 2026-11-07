@@ -13,6 +13,19 @@ import os
 import re
 import time
 
+
+# Canonical April identity helpers are kept inside existing modules; no extra file.
+def _april_env_text(name: str, default: str) -> str:
+    value = str(os.getenv(name, "") or "").strip()
+    return value[:120] if value else default
+
+def get_april_project_identity() -> dict[str, str]:
+    return {
+        "project_name": _april_env_text("APRIL_PROJECT_NAME", "April"),
+        "creator_name": _april_env_text("APRIL_CREATOR_NAME", "Дмитрий Вакульчук"),
+        "model_provider": _april_env_text("APRIL_MODEL_PROVIDER", "OpenAI"),
+    }
+
 from blocks.C_ARTIFACT_CONTRACT import (
     MachineRequest,
     MachineResponse,
@@ -20,6 +33,7 @@ from blocks.C_ARTIFACT_CONTRACT import (
     get_web_renderer_registration,
     _mermaid_payload,
 )
+
 
 
 MODEL = os.getenv("APRIL_OPENAI_MODEL", "gpt-6-luna")
@@ -177,6 +191,7 @@ DIALOGUE_TRANSITION_ANALYSIS is the synchronous local audit performed before thi
 
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
 PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
+- APRIL PROJECT IDENTITY: When asked who created/developed/authored April, name APRIL_PROJECT_IDENTITY.creator_name as the April project creator. Do not substitute the model provider: APRIL_PROJECT_IDENTITY.model_provider supplies the underlying AI model, not April product authorship. When asked the current user's name, use CURRENT_USER_PROFILE.display_name (or AUTHENTICATED_IDENTITY.display_name) exactly as provided; never confuse the profile user with April's creator and never guess either name.
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
@@ -3106,8 +3121,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             },
         } if raw_transition_min else {}
 
+        current_user_profile_min = data.get("CURRENT_USER_PROFILE") if isinstance(data.get("CURRENT_USER_PROFILE"), dict) else {}
+        project_identity_min = data.get("APRIL_PROJECT_IDENTITY") if isinstance(data.get("APRIL_PROJECT_IDENTITY"), dict) else get_april_project_identity()
         return {
             "AUTHENTICATED_IDENTITY": identity_min,
+            "CURRENT_USER_PROFILE": current_user_profile_min,
+            "APRIL_PROJECT_IDENTITY": project_identity_min,
             "CURRENT_REQUEST": data.get("CURRENT_REQUEST") if preserve_current_verbatim else _semantic_compress(data.get("CURRENT_REQUEST"), current_budget),
             "RETURN_LANGUAGE": data.get("RETURN_LANGUAGE") or "en",
             "INTERPRETATION": keep_intent,
@@ -3594,6 +3613,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # live request, ordered outputs, protected source and a compact site map, but
         # discard indexes and telemetry that do not help answer this turn.
         essential_keys = (
+            "AUTHENTICATED_IDENTITY", "CURRENT_USER_PROFILE", "APRIL_PROJECT_IDENTITY",
             "CURRENT_REQUEST", "RETURN_LANGUAGE", "OUTPUT_CONTRACT", "REQUEST_SEQUENCE",
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
             "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
@@ -3824,7 +3844,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         else:
             emergency_task_guidance = "Treat CURRENT_REQUEST as a new topic and do not import unrelated earlier dialogue."
         emergency_system = (
-            "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Preserve every REQUEST_SEQUENCE step and all protected source values. "
+            "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. APRIL_PROJECT_IDENTITY.creator_name is the creator of the April product; "
+            "APRIL_PROJECT_IDENTITY.model_provider is only the underlying AI provider. For the signed-in user's name use "
+            "CURRENT_USER_PROFILE.display_name or AUTHENTICATED_IDENTITY.display_name exactly; never confuse these identities. "
+            "Room IDs and room knowledge are domain/provenance metadata, never renderer triggers. "
+            "Preserve every REQUEST_SEQUENCE step and all protected source values. "
             "PRE-RESPONSE DIALOGUE AUDIT: obey DIALOGUE_TRANSITION_ANALYSIS and LAST_TURN_LINK; compare the latest actual April answer first, then selected authenticated history only on mismatch; never attach unrelated context to NEW_TOPIC. "
             + emergency_task_guidance + " "
             + "Use Markdown headings and short nested subsections for substantive multi-part answers. Renderers must complement the text: "
@@ -4039,7 +4063,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             # Minimal semantic contract: preserve current request, output contract,
             # every task index/type, relation and selected source IDs.
             compact_system = (
-                "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Follow DIALOGUE_RELATION and LAST_TURN_LINK; "
+                "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. APRIL_PROJECT_IDENTITY.creator_name is April's product creator; "
+                "model_provider is only the underlying AI provider. For the signed-in user's name use "
+                "CURRENT_USER_PROFILE.display_name or AUTHENTICATED_IDENTITY.display_name exactly. "
+                "Room IDs are metadata, never renderer triggers. Follow DIALOGUE_RELATION and LAST_TURN_LINK; "
                 "use only selected authenticated history when it matches. Preserve protected source values and every "
                 "REQUEST_SEQUENCE step in order with its output type. Use concrete registered renderers only. "
                 "Return valid JSON matching OUTPUT_CONTRACT; do not invent data or claim an artifact without its payload."
@@ -4777,8 +4804,16 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "do_not_substitute": [_clip(value, 100) for value in (portrait_profile_raw.get("do_not_substitute") or [])[:8] if str(value).strip()],
     } if dialogue_profile_request else {}
 
+    authenticated_identity = {key: _clip(value, 180) for key, value in identity.items() if value}
+    current_user_profile = {
+        "display_name": _clip(authenticated_identity.get("display_name"), 80),
+        "source": "authenticated_settings_profile",
+    } if authenticated_identity.get("display_name") else {}
+
     structured = {
-        "AUTHENTICATED_IDENTITY": {key: _clip(value, 180) for key, value in identity.items() if value},
+        "AUTHENTICATED_IDENTITY": authenticated_identity,
+        "CURRENT_USER_PROFILE": current_user_profile,
+        "APRIL_PROJECT_IDENTITY": get_april_project_identity(),
         "CURRENT_REQUEST": current,
         "RETURN_LANGUAGE": _text(
             constraints.get("provider_output_language")
