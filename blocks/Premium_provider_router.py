@@ -3306,6 +3306,315 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if total <= MAX_PROMPT_TOKENS:
                     break
     if total > MAX_PROMPT_TOKENS:
+        # Absolute metadata floor. Earlier compaction preserves a rich branch
+        # manifest, but a wide history snapshot can still duplicate the same
+        # topics in TRANSITION_ANALYSIS, ACTIVE_TOPIC_CONTEXT and REQUEST_SEQUENCE.
+        # Keep the exact current request, ordered task steps, protected source data,
+        # authenticated identity and a compact set of real history evidence; shrink
+        # only duplicated metadata. This is a budget guard, not a semantic reroute.
+        source = minimal
+        ultra: dict[str, Any] = {}
+        for key in (
+            "AUTHENTICATED_IDENTITY", "CURRENT_REQUEST", "RETURN_LANGUAGE",
+            "OUTPUT_CONTRACT", "REQUEST_SEQUENCE", "PROTECTED_CURRENT_INPUT",
+            "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
+            "INTERPRETATION", "DIALOGUE_RELATION", "HISTORY_REQUEST",
+            "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM", "HISTORY_TIME_WINDOW",
+            "DIALOGUE_RETRIEVAL_PLAN", "INPUT_MODALITIES", "ATTACHMENT_COUNTS",
+        ):
+            if key in source:
+                ultra[key] = source[key]
+
+        # Do not let an emergency context rebuild silently drop the authenticated
+        # display name. Recover it from the original structured request if an
+        # earlier compaction stage omitted the identity card.
+        identity_payload: dict[str, Any] = {}
+        for identity_source in (
+            structured.get("AUTHENTICATED_IDENTITY") if isinstance(structured, dict) else None,
+            data.get("AUTHENTICATED_IDENTITY") if isinstance(data, dict) else None,
+            source.get("AUTHENTICATED_IDENTITY") if isinstance(source, dict) else None,
+        ):
+            if isinstance(identity_source, dict):
+                identity_payload.update({
+                    str(key): _clip(value, 180)
+                    for key, value in identity_source.items()
+                    if value not in (None, "", [], {})
+                })
+        if identity_payload:
+            ultra["AUTHENTICATED_IDENTITY"] = identity_payload
+
+        def _ultra_topic_rows(value: Any, limit: int = 10) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for item in (value or [])[:limit] if isinstance(value, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                row = {
+                    "number": item.get("number", item.get("n")),
+                    "topic": _semantic_compress(item.get("topic") or item.get("t"), 12),
+                    "summary": _semantic_compress(item.get("summary") or item.get("s"), 18),
+                    "last_question": _semantic_compress(item.get("last_question") or item.get("q"), 10),
+                    "topic_id": item.get("topic_id") or item.get("id"),
+                    "origin_message_id": item.get("origin_message_id") or item.get("origin_id"),
+                    "last_at": item.get("last_at"),
+                    "active_branch_id": item.get("active_branch_id"),
+                    "branch_ids": list(item.get("branch_ids") or [])[:3],
+                }
+                rows.append({k: v for k, v in row.items() if v not in (None, "", [], {})})
+            return rows
+
+        for key in ("DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX"):
+            rows = _ultra_topic_rows(source.get(key), 10)
+            if rows:
+                ultra[key] = rows
+
+        raw_pairs = source.get("CONTINUATION_CONTEXT")
+        if isinstance(raw_pairs, list):
+            pairs: list[dict[str, Any]] = []
+            for pair in raw_pairs[:2]:
+                if not isinstance(pair, dict):
+                    continue
+                row = {
+                    "topic": _semantic_compress(pair.get("topic"), 12),
+                    "user": _semantic_compress(pair.get("user") or pair.get("source_user_text"), 18),
+                    "april": _semantic_compress(pair.get("april") or pair.get("source_april_text"), 32),
+                    "message_id": pair.get("message_id"),
+                    "topic_id": pair.get("topic_id"),
+                    "origin_message_id": pair.get("origin_message_id"),
+                    "same_dialog": pair.get("same_dialog"),
+                }
+                if pair.get("preserve_source_text") is True:
+                    row.update({
+                        "preserve_source_text": True,
+                        "source_user_text": pair.get("source_user_text", ""),
+                        "source_april_text": pair.get("source_april_text", ""),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")),
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")),
+                        "source_content_complete": bool(pair.get("source_content_complete")),
+                        "source_text_origin": pair.get("source_text_origin", "dialogue_memory"),
+                    })
+                pairs.append({k: v for k, v in row.items() if v not in (None, "", [], {})})
+            if pairs:
+                ultra["CONTINUATION_CONTEXT"] = pairs
+
+        anchor = source.get("DIALOGUE_ANCHOR")
+        if isinstance(anchor, dict) and anchor:
+            ultra["DIALOGUE_ANCHOR"] = {
+                "topic": _semantic_compress(anchor.get("topic"), 12),
+                "user": _semantic_compress(anchor.get("user"), 12),
+                "assistant_message": _clip(anchor.get("assistant_message"), 1200),
+                "message_id": anchor.get("message_id"),
+                "same_dialog": bool(anchor.get("same_dialog")),
+                "artifact_index": (anchor.get("artifact_index") or [])[:4],
+                "structured_output": (anchor.get("structured_output") or [])[:2],
+            }
+
+        guidance = source.get("CONTINUATION_GUIDANCE")
+        if isinstance(guidance, dict) and guidance:
+            ultra["CONTINUATION_GUIDANCE"] = {
+                key: guidance[key] for key in (
+                    "mode", "semantic_intent", "search_direction", "topic_reference",
+                    "active_topic_seed", "selected_message_ids", "coverage_policy",
+                    "avoid_cross_topic_injection", "response_strategy",
+                ) if key in guidance
+            }
+
+        communication = source.get("DIALOGUE_COMMUNICATION")
+        if isinstance(communication, dict) and communication:
+            ultra["DIALOGUE_COMMUNICATION"] = {
+                key: communication[key] for key in (
+                    "speech_act", "communicative_act", "tone",
+                    "recommended_response_action", "context_dependent_reaction",
+                    "active_branch_repair", "previous_answer_reference",
+                    "factual_verification_request", "explicit_topic_switch",
+                ) if key in communication
+            }
+
+        retrieval = source.get("DIALOGUE_RETRIEVAL_PLAN")
+        if isinstance(retrieval, dict):
+            ultra["DIALOGUE_RETRIEVAL_PLAN"] = {
+                key: retrieval[key] for key in (
+                    "version", "mode", "search_scope", "search_order", "operation",
+                    "evidence_policy", "selected_pair_count", "indexed_topic_count",
+                    "selected_message_ids", "selected_topic_ids", "avoid_cross_topic_injection",
+                    "do_not_invent_missing_history", "actual_search_scope",
+                ) if key in retrieval
+            }
+
+        work = source.get("ACTIVE_WORK_BRANCH")
+        if isinstance(work, dict) and work.get("active"):
+            ultra["ACTIVE_WORK_BRANCH"] = {
+                key: work[key] for key in (
+                    "active", "kind", "work_id", "topic", "goal", "state_summary",
+                    "last_action", "source_message_id", "origin_message_id", "expects_choice",
+                ) if key in work
+            }
+
+        modalities = source.get("INPUT_MODALITIES")
+        attachment_rows = source.get("ATTACHMENT_INDEX")
+        if isinstance(attachment_rows, list) and attachment_rows:
+            ultra["ATTACHMENT_INDEX"] = [
+                {k: item[k] for k in (
+                    "n", "k", "m", "r", "id", "src", "s", "available",
+                    "original_required", "recalled", "i", "filename", "kind",
+                    "mime_type", "asset_role", "asset_message_id", "sequence_index",
+                ) if k in item}
+                for item in attachment_rows[:6] if isinstance(item, dict)
+            ]
+        if isinstance(modalities, dict):
+            ultra["INPUT_MODALITIES"] = modalities
+
+        # A concise prompt keeps the distinction between history retrieval and
+        # continuation, while the request itself remains unmodified above.
+        history_guidance = (
+            "Read-only history retrieval: use only the supplied topic records and selected pairs; "
+            "prioritize the current subject/time window and never invent missing history. "
+            if bool(ultra.get("HISTORY_REQUEST")) else
+            "First compare the request with April's latest saved answer; use a matching branch only. "
+            "If it is a different self-contained request, answer it as a new topic. "
+        )
+        system = (
+            "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Keep REQUEST_SEQUENCE order and preserve all protected source values. "
+            + history_guidance
+            + "Use authenticated identity only when natural. Return valid JSON with answer, content, render_blocks, artifacts and dialogue_memory_record."
+        )
+        minimal = ultra
+        card = _json_card(minimal)
+        total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
+        if externalized_structures:
+            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+        if total > MAX_PROMPT_TOKENS:
+            # The history overview already carries readable topic labels/summaries.
+            # Keep the second index as lineage-only IDs to avoid paying twice for
+            # the same topic descriptions while retaining branch-to-origin mapping.
+            topic_index = minimal.get("DIALOGUE_TOPIC_INDEX")
+            if isinstance(topic_index, list):
+                minimal["DIALOGUE_TOPIC_INDEX"] = [
+                    {k: item[k] for k in ("topic_id", "origin_message_id", "active_branch_id", "branch_ids") if k in item}
+                    for item in topic_index[:10] if isinstance(item, dict)
+                ]
+            anchor = minimal.get("DIALOGUE_ANCHOR")
+            if isinstance(anchor, dict):
+                anchor["assistant_message"] = _clip(anchor.get("assistant_message"), 600)
+                anchor.pop("structured_output", None)
+            card = _json_card(minimal)
+            total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
+            if externalized_structures:
+                total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+
+    if total > MAX_PROMPT_TOKENS:
+        # One final adaptive pass removes descriptive duplicates while retaining
+        # every ordered step, topic/branch identifiers and the strongest selected
+        # source pair. This is still context compaction, not trigger-based routing.
+        raw_sequence = minimal.get("REQUEST_SEQUENCE")
+        if isinstance(raw_sequence, list):
+            compact_sequence: list[dict[str, Any]] = []
+            for index, step in enumerate(raw_sequence):
+                if not isinstance(step, dict):
+                    continue
+                q = step.get("q") or step.get("request") or step.get("question") or ""
+                outputs = step.get("o") or step.get("output_types") or ["text"]
+                if isinstance(outputs, list):
+                    outputs = [str(value)[:18] for value in outputs[:3] if str(value).strip()]
+                else:
+                    outputs = _clip(outputs, 48)
+                compact_sequence.append({
+                    "i": step.get("i", step.get("step_index", index + 1)),
+                    "q": _semantic_compress(q, 22),
+                    "o": outputs or ["text"],
+                    "r": _clip(step.get("r") or step.get("relation") or "NEW", 16),
+                    "p": bool(step.get("p", step.get("inherits_current_request_subject", False))),
+                })
+            minimal["REQUEST_SEQUENCE"] = compact_sequence
+        elif isinstance(raw_sequence, str):
+            minimal["REQUEST_SEQUENCE"] = _clip(raw_sequence, 2600)
+
+        topic_rows = minimal.get("DIALOGUE_HISTORY_TOPICS")
+        if isinstance(topic_rows, list):
+            minimal["DIALOGUE_HISTORY_TOPICS"] = [
+                {
+                    "number": item.get("number", item.get("n")),
+                    "topic": _semantic_compress(item.get("topic") or item.get("t"), 7),
+                    "summary": _semantic_compress(item.get("summary") or item.get("s"), 9),
+                    "last_question": _semantic_compress(item.get("last_question") or item.get("q"), 5),
+                    "topic_id": item.get("topic_id") or item.get("id"),
+                    "origin_message_id": item.get("origin_message_id") or item.get("origin_id"),
+                    "last_at": item.get("last_at"),
+                    "active_branch_id": item.get("active_branch_id"),
+                    "branch_ids": list(item.get("branch_ids") or [])[:3],
+                }
+                for item in topic_rows[:10] if isinstance(item, dict)
+            ]
+        topic_index = minimal.get("DIALOGUE_TOPIC_INDEX")
+        if isinstance(topic_index, list):
+            minimal["DIALOGUE_TOPIC_INDEX"] = [
+                {k: item[k] for k in ("topic_id", "origin_message_id", "active_branch_id", "branch_ids") if k in item}
+                for item in topic_index[:10] if isinstance(item, dict)
+            ]
+
+        pairs = minimal.get("CONTINUATION_CONTEXT")
+        if isinstance(pairs, list):
+            keep_pairs = 1 if bool(minimal.get("HISTORY_REQUEST")) else 2
+            compact_pairs = []
+            for pair in pairs[:keep_pairs]:
+                if not isinstance(pair, dict):
+                    continue
+                compact_pair = {
+                    "topic": _semantic_compress(pair.get("topic"), 6),
+                    "user": _semantic_compress(pair.get("user") or pair.get("source_user_text"), 10),
+                    "april": _semantic_compress(pair.get("april") or pair.get("source_april_text"), 18),
+                    "message_id": pair.get("message_id"),
+                    "topic_id": pair.get("topic_id"),
+                    "origin_message_id": pair.get("origin_message_id"),
+                    "same_dialog": pair.get("same_dialog"),
+                }
+                if pair.get("preserve_source_text") is True:
+                    compact_pair.update({
+                        "preserve_source_text": True,
+                        "source_user_text": _clip(pair.get("source_user_text"), 350),
+                        "source_april_text": _clip(pair.get("source_april_text"), 900),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 350,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 900,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 350 and len(_text(pair.get("source_april_text"))) <= 900,
+                        "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
+                    })
+                compact_pairs.append({k: v for k, v in compact_pair.items() if v not in (None, "", [], {})})
+            minimal["CONTINUATION_CONTEXT"] = compact_pairs
+
+        anchor = minimal.get("DIALOGUE_ANCHOR")
+        if isinstance(anchor, dict):
+            anchor["topic"] = _semantic_compress(anchor.get("topic"), 8)
+            anchor["user"] = _semantic_compress(anchor.get("user"), 8)
+            anchor["assistant_message"] = _clip(anchor.get("assistant_message"), 320)
+            anchor["artifact_index"] = (anchor.get("artifact_index") or [])[:2]
+            anchor.pop("structured_output", None)
+
+        guidance = minimal.get("CONTINUATION_GUIDANCE")
+        if isinstance(guidance, dict):
+            for key in ("active_topic_seed", "selected_message_ids", "topic_reference", "search_direction"):
+                if isinstance(guidance.get(key), str):
+                    guidance[key] = _clip(guidance[key], 100)
+            if isinstance(guidance.get("selected_message_ids"), list):
+                guidance["selected_message_ids"] = guidance["selected_message_ids"][:5]
+
+        retrieval = minimal.get("DIALOGUE_RETRIEVAL_PLAN")
+        if isinstance(retrieval, dict):
+            minimal["DIALOGUE_RETRIEVAL_PLAN"] = {
+                key: retrieval[key] for key in (
+                    "version", "mode", "search_scope", "search_order", "operation",
+                    "selected_message_ids", "selected_topic_ids", "avoid_cross_topic_injection",
+                    "do_not_invent_missing_history", "actual_search_scope",
+                ) if key in retrieval
+            }
+            for key in ("selected_message_ids", "selected_topic_ids", "search_order"):
+                if isinstance(minimal["DIALOGUE_RETRIEVAL_PLAN"].get(key), list):
+                    minimal["DIALOGUE_RETRIEVAL_PLAN"][key] = minimal["DIALOGUE_RETRIEVAL_PLAN"][key][:8]
+
+        card = _json_card(minimal)
+        total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
+        if externalized_structures:
+            total += _estimate_tokens("PROTECTED_STRUCTURED_DATA_SOURCE exact JSON source payload")
+
+    if total > MAX_PROMPT_TOKENS:
         # Preserve the explicit failure only when the actual protected source itself
         # cannot fit; ordinary metadata overflow must not cause an HTTP 500.
         raise RuntimeError(f"APRIL_PROMPT_BUDGET_UNSATISFIABLE:{total}>{MAX_PROMPT_TOKENS}")
