@@ -3375,6 +3375,14 @@ def build_interpretation(
     identity_data = dict(identity or {})
     current_identity = {
         "user_id": _text(identity_data.get("user_id") or identity_data.get("april_id")),
+        # Keep the authenticated Settings profile name in the identity card.
+        # The previous whitelist copied only technical IDs and silently dropped
+        # display_name before Provider could build AUTHENTICATED_IDENTITY.
+        "display_name": _text(
+            identity_data.get("display_name")
+            or identity_data.get("user_display_name")
+            or identity_data.get("name")
+        )[:80],
         "conversation_id": _text(identity_data.get("conversation_id")),
         "dialog_id": _text(identity_data.get("dialog_id")),
         "message_id": _text(identity_data.get("message_id")),
