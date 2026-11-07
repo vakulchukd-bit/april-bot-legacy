@@ -5380,6 +5380,35 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
         conn.close()
 
 
+def get_community_display_name(user_id: Any) -> str:
+    """Return the authenticated user's saved April display name, if available."""
+    uid = _community_canonical_user(user_id)
+    if not uid:
+        return ""
+    conn = get_conn()
+    if not conn:
+        return ""
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT CASE WHEN COALESCE(p.is_custom, FALSE) = TRUE
+                                     THEN NULLIF(p.display_name, '') ELSE NULL END AS display_name
+                       FROM users u
+                       LEFT JOIN community_profiles p ON p.user_id = u.user_id
+                       WHERE u.user_id = %s
+                       LIMIT 1""",
+                    (uid,),
+                )
+                row = cur.fetchone() or {}
+                return str(row.get("display_name") or "").strip()[:80]
+    except Exception as exc:
+        print(f"[APRIL_PROFILE] DISPLAY_NAME_LOOKUP_FAILED type={type(exc).__name__}", flush=True)
+        return ""
+    finally:
+        conn.close()
+
+
 def save_community_display_name(user_id: Any, display_name: Any) -> dict[str, Any]:
     uid = _community_canonical_user(user_id)
     if not uid:
