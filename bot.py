@@ -59,7 +59,7 @@ from storage import (
     get_premium_support_status, get_premium_support_message_detail,
     mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
-    get_community_snapshot, save_community_display_name, reset_community_display_name, create_community_message,
+    get_community_snapshot, get_community_display_name, save_community_display_name, reset_community_display_name, create_community_message,
     get_community_file, get_community_preview, delete_community_message, admin_delete_community_message, report_community_message,
     submit_ai_content_report, list_ai_content_reports, delete_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
@@ -1162,8 +1162,14 @@ def _handle_payload(
         # The display name is a user preference supplied by April Web. The
         # authenticated account ID above remains authoritative and is never
         # taken from this field.
+        # The display name saved from Settings is account-scoped in the April
+        # database. Resolve it server-side so Free and Premium interpret the
+        # same authenticated identity even on another device/browser.
         user_display_name = _text(
-            data.get("display_name") or data.get("user_display_name") or data.get("name")
+            get_community_display_name(uid)
+            or data.get("display_name")
+            or data.get("user_display_name")
+            or data.get("name")
         )[:80]
 
         executor_started = time.perf_counter()
