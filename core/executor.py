@@ -1842,6 +1842,12 @@ async def execute(
             flow_id=identity["flow_id"],
         )["interpretation_id"]
     )
+    # Bind the authenticated client's display name to the canonical identity
+    # BEFORE Interpretation is built, so Provider receives it in
+    # AUTHENTICATED_IDENTITY (not only in the later local interpretation object).
+    user_display_name = _text(kwargs.get("user_display_name"))[:80]
+    if user_display_name:
+        identity["display_name"] = user_display_name
     _apr_timing_log(
         "identity_bind", identity_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(identity.get("dialog_id")),
