@@ -16,6 +16,57 @@ from uuid import uuid4
 import re
 
 
+# Identity and command semantics live in this existing interpreter module.
+def is_april_identity_question(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip()
+    if not text:
+        return False
+    subject = r"(?:април\w*|aprill?\b|ты\b|тебя\b|твой\b|твоя\b|вас\b|вы\b|your\b|you\b|yourself\b)"
+    authorship = r"(?:создател\w*|создал\w*|создан\w*|разработчик\w*|разработал\w*|разработан\w*|автор\w*|основател\w*|основал\w*|придумал\w*|производител\w*|произвел\w*|сделал\w*|сделан\w*|built\b|made\b|created\b|developed\b|creator\b|developer\b|manufacturer\b|author\b|founder\b)"
+    patterns = (
+        rf"\bкто\s+(?:именно\s+)?(?:тебя|вас)\s+(?:{authorship})",
+        rf"\bкто\s+(?:именно\s+)?(?:твой|ваш)\s+{authorship}",
+        rf"\bкто\s+(?:именно\s+)?(?:является\s+)?{authorship}\s+(?:(?:проекта|продукта|системы)\s+)?(?:април\w*|aprill?)\b",
+        rf"\bкто\s+{authorship}\s+(?:ты|тебя|вас)\b",
+        rf"\bкто\s+{authorship}\s+(?:проект\s+)?(?:април\w*|aprill?)\b",
+        rf"\b{authorship}\s+(?:април\w*|aprill?)\b",
+        rf"\bкто\s+(?:создал|разработал|сделал|придумал|основал|автор)\s+(?:(?:проект|продукт|систему)\s+)?(?:април\w*|aprill?)\b",
+        rf"\bкем\s+(?:создан\w*|разработан\w*|сделан\w*)\s+(?:(?:проект|продукт|система)\s+)?(?:април\w*|aprill?)\b",
+        rf"\b(?:чья|чей|кому\s+принадлежит)\s+(?:април\w*|aprill?)\b",
+        r"\bкто\s+(?:стоит\s+за|владелец\s+(?:проекта\s+)?)\s+(?:проектом?\s+)?(?:април\w*|aprill?)\b",
+        rf"\bwho\s+(?:created|made|built|developed|authored|owns?)\s+(?:you|yourself|april)\b",
+        rf"\bwho\s+is\s+your\s+(?:creator|developer|manufacturer|author)\b",
+        rf"\b(?:creator|developer|manufacturer|author)\s+of\s+(?:you|april)\b",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+def is_bare_visual_command(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip(" \t\r\n.,!?;:")
+    if not text:
+        return False
+    return bool(re.fullmatch(
+        r"(?:(?:ну|давай|пожалуйста|мне|нам|тут|здесь|просто|тогда)\s+)*"
+        r"(?:нарисуй(?:те)?|нарисовать|изобрази(?:те)?|изобразить|покажи(?:те)?|показать|"
+        r"отобрази(?:те)?|визуализируй(?:те)?|draw|show|depict|sketch|illustrate|visualize|visualise)"
+        r"(?:\s+(?:мне|нам|пожалуйста|тут|здесь|ну|давай))*",
+        text, re.IGNORECASE,
+    ))
+
+def is_current_user_name_question(value: Any) -> bool:
+    text = str(value or "").lower().replace("ё", "е").strip()
+    if not text:
+        return False
+    return bool(re.search(
+        r"(?:\bкак\s+меня\s+зовут\b|\bкак\s+мое\s+имя\b|\bкакое\s+у\s+меня\s+имя\b|"
+        r"\bкакое\s+имя\s+(?:указано|стоит)\s+(?:у\s+меня\s+)?(?:в\s+)?(?:настройках|профиле)\b|"
+        r"\bмое\s+(?:отображаемое\s+)?имя\b|\bназови\s+мое\s+имя\b|"
+        r"\bты\s+знаешь\s+(?:как\s+меня\s+зовут|мое\s+имя)\b|\bкак\s+ты\s+меня\s+называешь\b|"
+        r"\bwhat\s+is\s+my\s+name\b)",
+        text, re.IGNORECASE,
+    ))
+
+
+
 
 
 def _apr_timing_log(stage: str, started: float | None = None, **fields: Any) -> None:
@@ -409,7 +460,7 @@ def _is_ui_instruction_request(text: Any) -> bool:
     ))
     semantic_walkthrough = interface_surface and guided_goal and interaction_goal
     known_ui_objects = bool(re.search(
-        r"(?:истори\w*|диалог\w*|раздел\w*|настройк\w*|профил\w*|аккаунт\w*|сесси\w*|выход|язык\w*|april\s*id|premium\s*id|идентификатор\w*|сообществ\w*|друг\w*|приглашени\w*|контакт\w*|поддержк\w*|тариф\w*|оплат\w*|справк\w*|политик\w*|услови\w*|вложени\w*|скрепк\w*|файл\w*|сообщени\w*|чат\w*|переписк\w*|рабоч\w*\s+поле|голосов\w*|микрофон\w*|ник\w*|имя\s+пользовател\w*|обратн\w*\s+связ\w*|жалоб\w*|отзыв\w*|ответ\w*|артефакт\w*|диаграмм\w*|таблиц\w*|график\w*|картинк\w*|render\w*|history|profile|settings|account|community|support|plan|payment|help|attachment|file|artifact|microphone|voice\s+message)",
+        r"(?:истори\w*|диалог\w*|раздел\w*|настройк\w*|профил\w*|аккаунт\w*|сесси\w*|выход|язык\w*|april\s*id|premium\s*id|идентификатор\w*|сообществ\w*|друг\w*|приглашени\w*|контакт\w*|поддержк\w*|тариф\w*|оплат\w*|справк\w*|политик\w*|услови\w*|вложени\w*|скрепк\w*|файл\w*|сообщени\w*|чат\w*|переписк\w*|рабоч\w*\s+поле|голосов\w*|микрофон\w*|ник\w*|имя\s+пользовател\w*|обратн\w*\s+связ\w*|жалоб\w*|отзыв\w*|ответ\w*|артефакт\w*|диаграмм\w*|таблиц\w*|график\w*|render\w*|history|profile|settings|account|community|support|plan|payment|help|attachment|file|artifact|microphone|voice\s+message)",
         low, re.I,
     ))
     ui_action_verb = bool(re.search(
@@ -743,6 +794,8 @@ def _split_inline_numbered_items(text: str) -> list[str]:
 def _is_standalone_assistant_self_question(text: str) -> bool:
     """Recognize self-contained questions about the assistant, not dialogue repair."""
     low = _text(text).lower().replace("ё", "е").strip()
+    if is_april_identity_question(low):
+        return True
     if not low:
         return False
     inline_items = _split_inline_numbered_items(low)
@@ -1534,10 +1587,18 @@ def _detect_requested_outputs(text: str) -> list[str]:
             r"(?:фото\b|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b)",
             low,
         ))
-        if has_graph_action and has_spatial_primitive and not explicit_image_request and not image_or_photo_noun and "graph" not in result:
-            # Asking to show a geometric primitive without mentioning a raster image
-            # is a structured spatial object request in April's adaptive visual layer.
-            result.append("graph")
+        if (
+            has_graph_action
+            and has_spatial_primitive
+            and not explicit_image_request
+            and not image_or_photo_noun
+            and not (has_3d_marker and "graph" in result)
+            and "diagram" not in result
+        ):
+            # A 2D geometric primitive is a simple structured drawing, not a data graph.
+            # When the same turn already selected a 3D GraphBlock, do not add a second
+            # diagram merely because the object's noun is also a spatial primitive.
+            result.append("diagram")
 
     if _is_image_discussion_without_new_visual_action(low) or incidental_nonvisual_followup:
         result = [kind for kind in result if kind != "image"]
@@ -1588,7 +1649,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         if "text" not in merged:
             merged.insert(0, "text")
         return merged
-    if _is_standalone_assistant_self_question(low):
+    if _is_standalone_assistant_self_question(low) or is_bare_visual_command(low):
         return ["text"]
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     incidental_nonvisual_followup = bool(
@@ -1636,8 +1697,6 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         outputs.append("diagram")
     if application_cue and "table" not in outputs:
         outputs.append("table")
-    if appearance_cue and "image" not in outputs:
-        outputs.append("image")
     if portrait_request and "image" not in outputs:
         outputs.append("image")
 
@@ -1695,7 +1754,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         outputs = [kind for kind in outputs if kind != "diagram"]
         if "image" not in outputs:
             outputs.append("image")
-    elif _implicit_visual_request_as_diagram(low, outputs) and "diagram" not in outputs:
+    elif "graph" not in outputs and _implicit_visual_request_as_diagram(low, outputs) and "diagram" not in outputs:
         # Generic drawing/showing of an object is the lightweight structured
         # visual path. Explicit picture/image/photo wording remains on Images.
         outputs.append("diagram")
@@ -3191,6 +3250,54 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     intact; this profile supplies intent hints and auditable reasons.
     """
     source = _text(text)
+    if is_april_identity_question(source) or is_current_user_name_question(source) or is_bare_visual_command(source):
+        identity_question = is_april_identity_question(source)
+        user_name_question = is_current_user_name_question(source)
+        identity_topic = "APRIL_PROJECT_IDENTITY" if identity_question else ("CURRENT_USER_PROFILE" if user_name_question else "UNSPECIFIED")
+        identity_reason = ("independent_april_project_identity_question" if identity_question else ("authenticated_user_name_question" if user_name_question else "bare_visual_command_needs_subject"))
+        return {
+            "schema": "april_request_semantics_v1",
+            "primary_intent": "NEW_INFORMATION",
+            "direction": "ANSWER_NEW_REQUEST",
+            "time_scope": "UNSPECIFIED",
+            "time_window": extract_temporal_window(source),
+            "has_explicit_time_window": False,
+            "requested_topic_count": 1,
+            "minimum_topic_count": 1,
+            "history_inventory_request": False,
+            "topic_reference": identity_topic,
+            "requires_memory": False,
+            "history_request": False,
+            "dialogue_history_intent_kind": "NONE",
+            "dialogue_retrieval_plan": {
+                "mode": "NEW_REQUEST", "operation": "NEW_REQUEST", "targets": [],
+                "evidence_policy": "PROJECT_IDENTITY_ONLY" if identity_question else ("AUTHENTICATED_PROFILE_ONLY" if user_name_question else "CURRENT_REQUEST_ONLY"),
+                "side_effect_policy": "NO_SIDE_EFFECTS",
+                "answer_goal": "ANSWER_CURRENT_REQUEST",
+                "avoid_cross_topic_injection": True,
+                "do_not_invent_missing_history": True,
+            },
+            "dialogue_profile_request": False,
+            "search_scope": "CURRENT_DIALOGUE",
+            "relation_hint": "NEW",
+            "intent_score": 0,
+            "speech_act": "QUESTION",
+            "communicative_act": "INFORMATION_REQUEST",
+            "previous_answer_reference": False,
+            "active_branch_repair": False,
+            "factual_verification_request": False,
+            "explicit_topic_switch": True,
+            "explicit_topic_introduction": True,
+            "explicit_topic_closure": False,
+            "saved_artifact_followup_kind": "",
+            "routing_policy": {"version": "april_identity_isolated_v1", "order": ["CURRENT_PROJECT_IDENTITY", "NEW_TOPIC"], "active_branch_must_match_semantically": True, "cross_topic_injection": "DISALLOW"},
+            "pragmatic_intent": "INFORMATION_REQUEST",
+            "message_function": "ASK_ABOUT_APRIL_IDENTITY" if identity_question else ("ASK_CURRENT_USER_NAME" if user_name_question else "BARE_VISUAL_COMMAND_NEEDS_OBJECT"),
+            "pragmatic_features": {"context_dependent_question": False, "answer_followup": False, "previous_answer_reference": False, "active_branch_repair": False, "has_independent_payload": True, "explicit_topic_switch": True},
+            "features": {"context_dependent_question": False, "context_dependent_reaction": False, "answer_followup": False, "past_reference": False, "explicit_topic_switch": True, "has_independent_payload": True},
+            "reason": identity_reason,
+            "explicit_topic_switch": True,
+        }
     low, tokens = _semantic_normalize(source)
     token_set = set(tokens)
     if not low:
@@ -4088,6 +4195,29 @@ def interpret_request_in_context(
     """
     source = _text(text)
     profile = dict(semantic_interpretation or interpret_request_semantics(source) or {})
+    if is_april_identity_question(source) or is_current_user_name_question(source) or is_bare_visual_command(source):
+        identity_question = is_april_identity_question(source)
+        user_name_question = is_current_user_name_question(source)
+        identity_topic = "APRIL_PROJECT_IDENTITY" if identity_question else ("CURRENT_USER_PROFILE" if user_name_question else "UNSPECIFIED")
+        identity_reason = ("independent_april_project_identity_question" if identity_question else ("authenticated_user_name_question" if user_name_question else "bare_visual_command_needs_subject"))
+        profile.update({
+            "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
+            "topic_reference": identity_topic, "requires_memory": False,
+            "history_request": False, "search_scope": "CURRENT_DIALOGUE", "relation_hint": "NEW",
+            "explicit_topic_switch": True, "explicit_topic_introduction": True,
+            "previous_answer_reference": False, "active_branch_repair": False,
+            "reason": identity_reason,
+            "latest_exchange_analysis": {
+                "available": bool(latest_exchange), "linked": False,
+                "reason": "explicit_april_identity_question_is_independent_of_previous_topic" if identity_question else ("current_user_name_question_uses_authenticated_profile" if user_name_question else "bare_visual_command_waits_for_object"),
+                "has_independent_payload": True,
+            },
+            "features": {**(profile.get("features") if isinstance(profile.get("features"), dict) else {}),
+                         "context_dependent_question": False, "context_dependent_reaction": False,
+                         "answer_followup": False, "explicit_topic_switch": True,
+                         "has_independent_payload": True},
+        })
+        return profile
     row = latest_exchange if isinstance(latest_exchange, dict) else {}
     previous_user = _text(
         row.get("user_text") or row.get("user") or row.get("user_request")
