@@ -6489,9 +6489,15 @@ def search_dialogue_context(
         or query_interpretation.get("history_inventory_request")
         or interpreted_intent_preload in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
     )
+    query_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
+    explicit_topic_fragment = bool(
+        query_interpretation.get("topic_reference_fragment")
+        or query_features.get("topic_reference_fragment")
+    )
     explicit_prior_pointer_preload = bool(
         query_interpretation.get("resume_anchor_requested")
         or query_interpretation.get("has_explicit_time_window")
+        or explicit_topic_fragment
         or _text(query_interpretation.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
         or _text(resume_message_id)
     )
