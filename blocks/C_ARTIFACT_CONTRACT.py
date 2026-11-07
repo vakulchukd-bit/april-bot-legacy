@@ -2476,6 +2476,12 @@ def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id
 
 
 def _render_requested_outputs(values: Any) -> set[str]:
+    """Normalize outputs selected by Interpretation, never by a room identifier.
+
+    Room identities provide domain knowledge and artifact provenance only. A room
+    ID (including C_DIAGRAM_ROOM or C_GRAPH_ROOM) must not select or trigger a
+    renderer; requested_outputs and concrete same-turn evidence do that.
+    """
     if not isinstance(values, (list, tuple, set)):
         return set()
     aliases = {
@@ -3810,7 +3816,10 @@ def prepare_render_blocks_for_room_dispatch(
     This is a deterministic adapter, not a second route. It promotes a structure
     only when Interpretation requested it OR the same-turn answer already contains
     an unambiguous representation (Markdown table, fenced source code, Mermaid
-    flowchart, delimited math, or literal URL). It never invents data or assets.
+    flowchart, delimited math, or literal URL). Room identifiers are provenance and
+    domain metadata only; they are never renderer triggers. Preserve every valid
+    requested block and its SceneContract payload without inferring a new output
+    from the selected room. This adapter never invents data or assets.
     """
     requested = _render_requested_outputs(requested_outputs)
     interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
@@ -5432,6 +5441,8 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
             route_meta = (scene.metadata or {}).get("route") if isinstance((scene.metadata or {}).get("route"), dict) else {}
             selected_rooms = route_meta.get("selected_rooms") or (scene.metadata or {}).get("selected_rooms") or []
             registration = get_web_renderer_registration(str(block.get("type") or block.get("artifact_type") or "text"))
+            # Preserve origin/room labels for provenance and later inspection only.
+            # These fields are deliberately not consulted to choose any renderer.
             source_room = str(block.get("source_room") or block.get("room_source") or "")
             payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
             identity_signal = {
