@@ -59,7 +59,7 @@ from storage import (
     get_premium_support_status, get_premium_support_message_detail,
     mark_premium_support_message_read, send_premium_support_message,
     list_premium_support_messages, reply_premium_support_message,
-    get_community_snapshot, get_community_display_name, save_community_display_name, reset_community_display_name, create_community_message,
+    get_community_snapshot, get_community_profile, save_community_display_name, reset_community_display_name, create_community_message,
     get_community_file, get_community_preview, delete_community_message, admin_delete_community_message, report_community_message,
     submit_ai_content_report, list_ai_content_reports, delete_ai_content_report,
     get_community_members, send_community_friend_request, accept_community_friend_request,
@@ -1159,18 +1159,25 @@ def _handle_payload(
             "stage": "bot.ru",
         }
 
-        # The display name is a user preference supplied by April Web. The
-        # authenticated account ID above remains authoritative and is never
-        # taken from this field.
-        # The display name saved from Settings is account-scoped in the April
-        # database. Resolve it server-side so Free and Premium interpret the
-        # same authenticated identity even on another device/browser.
-        user_display_name = _text(
-            get_community_display_name(uid)
-            or data.get("display_name")
-            or data.get("user_display_name")
-            or data.get("name")
+        # The profile row is the source of truth for the signed-in April user.
+        # Never trust a browser-supplied display name to override the DB value.
+        # The Google-authenticated name is only a fallback for accounts whose
+        # profile row cannot be read yet.
+        profile_started = time.perf_counter()
+        profile_result = get_community_profile(uid)
+        profile_payload = profile_result.get("profile") if isinstance(profile_result, dict) else None
+        stored_display_name = _text(
+            profile_payload.get("display_name") if isinstance(profile_payload, dict) else ""
         )[:80]
+        user_display_name = stored_display_name or _text(
+            data.get("display_name") or data.get("user_display_name") or data.get("name")
+        )[:80]
+        _apr_timing_log(
+            "profile_display_name_resolved", profile_started,
+            user_key=_apr_diag_ref(uid),
+            name_available=bool(user_display_name),
+            name_source="community_profiles" if stored_display_name else "authenticated_fallback" if user_display_name else "unavailable",
+        )
 
         executor_started = time.perf_counter()
         selected_executor = execute_premium if is_premium else execute_free
@@ -2251,6 +2258,14 @@ class AprilHandler(BaseHTTPRequestHandler):
                 self._send_community_file(file_payload)
                 return
             view = _text(query.get("view", [""])[0]).lower()
+            if view == "profile":
+                result = get_community_profile(canonical_user_id)
+                if result and result.get("success") is True:
+                    self._send_json(200, result)
+                else:
+                    error = _text((result or {}).get("error") or "COMMUNITY_UNAVAILABLE")
+                    self._send_json(401 if error == "AUTHENTICATED_USER_REQUIRED" else 503, result or {"success": False, "error": error})
+                return
             if view == "members":
                 result = get_community_members(canonical_user_id, limit=100)
                 if result and result.get("success") is True:
