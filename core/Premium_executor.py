@@ -49,6 +49,7 @@ from blocks.Premium_interpretation_identity import (
     interpret_request_semantics,
     analyze_dialogue_transition,
     _has_explicit_topic_introduction,
+    _bare_image_object_request,
     _detect_image_modification,
     _detect_contextual_image_edit,
 )
@@ -68,7 +69,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_exkrutor_single_route_v8_interpretive_transition_artifact_lineage"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v9_multimodal_full_answer_branch_repair"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -2512,13 +2513,23 @@ def _reconcile_new_image_source_text(
     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
     language = _text(input_data.get("display_language") or "").lower()
     if bool(intent.get("dialogue_profile_request")):
-        reconciled = _dialogue_profile_text(interpretation, image_ready=False)
+        status = _dialogue_profile_text(interpretation, image_ready=False)
     elif language in {"uk", "ua", "uk-ua"}:
-        reconciled = "Зрозуміла: потрібно створити нове зображення за вашим описом, а не редагувати оригінальне фото. Готую результат."
+        status = "Зрозуміла: створюю нове зображення за вашим описом, а не редагую відсутній оригінал."
     elif language in {"en", "en-us", "en-gb"}:
-        reconciled = "Understood — this request is to create a new image, not edit an existing photo. Preparing the result."
+        status = "Understood — I am creating a new image from your description, not editing a missing source photo."
     else:
-        reconciled = "Поняла: вы просите создать новое изображение по описанию, а не редактировать исходную фотографию. Подготавливаю результат."
+        status = "Поняла: создаю новое изображение по вашему описанию, а не редактирую отсутствующий исходник."
+
+    # Keep every valid informational section. Only the false request to upload a
+    # source photo is removed; the new-image operation remains a separate status.
+    cleaned_answer = _remove_stale_image_operation_sentences(answer)
+    if bool(intent.get("dialogue_profile_request")) and not _profile_answer_is_substantive(cleaned_answer, interpretation):
+        reconciled = status
+    elif _is_substantive_answer_for_image(cleaned_answer):
+        reconciled = cleaned_answer.rstrip() + "\n\n" + status
+    else:
+        reconciled = status
 
     raw["answer"] = reconciled
     raw["content"] = reconciled
@@ -2531,16 +2542,14 @@ def _reconcile_new_image_source_text(
         and _text(block.get("type") or block.get("artifact_type") or "text").lower()
             in {"text", "message", "answer", "markdown", "message_text", "message_text_block"}
     ]
-    if text_blocks:
-        for block in text_blocks:
-            if "content" in block:
-                block["content"] = reconciled
-            if "text" in block:
-                block["text"] = reconciled
-            if "markdown" in block:
-                block["markdown"] = reconciled
-    else:
-        raw["render_blocks"].append({
+    if len(text_blocks) == 1:
+        block = text_blocks[0]
+        block["content"] = reconciled
+        block["text"] = reconciled
+        if "markdown" in block:
+            block["markdown"] = reconciled
+    elif not text_blocks:
+        raw["render_blocks"].insert(0, {
             "type": "text",
             "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
             "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
@@ -2559,6 +2568,12 @@ def _has_concrete_image_plan(raw: dict[str, Any]) -> bool:
     )
     direct = raw.get("image_spec")
     if isinstance(direct, dict) and any(_text(direct.get(key)) for key in prompt_keys):
+        return True
+    multi_specs = raw.get("image_specs") if isinstance(raw.get("image_specs"), list) else []
+    if any(
+        isinstance(spec, dict) and any(_text(spec.get(key)) for key in prompt_keys)
+        for spec in multi_specs[:4]
+    ):
         return True
     for artifact in raw.get("artifacts") if isinstance(raw.get("artifacts"), list) else []:
         if not isinstance(artifact, dict) or _text(artifact.get("type") or artifact.get("artifact_type")).lower() not in {"image", "generated_image"}:
@@ -2600,6 +2615,9 @@ def _has_safe_alternative_visual_plan(raw: dict[str, Any]) -> bool:
     direct = raw.get("image_spec")
     if isinstance(direct, dict):
         candidates.extend(_text(direct.get(key)) for key in prompt_keys if _text(direct.get(key)))
+    for image_spec in (raw.get("image_specs") if isinstance(raw.get("image_specs"), list) else [])[:4]:
+        if isinstance(image_spec, dict):
+            candidates.extend(_text(image_spec.get(key)) for key in prompt_keys if _text(image_spec.get(key)))
     for artifact in raw.get("artifacts") if isinstance(raw.get("artifacts"), list) else []:
         if not isinstance(artifact, dict):
             continue
@@ -2902,6 +2920,15 @@ def _build_image_spec(
         clean.setdefault("dialogue_development", interpretation.get("dialogue") or {})
         return clean
 
+    # Ambiguous-but-materially-plausible readings may each need their own image.
+    # The first typed visual plan is the primary raster; the remaining plans are
+    # generated later as separate images in the same GalleryBlock/SceneContract.
+    image_specs = raw.get("image_specs") if isinstance(raw.get("image_specs"), list) else []
+    if image_specs and isinstance(image_specs[0], dict):
+        result = _canonicalize(image_specs[0], raw_plan=raw)
+        if result:
+            return result
+
     # Canonical form requested by the Provider contract.
     artifacts = raw.get("artifacts")
     if isinstance(artifacts, list):
@@ -3016,6 +3043,199 @@ async def _edit_image_artifact(
     result["source_asset_filename"] = _text(source_item.get("filename"))[:200]
     result["source_asset_mime_type"] = source_mime
     return result
+
+
+def _latest_answer_offers_image(dialogue_context: dict[str, Any]) -> bool:
+    """Check whether the authenticated latest assistant answer explicitly offered an image."""
+    context = dialogue_context if isinstance(dialogue_context, dict) else {}
+    relation = context.get("latest_answer_relation") if isinstance(context.get("latest_answer_relation"), dict) else {}
+    # State Manager can identify a reply to April's invitation even when the
+    # older `expects_user_input` summary flag is false. Preserve that semantic
+    # evidence instead of requiring both fields to agree.
+    if not (bool(relation.get("expects_user_input")) or bool(relation.get("answer_invitation_reply"))):
+        return False
+    anchor = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    if not anchor:
+        anchor = context.get("anchor") if isinstance(context.get("anchor"), dict) else {}
+    answer = _text(
+        anchor.get("assistant_last_message") or anchor.get("assistant_message")
+        or anchor.get("april") or relation.get("answer_excerpt")
+    )[:5200].lower().replace("ё", "е")
+    has_image_subject = bool(re.search(
+        r"(?:фото\w*|фотограф\w*|фотк\w*|картинк\w*|изображен\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        answer, re.IGNORECASE,
+    ))
+    offers_delivery = bool(re.search(
+        r"(?:могу\s+(?:показать|прислать|создать|сделать|подготовить)|"
+        r"(?:показать|прислать|создать)\s+(?:его|ее|ее\s+же|это|такое)?\s*(?:фото|картинк|изображен)|"
+        r"would\s+you\s+like.{0,60}(?:photo|picture|image)|"
+        r"i\s+can\s+(?:show|send|create|make).{0,60}(?:photo|picture|image))",
+        answer, re.IGNORECASE | re.DOTALL,
+    ))
+    return bool(has_image_subject and offers_delivery)
+
+
+def _select_restored_output_image(
+    restored_assets: list[dict[str, Any]],
+    current_request: str,
+    dialogue_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Select the most relevant generated image inside the already-selected branch.
+
+    Uses the asset's own saved prompt/caption and authenticated branch metadata.
+    It never searches outside `restored_assets` or picks a user-uploaded image.
+    """
+    candidates = [
+        item for item in (restored_assets or [])
+        if isinstance(item, dict)
+        and _text(item.get("kind")).lower() == "image"
+        and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+        and _text(item.get("_content_data_uri")).startswith("data:image/")
+    ]
+    if not candidates:
+        return None
+    query_subjects = _subject_tokens(current_request)
+    ranked: list[tuple[float, int, int, dict[str, Any]]] = []
+    for position, item in enumerate(candidates):
+        evidence = " ".join(
+            _text(item.get(key))
+            for key in ("prompt", "caption", "alt", "analysis_summary", "filename", "output_type")
+        )
+        details = item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else []
+        evidence += " " + " ".join(_text(value) for value in details)
+        score = _subject_overlap(query_subjects, _subject_tokens(evidence)) if query_subjects else 0.0
+        message_id = _text(item.get("asset_message_id"))
+        timestamp_match = re.search(r"(?:msg_)?(\d{10,})", message_id)
+        timestamp = int(timestamp_match.group(1)) if timestamp_match else 0
+        try:
+            sequence_index = int(item.get("sequence_index") or 0)
+        except (TypeError, ValueError, OverflowError):
+            sequence_index = 0
+        ranked.append((score, timestamp, sequence_index * 1000 + position, item))
+    # Semantic subject alignment outranks recency. If the user's short reply has
+    # no recoverable subject, recency remains the tie-break inside this branch.
+    ranked.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    best = ranked[0]
+    if query_subjects and best[0] <= 0:
+        # Do not substitute a visibly unrelated image when the named subject
+        # cannot be grounded in any restored asset in this branch.
+        return None
+    return best[3]
+
+
+def _image_status_language(interpretation: dict[str, Any]) -> str:
+    input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+    language = _text(input_data.get("display_language") or "").lower()
+    return "uk" if language in {"uk", "ua", "uk-ua"} else "en" if language in {"en", "en-us", "en-gb"} else "ru"
+
+
+def _remove_stale_image_operation_sentences(text: Any) -> str:
+    """Remove only source-upload/capability sentences contradicted by the actual operation."""
+    value = _text(text)
+    if not value:
+        return ""
+    kept_paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", value):
+        if not paragraph.strip():
+            continue
+        # Preserve headings, bullets, URLs and code as units; split prose only at
+        # sentence boundaries so a stale upload request cannot erase a whole section.
+        if paragraph.lstrip().startswith(("#", "- ", "* ", "> ", "```")):
+            if _is_missing_source_reply(paragraph) or _is_generic_image_capability_reply(paragraph):
+                cleaned = re.sub(
+                    r"(?is)(?:прикрепи(?:те)?|загрузите|пришлите|добавьте)\b.{0,120}(?:исходн\w*|фото|картинк\w*|изображени\w*|снимок)[^.!?]*[.!?]?|"
+                    r"(?:не могу|не умею|не способен).{0,160}(?:созда\w*|сгенерир\w*|прикреп\w*).{0,120}(?:изображени\w*|картинк\w*|фото)[^.!?]*[.!?]?",
+                    "", paragraph,
+                ).strip()
+                if cleaned:
+                    kept_paragraphs.append(cleaned)
+            else:
+                kept_paragraphs.append(paragraph.strip())
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z0-9«])", paragraph.strip())
+        kept_sentences = [
+            sentence.strip() for sentence in sentences
+            if sentence.strip()
+            and not _is_missing_source_reply(sentence)
+            and not _is_generic_image_capability_reply(sentence)
+        ]
+        # If the whole paragraph was one compound source-request sentence, discard
+        # only that paragraph; independent preceding/following paragraphs survive.
+        if kept_sentences:
+            kept_paragraphs.append(" ".join(kept_sentences))
+    return "\n\n".join(kept_paragraphs).strip()
+
+
+def _is_substantive_answer_for_image(text: Any) -> bool:
+    value = _remove_stale_image_operation_sentences(text)
+    if len(value) < 35:
+        return False
+    if re.fullmatch(
+        r"(?is)(?:извин\w*[.! ]*)?(?:не\s+удалось\s+(?:создать|обработать|изменить)|"
+        r"предыдущ\w*\s+попытк\w*\s+не\s+удал\w*|"
+        r"готово\s*[—-]?\s*(?:изображени\w*\s+создано|картинк\w*\s+готов\w*))[^.!?]{0,100}[.!]?",
+        value,
+    ):
+        return False
+    return True
+
+
+def _merge_image_status(answer: Any, status: str, *, operation_succeeded: bool = True) -> str:
+    """Preserve substantive answer text and append a factual artifact status."""
+    source = _remove_stale_image_operation_sentences(answer)
+    if not operation_succeeded and source:
+        source = re.sub(
+            r"(?is)(?:изображени\w*|фото\w*|картинк\w*).{0,70}(?:создано|готово|сгенерирован\w*|успешно\s+(?:создан|сохранен)|ready|created|generated)[^.!?]*[.!?]?",
+            "", source,
+        ).strip()
+    status = _text(status)
+    if not status:
+        return source
+    if not _is_substantive_answer_for_image(source):
+        return status
+    normalized_source = source.lower().replace("ё", "е")
+    normalized_status = status.lower().replace("ё", "е")
+    if normalized_status in normalized_source:
+        return source
+    if re.search(
+        r"(?:изображени\w*\s+(?:создано|готово|восстановлено|отредактировано)|"
+        r"фото\w*\s+(?:готово|создано|восстановлено)|"
+        r"image\s+(?:created|ready|restored|edited))",
+        normalized_source, re.IGNORECASE,
+    ):
+        return source
+    return source.rstrip() + "\n\n" + status
+
+
+def _sync_packaged_answer(packaged: dict[str, Any], answer: str, summary: str = "") -> None:
+    """Synchronize canonical text aliases without flattening the SceneContract."""
+    packaged["answer"] = answer
+    packaged["content"] = answer
+    packaged["summary"] = summary or answer[:180]
+    blocks = packaged.get("render_blocks") if isinstance(packaged.get("render_blocks"), list) else []
+    text_blocks = [
+        block for block in blocks
+        if isinstance(block, dict)
+        and _text(block.get("type") or block.get("artifact_type")).lower()
+        in {"text", "message", "answer", "markdown", "message_text"}
+    ]
+    if not text_blocks:
+        blocks.insert(0, {
+            "type": "text",
+            "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+            "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+            "content": answer,
+            "text": answer,
+        })
+    elif len(text_blocks) == 1:
+        # A single text block represents the full narrative; keep it identical to
+        # the canonical answer. When multiple text fragments interleave renderers,
+        # retain their original boundaries and anchors instead of flattening them.
+        text_blocks[0]["content"] = answer
+        text_blocks[0]["text"] = answer
+        if "markdown" in text_blocks[0]:
+            text_blocks[0]["markdown"] = answer
+    packaged["render_blocks"] = blocks
 
 
 def _image_edit_message(interpretation: dict[str, Any], state: str) -> str:
@@ -3225,11 +3445,16 @@ def _image_source_subject_terms(value: Any) -> list[str]:
     words = [word for word in raw_words if word not in skip and len(word) >= 3]
     if not words:
         return []
+    # A bare image-object request has already been parsed as noun + concrete
+    # subject. Its single subject token is sufficient to choose among multiple
+    # images in the selected branch (e.g. "фото Николы" versus "фото Маска").
+    if _bare_image_object_request(value):
+        return [words[0][:12]]
     explicit_link = bool(re.match(r"\s*(?:с\b|со\b|из\b|про\b|of\b|with\b|from\b|about\b)", tail, re.I))
     if not (explicit_link or len(words) >= 2 or edit_after_source):
         return []
     # Keep just the first source-scene token; never score all later add-on nouns.
-    return [words[0][:5]]
+    return [words[0][:12]]
 
 
 def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3704,15 +3929,29 @@ def _restore_selected_assets(
     explicit_asset_reference = _explicit_prior_asset_reference(current_request)
     relation = _text(dialogue_context.get("relation")).upper()
     artifact_recovery = dialogue_context.get("artifact_recovery") if isinstance(dialogue_context.get("artifact_recovery"), dict) else {}
+    # A compact noun+subject request is itself a complete semantic request for
+    # the image object (for example, "Да, фото Николы"). It need not repeat a
+    # retrieval verb when the State Manager has already selected the relevant
+    # authenticated branch. This is compositional evidence, not a phrase trigger.
+    short_image_object_request = bool(
+        relation == "CONTINUE" and _bare_image_object_request(current_request)
+    )
+    image_delivery_invitation_reply = bool(
+        short_image_object_request and _latest_answer_offers_image(dialogue_context)
+    )
     image_retrieval = bool(
         relation == "CONTINUE"
         and re.search(r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображен\w*|\bimage\b|\bphoto\b|\bpicture\b)", current_request, re.I)
-        and re.search(r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|найди\w*|вытащи\w*|вывед\w*|отобраз\w*|show|restore|recover|retrieve|bring\s+back|display|find)", current_request, re.I)
+        and (
+            re.search(r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|найди\w*|вытащи\w*|вывед\w*|отобраз\w*|show|restore|recover|retrieve|bring\s+back|display|find)", current_request, re.I)
+            or short_image_object_request
+        )
         and not re.search(r"(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|передел\w*|исправ\w*|add|edit|change|modify|revise|remove)", current_request, re.I)
         and (
             _text(artifact_recovery.get("family")).lower() == "image"
             or bool(dialogue_context.get("contextual_history_match"))
             or explicit_asset_reference
+            or short_image_object_request
         )
     )
     referential_edit = bool(
@@ -5090,6 +5329,10 @@ async def execute(
         last_turn_link["response_strategy"] = _text(transition_analysis.get("response_strategy"))[:48]
         last_turn_link["continuation_summary"] = _text(transition_analysis.get("continuation_summary"))[:760]
     interpretation_memory = dict(dialogue_context)
+    interpretation_memory["image_delivery_invitation_reply"] = bool(
+        _bare_image_object_request(original or current_text)
+        and _latest_answer_offers_image(dialogue_context)
+    )
     interpretation_memory["dialogue_transition_analysis"] = transition_analysis
     interpretation_memory["dialogue_thread_context"] = dialogue_thread_context
     # The inline data URI is private to the renderer/reuse branch and must never
@@ -6430,13 +6673,21 @@ async def execute(
                     source_message_key=_apr_diag_ref(image_intent.get("source_asset_message_id")),
                 )
         elif image_intent.get("reuse_saved_image"):
-            saved_output = next((
-                item for item in restored_assets
-                if isinstance(item, dict)
-                and _text(item.get("kind")).lower() == "image"
-                and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
-                and _text(item.get("_content_data_uri")).startswith("data:image/")
-            ), None)
+            saved_output = _select_restored_output_image(
+                restored_assets, original or current_text, dialogue_context
+            )
+            _apr_timing_log(
+                "saved_image_candidate_selected", None,
+                restored_image_candidates=sum(
+                    1 for item in (restored_assets or [])
+                    if isinstance(item, dict)
+                    and _text(item.get("kind")).lower() == "image"
+                    and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+                    and _text(item.get("_content_data_uri")).startswith("data:image/")
+                ),
+                selected_source_message_key=_apr_diag_ref((saved_output or {}).get("asset_message_id")),
+                current_subject_match=bool(saved_output),
+            )
             decoded_saved = _decode_asset_data_uri(saved_output.get("_content_data_uri")) if saved_output else None
             if decoded_saved:
                 saved_bytes, saved_mime = decoded_saved
@@ -6513,7 +6764,21 @@ async def execute(
         request_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
         raw_question_sequence = request_structure.get("question_sequence") if isinstance(request_structure.get("question_sequence"), list) else []
         image_subrequests: list[str] = []
-        for question in raw_question_sequence:
+        raw_image_specs = raw.get("image_specs") if isinstance(raw.get("image_specs"), list) else []
+        normalized_image_specs: list[dict[str, Any]] = [
+            item for item in raw_image_specs if isinstance(item, dict)
+        ][:4]
+        for image_spec_item in normalized_image_specs:
+            spec_prompt = _text(
+                image_spec_item.get("openai_structured_visual_plan_semantic")
+                or image_spec_item.get("visual_generation_prompt")
+                or image_spec_item.get("image_prompt")
+                or image_spec_item.get("prompt")
+                or image_spec_item.get("description")
+            )
+            if spec_prompt and spec_prompt not in image_subrequests:
+                image_subrequests.append(spec_prompt)
+        for question in ([] if normalized_image_specs else raw_question_sequence):
             if not isinstance(question, dict):
                 continue
             outputs = question.get("output_types") or question.get("outputs") or []
@@ -6555,9 +6820,14 @@ async def execute(
                     continue
                 if variant_index < len(image_subrequests):
                     variant_brief = image_subrequests[variant_index]
-                    # When the user specified separate image subrequests, preserve
-                    # each subrequest's subject rather than reusing one generic prompt.
+                    # Separate semantic readings receive distinct image plans and
+                    # rasters; never blend two identities into one ambiguous image.
                     variant_prompt = variant_brief
+                    if variant_index < len(normalized_image_specs):
+                        variant_spec_source = normalized_image_specs[variant_index]
+                        for safe_key in ("image_caption", "caption", "title", "alt", "step_index", "step_title"):
+                            if variant_spec_source.get(safe_key) not in (None, "", [], {}):
+                                variant_spec[safe_key] = variant_spec_source[safe_key]
                 else:
                     variant_prompt = (
                         _text(variant_spec.get("prompt"))
@@ -6636,56 +6906,36 @@ async def execute(
                 })
             packaged.setdefault("artifacts", []).extend(compact_artifacts)
             if visible_images:
-                if (
-                    not is_image_edit_operation
-                    and (_text(image_intent.get("task")).lower() == "generate_image" or bool(image_intent.get("dialogue_profile_request")))
-                    and (
-                        bool(image_intent.get("dialogue_profile_request"))
-                        or _is_missing_source_reply(answer)
-                        or (
-                            not _provider_declined_visual_output(raw)
-                            and _is_generic_image_capability_reply(answer)
-                        )
-                    )
+                if not is_image_edit_operation and (
+                    _text(image_intent.get("task")).lower() == "generate_image"
+                    or bool(image_intent.get("dialogue_profile_request"))
                 ):
                     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
                     language = _text(input_data.get("display_language") or "").lower()
-                    if bool(image_intent.get("dialogue_profile_request")):
-                        # Do not replace a useful profile analysis with a one-line
-                        # "Done" message. Use evidence-derived prose only when the
-                        # Provider supplied an empty/generic/source-photo response;
-                        # otherwise retain its substantive analysis and append image status.
-                        if _is_missing_source_reply(answer) or not _profile_answer_is_substantive(answer, interpretation):
-                            answer = _dialogue_profile_text(interpretation, image_ready=True)
-                        elif not re.search(
-                            r"(?:изображени\w*\s+готов|готов\w*\s*[—-]?\s*(?:ниже|портрет)|ниже\s+концептуальн\w*\s+(?:портрет|изображени\w*)|image\s+is\s+ready|image\s+is\s+below|below\s+is\s+(?:the\s+)?portrait)",
-                            answer.lower().replace("ё", "е"), re.I,
-                        ):
-                            status = "Изображение готово — ниже; оно дополняет анализ, а не заменяет его."
-                            if language in {"uk", "ua", "uk-ua"}:
-                                status = "Зображення готове — нижче; воно доповнює аналіз, а не замінює його."
-                            elif language in {"en", "en-us", "en-gb"}:
-                                status = "The image is ready below; it complements the analysis rather than replacing it."
-                            answer = answer.rstrip() + "\n\n" + status
-                    elif language in {"uk", "ua", "uk-ua"}:
-                        answer = "Готово — створено нове зображення за поточним запитом. Нижче — результат."
-                    elif language in {"en", "en-us", "en-gb"}:
-                        answer = "Done — a new image was created from your current request. The result is below."
+                    if bool(image_intent.get("dialogue_profile_request")) and not _profile_answer_is_substantive(answer, interpretation):
+                        # Only synthesize profile prose when the Provider supplied no
+                        # substantive analysis. A successful raster never authorizes
+                        # replacing a complete answer with a one-line status.
+                        answer = _dialogue_profile_text(interpretation, image_ready=True)
                     else:
-                        answer = "Готово — создано новое изображение по текущему запросу. Ниже — результат."
+                        status = (
+                            "Изображение создано и добавлено к ответу ниже."
+                            if language not in {"uk", "ua", "uk-ua", "en", "en-us", "en-gb"} else
+                            "Зображення створено й додано до відповіді нижче."
+                            if language in {"uk", "ua", "uk-ua"} else
+                            "The image has been created and is included below."
+                        )
+                        answer = _merge_image_status(answer, status, operation_succeeded=True)
                     raw["answer"] = answer
                     raw["content"] = answer
-                    packaged["answer"] = answer
-                    packaged["content"] = answer
-                    packaged["summary"] = answer[:180]
-                    for text_block in (packaged.get("render_blocks") or []):
-                        if isinstance(text_block, dict) and _text(text_block.get("type") or text_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
-                            text_block["content"] = answer
-                            text_block["text"] = answer
-                            if "markdown" in text_block:
-                                text_block["markdown"] = answer
-                            break
-                    _apr_timing_log("image_text_contract_reconciled", None, mode="preserve_profile_analysis_and_append_image_status")
+                    raw["summary"] = answer[:180]
+                    _sync_packaged_answer(packaged, answer, answer[:180])
+                    _apr_timing_log(
+                        "image_text_contract_reconciled", None,
+                        mode="preserve_complete_answer_append_image_status",
+                        preserved_substantive_answer=_is_substantive_answer_for_image(answer),
+                        render_block_count=len(packaged.get("render_blocks") or []),
+                    )
                 first_artifact = image_results[0].get("artifact") if isinstance(image_results[0].get("artifact"), dict) else image_results[0]
                 default_image_title = "Illustration" if len(visible_images) == 1 else f"Complementary illustrations ({len(visible_images)})"
                 image_sequence_items = [item for item in presentation_sequence if isinstance(item, dict) and "image" in (item.get("output_types") or [])]
@@ -6773,85 +7023,42 @@ async def execute(
     )
     if _text(image_intent.get("task")).lower() == "edit_image" or (image_operation_succeeded and is_completed_edit):
         edit_state = "success" if image_operation_succeeded else "failed"
-        answer = _image_edit_message(interpretation, edit_state)
-        packaged["answer"] = answer
-        packaged["content"] = answer
-        packaged["summary"] = "Изображение отредактировано." if edit_state == "success" else "Не удалось завершить редактирование изображения."
-        text_blocks = [
-            block for block in (packaged.get("render_blocks") or [])
-            if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
-        ]
-        if text_blocks:
-            text_blocks[0]["content"] = answer
-            text_blocks[0]["text"] = answer
-            _synced_text_blocks = []
-            _kept_primary_text = False
-            for _existing_block in (packaged.get("render_blocks") or []):
-                if isinstance(_existing_block, dict) and _text(_existing_block.get("type") or _existing_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
-                    if not _kept_primary_text:
-                        _synced_text_blocks.append(text_blocks[0])
-                        _kept_primary_text = True
-                    continue
-                _synced_text_blocks.append(_existing_block)
-            packaged["render_blocks"] = _synced_text_blocks
-        else:
-            packaged.setdefault("render_blocks", []).insert(0, {
-                "type": "text",
-                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-                "content": answer,
-                "text": answer,
-            })
+        status = _image_edit_message(interpretation, edit_state)
+        answer = _merge_image_status(answer, status) if edit_state == "success" else _merge_image_status(answer, status)
+        _sync_packaged_answer(
+            packaged,
+            answer,
+            "Изображение отредактировано." if edit_state == "success" else "Не удалось завершить редактирование изображения.",
+        )
     elif image_operation_succeeded and not image_intent.get("image_status_request"):
-        # Generation/reuse succeeded. The Provider's prose is advisory and can be
-        # stale (e.g. it says "upload the photo" while the PNG was generated below).
-        # The completed artifact is the source of truth for the user-facing status.
-        input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
-        language = _text(input_data.get("display_language") or "").lower()
+        # A completed raster supplements the answer; it never replaces a useful
+        # biography, research result, comparison, explanation, table, or other
+        # independent deliverable. Replace only stale lifecycle/capability prose.
+        language = _image_status_language(interpretation)
         if image_result.get("reused"):
-            answer = (
-                "Завершено — восстановила сохранённое изображение из этой ветки диалога. Ниже результат."
-                if language not in {"uk", "ua", "uk-ua", "en", "en-us", "en-gb"} else
-                "Готово — збережене зображення відновлено з цієї гілки діалогу. Нижче результат."
-                if language in {"uk", "ua", "uk-ua"} else
-                "Done — restored the saved image from this dialogue branch. The result is below."
+            status = (
+                "Готово — сохранённое изображение восстановлено из этой ветки диалога; оно показано ниже."
+                if language == "ru" else
+                "Готово — збережене зображення відновлено з цієї гілки діалогу; воно показане нижче."
+                if language == "uk" else
+                "Done — the saved image has been restored from this dialogue branch and is shown below."
             )
         else:
-            answer = (
-                "Готово — изображение создано. Ниже результат."
-                if language not in {"uk", "ua", "uk-ua", "en", "en-us", "en-gb"} else
-                "Готово — зображення створено. Нижче результат."
-                if language in {"uk", "ua", "uk-ua"} else
-                "Done — the image has been created. The result is below."
+            status = (
+                "Изображение создано и добавлено к ответу ниже."
+                if language == "ru" else
+                "Зображення створено й додано до відповіді нижче."
+                if language == "uk" else
+                "The image has been created and is included below."
             )
-        packaged["answer"] = answer
-        packaged["content"] = answer
-        packaged["summary"] = answer
-        text_blocks = [
-            block for block in (packaged.get("render_blocks") or [])
-            if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
-        ]
-        if text_blocks:
-            text_blocks[0]["content"] = answer
-            text_blocks[0]["text"] = answer
-            _synced_text_blocks = []
-            _kept_primary_text = False
-            for _existing_block in (packaged.get("render_blocks") or []):
-                if isinstance(_existing_block, dict) and _text(_existing_block.get("type") or _existing_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
-                    if not _kept_primary_text:
-                        _synced_text_blocks.append(text_blocks[0])
-                        _kept_primary_text = True
-                    continue
-                _synced_text_blocks.append(_existing_block)
-            packaged["render_blocks"] = _synced_text_blocks
-        else:
-            packaged.setdefault("render_blocks", []).insert(0, {
-                "type": "text",
-                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-                "content": answer,
-                "text": answer,
-            })
+        answer = _merge_image_status(answer, status)
+        _sync_packaged_answer(packaged, answer)
+        _apr_timing_log(
+            "image_text_contract_reconciled", None,
+            mode="preserve_complete_answer_and_append_image_status",
+            preserved_substantive_answer=_is_substantive_answer_for_image(answer),
+            render_block_count=len(packaged.get("render_blocks") or []),
+        )
 
     elif image_intent.get("image_status_request"):
         # This request asks about a prior render, not for a new one. When no output
@@ -6912,15 +7119,12 @@ async def execute(
             answer = "The image could not be generated this time. Your request has been saved in the conversation; you can retry the generation."
         else:
             answer = "Не удалось создать изображение в этот раз. Запрос сохранён в диалоге; можно повторить генерацию."
-        packaged["answer"] = answer
-        packaged["content"] = answer
-        packaged["summary"] = answer[:180]
-        text_block = next((block for block in (packaged.get("render_blocks") or []) if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}), None)
-        if text_block is None:
-            text_block = {"type": "text", "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"), "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock")}
-            packaged["render_blocks"] = [text_block]
-        text_block["content"] = answer
-        text_block["text"] = answer
+        answer = _merge_image_status(answer, answer)
+        # `answer` above is the fallback status. Preserve any substantive Provider
+        # explanation and append the honest generation failure instead of erasing it.
+        provider_answer_before_failure = _text(packaged.get("answer") or raw.get("answer"))
+        answer = _merge_image_status(provider_answer_before_failure, answer, operation_succeeded=False)
+        _sync_packaged_answer(packaged, answer)
         packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
 
     # Use the reconciled answer (not stale Provider prose) for all persistence
@@ -6929,18 +7133,18 @@ async def execute(
     if answer:
         packaged["content"] = _text(packaged.get("content") or answer)
         packaged["summary"] = _text(packaged.get("summary") or answer[:180])
-        if image_operation_succeeded:
-            # Keep saved dialogue aliases consistent with the delivered artifact;
-            # otherwise the next turn can retrieve stale provider prose that claims
-            # the just-created image is missing or asks the user to upload it again.
+        if image_operation_succeeded or image_generation_failed:
+            # The persisted dialogue pair must reflect the complete visible answer,
+            # not a shorter stale Provider alias that changes what happened.
             raw["answer"] = answer
             raw["content"] = packaged["content"]
             raw["summary"] = packaged["summary"]
-            raw["internal_answer_en"] = (
-                "Done — the requested image edit has been applied. The updated image is below."
-                if is_completed_edit else
-                "Done — the image has been created. The result is below."
-            )
+            if image_operation_succeeded:
+                raw["internal_answer_en"] = (
+                    "Done — the requested image edit has been applied. The updated image is below."
+                    if is_completed_edit else
+                    "Done — the image has been created. The result is below."
+                )
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
     )
