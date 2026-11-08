@@ -257,7 +257,7 @@ _IMAGE_EDIT_ACTION_RE = re.compile(
     r"draw|redraw|paint|place|move|crop|enhance|mark|point|annotate|highlight|outline|circle|redo|revise|"
     r"добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|"
     r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|"
-    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|"
+    r"перекрас\w*|подправ\w*|обреж\w*|поверн\w*|укаж\w*|помет\w*|отмет\w*|"
     r"выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|сделай|сделать|поправ\w*)\b",
     re.IGNORECASE,
 )
@@ -482,10 +482,10 @@ def _is_ui_instruction_request(text: Any) -> bool:
         low, re.I,
     ))
     ui_action_verb = bool(re.search(
-        r"(?:откро\w*|открыт\w*|перейд\w*|перейти|зайд\w*|зайти|попаст\w*|найд\w*|покаж\w*|провед\w*|объясн\w*|расскаж\w*|опиш\w*|пользова\w*|отправ\w*|подел\w*|перешл\w*|прикреп\w*|добав\w*|приглас\w*|загруз\w*|запис\w*|диктова\w*|очист\w*|отблагодар\w*|пожалова\w*|оцен\w*|скача\w*|сохран\w*|скопир\w*|измени\w*|поменя\w*|смен\w*|выбер\w*|удал\w*|выйти|выйд\w*|заверш\w*|logout|log\s+out|invite|record|open|navigate|go\s+to|find|show|guide|explain|describe|send|share|attach|upload|download|save|copy|edit|change|select|delete)",
+        r"(?:откро\w*|открыт\w*|перейд\w*|перейти|зайд\w*|зайти|попаст\w*|найд\w*|покаж\w*|провед\w*|объясн\w*|расскаж\w*|опиш\w*|использова\w*|работа\w*|отправ\w*|подел\w*|перешл\w*|прикреп\w*|добав\w*|приглас\w*|загруз\w*|запис\w*|диктова\w*|очист\w*|отблагодар\w*|пожалова\w*|оцен\w*|скача\w*|сохран\w*|скопир\w*|измени\w*|поменя\w*|смен\w*|выбер\w*|удал\w*|выйти|выйд\w*|заверш\w*|logout|log\s+out|invite|record|open|navigate|go\s+to|find|show|guide|explain|describe|send|share|attach|upload|download|save|copy|edit|change|select|delete)",
         low, re.I,
     ))
-    targeted_ui_action = known_ui_objects and ui_action_verb
+    targeted_ui_action = False  # finalized after the explicit UI-surface cues below
     # Community publishing is a UI workflow even when the user doesn't say
     # "where do I click". Require a community surface + post/file concept +
     # an operational verb so this does not hijack requests to write content.
@@ -532,6 +532,22 @@ def _is_ui_instruction_request(text: Any) -> bool:
         r"куда\s+(?:перейти|зайти|открыть)|where\s+(?:is|are|can\s+i\s+find)|where\s+to\s+find)",
         low, re.I,
     ))
+    explicit_use_help = bool(
+        known_ui_objects
+        and re.search(
+            r"(?:как\s+(?:пользоваться|использовать|работать|открыть|перейти|найти)|"
+            r"how\s+(?:do\s+i\s+)?(?:use|open|find|navigate)|how\s+to\s+(?:use|open|find))",
+            low, re.I,
+        )
+    )
+    # A content operation can mention "history", "dialogue", "file" or "image"
+    # without asking for interface instructions. Treat it as UI guidance only
+    # when the sentence also identifies a control/surface, a navigation/location
+    # request, or an explicit how-to operation.
+    targeted_ui_action = bool(
+        known_ui_objects and ui_action_verb
+        and (explicit_ui_terms or navigation_cue or interface_surface or location_question or explicit_use_help)
+    )
     return attach_photo_tutorial or account_ui or navigation_cue or how_to or semantic_walkthrough or targeted_ui_action or community_post_action or payment_ui_action or identifier_ui_action or voice_ui_action or invite_ui_action or logout_ui_action or clear_chat_ui_action or response_feedback_ui_action or support_contact_location or location_question or (
         explicit_ui_terms and bool(re.search(rf"{operation}.{{0,100}}?{media}|{media}.{{0,100}}?{operation}", low, re.I | re.S))
     )
@@ -1387,7 +1403,7 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         ("link", r"(?:\bссылк\w*\b|\burl\b|\blinks?\b|\bгиперссылк\w*\b)"),
         ("copy", r"(?:\bcopyable\s+text\b|\bcopy\s+block\b|\bкопируем\w*\s+текст\w*\b|\bкопи(?:руем\w*)?\s+блок\w*\b|\bтекст\s+из\s+(?:прошл\w*|предыдущ\w*|истори\w*)|\bтекст\s+котор\w*\s+(?:ты|мы)\s+(?:создал\w*|сделал\w*|написал\w*))"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
-        ("image", r"(?:\bфото\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bснимк\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
     )
     kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
@@ -1405,7 +1421,7 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
         r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
-        r"найди\w*|открой\w*|вытащи\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
+        r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
@@ -2460,7 +2476,10 @@ def _has_explicit_topic_switch(text: str) -> bool:
     if not low:
         return False
     explicit_switch = re.search(
-        r"(?:^|[.!?;:\n]\s*)(?:новая\s+тема|другая\s+тема|другой\s+вопрос|"
+        r"(?:^|[.!?;:\n]\s*)(?:новая\s+тема|другая\s+тема|отдельная\s+новая\s+тема|"
+        r"теперь\s+(?:новая|другая|отдельная)\s+тема|другой\s+вопрос|"
+        r"(?:давай(?:те)?\s+)?(?:начн[её]м|начать|откроем|создадим|выделим)\s+"
+        r"(?:совершенно\s+)?(?:новую|другую|отдельную)\s+тему|"
         r"перейд[её]м\s+к(?:\s+новой\s+теме)?|"
         r"(?:давай(?:те)?\s+)?(?:сменим|сменить|сменяем)\s+тему|"
         r"switch\s+to\s+(?:a\s+)?new\s+topic|new\s+topic|"
@@ -3832,9 +3851,12 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     # UI navigation can mention “история диалога”, but it is not a request to retrieve prior conversation content.
     ui_instruction_detector = globals().get("_is_ui_instruction_request")
     site_navigation_request = (
-        _is_site_navigation_request(source)
-        or _is_feedback_control_help_request(source)
-        or (callable(ui_instruction_detector) and bool(ui_instruction_detector(source)))
+        (
+            _is_site_navigation_request(source)
+            or _is_feedback_control_help_request(source)
+            or (callable(ui_instruction_detector) and bool(ui_instruction_detector(source)))
+        )
+        and not explicit_historical_artifact_reference
     )
     if site_navigation_request:
         primary_intent = "NEW_INFORMATION"
@@ -4425,7 +4447,10 @@ def interpret_request_in_context(
             and bool(re.search(r"\b(?:где|куда|ну|так|что|она|он|оно|их|его|ее|её|этот|эта|это|тот|та|the|where|it|this|that)\b", low, re.IGNORECASE))
         )
     )
-    explicit_switch = bool(profile.get("explicit_topic_switch") or profile.get("explicit_topic_introduction"))
+    # A named subject is not automatically a branch switch. First test whether
+    # it belongs to the latest exchange; only a semantically explicit switch is
+    # allowed to bypass that primary discourse vector.
+    explicit_switch = bool(profile.get("explicit_topic_switch"))
 
     # A complaint about April repeating/restating history mentions the same words
     # as a recall request, but its communicative act is correction of the last answer.
@@ -4462,9 +4487,63 @@ def interpret_request_in_context(
     # immediately preceding exchange. Short social acts are context-bound when
     # they carry no independent subject/deliverable of their own.
     signature = _context_signature(source)
+    latest_signature = _context_signature(" ".join((previous_user, previous_answer[:9000])))
     output_forms = signature.get("output_forms") if isinstance(signature.get("output_forms"), list) else []
+    latest_output_forms = latest_signature.get("output_forms") if isinstance(latest_signature.get("output_forms"), list) else []
     numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
     reference_terms = signature.get("reference_terms") if isinstance(signature.get("reference_terms"), list) else []
+    # Presentation/media descriptors are not entity identity. Excluding them
+    # lets a voice-transcribed surname remain the comparison anchor even when the
+    # request also contains words such as "real photo", "show" or "portrait".
+    subject_noise = {
+        "насто", "реаль", "фотог", "фото", "фотк", "портр", "сним", "изобр",
+        "картин", "изображ", "покаж", "подым", "созда", "сдела", "нарис",
+        "истор", "делал", "котор", "которы", "пожал", "нов", "новую", "новый",
+        "схем", "диаграм", "граф", "таблиц", "формул", "код", "скрипт", "ссыл",
+        "откры", "опис", "расскаж", "объясн", "поясн", "постро", "сравн", "исправ",
+        "image", "photo", "picture", "portrait", "real", "actual", "genuine",
+        "show", "create", "draw", "generated", "made",
+    }
+    current_subject_terms = {
+        str(term).strip().lower()
+        for term in (signature.get("subject_terms") or [])
+        if str(term).strip() and str(term).strip().lower() not in subject_noise
+    }
+    latest_subject_terms = {
+        str(term).strip().lower()
+        for term in (latest_signature.get("subject_terms") or [])
+        if str(term).strip() and str(term).strip().lower() not in subject_noise
+    }
+
+    def _subject_term_matches(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        if len(left) >= 5 and len(right) >= 5:
+            if left.startswith(right[:5]) or right.startswith(left[:5]):
+                return True
+            # Allow a single transcription/typing error in a five-character stem.
+            return sum(a == b for a, b in zip(left[:5], right[:5])) >= 4
+        return False
+
+    subject_match_count = sum(
+        1 for term in current_subject_terms
+        if any(_subject_term_matches(term, prior) for prior in latest_subject_terms)
+    )
+    latest_subject_overlap = subject_match_count / max(1, len(current_subject_terms))
+    same_subject_latest = bool(
+        current_subject_terms and latest_subject_terms and latest_subject_overlap >= 0.50
+    )
+    same_output_family_latest = bool(
+        set(output_forms) & set(latest_output_forms)
+        and (
+            same_subject_latest
+            or bool(reference_terms)
+        )
+    )
+    latest_exchange_subject_match = bool(
+        not explicit_switch
+        and (same_subject_latest or same_output_family_latest)
+    )
     visual_deliverable_request = bool(
         _detect_image_generation_request(source) or _bare_image_object_request(source)
     )
@@ -4533,6 +4612,7 @@ def interpret_request_in_context(
             or (unfulfilled_image_contract and image_contract_followup)
             or contextual_visual_revision
             or visual_continuation_link
+            or latest_exchange_subject_match
             or linked_by_user_turn
             or linked_by_answer
             or (explicit_context_signal and (
@@ -4574,6 +4654,9 @@ def interpret_request_in_context(
         "contextual_visual_revision": bool(contextual_visual_revision),
         "visual_continuation_link": bool(visual_continuation_link),
         "assistant_output_feedback": bool(assistant_output_feedback),
+        "same_subject_match": bool(same_subject_latest),
+        "same_output_family_match": bool(same_output_family_latest),
+        "subject_overlap": round(latest_subject_overlap, 3),
     }
     profile["latest_exchange_analysis"] = analysis
 
@@ -5241,6 +5324,13 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         low, re.I | re.S,
     ))
     history = bool(sem.get("history_request") or sem.get("primary_intent") in {"HISTORY_RECALL", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL"} or history_action_phrase or (callable(history_detector) and history_detector(request)))
+    saved_artifact_kind = (
+        _text(sem.get("saved_artifact_followup_kind"))
+        or _explicit_saved_artifact_followup_kind(request)
+    )
+    explicit_saved_artifact_source = bool(
+        saved_artifact_kind and _has_explicit_historical_artifact_reference(request)
+    )
     if attach_help:
         action, domain, target = "GUIDE_ATTACH_IMAGE", "april_ui", "chat.paperclip_picker"
         must_not = ["не запускать генерацию или редактирование вместо инструкции", "не утверждать, что фото прикреплено до появления вложения и отправки сообщения"]
@@ -5255,6 +5345,21 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         must_not = ["не придумывать кнопку, раздел, URL или тариф", "для страницы без реализации честно описать статус"]
         success = ["назвать стартовый экран и точную кнопку", "описать куда попадёт пользователь", "дать следующий шаг и безопасный путь назад"]
         source_requirement = "APRIL_SITE_MAP и проверенные UI blueprint-описания"
+    elif explicit_saved_artifact_source:
+        action, domain, target = "RETRIEVE_SAVED_ARTIFACT", "artifact", f"authenticated_premium_history.{saved_artifact_kind}"
+        must_not = [
+            "не открывать вместо результата инструкцию по разделу истории диалогов",
+            "не подменять найденный артефакт его текстовым описанием",
+            "не выбирать артефакт из другой темы или другого пользователя",
+            "не сообщать, что артефакт отсутствует, если в выбранной записи есть его сохранённые данные",
+        ]
+        success = [
+            "найдена точная запись аутентичного Premium-пользователя",
+            "восстановлены исходные структурированные данные и нужный рендерер",
+            "пользователю показан запрошенный артефакт, а не только сообщение о поиске",
+            "связь с исходной темой и веткой сохранена",
+        ]
+        source_requirement = "конкретный сохранённый артефакт нужного типа из совпавшей ветки 24-часовой истории Premium"
     elif history:
         action, domain, target = "SEARCH_DIALOGUE_HISTORY", "dialogue_history", "dialogue_memory"
         must_not = ["не подменять названную тему другой похожей темой", "не сообщать время без подходящей записи или достоверной отметки времени", "при отсутствии точного совпадения явно сказать об этом и предложить ближайшие подтверждённые совпадения"]
@@ -5383,6 +5488,167 @@ def _is_dependent_tail_action_fragment(text: str) -> bool:
         r"[.!?？]*",
         low, re.IGNORECASE,
     ))
+
+
+
+def _semantic_independent_request_parts(source: str) -> list[str]:
+    """Split only independently addressed topics/tasks, preserving dependent fallbacks.
+
+    The structural splitter may leave a new subject phrase at the end of the
+    preceding fragment (for example, "... а по Менделееву | создай схему").
+    Rebind that phrase to its action, then compare each clause's interpreted
+    topic signature. Coordinated actions on one subject remain one request.
+    """
+    value = _text(source)
+    if not value:
+        return []
+
+    # A conditional fallback is one ordered request contract: retrieve/use the
+    # existing item first, and create a replacement only if that retrieval fails.
+    conditional_fallback = bool(
+        re.search(
+            r"\bесли\b.{0,140}\b(?:нет|не\s+найден\w*|не\s+оказал\w*|не\s+удал\w*|"
+            r"не\s+получил\w*|отсутств\w*)\b",
+            value,
+            re.IGNORECASE | re.DOTALL,
+        )
+        and re.search(
+            r"\b(?:созда\w*|нарис\w*|сгенерир\w*|постро\w*|сдела\w*|generate|create|draw|build)\b",
+            value,
+            re.IGNORECASE,
+        )
+    )
+    if conditional_fallback:
+        return []
+
+    raw_parts = _split_explicit_tasks(value)
+    if len(raw_parts) < 2:
+        return []
+
+    parts: list[str] = []
+    action_start = re.compile(
+        r"^\s*(?:расскажи\w*|объясни\w*|опиши\w*|покажи\w*|созда\w*|нарису\w*|"
+        r"сгенерир\w*|постро\w*|сдела\w*|исправ\w*|передел\w*|найди\w*|подними\w*|"
+        r"рассчита\w*|сравни\w*|проверь\w*|перечисли\w*|"
+        r"tell|explain|describe|show|create|draw|generate|build|edit|revise|find|calculate|compare)\b",
+        re.IGNORECASE,
+    )
+    dangling_subject = re.compile(
+        r"\s*(?P<connector>и|а|а\s+также|затем|потом|отдельно|также)\s+"
+        r"(?P<prep>по|про|о|об|для)\s+(?P<subject>[^,;.!?]+?)\s*$",
+        re.IGNORECASE,
+    )
+    dangling_connector = re.compile(
+        r"\s+(?:и|а|а\s+также|затем|потом|отдельно|также)\s*$",
+        re.IGNORECASE,
+    )
+
+    for raw in raw_parts:
+        part = re.sub(r"\s+", " ", _text(raw)).strip(" ,;")
+        if not part:
+            continue
+        if parts and action_start.search(part):
+            previous = parts[-1]
+            subject_tail = dangling_subject.search(previous)
+            if subject_tail:
+                transferred = (
+                    subject_tail.group("connector") + " "
+                    + subject_tail.group("prep") + " "
+                    + subject_tail.group("subject")
+                ).strip()
+                parts[-1] = previous[:subject_tail.start()].strip(" ,;")
+                part = f"{transferred} {part}".strip()
+            else:
+                parts[-1] = dangling_connector.sub("", previous).strip(" ,;")
+        parts.append(part)
+
+    parts = [part for part in parts if part]
+    if len(parts) < 2:
+        return []
+
+    semantics: list[dict[str, Any]] = []
+    for part in parts:
+        try:
+            result = interpret_request_semantics(part)
+        except Exception:
+            result = {}
+        semantics.append(result if isinstance(result, dict) else {})
+
+    def _signature(item: dict[str, Any]) -> set[str]:
+        context = item.get("context_signature") if isinstance(item.get("context_signature"), dict) else {}
+        raw_terms = context.get("subject_terms") if isinstance(context.get("subject_terms"), list) else []
+        # Signatures are already normalized by the interpreter. Remove grammatical
+        # and task-format residues; retain entity/domain terms for cross-topic checks.
+        generic = {
+            "нашу", "наши", "наш", "прошл", "предыдущ", "последн", "тему", "тем",
+            "истор", "диалог", "разговор", "подни", "покаж", "созда", "сдела",
+            "расскаж", "объясн", "опиш", "найд", "исправ", "передел", "постро",
+            "нов", "новую", "новый", "схем", "фотог", "фото", "изображ",
+            "картин", "портр", "настоящ", "реальн", "отдельн", "также",
+        }
+        terms = {
+            str(term).strip().lower()
+            for term in raw_terms
+            if len(str(term).strip()) >= 4 and str(term).strip().lower() not in generic
+        }
+        output_forms = context.get("output_forms") if isinstance(context.get("output_forms"), list) else []
+        terms.update(f"artifact:{str(kind).strip().lower()}" for kind in output_forms if str(kind).strip())
+        saved_kind = str(item.get("saved_artifact_followup_kind") or "").strip().lower()
+        if saved_kind:
+            terms.add(f"artifact:{saved_kind}")
+        return terms
+
+    groups: list[list[str]] = [[parts[0]]]
+    previous_semantics = semantics[0]
+    previous_signature = _signature(previous_semantics)
+    active_intents = {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+    artifact_outputs = {"image", "diagram", "graph", "table", "formula", "code", "file", "link"}
+
+    for part, current_semantics in zip(parts[1:], semantics[1:]):
+        current_signature = _signature(current_semantics)
+        current_intent = str(current_semantics.get("primary_intent") or "").upper()
+        previous_intent = str(previous_semantics.get("primary_intent") or "").upper()
+        current_intro = bool(
+            current_semantics.get("explicit_topic_introduction")
+            or current_semantics.get("explicit_topic_switch")
+        )
+        previous_context = previous_semantics.get("context_signature") if isinstance(previous_semantics.get("context_signature"), dict) else {}
+        previous_outputs = set(
+            str(current).strip().lower()
+            for current in (previous_context.get("output_forms") or [])
+            if str(current).strip()
+        )
+        previous_saved_kind = str(previous_semantics.get("saved_artifact_followup_kind") or "").strip().lower()
+        if previous_saved_kind:
+            previous_outputs.add(previous_saved_kind)
+        previous_has_artifact = bool(previous_outputs.intersection(artifact_outputs))
+        # A continuation/artifact clause followed by a separately named subject,
+        # or two self-contained clauses with disjoint subject signatures, are
+        # independently routed. Same-subject render instructions stay bundled.
+        disjoint_named_subjects = bool(
+            previous_signature and current_signature
+            and not (previous_signature & current_signature)
+        )
+        independent_boundary = bool(
+            disjoint_named_subjects
+            and (
+                current_intro
+                or previous_intent in active_intents
+                or previous_has_artifact
+                or current_intent == "NEW_INFORMATION"
+            )
+        )
+        if independent_boundary:
+            groups.append([part])
+        else:
+            groups[-1].append(part)
+        previous_semantics = current_semantics
+        previous_signature = current_signature
+
+    grouped = [" ".join(group).strip() for group in groups if group]
+    if len(grouped) < 2:
+        return []
+    return grouped
 
 
 def _split_request_sequence(text: str) -> list[str]:
@@ -5542,7 +5808,8 @@ def _split_request_sequence(text: str) -> list[str]:
         and (len(nonempty_source_lines) <= 1 or is_explicit_multiline_list)
         and not is_explicit_multiline_list
     ):
-        return [source]
+        semantic_parts = _semantic_independent_request_parts(source)
+        return semantic_parts if semantic_parts else [source]
 
     lines = nonempty_source_lines or [source]
     parts: list[str] = []
@@ -5928,6 +6195,24 @@ def build_question_sequence(
         if "text" not in outputs:
             outputs.insert(0, "text")
         item_semantics = interpret_request_semantics(item)
+        # A saved-artifact retrieval/revision must carry its renderer in the child
+        # request contract. Text-only child output made the Executor restore bytes
+        # as context but never return the original GalleryBlock/TableBlock/etc.
+        item_saved_kind = _text(item_semantics.get("saved_artifact_followup_kind")).lower() if isinstance(item_semantics, dict) else ""
+        saved_output_map = {
+            "image": "image", "table": "table", "graph": "graph", "diagram": "diagram",
+            "formula": "formula", "code": "code", "link": "link", "copy": "copy",
+        }
+        historical_artifact_reference = _has_explicit_historical_artifact_reference(item)
+        saved_artifact_operation = bool(
+            historical_artifact_reference
+            or _detect_image_modification(item)
+            or _detect_contextual_image_edit(item)
+        )
+        if item_saved_kind in saved_output_map and saved_artifact_operation:
+            saved_output_type = saved_output_map[item_saved_kind]
+            if saved_output_type not in outputs:
+                outputs.append(saved_output_type)
         if parent_explicit_topic_switch:
             item_semantics["explicit_topic_switch"] = True
             item_semantics["active_branch_repair"] = False
@@ -6577,6 +6862,26 @@ def build_interpretation(
         r"|\bwhere\s+(?:is|did|has)\b.{0,45}?(?:photo|picture|image)\b)",
         normalized_visual_request, re.IGNORECASE | re.DOTALL,
     )) and not explicit_new_image and not explicit_image_edit
+    # A status-shaped question may actually request delivery of an already saved
+    # output: "где настоящая фотография ... покажи" / "подними фотку из истории".
+    # When the matched authenticated branch contains that concrete output, restore
+    # and display it instead of replying with status prose or asking for an upload.
+    image_retrieval_requested = bool(
+        has_saved_output_image
+        and image_noun_present
+        and re.search(
+            r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|"
+            r"вывед\w*|отобраз\w*|пришл\w*|show|restore|recover|retrieve|bring\s+back|display)",
+            normalized_visual_request, re.IGNORECASE,
+        )
+        and not explicit_image_edit
+        and not image_discussion_only
+        and not ui_instruction_request
+    )
+    if image_retrieval_requested:
+        image_status_request = False
+        if "image" not in requested_outputs:
+            requested_outputs.append("image")
     # If the active branch requested an image but persisted no value-bearing
     # image artifact, a short status/repair turn is permission to complete that
     # missing deliverable—not a request for the user to upload a source photo.
@@ -6642,7 +6947,7 @@ def build_interpretation(
     )
     image_followup = (
         relation == "CONTINUE"
-        and (short_image_reference or short_image_noun_request or pending_image_status_pointer or pending_image_refinement)
+        and (image_retrieval_requested or short_image_reference or short_image_noun_request or pending_image_status_pointer or pending_image_refinement)
         and not ui_instruction_request
         and not image_discussion_only
         and not image_edit_requested
