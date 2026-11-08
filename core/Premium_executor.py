@@ -2807,18 +2807,62 @@ def _build_image_spec(
                         + ("April's relevant answer: " + prior_answer if prior_answer else "")
                     )
             active_branch_evidence = "\n".join(branch_evidence_parts)[:2600]
+            # The most recent assistant text can be a status/error-only message
+            # even when the active branch already contains a successfully saved
+            # artifact (image, table, code, diagram, link, file, etc.). Build the
+            # grounding set from BOTH the latest answer and the authenticated
+            # selected branch pairs. This prevents a later text-only reply from
+            # hiding the actual output that the user is now asking to revise.
             latest_artifacts = latest_anchor.get("assistant_artifact_index") or latest_anchor.get("artifact_index") or []
-            artifact_facts = []
-            for artifact in latest_artifacts[:8] if isinstance(latest_artifacts, list) else []:
-                if not isinstance(artifact, dict):
+            active_branch_artifacts = (
+                continuation.get("active_branch_artifact_index")
+                if isinstance(continuation.get("active_branch_artifact_index"), list)
+                else dialogue.get("active_branch_artifact_index")
+                if isinstance(dialogue.get("active_branch_artifact_index"), list)
+                else []
+            )
+            artifact_sources: list[tuple[dict[str, Any], str]] = []
+            if isinstance(latest_artifacts, list):
+                artifact_sources.extend(
+                    (item, _text(latest_anchor.get("message_id")))
+                    for item in latest_artifacts if isinstance(item, dict)
+                )
+            for artifact in active_branch_artifacts:
+                if isinstance(artifact, dict):
+                    artifact_sources.append((artifact, _text(artifact.get("source_message_id") or artifact.get("asset_message_id"))))
+            # Include artifact manifests carried by the exact State Manager-selected
+            # pair rows as a compatibility path for older saved dialogue records.
+            for pair in reversed(selected_branch_pairs[-12:]):
+                if not isinstance(pair, dict):
                     continue
+                source_message_id = _text(pair.get("message_id") or pair.get("source_message_id"))
+                for field_name in ("assistant_artifact_index", "artifact_index"):
+                    values = pair.get(field_name)
+                    if isinstance(values, list):
+                        artifact_sources.extend(
+                            (item, source_message_id) for item in values if isinstance(item, dict)
+                        )
+            artifact_facts = []
+            seen_artifact_facts = set()
+            for artifact, artifact_message_id in artifact_sources:
                 facts = [
                     _text(artifact.get(key))[:180]
-                    for key in ("kind", "type", "artifact_type", "title", "label", "summary", "description", "filename", "renderer", "representation")
+                    for key in (
+                        "artifact_family", "kind", "type", "artifact_type", "output_type",
+                        "title", "label", "summary", "description", "filename", "name",
+                        "renderer", "representation", "language", "url", "ref",
+                    )
                     if _text(artifact.get(key))
                 ]
-                if facts:
-                    artifact_facts.append("; ".join(facts))
+                if artifact_message_id:
+                    facts.append("source_message_id=" + artifact_message_id[:100])
+                fact_line = "; ".join(facts)
+                fact_key = fact_line.casefold()
+                if facts and fact_key not in seen_artifact_facts:
+                    seen_artifact_facts.add(fact_key)
+                    artifact_facts.append(fact_line)
+                if len(artifact_facts) >= 12:
+                    break
             clean["visual_context"]["latest_assistant_anchor_message_id"] = _text(latest_anchor.get("message_id"))[:120]
             clean["visual_context"]["latest_assistant_answer"] = latest_answer_text[:1800]
             clean["visual_context"]["latest_assistant_artifacts"] = artifact_facts[:8]
@@ -2829,10 +2873,12 @@ def _build_image_spec(
             if latest_answer_text or artifact_facts:
                 grounding = (
                     "Verified latest April answer: " + latest_answer_text[:1800] + ". "
-                    "Objects created in that answer: " + (" | ".join(artifact_facts) if artifact_facts else "none recorded") + ". "
+                    "Artifacts in the latest answer or the exact selected active branch (the artifact may precede a later text-only status reply): "
+                    + (" | ".join(artifact_facts) if artifact_facts else "none recorded in the selected branch") + ". "
                     "Current user instruction: " + request_text[:1200] + ". "
-                    "Continue only the object/task evidenced by this latest answer and its artifacts. "
-                    "Do not import an older topic title, old branch root, or unrelated earlier request."
+                    "When the current instruction refers to a prior result, continue or revise the matching artifact from this selected branch; do not ask the user to upload an artifact that is already present in the selected branch. "
+                    "For a request to create a new artifact, create a new one instead of editing an older artifact. "
+                    "Do not import an older unrelated topic or branch."
                 )
                 if active_branch_evidence:
                     grounding += "\nVerified selected active-branch evidence (not a global history search): " + active_branch_evidence
@@ -3328,6 +3374,17 @@ def _select_image_edit_source(
         and _text(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
         for item in decoded_candidates
     )
+    # If the exact selected branch contains an April-generated image and the user
+    # requests a visual modification without attaching a new source, that saved
+    # output is the edit source even when the short instruction does not repeat
+    # "the picture you made" (for example: "добавь красные усы ему"). A fresh
+    # user upload still keeps priority below.
+    if (
+        not has_current_user_upload
+        and decoded_candidates
+        and (_detect_contextual_image_edit(low_request) or _detect_image_modification(low_request))
+    ):
+        prefers_generated = True
     # When the user asks to revise the previous result without a new upload—most
     # importantly, to remove an unrequested arrow/marker—edit the generated result
     # so already-corrected content is preserved. A freshly attached user image
@@ -3858,8 +3915,10 @@ def _restore_selected_assets(
                 _looks_like_referential_image_edit(current_request)
                 or (
                     relation_for_asset == "CONTINUE"
-                    and _detect_contextual_image_edit(current_request)
-                    and not _detect_image_modification(current_request)
+                    and (
+                        _detect_contextual_image_edit(current_request)
+                        or _detect_image_modification(current_request)
+                    )
                 )
             )
             if should_use_saved_output_as_edit_source:
@@ -4974,7 +5033,25 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
+    # Carry the selected active branch's non-text output index into the final
+    # interpretation. The thread builder already strips binary payloads and keeps
+    # stable IDs/lineage for image, table, graph, code, diagram, file and link
+    # artifacts. Do not depend on the latest assistant text to rediscover them.
+    active_branch_artifact_index = [
+        dict(item) for item in (dialogue_thread_context.get("artifact_index") or [])
+        if isinstance(item, dict)
+    ][:80]
+    interpretation_dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+    interpretation_dialogue["active_branch_artifact_index"] = active_branch_artifact_index
+    interpretation_dialogue["active_branch_artifact_source"] = "authenticated_state_manager_selected_pairs"
+    if isinstance(interpretation.get("dialogue"), dict):
+        interpretation["dialogue"] = interpretation_dialogue
+        continuation_state = interpretation_dialogue.get("continuation_context")
+        if isinstance(continuation_state, dict):
+            continuation_state["active_branch_artifact_index"] = active_branch_artifact_index
+            continuation_state["active_branch_artifact_source"] = "authenticated_state_manager_selected_pairs"
     request_structure = interpretation.setdefault("request_structure", {})
+    request_structure["active_branch_artifact_index"] = active_branch_artifact_index
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
     request_structure["question_search_engine"] = "state_manager_per_question_semantic_v4_last_answer_branch_link"
@@ -4984,6 +5061,52 @@ async def execute(
     request_structure["dialogue_transition_analysis_version"] = "april_dialogue_transition_v1"
     request_structure["semantic_interpretation_version"] = "april_request_semantics_v6_transition_analysis"
     request_structure["question_search_count"] = len(question_sequence)
+
+    # A recovered assistant-output image is a valid source for a continuation edit.
+    # Only elevate to edit when the user's current wording actually requests a
+    # visual modification; a plain reference/status question must not mutate it.
+    intent_for_source_audit = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    current_visual_edit_requested = bool(
+        _detect_contextual_image_edit(original or current_text)
+        or _detect_image_modification(original or current_text)
+    )
+    selected_edit_source = (
+        _select_image_edit_source(visual_context or [], request_text=original or current_text)
+        if current_visual_edit_requested else None
+    )
+    if selected_edit_source and current_visual_edit_requested:
+        _source_bytes, _source_mime, _source_item = selected_edit_source
+        intent_for_source_audit.update({
+            "task": "edit_image",
+            "wants_image": True,
+            "image_operation": "edit",
+            "image_output_permission": True,
+            "image_generation_blocked": False,
+            "source_image_available": True,
+            "source_asset_message_id": _text(_source_item.get("asset_message_id"))[:120],
+            "source_asset_role": _text(_source_item.get("asset_role") or "user_input")[:40],
+            "source_asset_filename": _text(_source_item.get("filename"))[:200],
+            "source_available_from_selected_branch": bool(_source_item.get("recalled_from_memory")),
+        })
+        requested_outputs = intent_for_source_audit.get("requested_outputs")
+        if not isinstance(requested_outputs, list):
+            requested_outputs = []
+        if "image" not in [str(value).lower() for value in requested_outputs]:
+            requested_outputs.append("image")
+        intent_for_source_audit["requested_outputs"] = requested_outputs
+        request_structure["active_visual_source"] = {
+            "available": True,
+            "source_message_id": _text(_source_item.get("asset_message_id"))[:120],
+            "source_role": _text(_source_item.get("asset_role") or "user_input")[:40],
+            "restored_from_selected_branch": bool(_source_item.get("recalled_from_memory")),
+            "operation": "edit",
+        }
+        _apr_timing_log(
+            "selected_branch_visual_edit_source_confirmed", None,
+            source_message_key=_apr_diag_ref(_source_item.get("asset_message_id")),
+            source_role=_text(_source_item.get("asset_role") or "user_input"),
+            restored_from_selected_branch=bool(_source_item.get("recalled_from_memory")),
+        )
     # Prepare the April Web guide from the current typed Interpretation/action_contract
     # before room selection and renderer planning. This keeps UI navigation semantic,
     # request-scoped, and independent of a second model call.
@@ -6495,8 +6618,17 @@ async def execute(
                     image_block["final_output"] = True
                 packaged["render_blocks"].append(image_block)
 
-    if _text(image_intent.get("task")) == "edit_image":
-        edit_state = "success" if image_result and image_result.get("success") else "failed"
+    image_operation_succeeded = bool(
+        isinstance(image_result, dict)
+        and image_result.get("success", True)
+        and image_result.get("image_bytes")
+    )
+    is_completed_edit = bool(
+        _text(image_intent.get("task")).lower() == "edit_image"
+        or _text((image_result or {}).get("operation")).lower() == "edit"
+    )
+    if _text(image_intent.get("task")).lower() == "edit_image" or (image_operation_succeeded and is_completed_edit):
+        edit_state = "success" if image_operation_succeeded else "failed"
         answer = _image_edit_message(interpretation, edit_state)
         packaged["answer"] = answer
         packaged["content"] = answer
@@ -6508,15 +6640,73 @@ async def execute(
         if text_blocks:
             text_blocks[0]["content"] = answer
             text_blocks[0]["text"] = answer
-            packaged["render_blocks"] = [block for block in (packaged.get("render_blocks") or []) if not (
-                isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
-            )] + [text_blocks[0]]
+            _synced_text_blocks = []
+            _kept_primary_text = False
+            for _existing_block in (packaged.get("render_blocks") or []):
+                if isinstance(_existing_block, dict) and _text(_existing_block.get("type") or _existing_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
+                    if not _kept_primary_text:
+                        _synced_text_blocks.append(text_blocks[0])
+                        _kept_primary_text = True
+                    continue
+                _synced_text_blocks.append(_existing_block)
+            packaged["render_blocks"] = _synced_text_blocks
         else:
             packaged.setdefault("render_blocks", []).insert(0, {
                 "type": "text",
                 "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
                 "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
                 "content": answer,
+                "text": answer,
+            })
+    elif image_operation_succeeded and not image_intent.get("image_status_request"):
+        # Generation/reuse succeeded. The Provider's prose is advisory and can be
+        # stale (e.g. it says "upload the photo" while the PNG was generated below).
+        # The completed artifact is the source of truth for the user-facing status.
+        input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
+        language = _text(input_data.get("display_language") or "").lower()
+        if image_result.get("reused"):
+            answer = (
+                "Завершено — восстановила сохранённое изображение из этой ветки диалога. Ниже результат."
+                if language not in {"uk", "ua", "uk-ua", "en", "en-us", "en-gb"} else
+                "Готово — збережене зображення відновлено з цієї гілки діалогу. Нижче результат."
+                if language in {"uk", "ua", "uk-ua"} else
+                "Done — restored the saved image from this dialogue branch. The result is below."
+            )
+        else:
+            answer = (
+                "Готово — изображение создано. Ниже результат."
+                if language not in {"uk", "ua", "uk-ua", "en", "en-us", "en-gb"} else
+                "Готово — зображення створено. Нижче результат."
+                if language in {"uk", "ua", "uk-ua"} else
+                "Done — the image has been created. The result is below."
+            )
+        packaged["answer"] = answer
+        packaged["content"] = answer
+        packaged["summary"] = answer
+        text_blocks = [
+            block for block in (packaged.get("render_blocks") or [])
+            if isinstance(block, dict) and _text(block.get("type") or block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}
+        ]
+        if text_blocks:
+            text_blocks[0]["content"] = answer
+            text_blocks[0]["text"] = answer
+            _synced_text_blocks = []
+            _kept_primary_text = False
+            for _existing_block in (packaged.get("render_blocks") or []):
+                if isinstance(_existing_block, dict) and _text(_existing_block.get("type") or _existing_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
+                    if not _kept_primary_text:
+                        _synced_text_blocks.append(text_blocks[0])
+                        _kept_primary_text = True
+                    continue
+                _synced_text_blocks.append(_existing_block)
+            packaged["render_blocks"] = _synced_text_blocks
+        else:
+            packaged.setdefault("render_blocks", []).insert(0, {
+                "type": "text",
+                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                "content": answer,
+                "text": answer,
             })
 
     elif image_intent.get("image_status_request"):
@@ -6589,6 +6779,24 @@ async def execute(
         text_block["text"] = answer
         packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
 
+    # Use the reconciled answer (not stale Provider prose) for all persistence
+    # aliases, so the next turn sees the same successful/failed state as the UI.
+    answer = _text(packaged.get("answer") or answer)
+    if answer:
+        packaged["content"] = _text(packaged.get("content") or answer)
+        packaged["summary"] = _text(packaged.get("summary") or answer[:180])
+        if image_operation_succeeded:
+            # Keep saved dialogue aliases consistent with the delivered artifact;
+            # otherwise the next turn can retrieve stale provider prose that claims
+            # the just-created image is missing or asks the user to upload it again.
+            raw["answer"] = answer
+            raw["content"] = packaged["content"]
+            raw["summary"] = packaged["summary"]
+            raw["internal_answer_en"] = (
+                "Done — the requested image edit has been applied. The updated image is below."
+                if is_completed_edit else
+                "Done — the image has been created. The result is below."
+            )
     normalized_blocks = _apply_presentation_sequence(
         packaged["render_blocks"] or [], answer, presentation_sequence
     )
