@@ -2281,11 +2281,13 @@ def _apply_presentation_sequence(
     return compact
 
 def _provider_declined_visual_output(raw: dict[str, Any]) -> bool:
-    """Detect a refusal/limitation that must not be bypassed by raster fallback.
+    """Detect explicit safety/technical refusals, not generic capability disclaimers.
 
-    When a provider returns a textual refusal and no concrete visual plan, a missing
-    image block is not permission to retry the original request through another
-    renderer. This prevents text/render contradictions and accidental policy bypass.
+    The text model may say that it cannot create or attach an image "in this
+    chat" even though the separately registered C_APRIL_IMAGES_GENERATOR is
+    available. That wording is not a safety refusal and must not suppress the
+    raster generator. Explicit policy refusals, clearly hazardous subjects, and
+    the existing detailed-blueprint/assembly restrictions remain protected.
     """
     texts: list[str] = []
     if isinstance(raw, dict):
@@ -2299,18 +2301,75 @@ def _provider_declined_visual_output(raw: dict[str, Any]) -> bool:
             value = block.get("content") or block.get("text") or block.get("markdown")
             if isinstance(value, str) and value.strip():
                 texts.append(value.strip())
+
     combined = "\n".join(texts).lower().replace("ё", "е")
     if not combined:
         return False
-    refusal_patterns = (
-        r"(?:не могу|не предоставляю|не буду предоставлять|не могу помочь|не могу создать|не могу выполнить|нельзя предоставить|не предоставлю).{0,180}(?:оруж\w*|чертеж\w*|чертёж\w*|сборк\w*|ударно[- ]спусков\w*|инструкц\w*|изображен\w*|картинк\w*|схем\w*|рабоч\w*|подробн\w*)",
-        r"(?:не подробн\w* рабоч\w* чертеж\w*|не предоставля\w* подробн\w* (?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w*)|"
-        r"(?:подробн\w* )?(?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w*|инструкц\w* по внутренн\w* устройств\w*).{0,100}(?:не предоставля\w*|не могу|не буду|не могу помочь)|"
-        r"без (?:размер\w*|инструкц\w* по сборк\w*))",
-        r"(?:i\s+(?:cannot|can't|am unable to|won't be able to)|i\s+can't\s+help\s+with).{0,180}(?:weapon|firearm|blueprint|assembly|detailed\s+(?:diagram|schematic|instructions)|image generation)",
-        r"(?:request was rejected by the safety system|safety system rejected|safety policy prevents)",
-    )
-    return any(re.search(pattern, combined, re.IGNORECASE | re.DOTALL) for pattern in refusal_patterns)
+
+    refusal_action = bool(re.search(
+        r"(?:не могу|не предоставляю|не буду предоставлять|не могу помочь|"
+        r"не могу создать|не могу выполнить|нельзя предоставить|не предоставлю|"
+        r"i\s+(?:cannot|can't|am unable to|won't be able to)|"
+        r"i\s+can't\s+help\s+with|request was rejected|"
+        r"запрос\s+(?:отклонен|заблокирован))",
+        combined,
+        re.IGNORECASE | re.DOTALL,
+    ))
+
+    # Explicit safety/moderation language is authoritative, including common
+    # forms where the policy statement itself carries the refusal verb.
+    explicit_policy_refusal = bool(re.search(
+        r"(?:safety|content|usage)\s+(?:policy|policies|system|filter).{0,180}"
+        r"(?:prevent\w*|prohibit\w*|reject\w*|block\w*|disallow\w*|violate\w*)|"
+        r"(?:policy|safety|moderation)\s+(?:violation|restriction|refusal|block)|"
+        r"(?:violat\w*|break\w*).{0,100}(?:safety|content|usage)\s+polic\w*|"
+        r"(?:наруш\w*|противореч\w*|не соответств\w*).{0,140}"
+        r"(?:правил\w*|политик\w*|требован\w* безопасности)|"
+        r"(?:систем\w* безопасност\w*|модерац\w*).{0,100}"
+        r"(?:отклон\w*|запрет\w*|заблок\w*)|"
+        r"(?:отклон\w*|заблок\w*).{0,100}"
+        r"(?:систем\w* безопасност\w*|модерац\w*|политик\w* безопасности)",
+        combined,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    if explicit_policy_refusal:
+        return True
+
+    if not refusal_action:
+        return False
+
+    # Keep the existing restriction for detailed working blueprints, internal
+    # mechanisms and assembly instructions, but do not include generic words
+    # such as image, picture, illustration, diagram or image generation.
+    technical_detail_refusal = bool(re.search(
+        r"(?:не подробн\w* рабоч\w* чертеж\w*|"
+        r"не предоставля\w* подробн\w* (?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w*)|"
+        r"(?:подробн\w* )?(?:рабоч\w* )?(?:чертеж\w*|схем\w*|инструкц\w* по внутренн\w* устройств\w*).{0,100}"
+        r"(?:не предоставля\w*|не могу|не буду|не могу помочь)|"
+        r"без (?:размер\w*|инструкц\w* по сборк\w*))|"
+        r"(?:i\s+(?:cannot|can't|am unable to|won't be able to)|i\s+can't\s+help\s+with)"
+        r".{0,180}(?:blueprint|assembly|detailed\s+(?:diagram|schematic|instructions))",
+        combined,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    if technical_detail_refusal:
+        return True
+
+    # Preserve the guard for clearly hazardous subjects. Ordinary image nouns
+    # alone never count as a safety refusal.
+    hazardous_subject_refusal = bool(re.search(
+        r"(?:не могу|не предоставляю|не буду предоставлять|не могу помочь|"
+        r"не могу создать|не могу выполнить|нельзя предоставить|не предоставлю|"
+        r"i\s+(?:cannot|can't|am unable to|won't be able to)|i\s+can't\s+help\s+with)"
+        r".{0,220}(?:оруж\w*|огнестрел\w*|боеприпас\w*|взрывчат\w*|"
+        r"взрывн\w* устройств\w*|бомб\w*|ударно[- ]спусков\w*|"
+        r"самоповрежден\w*|самоубийств\w*|отравляющ\w* веществ\w*|"
+        r"weapon\w*|firearm\w*|ammunition|explosive\w*|bomb\w*|"
+        r"firing\s+mechanism|self[- ]harm|suicide|poison\w*)",
+        combined,
+        re.IGNORECASE | re.DOTALL,
+    ))
+    return hazardous_subject_refusal
 
 
 def _is_missing_source_reply(text: str) -> bool:
@@ -2320,6 +2379,34 @@ def _is_missing_source_reply(text: str) -> bool:
         r"(?:please|kindly)\s+(?:attach|upload|provide)\b.{0,90}(?:original|source|image|photo|picture)|"
         r"(?:исходн\w* изображени\w* нет|сейчас изображени\w* в сообщении нет|source image (?:is )?not available|no source image)",
         low, re.IGNORECASE | re.DOTALL,
+    ))
+
+
+def _is_generic_image_capability_reply(text: str) -> bool:
+    """Recognize an operational "not available in this chat" disclaimer.
+
+    After a successful raster call, replace this stale disclaimer with the
+    normal success message so the final text never contradicts the GalleryBlock.
+    Safety/policy refusals are handled separately and are not matched here.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    return bool(re.search(
+        r"(?:не могу|не умею|не способен|невозможно).{0,100}"
+        r"(?:созда\w*|сгенерир\w*|прикреп\w*|отправ\w*).{0,100}"
+        r"(?:изображени\w*|картинк\w*|фото|иллюстраци\w*).{0,70}"
+        r"(?:в этом чате|здесь|тут)|"
+        r"(?:в этом чате|здесь|тут).{0,100}(?:не могу|не умею|не способен).{0,100}"
+        r"(?:созда\w*|сгенерир\w*|прикреп\w*).{0,80}"
+        r"(?:изображени\w*|картинк\w*|фото|иллюстраци\w*)|"
+        r"(?:i\s+(?:cannot|can't|am unable to|am not able to)).{0,100}"
+        r"(?:create|generate|attach|send).{0,100}(?:image|picture|photo|illustration).{0,70}"
+        r"(?:in this chat|here)|"
+        r"(?:image|picture|photo|illustration)\s+generation.{0,60}"
+        r"(?:is not available|isn't available|is unavailable|is not supported).{0,50}(?:in this chat|here)",
+        low,
+        re.IGNORECASE | re.DOTALL,
     ))
 
 
@@ -6249,7 +6336,14 @@ async def execute(
                 if (
                     not is_image_edit_operation
                     and (_text(image_intent.get("task")).lower() == "generate_image" or bool(image_intent.get("dialogue_profile_request")))
-                    and (bool(image_intent.get("dialogue_profile_request")) or _is_missing_source_reply(answer))
+                    and (
+                        bool(image_intent.get("dialogue_profile_request"))
+                        or _is_missing_source_reply(answer)
+                        or (
+                            not _provider_declined_visual_output(raw)
+                            and _is_generic_image_capability_reply(answer)
+                        )
+                    )
                 ):
                     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
                     language = _text(input_data.get("display_language") or "").lower()
