@@ -63,6 +63,7 @@ from blocks.Premium_state_manager import (
     build_active_work_branch_record,
     _explicit_artifact_followup_kind,
     _subject_tokens,
+    _subject_overlap,
     _subject_conflicts,
 )
 
@@ -3195,6 +3196,19 @@ def _image_source_subject_terms(value: Any) -> list[str]:
         return []
     tail = low[image_match.end():image_match.end() + 120]
     tail = re.split(r"[.!?;\n]", tail, maxsplit=1)[0]
+    # The edit verb can precede the image noun ("добавь ему на фотку ..."),
+    # so inspect the complete current instruction rather than only its tail.
+    edit_after_source = bool(re.search(
+        r"\b(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|"
+        r"передел\w*|исправ\w*|add\w*|edit\w*|change\w*|modify\w*)\b", low, re.I,
+    ))
+    # In edit requests, a clause introduced by "именно/specifically" names the
+    # source subject after the requested addition (e.g. "красные усы именно
+    # Менделееву"). Use that subject, not the color/object being added.
+    if edit_after_source:
+        named_source = re.search(r"(?:\bименно\b|\bspecifically\b|\bexactly\b)\s+([a-zа-яёіїєґ][a-zа-яёіїєґ-]{2,})", tail, re.I)
+        if named_source:
+            return [named_source.group(1)[:5]]
     raw_words = re.findall(r"[a-zа-яёіїєґ][a-zа-яёіїєґ-]{1,}", tail, re.I)
     skip = {
         "с", "со", "из", "изо", "на", "в", "во", "про", "об", "обо", "о", "от", "для",
@@ -3206,16 +3220,12 @@ def _image_source_subject_terms(value: Any) -> list[str]:
         "сохрани", "какую", "цифрами", "цифры", "цифру", "цифр", "числа", "число", "показание",
         "показания", "дисплей", "дисплея", "дисплее", "стрелка", "стрелки", "стрелку", "стрелкой",
         "указатель", "указателя", "указателем", "маркер", "маркера", "красный", "красная", "красной",
-        "красную", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только", "выдай", "пришли",
+        "красную", "красные", "красных", "красным", "усы", "усов", "усами", "именно", "без", "не", "лишний", "лишняя", "лишней", "да", "но", "только", "выдай", "пришли",
     }
     words = [word for word in raw_words if word not in skip and len(word) >= 3]
     if not words:
         return []
     explicit_link = bool(re.match(r"\s*(?:с\b|со\b|из\b|про\b|of\b|with\b|from\b|about\b)", tail, re.I))
-    edit_after_source = bool(re.search(
-        r"\b(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|"
-        r"переделай|исправь|add\w*|edit\w*|change\w*|modify\w*)\b", tail, re.I,
-    ))
     if not (explicit_link or len(words) >= 2 or edit_after_source):
         return []
     # Keep just the first source-scene token; never score all later add-on nouns.
@@ -3305,7 +3315,8 @@ def _select_active_image_candidate(
 ) -> str:
     """Choose one image from the active branch or an explicitly selected historical source."""
     now = float(now_ts if now_ts is not None else time.time())
-    ranked: list[tuple[int, float, int, str]] = []
+    ranked: list[tuple[int, float, float, int, str]] = []
+    source_token_set = set(_subject_tokens(" ".join(source_terms or [])))
     for candidate in candidates or []:
         if not isinstance(candidate, dict):
             continue
@@ -3329,13 +3340,15 @@ def _select_active_image_candidate(
             for key in ("topic", "user", "april", "attachment_evidence", "memory_summary")
         ).lower().replace("ё", "е")
         hits = sum(1 for term in (source_terms or []) if term and term in evidence)
-        if source_terms and hits <= 0:
+        evidence_token_set = set(_subject_tokens(evidence))
+        semantic_source_match = _subject_overlap(source_token_set, evidence_token_set) if source_token_set and evidence_token_set else 0.0
+        if source_terms and hits <= 0 and semantic_source_match < 0.18:
             continue
-        ranked.append((hits, created_at, int(candidate.get("turn_index") or 0), candidate_id))
+        ranked.append((hits, semantic_source_match, created_at, int(candidate.get("turn_index") or 0), candidate_id))
     if not ranked:
         return ""
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    return ranked[0][3]
+    ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+    return ranked[0][4]
 
 
 def _select_image_edit_source(
@@ -3689,7 +3702,28 @@ def _restore_selected_assets(
     """
     has_current_asset = bool(visual_context or file_inputs or file_contents)
     explicit_asset_reference = _explicit_prior_asset_reference(current_request)
-    referential_edit = _looks_like_referential_image_edit(current_request)
+    relation = _text(dialogue_context.get("relation")).upper()
+    artifact_recovery = dialogue_context.get("artifact_recovery") if isinstance(dialogue_context.get("artifact_recovery"), dict) else {}
+    image_retrieval = bool(
+        relation == "CONTINUE"
+        and re.search(r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображен\w*|\bimage\b|\bphoto\b|\bpicture\b)", current_request, re.I)
+        and re.search(r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|найди\w*|вытащи\w*|вывед\w*|отобраз\w*|show|restore|recover|retrieve|bring\s+back|display|find)", current_request, re.I)
+        and not re.search(r"(?:добав\w*|дорис\w*|измени\w*|отредактир\w*|замени\w*|удали\w*|убери\w*|передел\w*|исправ\w*|add|edit|change|modify|revise|remove)", current_request, re.I)
+        and (
+            _text(artifact_recovery.get("family")).lower() == "image"
+            or bool(dialogue_context.get("contextual_history_match"))
+            or explicit_asset_reference
+        )
+    )
+    referential_edit = bool(
+        _looks_like_referential_image_edit(current_request)
+        or dialogue_context.get("image_edit_reference")
+        or (
+            isinstance(dialogue_context.get("effective_interpretation"), dict)
+            and _text(dialogue_context["effective_interpretation"].get("saved_artifact_followup_kind")).lower() == "image"
+            and (_detect_image_modification(current_request) or _detect_contextual_image_edit(current_request))
+        )
+    )
     # A recalled generated output is not necessarily the source being referenced.
     # Continue into source retrieval for image edits even when the current branch
     # contains a different restored raster (for example, a prior accidental image).
@@ -3700,13 +3734,23 @@ def _restore_selected_assets(
         and _decode_image_source_item(item)
         for item in (visual_context or [])
     )
-    if has_current_asset and current_has_user_upload and not explicit_asset_reference:
+    if has_current_asset and current_has_user_upload and not explicit_asset_reference and not image_retrieval:
         return visual_context, attachments, file_inputs, file_contents, []
-    if has_current_asset and not explicit_asset_reference and not referential_edit:
+    if has_current_asset and not explicit_asset_reference and not referential_edit and not image_retrieval:
         return visual_context, attachments, file_inputs, file_contents, []
 
     selected = dialogue_context.get("selected_pairs") or []
     anchor = dialogue_context.get("anchor") or {}
+    selected_message_ids = {
+        _text(item.get("message_id") or item.get("source_message_id"))
+        for item in selected if isinstance(item, dict)
+        and _text(item.get("message_id") or item.get("source_message_id"))
+    }
+    if isinstance(anchor, dict):
+        _anchor_selected_id = _text(anchor.get("message_id") or anchor.get("source_message_id"))
+        if _anchor_selected_id:
+            selected_message_ids.add(_anchor_selected_id)
+    recovery_source_id = _text(artifact_recovery.get("source_message_id"))
     message_ids: list[str] = []
     if isinstance(anchor, dict) and _text(anchor.get("message_id")):
         message_ids.append(_text(anchor.get("message_id")))
@@ -3715,21 +3759,42 @@ def _restore_selected_assets(
             message_ids.append(_text(item.get("message_id")))
     message_ids = list(dict.fromkeys(message_ids))[:8]
 
-    relation = _text(dialogue_context.get("relation")).upper()
-    # The current hot scene is checked before any broad/history branch. For a
-    # referential image edit, select one same-dialog image candidate by explicit
-    # source-subject evidence; if no source subject is named, prefer the newest
-    # image in this dialogue. Do not restore a stack of unrelated historical images.
-    if referential_edit:
+    # The current hot scene is checked before any broad/history branch. For an
+    # image retrieval or edit, select the concrete image from the State Manager's
+    # already-selected branch; never scan or attach unrelated saved pictures.
+    if referential_edit or image_retrieval:
         candidates = _dialogue_image_source_candidates(dialogue_context)
         source_terms = _image_source_subject_terms(current_request)
-        selected_image_id = _select_active_image_candidate(candidates, source_terms)
-        # Never retain an old anchor when the active-dialog image resolver did not
-        # find a compatible source. If no source hint is present, the resolver uses
-        # recency within this same dialogue; it never searches another dialogue.
+        candidate_ids = {
+            _text(item.get("message_id")) for item in candidates if isinstance(item, dict)
+        }
+        selected_image_id = (
+            recovery_source_id
+            if recovery_source_id and recovery_source_id in candidate_ids
+            else _select_active_image_candidate(candidates, source_terms)
+        )
+        # If morphology in a short edit phrase describes only the requested addition
+        # (e.g. "красные усы"), it is not a source-photo identifier. When State
+        # Manager has already selected the exact active/history branch and that
+        # branch contains exactly one eligible image, use that unique source rather
+        # than asking the user to upload an image that April itself just created.
+        eligible_candidates = [
+            item for item in candidates
+            if isinstance(item, dict)
+            and (bool(item.get("same_dialog")) or bool(item.get("selected_historical_source")))
+            and "image" in set(item.get("row_modalities") or [])
+            and _text(item.get("message_id"))
+        ]
+        unique_branch_fallback = False
+        if not selected_image_id and len(eligible_candidates) == 1:
+            selected_image_id = _select_active_image_candidate(eligible_candidates, [])
+            unique_branch_fallback = bool(selected_image_id)
         message_ids = [selected_image_id] if selected_image_id else []
-        selection_method = "source_subject_match" if source_terms and selected_image_id else (
-            "latest_image_in_active_dialogue" if selected_image_id else "no_compatible_image_in_active_dialogue"
+        selection_method = (
+            "source_subject_match" if source_terms and selected_image_id and not unique_branch_fallback
+            else "single_selected_branch_image_fallback" if unique_branch_fallback
+            else "latest_image_in_active_dialogue" if selected_image_id
+            else "no_compatible_image_in_selected_branch"
         )
         print(
             "[APRIL_ACTIVE_IMAGE_SOURCE_RESOLUTION] " + json.dumps({
@@ -3738,6 +3803,7 @@ def _restore_selected_assets(
                 "candidate_images": len(candidates),
                 "selected_message_key": selected_image_id[:48] if selected_image_id else "",
                 "same_dialog_only": not bool(dialogue_context.get("historical_artifact_reactivation") or dialogue_context.get("contextual_history_match")),
+                "purpose": "retrieve_saved_image" if image_retrieval else "edit_selected_image",
                 "historical_source_selected": bool(selected_image_id and selected_image_id in selected_message_ids and not next((bool(item.get("same_dialog")) for item in candidates if _text(item.get("message_id")) == selected_image_id), True)),
             }, ensure_ascii=False),
             flush=True,
@@ -3751,13 +3817,22 @@ def _restore_selected_assets(
     # when no source is attached, the Premium Interpreter decides whether the user
     # wants a new image or explicitly refers to a particular existing source.
     fallback_used = False
-    if relation != "CONTINUE" and not (not has_current_asset and referential_edit):
+    if relation != "CONTINUE" and not (not has_current_asset and (referential_edit or image_retrieval)):
         return visual_context, attachments, file_inputs, file_contents, []
-    if not has_current_asset and referential_edit and not message_ids:
+    if not has_current_asset and (referential_edit or image_retrieval) and not message_ids:
         candidates = _dialogue_image_source_candidates(dialogue_context)
         now_ts = time.time()
         subject_terms = _image_source_subject_terms(current_request)
         selected_image_id = _select_active_image_candidate(candidates, subject_terms, now_ts=now_ts)
+        eligible_candidates = [
+            item for item in candidates
+            if isinstance(item, dict)
+            and (bool(item.get("same_dialog")) or bool(item.get("selected_historical_source")))
+            and "image" in set(item.get("row_modalities") or [])
+            and _text(item.get("message_id"))
+        ]
+        if not selected_image_id and len(eligible_candidates) == 1:
+            selected_image_id = _select_active_image_candidate(eligible_candidates, [], now_ts=now_ts)
         if selected_image_id:
             message_ids = [selected_image_id]
             fallback_used = True
@@ -5919,6 +5994,75 @@ async def execute(
     raw["answer"] = answer
     if not _text(raw.get("content")):
         raw["content"] = answer
+
+    # Artifact retrieval is distinct from artifact revision. When the user asks
+    # to show a saved structured result, use the value-bearing payload in the
+    # selected authenticated branch as the canonical renderer source if the
+    # Provider returned prose or an empty renderer shell only.
+    _artifact_request_text = original or current_text
+    _artifact_kind = _explicit_artifact_followup_kind(_artifact_request_text)
+    _artifact_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    _artifact_is_revision = bool(
+        _text(_artifact_intent.get("task")).lower() in {"edit_image", "edit_artifact", "revise_artifact"}
+        or re.search(
+            r"(?:добав\w*|исправ\w*|измен\w*|обнов\w*|передел\w*|редакт\w*|дорис\w*|убер\w*|замен\w*|"
+            r"add|edit|change|update|revise|modify|remove|replace)",
+            _artifact_request_text, re.IGNORECASE,
+        )
+    )
+    _artifact_is_retrieval = bool(
+        _artifact_kind in {"table", "graph", "diagram", "formula", "code", "link", "copy", "gallery", "audio", "video"}
+        and not _artifact_is_revision
+        and re.search(
+            r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|найди\w*|"
+            r"открой\w*|вывед\w*|отобраз\w*|пришл\w*|show|restore|recover|retrieve|bring\s+back|display|find|open)",
+            _artifact_request_text, re.IGNORECASE,
+        )
+    )
+    if _artifact_is_retrieval:
+        _artifact_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+        _artifact_pair = next((item for item in _artifact_pairs if isinstance(item, dict) and isinstance(item.get("assistant_structured_output"), list)), None)
+        if _artifact_pair is None:
+            _artifact_anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
+            _artifact_pair = _artifact_anchor if isinstance(_artifact_anchor.get("assistant_structured_output"), list) else None
+        if _artifact_pair is not None:
+            _restored_structured, _restored_structured_stats = _restore_saved_renderer_blocks(
+                _artifact_pair, [_artifact_kind], _artifact_request_text
+            )
+            if _restored_structured:
+                _existing_kinds = {
+                    _text(block.get("type") or block.get("artifact_type") or block.get("renderer")).lower()
+                    for block in (raw.get("render_blocks") or []) if isinstance(block, dict)
+                }
+                _family_aliases = {"graph": {"graph", "chart", "plot", "graphblock"}, "diagram": {"diagram", "svg", "flowchart", "mermaid"}, "table": {"table", "tableblock"}, "formula": {"formula", "math"}, "code": {"code", "codeblock"}, "link": {"link", "hyperlink"}, "copy": {"copy", "copyblock"}}
+                _wanted_aliases = _family_aliases.get(_artifact_kind, {_artifact_kind})
+                _has_existing_value = any(
+                    kind in _wanted_aliases and isinstance(block, dict)
+                    and any(value not in (None, "", [], {}) for value in (block.get("payload"), block.get("data"), block.get("content"), block.get("code")))
+                    for kind, block in [
+                        (_text(item.get("type") or item.get("artifact_type") or item.get("renderer")).lower(), item)
+                        for item in (raw.get("render_blocks") or []) if isinstance(item, dict)
+                    ]
+                )
+                if not _has_existing_value:
+                    raw.setdefault("render_blocks", []).extend(_restored_structured)
+                    raw.setdefault("artifacts", []).extend(deepcopy(_restored_structured))
+                    _apr_timing_log(
+                        "selected_saved_artifact_rehydrated", None,
+                        artifact_kind=_artifact_kind,
+                        restored_blocks=len(_restored_structured),
+                        restored_types=_restored_structured_stats.get("restored_types", []),
+                        source_message_key=_apr_diag_ref(_artifact_pair.get("message_id")),
+                    )
+                    answer = f"Нашёл сохранённый артефакт из выбранной ветки. Ниже восстановлен исходный результат без изменений."
+                    raw["answer"] = answer
+                    raw["content"] = answer
+                    raw["summary"] = answer[:180]
+                    for _text_block in raw.get("render_blocks") or []:
+                        if isinstance(_text_block, dict) and _text(_text_block.get("type") or _text_block.get("artifact_type")).lower() in {"text", "message", "answer", "markdown", "message_text"}:
+                            _text_block["content"] = answer
+                            _text_block["text"] = answer
+                            break
 
     image_intent_for_answer = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     image_task = _text(image_intent_for_answer.get("task"))
