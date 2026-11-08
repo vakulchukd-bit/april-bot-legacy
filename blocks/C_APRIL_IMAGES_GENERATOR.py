@@ -390,6 +390,20 @@ class AprilImagesGenerator:
         if plan_semantic:
             parts.append(f"OpenAI visual meaning: {plan_semantic}")
 
+        # The Provider's visual plan may contain a pronoun or an elliptical subject
+        # reference. Resolve it only from the authenticated active branch selected by
+        # Premium State Manager; never search or import unrelated history here.
+        visual_context = spec.get("visual_context") if isinstance(spec.get("visual_context"), dict) else {}
+        branch_source = cls._safe_text(visual_context.get("active_branch_evidence_source") or "")
+        branch_grounding = cls._safe_text(visual_context.get("latest_answer_grounding") or "").strip()
+        if branch_source == "authenticated_state_manager_selected_pairs" and branch_grounding:
+            parts.append(
+                "Verified active-dialogue context for resolving the current subject only: "
+                + branch_grounding[:6800]
+                + " Use this context to resolve references and preserve the requested subject. "
+                  "The current user instruction remains the action and output authority; do not recreate an old scene unless it is requested now."
+            )
+
         if isinstance(raw_plan, dict):
             compact_plan = cls._compact_visual_plan(raw_plan)
             encoded_plan = cls._compact_json(compact_plan, 1_600) if compact_plan else ""
