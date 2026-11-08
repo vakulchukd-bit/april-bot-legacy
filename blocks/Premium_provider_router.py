@@ -57,7 +57,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v6_contextual_refusal"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v7_multireading_scene_preservation"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -117,6 +117,9 @@ USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
 PRE-RESPONSE SELF-AUDIT AND TASK SHAPING:
 - Before drafting, compare the exact current request with April's immediately previous answer and the selected active branch. Classify each requested task as new information, continuation, correction, expansion, missing-item recovery, or artifact revision; follow REQUEST_SEQUENCE task count and order rather than guessing a count from topic nouns.
 - When the user is dissatisfied or asks to correct/complete the prior answer, identify the specific omission or error from the prior answer and the current request, repair it directly, and avoid asking for clarification when the target is recoverable from the selected branch. Do not repeat completed material.
+- Acknowledging a correction is not the repair. Preserve every previously correct section and every still-valid artifact, change only the part the user corrected, then return the actual corrected/expanded answer and synchronized render blocks. Never replace a substantive response with an apology, a one-line status, or a generic promise to do better.
+- **AMBIGUITY PRESERVATION (Premium):** interpret the complete current request against the exact latest exchange and selected branch. If two or more materially plausible readings remain and they lead to meaningfully different answers or artifacts, do not silently choose one, discard the other, or collapse the response to one familiar entity. Present each plausible reading as a clearly named, self-contained section in the same answer, preserve all requested facts and deliverables for each, and let the user correct/select a reading afterward. Do not invent implausible alternatives; do not ask a blocking clarification when both readings can be usefully answered. Ask one concise question only when a missing detail makes a safe or meaningful response impossible. Independent readings are cumulative sections, not mutually exclusive substitutions.
+- When an ambiguous request asks for a visual result and the readings require different subjects, keep the prose sections separate and return separate `image_specs` (one concrete prompt per materially distinct visual subject) so the executor can deliver distinct images in the same GalleryBlock/SceneContract. Never merge unrelated identities into one composite image or use a text-only status in place of a requested visual. Keep all non-image renderers and citations attached to the section they support.
 - Adaptive visuals are optional: emit a renderer only when its concrete payload adds non-redundant explanatory information to this request. A topical word alone is never a reason to create a diagram, image, table, formula, or local-site/community route. Keep image generation behind the interpreted image/generator signal.
 - When a formula is requested, a formula render block must contain at least one actual non-empty mathematical expression in `latex`, `formula`, or `equation`. A title, caption, artifact shell, empty list, or prose explanation is not a formula; do not claim the formula was supplied unless the expression is present.
 - Every renderer placed within a narrative must carry an exact, unique `anchor_text` copied from the answer after which it belongs. Keep the prose before and after the renderer as separate narrative fragments when appropriate. If no grounded anchor exists, do not insert the renderer into an unrelated paragraph or manufacture a placeholder.
@@ -463,7 +466,12 @@ output(s). Preserve list/line order. ATTACHMENT_INDEX keys may be n=filename,
 k=kind, m=MIME, r=role, id=source message ID, s=size bytes, tr=reader_truncated, c=source chars,
 i=sequence_index, a=cached summary. Use the required renderer/SceneContract and KaTeX for math. Code edits need complete source in a code block.
 Return valid JSON with internal_request_en, internal_answer_en, answer, content, summary, render_blocks,
-artifacts and dialogue_memory_record. `the canonical `answer` preserves the full response; `content` may be empty to avoid duplicating it in model output. Keep internal fields and summary concise; compress repeated
+artifacts and dialogue_memory_record. When materially ambiguous visual readings each require a different
+image, also return `image_specs`: an ordered array of concrete objects with `prompt` (or
+`openai_structured_visual_plan_semantic`), `image_caption`, `title`, and optional `step_index`; one object
+per distinct visual reading, maximum four. Each prompt must depict only its own reading. The executor
+renders each raster separately and places them in the shared GalleryBlock/SceneContract. Do not emit
+`image_specs` when there is only one clear visual reading. `the canonical `answer` preserves the full response; `content` may be empty to avoid duplicating it in model output. Keep internal fields and summary concise; compress repeated
 prose before requested topics. dialogue_memory_record.sections is an ordered array of {heading, summary,
 order}; store headings and brief summaries only, never the full prior explanation.
 Never return an empty answer or invent details not present in source.
@@ -2015,14 +2023,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     }
                     | ({
                         "preserve_source_text": True,
-                        "source_user_text": _clip(pair.get("source_user_text"), 500),
-                        "source_april_text": _clip(pair.get("source_april_text"), 1400),
-                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 500,
-                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 1400,
-                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 500 and len(_text(pair.get("source_april_text"))) <= 1400,
+                        "source_user_text": _clip(pair.get("source_user_text"), 700),
+                        "source_april_text": _clip(pair.get("source_april_text"), 3000),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 700,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 3000,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 700 and len(_text(pair.get("source_april_text"))) <= 3000,
                         "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
                     } if pair.get("preserve_source_text") is True else {})
-                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") or task_search.get("hot_work_followup") else 1)] if isinstance(pair, dict)
+                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") or task_search.get("hot_work_followup") or any(isinstance(selected_pair, dict) and selected_pair.get("preserve_source_text") is True for selected_pair in (task_search.get("selected_pairs") or [])) else 1)] if isinstance(pair, dict)
                 ]
                 if isinstance(task_search.get("anchor"), dict):
                     anchor = task_search["anchor"]
@@ -2141,9 +2149,22 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     has_preserved_source_pair = any(
         isinstance(item, dict) and item.get("preserve_source_text") is True for item in pairs
     )
-    # Never discard the only verified source excerpt just because the general prompt
-    # is over budget. Keep one bounded source pair and compress less critical context first.
-    pair_keep_levels = (3, 2, 1) if (is_history and pairs) or has_preserved_source_pair else (3, 2, 1, 0)
+    # Never discard verified source excerpts just because the general prompt is
+    # over budget. A correction turn may need both the latest short status and the
+    # preceding full answer. Preserve up to two already-selected exact source pairs
+    # through this first compaction pass; compress less critical context first.
+    preserved_source_pair_count = sum(
+        1 for item in pairs if isinstance(item, dict) and item.get("preserve_source_text") is True
+    )
+    minimum_pair_count = min(2, preserved_source_pair_count)
+    if is_history and pairs:
+        pair_keep_levels = (3, 2, 1)
+    elif minimum_pair_count >= 2:
+        pair_keep_levels = (3, 2)
+    elif has_preserved_source_pair:
+        pair_keep_levels = (3, 2, 1)
+    else:
+        pair_keep_levels = (3, 2, 1, 0)
     for keep_n in pair_keep_levels:
         compact_pairs = []
         for item in pairs[:keep_n]:
@@ -2473,7 +2494,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                                       "summary": _semantic_compress(sec.get("summary"), max(_scaled_prompt_tokens(12), summary_budget // 2)),
                                       "order": sec.get("order")} for sec in (pair.get("sections") or [])[:2] if isinstance(sec, dict)]
                     }
-                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") else 1)] if isinstance(pair, dict)
+                    for pair in (task_search.get("selected_pairs") or [])[:(2 if task_search.get("active_branch_repair") or any(isinstance(selected_pair, dict) and selected_pair.get("preserve_source_text") is True for selected_pair in (task_search.get("selected_pairs") or [])) else 1)] if isinstance(pair, dict)
                 ],
                 "clarification_needed": bool(task_search.get("clarification_needed")),
                 "clarification_prompt": _semantic_compress(task_search.get("clarification_prompt"), max(_scaled_prompt_tokens(8), summary_budget)),
@@ -2501,7 +2522,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
+            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "ambiguity_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -2544,11 +2565,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if item.get("preserve_source_text") is True:
                 compact_min_pair.update({
                     "preserve_source_text": True,
-                    "source_user_text": _clip(item.get("source_user_text"), 500),
-                    "source_april_text": _clip(item.get("source_april_text"), 1400),
-                    "source_user_text_complete": bool(item.get("source_user_text_complete")) and len(_text(item.get("source_user_text"))) <= 500,
-                    "source_april_text_complete": bool(item.get("source_april_text_complete")) and len(_text(item.get("source_april_text"))) <= 1400,
-                    "source_content_complete": bool(item.get("source_content_complete")) and len(_text(item.get("source_user_text"))) <= 500 and len(_text(item.get("source_april_text"))) <= 1400,
+                    "source_user_text": _clip(item.get("source_user_text"), 700),
+                    "source_april_text": _clip(item.get("source_april_text"), 3000),
+                    "source_user_text_complete": bool(item.get("source_user_text_complete")) and len(_text(item.get("source_user_text"))) <= 700,
+                    "source_april_text_complete": bool(item.get("source_april_text_complete")) and len(_text(item.get("source_april_text"))) <= 3000,
+                    "source_content_complete": bool(item.get("source_content_complete")) and len(_text(item.get("source_user_text"))) <= 700 and len(_text(item.get("source_april_text"))) <= 3000,
                     "source_text_origin": _clip(item.get("source_text_origin") or "dialogue_memory", 40),
                 })
             pairs_min.append(compact_min_pair)
@@ -2758,10 +2779,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Try progressively smaller allocations. Topic requests are always <= 30% of
     # 3600 estimated tokens, and each step remains represented in REQUEST_SEQUENCE.
-    minimum_history_pair = 1 if (
-        (is_history and original_pairs)
-        or any(isinstance(item, dict) and item.get("preserve_source_text") is True for item in original_pairs)
-    ) else 0
+    preserved_source_pair_count = sum(
+        1 for item in original_pairs
+        if isinstance(item, dict) and item.get("preserve_source_text") is True
+    )
+    # A repair can need both the latest brief status and the immediately preceding
+    # full answer. Keep up to two already-selected source pairs through every
+    # compaction level; do not let the final minimal candidate silently drop the
+    # substantive answer merely because it is older than the apology.
+    minimum_history_pair = max(
+        1 if is_history and original_pairs else 0,
+        min(2, preserved_source_pair_count),
+    )
     candidates = [
         (_scaled_prompt_tokens(420), min(_scaled_prompt_tokens(516), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24)), _scaled_prompt_tokens(70), min(2, len(original_pairs))),
         (_scaled_prompt_tokens(300), _scaled_prompt_tokens(210), _scaled_prompt_tokens(45), min(2, len(original_pairs))),
@@ -2995,7 +3024,17 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # Preserve the strongest selected pair and the exact protected structures;
         # remove verbose prose/history details from the non-protected context.
         compact_pairs = []
-        for pair in minimal["CONTINUATION_CONTEXT"][:1]:
+        # Keep the exact latest exchange plus one selected preceding source on
+        # correction/repair turns. The preceding pair may hold the complete original
+        # answer and its artifacts when the latest assistant message is only a status
+        # or apology. Unrelated pairs were already excluded by State Manager.
+        minimal_pairs = minimal["CONTINUATION_CONTEXT"]
+        preserved_pair_count = sum(
+            1 for pair in minimal_pairs
+            if isinstance(pair, dict) and pair.get("preserve_source_text") is True
+        )
+        pair_limit = min(2, len(minimal_pairs)) if preserved_pair_count >= 2 else 1
+        for pair in minimal_pairs[:pair_limit]:
             if isinstance(pair, dict):
                 compact_pair = {k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
                                 for k in ("topic", "user", "april") if pair.get(k)}
@@ -3012,11 +3051,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     # verified canonical source; all remaining text is explicitly marked incomplete.
                     compact_pair.update({
                         "preserve_source_text": True,
-                        "source_user_text": _clip(pair.get("source_user_text"), 300),
-                        "source_april_text": _clip(pair.get("source_april_text"), 900),
-                        "source_user_text_complete": False,
-                        "source_april_text_complete": False,
-                        "source_content_complete": False,
+                        "source_user_text": _clip(pair.get("source_user_text"), 700),
+                        "source_april_text": _clip(pair.get("source_april_text"), 3000),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 700,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 3000,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 700 and len(_text(pair.get("source_april_text"))) <= 3000,
                         "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
                     })
                 compact_pairs.append(compact_pair)
@@ -3154,11 +3193,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if pair.get("preserve_source_text") is True:
                     record.update({
                         "preserve_source_text": True,
-                        "source_user_text": _clip(pair.get("source_user_text"), 240),
-                        "source_april_text": _clip(pair.get("source_april_text"), 520),
-                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 240,
-                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 520,
-                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 240 and len(_text(pair.get("source_april_text"))) <= 520,
+                        "source_user_text": _clip(pair.get("source_user_text"), 700),
+                        "source_april_text": _clip(pair.get("source_april_text"), 3000),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 700,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 3000,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 700 and len(_text(pair.get("source_april_text"))) <= 3000,
                         "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
                     })
                 normalized_pairs.append({k: v for k, v in record.items() if v not in (None, "", [], {})})
@@ -3288,7 +3327,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "Room IDs and room knowledge are domain/provenance metadata, never renderer triggers. "
             "Preserve every REQUEST_SEQUENCE step and all protected source values. "
             + emergency_task_guidance + " "
-            + "Use Markdown headings and short nested subsections for substantive multi-part answers. Renderers must complement the text: "
+            + "Use Markdown headings and short nested subsections for substantive multi-part answers. Preserve every materially plausible interpretation as a separate complete section; never silently collapse ambiguity into one subject. "
+            + "When distinct visual interpretations are requested, return a separate image_specs item for each; never merge unrelated subjects into one image. "
+            + "A correction must repair the selected answer while retaining all still-correct sections and artifacts; never replace a substantive answer with an apology or one-line image status. "
+            + "Keep the complete answer, content, typed render_blocks and artifacts together in one SceneContract. Renderers complement the text: "
             + "never create a diagram by copying prose or headings; add a diagram only when the user explicitly asks for one or a concrete "
             + "process/relationship map materially clarifies the answer. For site help, use only verified ROOM_KNOWLEDGE_CONTEXT routes "
             + "and output clickable relative links when applicable. Return valid JSON with answer, content, render_blocks, artifacts and "
@@ -3594,11 +3636,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if pair.get("preserve_source_text") is True:
                     compact_pair.update({
                         "preserve_source_text": True,
-                        "source_user_text": _clip(pair.get("source_user_text"), 350),
-                        "source_april_text": _clip(pair.get("source_april_text"), 900),
-                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 350,
-                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 900,
-                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 350 and len(_text(pair.get("source_april_text"))) <= 900,
+                        "source_user_text": _clip(pair.get("source_user_text"), 700),
+                        "source_april_text": _clip(pair.get("source_april_text"), 2500),
+                        "source_user_text_complete": bool(pair.get("source_user_text_complete")) and len(_text(pair.get("source_user_text"))) <= 700,
+                        "source_april_text_complete": bool(pair.get("source_april_text_complete")) and len(_text(pair.get("source_april_text"))) <= 2500,
+                        "source_content_complete": bool(pair.get("source_content_complete")) and len(_text(pair.get("source_user_text"))) <= 700 and len(_text(pair.get("source_april_text"))) <= 2500,
                         "source_text_origin": _clip(pair.get("source_text_origin") or "dialogue_memory", 40),
                     })
                 compact_pairs.append({k: v for k, v in compact_pair.items() if v not in (None, "", [], {})})
@@ -6053,6 +6095,48 @@ def _normalize(
             })
     memory_record["attachment_summaries"] = normalized_asset_summaries
 
+    # Preserve separate visual plans for materially different readings of an
+    # ambiguous request. The executor receives these after normalization and
+    # generates one independent raster per spec; they are not collapsed into a
+    # single primary image or a collage.
+    raw_image_specs = data.get("image_specs") if isinstance(data.get("image_specs"), list) else []
+    normalized_image_specs: list[dict[str, Any]] = []
+    image_prompt_keys = (
+        "openai_structured_visual_plan_semantic", "visual_generation_prompt",
+        "image_prompt", "visual_prompt", "prompt", "description",
+    )
+    image_meta_keys = ("image_caption", "caption", "title", "alt", "step_index", "step_title", "anchor_text", "insert_after_text", "final_output")
+    for image_spec in raw_image_specs[:4]:
+        if not isinstance(image_spec, dict):
+            continue
+        prompt_value = next((
+            _text(image_spec.get(key))[:12000]
+            for key in image_prompt_keys if _text(image_spec.get(key))
+        ), "")
+        if not prompt_value:
+            continue
+        normalized_spec = {"prompt": prompt_value}
+        for key in image_meta_keys:
+            value = image_spec.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if key == "step_index":
+                try:
+                    normalized_spec[key] = max(1, int(value))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            elif key == "final_output":
+                normalized_spec[key] = bool(value)
+            else:
+                normalized_spec[key] = _text(value)[:300]
+        normalized_image_specs.append(normalized_spec)
+    if normalized_image_specs:
+        _log_json("IMAGE_SPECS_NORMALIZED", {
+            "count": len(normalized_image_specs),
+            "distinct_visual_plans": len({item.get("prompt", "") for item in normalized_image_specs}),
+            "separate_gallery_items": True,
+        })
+
     return {
         "machine_response": {
             "answer": answer,
@@ -6061,6 +6145,7 @@ def _normalize(
                 data.get("summary") or answer[:180]
             ),
             "render_blocks": blocks,
+            "image_specs": normalized_image_specs,
             "metadata": {
                 "provider_model": MODEL,
                 "provider_language": "en",
