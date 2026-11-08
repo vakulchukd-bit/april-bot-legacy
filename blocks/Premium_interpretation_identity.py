@@ -297,7 +297,25 @@ def _detect_contextual_image_edit(text: str) -> bool:
         and visual_target
         and re.search(r"(?:на\s+(?:этой\s+|присланной\s+|предыдущей\s+)?(?:картинк\w*|изображени\w*|фото|скриншот\w*)|\bon\s+(?:this\s+)?(?:picture|image|photo|screenshot)\b|(?:стрелк\w*|кнопк\w*|arrow|button))", low, re.IGNORECASE)
     )
-    return bool((_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low)) or revision_of_visual or natural_desired_visual)
+    # The target may be implicit when the active branch already contains a
+    # generated image. Short edit commands such as "Добавь усы" or "Убери лишнее"
+    # inherit that selected image instead of requiring the user to repeat "на
+    # этой картинке". Protect explicit non-visual deliverables and account/history
+    # operations so this contextual rule does not hijack unrelated work.
+    implicit_target_edit = bool(
+        _IMAGE_EDIT_ACTION_RE.search(low)
+        and not _has_independent_nonvisual_artifact_request(low)
+        and not re.search(r"\b(?:истори\w*|диалог\w*|памят\w*|сообщен\w*|аккаунт\w*|профил\w*|подписк\w*|таблиц\w*|диаграмм\w*|график\w*|код\w*|скрипт\w*|файл\w*|документ\w*|отчет\w*|отч[её]т\w*|презентац\w*|раздел\w*|параграф\w*|строк\w*|формул\w*|уравнен\w*|расчет\w*|расч[её]т\w*|решени\w*|ответ\w*|объяснен\w*|перевод\w*|спис\w*|план\w*|конспект\w*|резюме\w*|сводк\w*|сравнен\w*|информац\w*)\b", low, re.IGNORECASE)
+    )
+    comparative_visual_feedback = bool(
+        re.search(r"(?:не\s+похож\w*|похож\w*|не\s+тот\s+человек|не\s+та\s+внешност\w*|не\s+так\s+выгляд\w*|\bmore\s+like\b|\bdoesn.?t\s+look\b|\bnot\s+like\b)", low, re.IGNORECASE)
+        and re.search(r"\b(?:его|нее|неё|него|она|он|они|этот|эта|это|тот|та|оригинал|original|him|her|them|this|that|it)\b", low, re.IGNORECASE)
+    )
+    return bool(
+        (_IMAGE_EDIT_ACTION_RE.search(low) and _IMAGE_EDIT_TARGET_RE.search(low))
+        or revision_of_visual or natural_desired_visual
+        or implicit_target_edit or comparative_visual_feedback
+    )
 
 
 def _should_generate_instead_of_requesting_missing_source(text: str) -> bool:
@@ -1027,6 +1045,26 @@ def _detect_image_modification(text: str) -> bool:
     if _is_image_discussion_without_new_visual_action(low):
         return False
     if _is_self_portrait_generation_request(low):
+        return False
+
+    # Creation language plus a photo/image object means a new raster output unless
+    # the user explicitly identifies an existing source (attached, uploaded,
+    # previous, or demonstratively selected). Possessives such as "его фотку"
+    # identify the subject, not a source file. This prevents a new portrait request
+    # from being converted into "please send me a photo to edit".
+    image_noun_for_creation = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b)"
+    create_action_for_image = r"(?:нарис\w*|созда\w*|сгенерир\w*|изобраз\w*|draw|create|generate|make)"
+    creates_image_object = bool(re.search(
+        rf"(?<![\w\u0080-\uffff]){create_action_for_image}\b.{{0,100}}{image_noun_for_creation}",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    explicitly_selects_existing_source = bool(re.search(
+        rf"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+{image_noun_for_creation}|"
+        rf"\b(?:на\s+ней|на\s+нем|в\s+ней|в\s+нем|по\s+ней|по\s+нему|this\s+(?:photo|image|picture)|the\s+(?:uploaded|attached|previous)\s+(?:photo|image|picture))\b|"
+        rf"{image_noun_for_creation}.{{0,70}}\b(?:котор\w*\s+(?:я\s+)?(?:отправил\w*|загрузил\w*|прикрепил\w*)|в\s+предыдущем\s+сообщении|выше|uploaded|attached)\b)",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if creates_image_object and not explicitly_selects_existing_source:
         return False
 
     # A request to show/send a picture is a visual-output request, not an edit to
@@ -4328,6 +4366,23 @@ def interpret_request_in_context(
         or signals.get("context_dependent_reaction")
         or features.get("context_dependent_reaction")
     )
+    # Treat an evaluation of an assistant deliverable as feedback on the latest
+    # exchange, even when the pragmatic classifier did not label a short phrase
+    # such as "Ответ неправильный" as dissatisfaction. This is an output-object
+    # reference + negative evaluation, not a fixed reply string or topic trigger.
+    answer_object_reference = bool(re.search(
+        r"\b(?:ответ\w*|результат\w*|работ\w*|фото\w*|фотограф\w*|картинк\w*|изображени\w*|таблиц\w*|график\w*|диаграмм\w*|решени\w*|расчет\w*|расч[её]т\w*|answer\w*|result\w*|output\w*|image\w*|picture\w*|table\w*|chart\w*|graph\w*)\b",
+        low, re.IGNORECASE,
+    ))
+    negative_answer_evaluation = bool(re.search(
+        r"(?:\bне\s+(?:правильн\w*|верн\w*|точн\w*|то|тот|так|подош\w*|устраива\w*|нрав\w*|подход\w*)|"
+        r"\b(?:ошибк\w*|неверн\w*|неправильн\w*|мимо|плохо|wrong|incorrect|not\s+right|not\s+what|bad)\b)",
+        low, re.IGNORECASE,
+    ))
+    assistant_output_feedback = bool(
+        previous_answer and answer_object_reference
+        and (disagreement or dissatisfaction or negative_answer_evaluation)
+    )
     previous_answer_reference = bool(
         profile.get("previous_answer_reference")
         or profile.get("active_branch_repair")
@@ -4335,6 +4390,40 @@ def interpret_request_in_context(
         or features.get("active_branch_repair")
         or signals.get("previous_answer_reference")
         or signals.get("active_branch_repair")
+    )
+    # Audit whether the immediately preceding user request produced its declared
+    # image deliverable. A blank GalleryBlock is an attempted render, not a saved
+    # asset. When the output contract is still open, short follow-ups must repair
+    # that same branch instead of asking the user to upload April's missing result.
+    previous_image_attempted, previous_image_saved = _pair_image_output_state(row)
+    previous_user_requested_image = bool(
+        _detect_image_generation_request(previous_user)
+        or _bare_image_object_request(previous_user)
+    )
+    unfulfilled_image_contract = bool(
+        (previous_user_requested_image or previous_image_attempted)
+        and not previous_image_saved
+    )
+    previous_visual_output = bool(previous_image_attempted or previous_image_saved or previous_user_requested_image)
+    contextual_visual_revision = bool(
+        previous_visual_output and _detect_contextual_image_edit(source)
+    )
+    # An unresolved image deliverable only owns a follow-up when the new turn is
+    # itself an image reference/deliverable or is a genuinely underspecified
+    # pointer (for example, "Где?"). A separate content request such as
+    # "Расскажи про Менделеева всё" must remain a new text task even if an older
+    # image request in the same conversation was not fulfilled.
+    image_contract_followup = bool(
+        _detect_image_generation_request(source)
+        or _bare_image_object_request(source)
+        or re.search(
+            r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+            low, re.IGNORECASE,
+        )
+        or (
+            len(current_tokens_list) <= 2
+            and bool(re.search(r"\b(?:где|куда|ну|так|что|она|он|оно|их|его|ее|её|этот|эта|это|тот|та|the|where|it|this|that)\b", low, re.IGNORECASE))
+        )
     )
     explicit_switch = bool(profile.get("explicit_topic_switch") or profile.get("explicit_topic_introduction"))
 
@@ -4375,6 +4464,19 @@ def interpret_request_in_context(
     signature = _context_signature(source)
     output_forms = signature.get("output_forms") if isinstance(signature.get("output_forms"), list) else []
     numeric_anchors = signature.get("numeric_anchors") if isinstance(signature.get("numeric_anchors"), list) else []
+    reference_terms = signature.get("reference_terms") if isinstance(signature.get("reference_terms"), list) else []
+    visual_deliverable_request = bool(
+        _detect_image_generation_request(source) or _bare_image_object_request(source)
+    )
+    anaphoric_visual_link = bool(
+        visual_deliverable_request and reference_terms and previous_answer
+    )
+    named_visual_link = bool(
+        _bare_image_object_request(source) and (user_common > 0 or answer_common > 0)
+    )
+    visual_continuation_link = bool(
+        not explicit_switch and (anaphoric_visual_link or named_visual_link)
+    )
     has_independent_payload = bool(
         signals.get("has_independent_payload")
         or output_forms
@@ -4427,6 +4529,10 @@ def interpret_request_in_context(
             short_social_only
             or short_continuation_action
             or assistant_repetition_feedback
+            or assistant_output_feedback
+            or (unfulfilled_image_contract and image_contract_followup)
+            or contextual_visual_revision
+            or visual_continuation_link
             or linked_by_user_turn
             or linked_by_answer
             or (explicit_context_signal and (
@@ -4444,12 +4550,14 @@ def interpret_request_in_context(
         "linked": latest_exchange_link,
         "route": "LATEST_EXCHANGE_FIRST" if latest_exchange_link else "CHECK_FOR_PRIOR_BRANCH_OR_NEW_TOPIC",
         "reason": (
-            "assistant_response_feedback" if assistant_repetition_feedback else
+            "assistant_response_feedback" if (assistant_repetition_feedback or assistant_output_feedback) else
+            "complete_unfulfilled_image_output" if unfulfilled_image_contract and latest_exchange_link else
             "social_or_pragmatic_reaction" if short_social_only else
             "short_continuation_action" if short_continuation_action else
             "semantic_link_to_previous_user_turn" if linked_by_user_turn else
             "semantic_link_to_previous_april_answer" if linked_by_answer else
             "explicit_april_reference_to_latest_exchange" if latest_exchange_link and direct_april_reference else
+            "visual_continuation_to_prior_subject" if visual_continuation_link and latest_exchange_link else
             "contextual_reference_validated_against_latest_exchange" if latest_exchange_link else
             "self_contained_or_unmatched_request"
         ),
@@ -4459,6 +4567,13 @@ def interpret_request_in_context(
         "answer_shared_terms": answer_common,
         "social_act": bool(gratitude or positive or acknowledgement or disagreement or dissatisfaction),
         "has_independent_payload": has_independent_payload,
+        "previous_image_requested": bool(previous_user_requested_image or previous_image_attempted),
+        "previous_image_saved": bool(previous_image_saved),
+        "unfulfilled_image_contract": bool(unfulfilled_image_contract),
+        "previous_visual_output": bool(previous_visual_output),
+        "contextual_visual_revision": bool(contextual_visual_revision),
+        "visual_continuation_link": bool(visual_continuation_link),
+        "assistant_output_feedback": bool(assistant_output_feedback),
     }
     profile["latest_exchange_analysis"] = analysis
 
@@ -4480,7 +4595,7 @@ def interpret_request_in_context(
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback),
             "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision),
         })
         profile["features"] = features
         signals.update({
@@ -4488,12 +4603,30 @@ def interpret_request_in_context(
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or contextual_reaction or assistant_repetition_feedback),
             "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision),
         })
         profile["pragmatic_features"] = signals
         profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback)
         profile["previous_answer_reference"] = True
-        profile["active_branch_repair"] = bool(assistant_repetition_feedback or disagreement or dissatisfaction or profile.get("active_branch_repair"))
+        profile["active_branch_repair"] = bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or profile.get("active_branch_repair"))
+        if contextual_visual_revision:
+            profile["speech_act"] = "CORRECTION_OR_REVISION"
+            profile["communicative_act"] = "REVISE_PREVIOUS_VISUAL_OUTPUT"
+            profile["recommended_response_action"] = "REVISE_ACTIVE_IMAGE_ARTIFACT"
+            features["explicit_visual_revision"] = True
+            profile["features"] = features
+        elif assistant_output_feedback:
+            profile["speech_act"] = "CORRECTION_OR_REVISION"
+            profile["communicative_act"] = "RECHECK_PREVIOUS_ASSISTANT_OUTPUT"
+            profile["recommended_response_action"] = "RECHECK_AND_REVISE_PREVIOUS_ANSWER"
+        elif visual_continuation_link:
+            profile["speech_act"] = "REFERENTIAL_CONTINUATION"
+            profile["communicative_act"] = "CREATE_VISUAL_FOR_REFERENCED_SUBJECT"
+            profile["recommended_response_action"] = "GENERATE_VISUAL_FOR_REFERENCED_SUBJECT"
+        if unfulfilled_image_contract:
+            profile["speech_act"] = "CORRECTION_OR_REVISION"
+            profile["communicative_act"] = "REVISE_PREVIOUS_RESPONSE"
+            profile["recommended_response_action"] = "COMPLETE_UNFULFILLED_IMAGE_OUTPUT"
         profile["dialogue_act"] = profile.get("dialogue_act") or profile.get("speech_act") or "REFERENTIAL_CONTINUATION"
     elif (
         _text(profile.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "ACTIVE_BRANCH_REPAIR"}
@@ -6112,6 +6245,94 @@ def _build_dialogue_based_portrait_profile(
     }
 
 
+def _pair_image_output_state(pair: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (image_attempted, real_image_saved) from a persisted dialogue pair.
+
+    An empty GalleryBlock counts as an attempted visual output, never as a saved
+    image. A value-bearing image artifact/index entry is required for success.
+    """
+    attempted = False
+    saved = False
+    collections = []
+    for key in ("assistant_structured_output", "render_blocks", "assistant_artifact_index", "artifact_index"):
+        value = pair.get(key)
+        if isinstance(value, list):
+            collections.extend(item for item in value if isinstance(item, dict))
+    for item in collections:
+        kind = _text(item.get("kind") or item.get("type") or item.get("artifact_type") or item.get("family")).lower()
+        mime = _text(item.get("mime_type") or item.get("content_type")).lower()
+        renderer = _text(item.get("renderer") or item.get("viewer")).lower()
+        is_image = kind in {"image", "generated_image", "generated_image_gallery", "gallery", "image_artifact"} or mime.startswith("image/") or renderer == "galleryblock"
+        if not is_image:
+            continue
+        attempted = True
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        images = item.get("images") if isinstance(item.get("images"), list) else payload.get("images") if isinstance(payload.get("images"), list) else []
+        data_fields = (
+            item.get("src"), item.get("image_data_uri"), item.get("data_uri"), item.get("url"),
+            payload.get("src"), payload.get("image_data_uri"), payload.get("data_uri"), payload.get("url"),
+            item.get("artifact_id"), item.get("asset_id"), item.get("ref"), item.get("filename"),
+        )
+        value_bearing_image = any(isinstance(value, str) and value.strip() for value in data_fields)
+        value_bearing_image = value_bearing_image or any(
+            isinstance(img, dict) and any(
+                isinstance(img.get(field), str) and img.get(field).strip()
+                for field in ("src", "image_data_uri", "data_uri", "url", "artifact_id", "asset_id", "ref", "filename")
+            ) for img in images
+        )
+        # Renderer/type labels alone are placeholders and must not be reported as
+        # a completed image in dialogue memory.
+        if value_bearing_image:
+            saved = True
+    return attempted, saved
+
+
+def _bare_image_object_request(text: Any) -> bool:
+    """Recognize an elliptical image deliverable phrase with a named subject."""
+    low = _text(text).lower().replace("ё", "е").strip(" \t\r\n.,!;:")
+    if not low or "?" in low or re.search(r"\b(?:почему|зачем|как|что|где|куда|какой|какая|какие|опис\w*|анализир\w*|расскажи|объясни)\b", low):
+        return False
+    image_noun = r"(?:фото|фотку|фотка|фотография|фотографию|фотографии|фотографию|картинку|картинка|изображение|изображения|picture|photo|image)"
+    return bool(re.match(
+        rf"^(?:(?:а|и|тогда|еще|ещё|также)\s+)?(?:(?:мне|нам)\s+)?{image_noun}\s+(?:его\s+|ее\s+|её\s+|их\s+|этого\s+|этой\s+|this\s+)?[\w-]+(?:\s+[\w-]+){{0,4}}$",
+        low, re.IGNORECASE,
+    ))
+
+
+def _active_branch_image_audit(memory: dict[str, Any]) -> dict[str, Any]:
+    """Audit the selected active branch for an image request that was not fulfilled."""
+    rows: list[dict[str, Any]] = []
+    selected = memory.get("selected_pairs") if isinstance(memory.get("selected_pairs"), list) else []
+    rows.extend(item for item in selected if isinstance(item, dict))
+    latest = memory.get("latest_assistant_anchor") if isinstance(memory.get("latest_assistant_anchor"), dict) else {}
+    if latest:
+        latest_id = _text(latest.get("message_id"))
+        if not latest_id or all(_text(row.get("message_id")) != latest_id for row in rows):
+            rows.append(latest)
+    # Preserve the State Manager's branch order; it is already filtered to the
+    # current authenticated dialogue/topic, unlike a global history scan.
+    attempted_any = False
+    latest_attempt_saved = False
+    source_message_id = ""
+    for row in rows:
+        user_text = _text(
+            row.get("source_user_text") or row.get("user") or row.get("user_request") or row.get("user_text")
+        )
+        attempted, saved = _pair_image_output_state(row)
+        user_requested = bool(_detect_image_generation_request(user_text) or _bare_image_object_request(user_text))
+        attempted = attempted or user_requested
+        if attempted:
+            attempted_any = True
+            latest_attempt_saved = bool(saved)
+            source_message_id = _text(row.get("message_id") or row.get("source_message_id"))[:120]
+    return {
+        "image_attempted": attempted_any,
+        "image_saved": bool(attempted_any and latest_attempt_saved),
+        "image_unfulfilled": bool(attempted_any and not latest_attempt_saved),
+        "source_message_id": source_message_id,
+    }
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -6143,6 +6364,7 @@ def build_interpretation(
         if isinstance(item, dict)
     ]
     restored_kinds = {str(item.get("kind") or "").lower() for item in restored_assets}
+    branch_image_audit = _active_branch_image_audit(memory)
     has_image = "image" in kinds or "image" in restored_kinds or bool(visual_context)
     has_voice = "voice" in kinds
     has_file = bool(kinds & {"file", "text_file"}) or bool(restored_kinds & {"file", "text_file"})
@@ -6243,6 +6465,16 @@ def build_interpretation(
         ui_instruction_request or dialogue_profile_request or image_discussion_only
         or suppress_incidental_image_edit
     ) else _detect_image_modification(normalized_visual_request)
+    contextual_visual_revision = bool(
+        (branch_image_audit.get("image_attempted") or has_saved_output_image)
+        and _detect_contextual_image_edit(normalized_visual_request)
+        and not independent_artifact_request
+        and not ui_instruction_request
+        and not image_discussion_only
+    )
+    pending_image_refinement = bool(
+        branch_image_audit.get("image_unfulfilled") and contextual_visual_revision
+    )
     if (
         explicit_image_edit
         and not has_original_image
@@ -6252,8 +6484,31 @@ def build_interpretation(
         # changing a named/attached photo. Keep the image output and let the
         # registered generator create a new picture instead of asking for upload.
         explicit_image_edit = False
-    contextual_image_edit = bool(not ui_instruction_request and not image_discussion_only and has_original_image and _detect_contextual_image_edit(normalized_visual_request))
-    image_edit_requested = bool((explicit_image_edit or contextual_image_edit) and not dialogue_profile_request)
+    contextual_image_edit = bool(
+        not ui_instruction_request and not image_discussion_only and has_original_image
+        and (contextual_visual_revision or _detect_contextual_image_edit(normalized_visual_request))
+    )
+    # A genuine edit requires evidence of an existing source in this turn or in
+    # restored dialogue assets. Generic creation wording ("draw his photo") is
+    # never converted into a missing-source request merely because no upload was
+    # attached to the current message.
+    saved_output_image_metadata = any(
+        _text(item.get("kind")).lower() == "image"
+        and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
+        for item in restored_assets if isinstance(item, dict)
+    )
+    explicit_edit_source_reference = bool(re.search(
+        r"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+(?:фото|фотограф\w*|фотк\w*|картинк\w*|изображени\w*)|"
+        r"\b(?:на\s+ней|на\s+нем|в\s+ней|в\s+нем|по\s+ней|по\s+нему)\b|"
+        r"(?:созданн\w*|сгенерированн\w*)\s+тобой\s+(?:фото|картинк\w*|изображени\w*))",
+        normalized_visual_request, re.IGNORECASE,
+    ))
+    current_creation_request = _detect_image_generation_request(normalized_visual_request)
+    image_edit_requested = bool(
+        (explicit_image_edit or contextual_image_edit)
+        and not dialogue_profile_request
+        and (has_original_image or saved_output_image_metadata or explicit_edit_source_reference)
+    )
     # A contextual command such as "Добавь зелёную галочку" becomes an image
     # edit only when a source image is actually available. An explicit edit request
     # without source bytes must ask for the photo and must never run generation.
@@ -6322,6 +6577,17 @@ def build_interpretation(
         r"|\bwhere\s+(?:is|did|has)\b.{0,45}?(?:photo|picture|image)\b)",
         normalized_visual_request, re.IGNORECASE | re.DOTALL,
     )) and not explicit_new_image and not explicit_image_edit
+    # If the active branch requested an image but persisted no value-bearing
+    # image artifact, a short status/repair turn is permission to complete that
+    # missing deliverable—not a request for the user to upload a source photo.
+    if image_status_request and branch_image_audit.get("image_unfulfilled"):
+        image_status_request = False
+        if "image" not in requested_outputs:
+            requested_outputs.append("image")
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = list(dict.fromkeys(["text", "image", *(sequence_item.get("output_types") or [])]))
+        image_status_request = False
     if image_status_request:
         requested_outputs = [item for item in requested_outputs if _text(item).lower() != "image"]
         for sequence_item in question_sequence:
@@ -6352,18 +6618,43 @@ def build_interpretation(
         and not re.search(r"\b(?:что\s+(?:на|изображено|видно)|опиши|анализиру\w*|прочитай|распознай|написано|what\s+(?:is|does)|describe|analy[sz]e|read\s+the)\b", normalized_visual_request)
         and (retrieval_language or bool(re.search(r"\b(?:его|ее|её|их|эт\w*|тот|ту|this|that|his|her|their|it|а|и|еще|ещё|also|же)\b", normalized_visual_request)))
     )
+    # Elliptical object phrases such as "Фотку Менделеева" are new deliverable
+    # requests when they occur in a continuing dialogue, even without a verb.
+    # This is interpreted compositionally (output noun + named complement), not
+    # by hard-coding a person, topic, or a single command phrase.
+    short_image_noun_request = bool(
+        relation == "CONTINUE"
+        and _bare_image_object_request(normalized_visual_request)
+        and not ui_instruction_request
+        and not image_discussion_only
+        and not image_edit_requested
+    )
     # A short "where is his photo?" follow-up is an image deliverable even when
     # no prior output asset was saved. Reuse the saved asset when available;
     # otherwise let the image-generation path create the missing portrait.
+    pending_image_status_pointer = bool(
+        branch_image_audit.get("image_unfulfilled")
+        and len(_semantic_normalize(normalized_visual_request)[1]) <= 2
+        and re.search(
+            r"\b(?:где|куда|ну|так|что|она|он|оно|их|его|ее|её|этот|эта|это|тот|та|where|it|this|that)\b",
+            normalized_visual_request, re.IGNORECASE,
+        )
+    )
     image_followup = (
         relation == "CONTINUE"
-        and short_image_reference
+        and (short_image_reference or short_image_noun_request or pending_image_status_pointer or pending_image_refinement)
         and not ui_instruction_request
+        and not image_discussion_only
+        and not image_edit_requested
         and not image_status_request
     )
-    reuse_saved_image = image_followup and has_saved_output_image
+    reuse_saved_image = image_followup and has_saved_output_image and not branch_image_audit.get("image_unfulfilled")
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
+    if image_followup and not reuse_saved_image:
+        # Missing/empty prior render: this is a retry of the active deliverable.
+        # Do not ask the user to provide an image that April was supposed to make.
+        image_status_request = False
 
     # Active visual history is context, not permission to render again. A turn that
     # discusses, praises, questions, or rejects a previous image stays text-only
@@ -6495,7 +6786,9 @@ def build_interpretation(
         wants_image=wants_image,
     )
     if image_edit_requested:
-        task = "edit_image" if source_image_available else "request_source_image"
+        task = "edit_image" if (source_image_available or saved_output_image_metadata) else "request_source_image"
+    elif wants_image and not reuse_saved_image:
+        task = "generate_image"
     elif reuse_saved_image:
         task = "answer_request"
     # A modification verb requests a code edit; merely asking what a code file
@@ -6551,6 +6844,7 @@ def build_interpretation(
             "reuse_saved_image": bool(reuse_saved_image),
             "image_status_request": bool(image_status_request),
             "has_saved_output_image": bool(has_saved_output_image),
+            "active_branch_image_audit": dict(branch_image_audit),
             "explicit_generation_request": bool(
                 wants_image and not reuse_saved_image and not image_edit_requested
                 and not image_status_request and not image_generation_blocked
@@ -6566,7 +6860,7 @@ def build_interpretation(
             "image_output_permission": bool(
                 wants_image and not image_generation_blocked
                 and (
-                    explicit_new_image or explicit_image_edit
+                    explicit_new_image or explicit_image_edit or image_edit_requested
                     or _detect_image_generation_request(original or text)
                     or _detect_portrait_request(original or text)
                     or dialogue_profile_request or image_followup
