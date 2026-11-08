@@ -1200,9 +1200,15 @@ def _latest_answer_relation_vector(query: str, row: dict[str, Any] | None, *, hi
 
 
 def _subject_overlap(left: set[str], right: set[str]) -> float:
+    """Compare entity/topic signatures with bounded typo and inflection tolerance.
+
+    Subject families are still produced by the existing topicality filter; the
+    fuzzy comparison only resolves small spelling/ASR differences between those
+    filtered tokens (for example, a voice-transcribed surname).
+    """
     if not left or not right:
         return 0.0
-    return round(_concept_overlap(left, right), 6)
+    return round(_fuzzy_token_overlap(left, right), 6)
 
 def _subject_conflicts(query_subjects: set[str], row_subjects: set[str]) -> bool:
     # Missing subject evidence is neutral; two populated but disjoint signatures
@@ -2533,7 +2539,7 @@ def _concept_overlap(query_tokens: set[str], candidate_tokens: set[str]) -> floa
 
 def _explicit_entity_overlap(query: str, row: dict[str, Any], *, max_chars: int | None = None) -> float:
     """Measure overlap of meaningful subject terms, excluding pronouns and fillers."""
-    q = _semantic_tokens(query)
+    q = _subject_tokens(query)
     raw_parts = [
         row.get("user_text"), row.get("april_text"),
         row.get("user_text_en"), row.get("april_text_en"),
@@ -2543,8 +2549,8 @@ def _explicit_entity_overlap(query: str, row: dict[str, Any], *, max_chars: int 
         _text(str(value or "")[:max_chars] if max_chars is not None else value)
         for value in raw_parts
     ]
-    candidate = _semantic_tokens(" ".join(parts))
-    return _concept_overlap(q, candidate)
+    candidate = _subject_tokens(" ".join(parts))
+    return _fuzzy_token_overlap(q, candidate) if q else 0.0
 
 
 def _parse_json(value: Any) -> dict[str, Any]:
@@ -4217,6 +4223,17 @@ _HISTORY_QUERY_NOISE = _SECTION_TOPIC_NOISE | {
     "вспомнить", "напомнить", "сказать", "расскажи", "расскажите", "кратко",
     "краткий", "содержание", "содержании", "тема", "темы", "тему", "вопрос",
     "вопросе", "вопросы", "какие", "какую", "какой", "какое", "что", "чем",
+    # Artifact-medium and presentation words identify the requested output, not
+    # the historical subject. Removing them leaves the named entity/topic for
+    # semantic matching while preserving modality separately in requested_outputs.
+    "фото", "фотка", "фотку", "фотки", "фотография", "фотографии", "фотографию",
+    "фотографией", "изображение", "изображения", "изображению", "картинка",
+    "картинки", "картинку", "портрет", "портрета", "портретом", "снимок", "снимка",
+    "image", "images", "photo", "photos", "picture", "pictures", "portrait",
+    "где", "настоящая", "настоящий", "настоящее", "настоящую", "настоящего",
+    "реальная", "реальный", "реальное", "реальную", "real", "actual", "genuine",
+    "подыми", "подними", "поднять", "делали", "создавали", "которую", "который",
+    "которые", "если", "нет", "новую", "новый", "новая", "новое",
     # Demonstratives in questions such as “что такое гравитация?” are grammar,
     # not the requested subject. Leaving “такое” here let it falsely match a
     # historical topic and inject that unrelated pair into a NEW request.
@@ -4301,7 +4318,7 @@ def _history_topic_overlap(query_tokens: set[str], candidate_tokens: set[str]) -
 
 def _topic_query_overlap(query: str, topic: str) -> float:
     """Overlap only on topic-bearing words, not generic continuation vocabulary."""
-    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE - _CONTEXT_GENERIC_TERMS
+    query_tokens = _semantic_tokens(query) - _SECTION_TOPIC_NOISE - _CONTEXT_GENERIC_TERMS - _HISTORY_QUERY_NOISE
     topic_tokens = _topic_tokens(topic)
     return _fuzzy_token_overlap(query_tokens, topic_tokens) if query_tokens else 0.0
 
@@ -4969,7 +4986,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
         r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
-        r"найди\w*|открой\w*|вытащи\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
+        r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
@@ -6501,11 +6518,21 @@ def search_dialogue_context(
         or _text(query_interpretation.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
         or _text(resume_message_id)
     )
+    preclassified_artifact_kind = (
+        _text(query_interpretation.get("saved_artifact_followup_kind"))
+        or _explicit_artifact_followup_kind(query)
+    )
+    explicit_historical_artifact_request = bool(
+        preclassified_artifact_kind and _explicit_historical_artifact_reference(query)
+    )
     site_navigation_preload = bool(
-        query_interpretation.get("site_navigation_request")
-        or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION"
-        or ((query_interpretation.get("features") or {}).get("site_navigation_request")
-            if isinstance(query_interpretation.get("features"), dict) else False)
+        (
+            query_interpretation.get("site_navigation_request")
+            or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION"
+            or ((query_interpretation.get("features") or {}).get("site_navigation_request")
+                if isinstance(query_interpretation.get("features"), dict) else False)
+        )
+        and not explicit_historical_artifact_request
     )
     latest_exchange_available = bool(latest_exchange_analysis.get("available"))
     latest_exchange_independent_request = bool(
@@ -6515,28 +6542,24 @@ def search_dialogue_context(
         and not explicit_history_preload
         and not explicit_prior_pointer_preload
     )
-    # Once the latest-exchange interpretation identifies a self-contained request,
-    # stale continuation fields from an earlier classifier cannot authorize a scan.
+    # Premium arbitration is deliberately two-pass: the latest authenticated
+    # USER↔APRIL exchange is evaluated first, then a self-contained request may
+    # search the user's retained history if that exchange does not fit. A NEW label
+    # is not permission to skip history; only an interpreted topic boundary or a
+    # genuine request to operate the product UI closes the history-search lane.
     allow_semantic_history_search = bool(
-        explicit_history_preload or explicit_prior_pointer_preload
-        or (semantic_memory_preload and not latest_exchange_link
-            and not latest_exchange_independent_request
-            and not site_navigation_preload
-            and not query_interpretation.get("explicit_topic_switch"))
+        explicit_history_preload
+        or explicit_prior_pointer_preload
+        or (
+            not site_navigation_preload
+            and not query_interpretation.get("explicit_topic_switch")
+        )
     )
     independent_new_topic_preload = bool(
-        not latest_exchange_link and not allow_semantic_history_search
+        not allow_semantic_history_search
         and not explicit_history_preload and not explicit_prior_pointer_preload
         and _text(query_interpretation.get("primary_intent")).upper() not in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
     )
-    preclassified_artifact_kind = (
-        _text(query_interpretation.get("saved_artifact_followup_kind"))
-        or _explicit_artifact_followup_kind(query)
-    )
-    explicit_historical_artifact_request = bool(
-        preclassified_artifact_kind and _explicit_historical_artifact_reference(query)
-    )
-
     pragmatic_latest = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
     simple_acknowledgement_turn = bool(
         latest_exchange_analysis.get("simple_acknowledgement")
@@ -6649,7 +6672,12 @@ def search_dialogue_context(
     )
     state = hydrate(
         uid,
-        limit=5 if (_hot_branch_only or independent_new_topic_preload or not allow_semantic_history_search) else (16 if targeted_active_repair else 0),
+        # The bounded current-dialog probe already ran above. After it misses,
+        # semantic arbitration must see the complete authenticated Premium
+        # retention window, not a 16-row current-dialog slice. Otherwise a request
+        # about an older topic/artifact is silently prevented from reaching the
+        # history fallback merely because the latest exchange is unrelated.
+        limit=5 if (_hot_branch_only or independent_new_topic_preload or not allow_semantic_history_search) else 0,
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
         strict_dialog_scope=bool(_hot_branch_only),
@@ -6667,37 +6695,33 @@ def search_dialogue_context(
             all_rows = [dict(latest_exchange_row_precheck)]
         else:
             all_rows = []
+    active_repair_rows: list[dict[str, Any]] = []
     if targeted_active_repair:
         same_dialog_rows = [row for row in all_rows if (
             (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
             or (_text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
         )]
-        if same_dialog_rows:
-            all_rows = sorted(same_dialog_rows, key=lambda row: (
-                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
-            ))[-16:]
-        else:
-            all_rows = sorted(all_rows, key=lambda row: (
-                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
-            ))[-16:]
+        # Keep a compact current-dialog window for the first routing pass, but do
+        # not overwrite all_rows: the latter is the authenticated 24h history used
+        # by the second semantic pass after the active branch misses.
+        active_repair_rows = sorted(
+            same_dialog_rows or all_rows,
+            key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
+        )[-16:]
         explicit_graph_or_diagram_target = _query_targets_graph_or_diagram(query, query_interpretation)
-        visual_anchor = None if explicit_graph_or_diagram_target else _select_recent_visual_task_anchor(all_rows, query)
+        visual_anchor = None if explicit_graph_or_diagram_target else _select_recent_visual_task_anchor(active_repair_rows, query)
         if explicit_graph_or_diagram_target:
-            # The visual-anchor helper is deliberately image-specific. A correction
-            # about a 3D graph/diagram must continue from a saved graph artifact, not
-            # collapse history to the latest photograph operation.
+            # The visual-anchor helper is image-specific. A correction about a
+            # graph/diagram must not collapse the selected branch to a photograph.
             _apr_timing_log(
                 "image_anchor_skipped_for_structured_visual_target", None,
                 user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
-                requested_kinds=["graph_or_diagram"], retained_rows=len(all_rows),
+                requested_kinds=["graph_or_diagram"], retained_rows=len(active_repair_rows),
                 reason="preserve_matching_graph_or_diagram_history",
             )
         if visual_anchor is not None:
-            # Keep the full current-dialogue window. A matching visual record adds
-            # asset evidence; it must never replace the latest assistant answer or
-            # the user edits made after that artifact was created.
             visual_anchor_id = _text(visual_anchor.get("message_id"))
-            latest_pair = max(all_rows, key=lambda row: (
+            latest_pair = max(active_repair_rows, key=lambda row: (
                 float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
             ), default=None)
             latest_id = _text((latest_pair or {}).get("message_id"))
@@ -6707,10 +6731,10 @@ def search_dialogue_context(
             if visual_anchor_id and visual_anchor_id != latest_id:
                 ordered_rows.append(visual_anchor)
             ordered_rows.extend(
-                row for row in all_rows
+                row for row in active_repair_rows
                 if _text(row.get("message_id")) not in {latest_id, visual_anchor_id}
             )
-            all_rows = ordered_rows[:16]
+            active_repair_rows = ordered_rows[:16]
             _apr_timing_log(
                 "active_visual_branch_reanchored", None,
                 user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
@@ -6721,6 +6745,7 @@ def search_dialogue_context(
                     "explicit_visual_revision" if explicit_visual_revision else "explicit_visual_misroute_correction"
                 ))
                 ),
+                history_rows_preserved=len(all_rows),
             )
     # Keep this authenticated, already-pruned Premium 24h set for honest nearest-neighbor
     # lookup if an explicitly requested time interval contains no saved dialogue pairs.
@@ -6745,10 +6770,10 @@ def search_dialogue_context(
         history_request = True
     # In normal Premium routing the interpretation result is authoritative.
     # The lexical helper remains only as compatibility fallback for direct legacy callers.
-    new_topic_request = bool(
-        query_interpretation.get("explicit_topic_switch")
-        or query_interpretation.get("explicit_topic_introduction")
-    )
+    # Introducing a named subject is not by itself a topic boundary: it can
+    # reactivate a prior authenticated topic after the latest exchange misses.
+    # Only an interpreted explicit switch closes the historical continuation lane.
+    new_topic_request = bool(query_interpretation.get("explicit_topic_switch"))
     interpreted_topic_closure = (
         bool(query_interpretation.get("explicit_topic_closure"))
         if "explicit_topic_closure" in query_interpretation
@@ -6850,17 +6875,9 @@ def search_dialogue_context(
     # ("Эппл") from subject conflict and prevents an unnecessary archive search.
     if implicit_latest_branch_resume or (history_request and not _history_query_topic_tokens(query)):
         query_subjects = set()
-    if targeted_active_repair and all_rows:
-        # The authenticated source task is the semantic anchor; do not let reaction
-        # wording introduce unrelated entities into the branch selection.
-        anchor_row = all_rows[-1]
-        anchor_text = " ".join((
-            _text(anchor_row.get("user_text") or anchor_row.get("user")),
-            _text(anchor_row.get("user_text_en")),
-        ))
-        anchor_subjects = _subject_tokens(anchor_text)
-        if anchor_subjects:
-            query_subjects = set(anchor_subjects)
+    # Never replace the user's subject with the previous row's subject. The latest
+    # exchange has already been compared above; after a miss, the current request's
+    # own subject signature must drive authenticated-history retrieval.
     # Referential questions about an object's origin are continuations, not a new
     # "internet/source" topic. The grammar/predicate terms are excluded above; this
     # fallback prevents morphology/typos from creating a false subject conflict.
@@ -7047,6 +7064,10 @@ def search_dialogue_context(
         )]
     else:
         scoped_rows = list(all_rows)
+    if targeted_active_repair and active_repair_rows:
+        active_repair_ids = {_text(row.get("message_id")) for row in active_repair_rows if _text(row.get("message_id"))}
+        if active_repair_ids:
+            scoped_rows = [row for row in scoped_rows if _text(row.get("message_id")) in active_repair_ids]
 
     # Search the whole user's 24-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
@@ -9911,7 +9932,6 @@ def search_dialogue_context(
         history_request
         or time_filter.get("applied")
         or resume_key
-        or explicit_artifact_followup
         or interpreted_topic_closure
     )
     current_dialog_rows = [
@@ -9989,8 +10009,14 @@ def search_dialogue_context(
     # those descriptive nouns are the only remaining semantic evidence once the
     # immediate branch has genuinely failed to match.
     route_history_subjects = set(route_query_subjects)
+    history_topic_terms = set(_history_query_topic_tokens(query))
     if route_anaphoric_predicate and query_subjects:
         route_history_subjects = set(query_subjects)
+    elif history_topic_terms:
+        # Prefer the recall/topic signature over raw entity fragments. It removes
+        # presentation words ("photo", "show", "real") and leaves the named
+        # subject for the second pass, including ASR/inflection variants.
+        route_history_subjects = history_topic_terms
     route_subject_overlap = _subject_overlap(route_query_subjects, latest_route_subjects) if route_query_subjects and latest_route_subjects else 0.0
     route_subject_conflict = _subject_conflicts(route_query_subjects, latest_route_subjects)
     # An anaphoric question/repair may ask about an attribute whose noun differs
@@ -10117,7 +10143,43 @@ def search_dialogue_context(
         )
     )
     route_decision = "UNCHANGED"
-    if prefer_hot_branch:
+    # A typed saved-artifact match is already the result of the latest-branch-first
+    # check followed by an authenticated history fallback. Do not let the generic
+    # answer-invitation heuristic replace that exact artifact with a newer but
+    # unrelated last exchange (for example, a Mendeleev reply after a Ramanujan
+    # photo was found in another dialogue).
+    artifact_recovery_selected = bool(
+        explicit_artifact_followup and artifact_source_row and artifact_source_candidate
+    )
+    if artifact_recovery_selected:
+        relation = "CONTINUE"
+        continuation = True
+        contextual_history_match = bool(historical_artifact_reactivation)
+        active_topic = (
+            _text(artifact_source_row.get("topic"))
+            or _topic_label(artifact_source_row)
+            or _text(artifact_source_row.get("user_text") or artifact_source_row.get("user"))[:140]
+        )
+        anchor = artifact_source_candidate
+        history_selection_method = (
+            "historical_saved_artifact_recovery" if historical_artifact_reactivation
+            else "same_dialog_saved_artifact_recovery"
+        )
+        hot_work_followup = True
+        hot_work_match_reason = history_selection_method
+        route_decision = "MATCHED_SAVED_ARTIFACT"
+        source_retrieval_strategy = (
+            "NAMED_HISTORY_SOURCE_WITH_NEW_OPERATION"
+            if historical_artifact_reactivation else "ACTIVE_BRANCH_SOURCE"
+        )
+        _apr_timing_log(
+            "saved_artifact_route_preserved", None,
+            artifact_kind=explicit_artifact_kind,
+            source_message_key=_apr_diag_ref(artifact_source_row.get("message_id")),
+            historical=bool(historical_artifact_reactivation),
+            selected_pairs=len(selected_for_context),
+        )
+    elif prefer_hot_branch:
         latest_candidate = _candidate_score(
             query, latest_route_row,
             dialog_id=str(dialog_id or ""),
@@ -10172,13 +10234,27 @@ def search_dialogue_context(
     elif (
         allow_semantic_history_search
         and not route_blocked
-        and (route_query_subjects or (hot_branch_probe_missed and route_history_subjects))
+        and (route_query_subjects or route_history_subjects)
     ):
         # The active-branch test above has already failed. Search the user's full
         # retained history even if the query subject does not mathematically conflict
         # with the latest row; a standalone request can still resume an older topic.
         # Matching is semantic, not recency-only. A miss creates a clean new topic.
         named_history_candidates = []
+        requested_outputs = query_interpretation.get("requested_outputs") if isinstance(query_interpretation.get("requested_outputs"), list) else []
+        output_family_map = {
+            "image": "image", "photo": "image", "picture": "image", "gallery": "image",
+            "table": "table", "graph": "graph", "chart": "graph", "plot": "graph",
+            "diagram": "diagram", "formula": "formula", "code": "code", "file": "file",
+            "link": "link", "copy": "copy", "audio": "audio", "video": "video",
+        }
+        requested_artifact_families = {
+            output_family_map[str(value).strip().lower()]
+            for value in requested_outputs
+            if str(value).strip().lower() in output_family_map
+        }
+        if preclassified_artifact_kind:
+            requested_artifact_families.add(str(preclassified_artifact_kind).strip().lower())
         # Important: `scoped_rows` is optimized for the current dialog. Once the
         # active branch fails, the fallback must search every retained dialogue for
         # this authenticated Premium user, not just the current dialog plus a small
@@ -10207,17 +10283,43 @@ def search_dialogue_context(
                 query_modalities=query_modalities,
                 structured_evidence_required=needs_structured_search,
             )
+            raw_candidate_score = float(historical_candidate.get("score") or 0.0)
+            artifact_matches = {
+                family for family in requested_artifact_families
+                if _row_has_value_bearing_artifact(historical_row, family)
+            }
+            artifact_match_score = (
+                len(artifact_matches) / max(1, len(requested_artifact_families))
+                if requested_artifact_families else 0.0
+            )
+            # Short requests and ASR variants can have weak raw lexical scores even
+            # when the authenticated topic and its exact saved artifact match. Use
+            # three independent pieces of evidence: filtered subject similarity,
+            # topic-summary similarity, and a concrete matching artifact family.
+            # This score is only used after the latest exchange has already failed.
+            semantic_history_score = (
+                0.28 * float(subject_score or 0.0)
+                + 0.40 * float(topic_score or 0.0)
+                + 0.20 * float(artifact_match_score or 0.0)
+                + 0.12 * raw_candidate_score
+            )
+            effective_candidate_score = max(raw_candidate_score, semantic_history_score)
+            historical_candidate["raw_candidate_score"] = round(raw_candidate_score, 6)
+            historical_candidate["semantic_history_score"] = round(semantic_history_score, 6)
+            historical_candidate["artifact_match_score"] = round(artifact_match_score, 6)
+            historical_candidate["matched_artifact_families"] = sorted(artifact_matches)
             recency = float(historical_candidate.get("recency") or 0.0)
-            named_history_candidates.append((subject_score, topic_score, float(historical_candidate.get("score") or 0.0), recency, historical_candidate, historical_row))
+            named_history_candidates.append((subject_score, topic_score, effective_candidate_score, recency, historical_candidate, historical_row))
         if named_history_candidates:
             named_history_candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
             subject_score, topic_score, candidate_score, _, named_candidate, named_source_row = named_history_candidates[0]
             selected_for_context = [_compact_pair(named_candidate)]
             anchor = named_candidate
             active_topic = _text(named_source_row.get("topic")) or _topic_label(named_source_row) or _text(named_source_row.get("user_text") or named_source_row.get("user"))[:140]
-            # A history hit is a true branch reactivation only when interpretation
-            # says this request continues/references prior context. A merely related
-            # standalone question keeps the legacy NEW-turn semantics.
+            # A historical hit becomes a branch reactivation when the current turn
+            # semantically matches that topic strongly enough, provided the user has
+            # not introduced or explicitly switched to a different topic. The latest
+            # exchange was already checked before this second retrieval lane.
             semantic_profile = query_interpretation if isinstance(query_interpretation, dict) else {}
             semantic_features = semantic_profile.get("features") if isinstance(semantic_profile.get("features"), dict) else {}
             semantic_pragmatic = semantic_profile.get("pragmatic_features") if isinstance(semantic_profile.get("pragmatic_features"), dict) else {}
@@ -10245,6 +10347,14 @@ def search_dialogue_context(
                     or semantic_features.get("topic_reference_fragment")
                     or explicit_prior_pointer
                     or _text(semantic_profile.get("relation_hint")).upper() == "CONTINUE"
+                    # A strong match to an authenticated historical topic is itself
+                    # evidence of reactivation after the latest exchange has failed.
+                    # This is semantic candidate evidence, not a phrase/keyword trigger.
+                    or (
+                        not semantic_profile.get("explicit_topic_switch")
+                        and float(topic_score or 0.0) >= 0.62
+                        and float(candidate_score or 0.0) >= 0.52
+                    )
                 )
             )
             confident_historical_continuation = bool(
@@ -10671,7 +10781,14 @@ def search_dialogue_context(
         "query_composition": "current_request_plus_interpreter_profile_and_active_branch" if relation == "CONTINUE" else "current_request_and_interpreter_profile",
         "search_method": "deterministic_lexical_fuzzy_with_premium_active_branch_and_source_ranking",
     })
-    if site_navigation_request and not history_request and not resume_anchor_row:
+    if (
+        site_navigation_request
+        and not history_request
+        and not resume_anchor_row
+        and not explicit_historical_artifact_request
+        and not explicit_artifact_followup
+        and not contextual_history_match
+    ):
         # UI guidance is a new operation on the product interface, not a continuation
         # of whichever old task happens to be marked hot. Never attach an unrelated
         # active branch or old dialogue pair to this response.
@@ -10839,6 +10956,7 @@ def search_dialogue_context(
         "implicit_latest_branch_resume": bool(resume_latest_branch and not history_request),
         "contextual_history_match": contextual_history_match,
         "historical_artifact_reactivation": bool(historical_artifact_reactivation),
+        "image_edit_reference": bool(image_edit_reference),
         "artifact_recovery": ({
             "status": "historical_match" if historical_artifact_reactivation else "active_dialogue_match",
             "family": explicit_artifact_kind,
@@ -11022,6 +11140,9 @@ def prepare_dialogue_context(
         "effective_interpretation": deepcopy(context.get("effective_interpretation") or {}),
         "semantic_history_search_allowed": bool(context.get("semantic_history_search_allowed")),
         "contextual_history_match": bool(context.get("contextual_history_match")),
+        "image_edit_reference": bool(context.get("image_edit_reference")),
+        "historical_artifact_reactivation": bool(context.get("historical_artifact_reactivation")),
+        "artifact_recovery": deepcopy(context.get("artifact_recovery") or {}),
         "matched_topic_count": int(context.get("matched_topic_count") or 0),
         "requested_topic_count": int(context.get("requested_topic_count") or 10),
         "minimum_topic_count": int(context.get("minimum_topic_count") or 0),
