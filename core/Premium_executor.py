@@ -2790,6 +2790,23 @@ def _build_image_spec(
                 latest_anchor.get("assistant_last_message") or latest_anchor.get("assistant_message")
                 or latest_anchor.get("april")
             )[:3600]
+            # Use only the State Manager's already-selected branch evidence. This
+            # recovers a named subject/appearance when the current turn is elliptical
+            # ("his photo", "the picture of ...") or when April's immediately prior
+            # answer failed to produce the requested visual artifact.
+            selected_branch_pairs = continuation.get("selected_pairs") if isinstance(continuation.get("selected_pairs"), list) else []
+            branch_evidence_parts = []
+            for pair in selected_branch_pairs[:4]:
+                if not isinstance(pair, dict):
+                    continue
+                prior_user = _text(pair.get("source_user_text") or pair.get("user") or pair.get("user_request"))[:520]
+                prior_answer = _text(pair.get("source_april_text") or pair.get("assistant_last_message") or pair.get("april"))[:1200]
+                if prior_user or prior_answer:
+                    branch_evidence_parts.append(
+                        ("Prior user request: " + prior_user + ". " if prior_user else "")
+                        + ("April's relevant answer: " + prior_answer if prior_answer else "")
+                    )
+            active_branch_evidence = "\n".join(branch_evidence_parts)[:2600]
             latest_artifacts = latest_anchor.get("assistant_artifact_index") or latest_anchor.get("artifact_index") or []
             artifact_facts = []
             for artifact in latest_artifacts[:8] if isinstance(latest_artifacts, list) else []:
@@ -2817,7 +2834,10 @@ def _build_image_spec(
                     "Continue only the object/task evidenced by this latest answer and its artifacts. "
                     "Do not import an older topic title, old branch root, or unrelated earlier request."
                 )
-                clean["visual_context"]["latest_answer_grounding"] = grounding[:4200]
+                if active_branch_evidence:
+                    grounding += "\nVerified selected active-branch evidence (not a global history search): " + active_branch_evidence
+            clean["visual_context"]["latest_answer_grounding"] = grounding[:6800]
+            clean["visual_context"]["active_branch_evidence_source"] = "authenticated_state_manager_selected_pairs"
         # A screenshot-style April navigation illustration must be grounded in the
         # existing screen blueprint. Do not let the image model invent unrelated UI.
         _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
@@ -4673,6 +4693,7 @@ async def execute(
     # This is deliberately not based on topic-word presence or loose similarity.
     semantic_features = semantic_interpretation.get("features") if isinstance(semantic_interpretation.get("features"), dict) else {}
     pragmatic_features = semantic_interpretation.get("pragmatic_features") if isinstance(semantic_interpretation.get("pragmatic_features"), dict) else {}
+    latest_exchange_analysis = semantic_interpretation.get("latest_exchange_analysis") if isinstance(semantic_interpretation.get("latest_exchange_analysis"), dict) else {}
     explicit_topic_switch = bool(
         semantic_interpretation.get("explicit_topic_switch")
         or semantic_features.get("explicit_topic_switch")
@@ -4750,6 +4771,12 @@ async def execute(
         task_count=max(1, len(question_sequence)),
         source_message_key=_apr_diag_ref(latest_anchor_id) if latest_anchor_id else "",
         topic_switch_protected=bool(explicit_topic_switch),
+        latest_exchange_link=bool(latest_exchange_analysis.get("linked")),
+        latest_exchange_reason=_text(latest_exchange_analysis.get("reason"))[:80],
+        unfulfilled_image_contract=bool(latest_exchange_analysis.get("unfulfilled_image_contract")),
+        visual_continuation_link=bool(latest_exchange_analysis.get("visual_continuation_link")),
+        contextual_visual_revision=bool(latest_exchange_analysis.get("contextual_visual_revision")),
+        assistant_output_feedback=bool(latest_exchange_analysis.get("assistant_output_feedback")),
     )
 
     search_result = dialogue_context.get("search") if isinstance(dialogue_context.get("search"), dict) else {}
@@ -4876,6 +4903,9 @@ async def execute(
                 or semantic_features.get("active_branch_repair")
                 or semantic_features.get("explicit_previous_answer_correction")
                 or pragmatic_features.get("active_branch_repair")
+                or latest_exchange_analysis.get("assistant_output_feedback")
+                or latest_exchange_analysis.get("contextual_visual_revision")
+                or latest_exchange_analysis.get("unfulfilled_image_contract")
             ) else "DEVELOP_PREVIOUS_ANSWER" if explicit_previous_answer_action
             else "ANSWER_CURRENT_REQUEST"
         )
@@ -4888,6 +4918,12 @@ async def execute(
             "selected_source_message_id": _text((transition_analysis.get("previous_exchange") or {}).get("message_id"))[:120],
             "task_count": max(1, len(question_sequence)),
             "repair_without_unnecessary_clarification": previous_answer_action == "REPAIR_PREVIOUS_ANSWER",
+            "latest_exchange_link": bool(latest_exchange_analysis.get("linked")),
+            "latest_exchange_reason": _text(latest_exchange_analysis.get("reason"))[:80],
+            "assistant_output_feedback": bool(latest_exchange_analysis.get("assistant_output_feedback")),
+            "contextual_visual_revision": bool(latest_exchange_analysis.get("contextual_visual_revision")),
+            "unfulfilled_image_contract": bool(latest_exchange_analysis.get("unfulfilled_image_contract")),
+            "visual_continuation_link": bool(latest_exchange_analysis.get("visual_continuation_link")),
         }
         pre_response_analysis["request_vector"] = _text(
             semantic_interpretation.get("primary_intent")
