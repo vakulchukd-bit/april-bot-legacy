@@ -4552,7 +4552,14 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
     )
     if protected_source_label:
         external_text_body_tokens += _estimate_tokens(current)
-    reserved_prompt_tokens = reserved_label_tokens + external_text_body_tokens + recovery_headroom_tokens
+    # Leave a small tokenizer-estimation margin beyond the recovery rule itself.
+    # Without this reserve, a card can fit its planned budget yet exceed the final
+    # preflight by a handful of tokens (e.g. 3615/3600), forcing a text-only history
+    # fallback and discarding a valid image-edit/generation instruction. The
+    # compactor trims optional metadata; protected current input and exact source
+    # payloads remain lossless.
+    final_preflight_safety_margin = 48
+    reserved_prompt_tokens = reserved_label_tokens + external_text_body_tokens + recovery_headroom_tokens + final_preflight_safety_margin
     # Defensive ceiling: old exact structures are useful only when small enough to
     # fit as context. Never externalize a multi-megabyte historical renderer payload
     # around the normal prompt budget; the renderer asset store remains authoritative.
@@ -4808,6 +4815,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "topic_budget_tokens_max": MAX_TOPIC_PROMPT_TOKENS,
             "attachment_instruction_labels_token_estimate": reserved_label_tokens,
             "recovery_headroom_token_reserve": recovery_headroom_tokens,
+            "final_preflight_safety_margin": final_preflight_safety_margin,
             "lossless_external_text_body_token_reserve": external_text_body_tokens,
             "estimated_text_input_tokens_with_recovery_headroom": full_text_input_token_estimate + recovery_headroom_tokens,
             "input_budget_scope": "tokenized_text_parts; image and binary-file tokens are provider-reported separately",
