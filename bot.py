@@ -2507,7 +2507,9 @@ class AprilHandler(BaseHTTPRequestHandler):
                 # explicitly opens one saved entry.
                 user_key = supplied_user_id
                 status_only = _text(self.headers.get("X-April-History-Status-Only")) == "1"
-                recovery_only = bool(message_id) and _text(query.get("purpose", [""])[0]) == "chat_recovery"
+                history_purpose = _text(query.get("purpose", [""])[0])
+                recovery_only = bool(message_id) and history_purpose == "chat_recovery"
+                latest_chat_restore = not message_id and history_purpose == "latest_chat_restore"
 
                 # History readers below resolve the canonical account and enforce
                 # Premium from the same database snapshot used to return records.
@@ -2528,13 +2530,54 @@ class AprilHandler(BaseHTTPRequestHandler):
                     user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     status, payload = _history_payload(user_id, message_id, single_turn=recovery_only)
+                elif latest_chat_restore:
+                    # The active chat must be recoverable even when the browser's
+                    # sessionStorage/IndexedDB snapshot is missing. Restore the
+                    # latest durable topic and its SceneContract instead of asking
+                    # the provider to recreate an already-generated image.
+                    user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
+                    user_key = user_id or supplied_user_id
+                    snapshot = load_dialogue_history_index(user_id) if user_id else None
+                    if snapshot is None:
+                        status, payload = 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
+                    elif not snapshot.get("authenticated"):
+                        status, payload = 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+                    elif _text(snapshot.get("plan")).lower() != "premium":
+                        status, payload = 403, {"success": False, "error": "PREMIUM_HISTORY_REQUIRED"}
+                    else:
+                        rows = [row for row in (snapshot.get("rows") or []) if isinstance(row, dict)]
+                        requested_dialog = _text(query.get("dialog_id", [""])[0])
+                        requested_conversation = _text(query.get("conversation_id", [""])[0])
+                        scoped_rows = rows
+                        if requested_dialog or requested_conversation:
+                            matched_rows = [row for row in rows if
+                                (requested_dialog and _text(row.get("dialog_id")) == requested_dialog) or
+                                (requested_conversation and _text(row.get("conversation_id")) == requested_conversation)]
+                            if matched_rows:
+                                scoped_rows = matched_rows
+                        latest_row = max(scoped_rows, key=lambda row: (
+                            float(row.get("created_at") or 0),
+                            int(row.get("turn_index") or 0),
+                        ), default=None)
+                        latest_message_id = _text(latest_row.get("message_id")) if isinstance(latest_row, dict) else ""
+                        if not latest_message_id:
+                            status, payload = 200, {
+                                "success": True,
+                                "messages": [],
+                                "restore_reason": "no_saved_dialogue_turn",
+                                "canonical_route": CANONICAL_CHAT_ROUTE,
+                            }
+                        else:
+                            status, payload = _history_payload(user_id, latest_message_id, single_turn=False)
+                            payload["restore_reason"] = "latest_saved_topic"
+                            payload["restored_message_id"] = latest_message_id
                 else:
                     status, payload = _history_index_payload(canonical_user_id or supplied_user_id)
                     user_key = str(payload.get("user_id") or canonical_user_id or supplied_user_id)
                 _apr_timing_log("history_response", history_request_started,
                                 user_key=_apr_diag_ref(user_key), status=status,
                                 count=int(payload.get("count") or 0), message_count=len(payload.get("messages") or []),
-                                mode="status" if status_only else "restore" if bool(message_id) else "index")
+                                mode="status" if status_only else "latest_restore" if latest_chat_restore else "restore" if bool(message_id) else "index")
                 self._send_json(status, payload)
                 return
         if parsed.path == "/" or parsed.path == CANONICAL_CHAT_ROUTE:
