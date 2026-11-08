@@ -6573,11 +6573,23 @@ def _pair_image_output_state(pair: dict[str, Any]) -> tuple[bool, bool]:
 
 
 def _bare_image_object_request(text: Any) -> bool:
-    """Recognize an elliptical image deliverable phrase with a named subject."""
+    """Recognize a compact image-delivery phrase, including an answer to April's offer.
+
+    This is compositional: the phrase must contain an image noun and a concrete
+    subject. Neutral discourse acknowledgements are removed before the phrase is
+    checked, so "Да, фото Николы" is treated like "Фото Николы" without turning
+    a bare "да" into an image command.
+    """
     low = _text(text).lower().replace("ё", "е").strip(" \t\r\n.,!;:")
     if not low or "?" in low or re.search(r"\b(?:почему|зачем|как|что|где|куда|какой|какая|какие|опис\w*|анализир\w*|расскажи|объясни)\b", low):
         return False
-    image_noun = r"(?:фото|фотку|фотка|фотография|фотографию|фотографии|фотографию|картинку|картинка|изображение|изображения|picture|photo|image)"
+    # Acknowledgement is only syntax around the actual request; it does not
+    # independently authorize image creation or retrieval.
+    low = re.sub(
+        r"^(?:(?:да|ага|угу|хорошо|конечно|ок(?:ей)?|ладно|yes|yeah|sure|okay)\s*[,—:;.!-]?\s*)+",
+        "", low, flags=re.IGNORECASE,
+    )
+    image_noun = r"(?:фото|фотку|фотка|фотография|фотографию|фотографии|картинку|картинка|изображение|изображения|picture|photo|image)"
     return bool(re.match(
         rf"^(?:(?:а|и|тогда|еще|ещё|также)\s+)?(?:(?:мне|нам)\s+)?{image_noun}\s+(?:его\s+|ее\s+|её\s+|их\s+|этого\s+|этой\s+|this\s+)?[\w-]+(?:\s+[\w-]+){{0,4}}$",
         low, re.IGNORECASE,
@@ -6739,7 +6751,19 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
-    image_discussion_only = _is_image_discussion_without_new_visual_action(normalized_visual_request)
+    # A compact image phrase can be a direct affirmative answer to an image
+    # offer in April's immediately preceding response. In that case it is a
+    # deliverable request, not an image discussion; the authenticated branch
+    # supplies the subject and any already-saved output.
+    image_delivery_invitation_reply = bool(memory.get("image_delivery_invitation_reply"))
+    short_image_object_request = bool(
+        relation == "CONTINUE" and _bare_image_object_request(normalized_visual_request)
+    )
+    image_discussion_only = bool(
+        _is_image_discussion_without_new_visual_action(normalized_visual_request)
+        and not image_delivery_invitation_reply
+        and not short_image_object_request
+    )
     independent_artifact_request = _has_independent_nonvisual_artifact_request(normalized_visual_request)
     # A prior mention of a photo must not turn an unrelated graph/table/code/link
     # request into an image-edit operation. Preserve compound edits only when the
@@ -6956,6 +6980,15 @@ def build_interpretation(
     reuse_saved_image = image_followup and has_saved_output_image and not branch_image_audit.get("image_unfulfilled")
     if image_followup and "image" not in requested_outputs:
         requested_outputs.append("image")
+    if image_followup:
+        # Keep the inferred output requirement synchronized across the parent,
+        # task sequence and presentation sequence used by Provider/SceneContract.
+        for sequence_item in question_sequence[-1:]:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = list(dict.fromkeys([*(sequence_item.get("output_types") or []), "image"]))
+        for sequence_item in presentation_sequence[-1:]:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = list(dict.fromkeys([*(sequence_item.get("output_types") or []), "image"]))
     if image_followup and not reuse_saved_image:
         # Missing/empty prior render: this is a retry of the active deliverable.
         # Do not ask the user to provide an image that April was supposed to make.
@@ -7172,6 +7205,18 @@ def build_interpretation(
                 )
             ),
             "adaptive_visual_policy": True,
+            "ambiguity_policy": {
+                "mode": "PRESERVE_MATERIAL_PLAUSIBLE_READINGS",
+                "do_not_silently_collapse": True,
+                "keep_independent_answers_and_artifacts": True,
+                "allow_user_correction_after_complete_response": True,
+                "separate_visual_specs_per_distinct_reading": True,
+                "independent_readings_are_cumulative": True,
+                "correction_mode": "PATCH_REQUESTED_PART_PRESERVE_VALID_SECTIONS",
+                "preserve_prior_complete_answer_when_latest_reply_is_only_status": True,
+                "preserve_prior_renderers_and_artifact_lineage": True,
+                "do_not_replace_full_answer_with_apology_or_summary": True,
+            },
             "wants_file": wants_file,
             "wants_copy": wants_copy,
             "file_delivery_mode": file_delivery_mode,
