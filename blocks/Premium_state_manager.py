@@ -10106,6 +10106,11 @@ def search_dialogue_context(
         and not new_work_root_request
         and not route_blocked
     )
+    # Carry this semantic result inside the same latest-answer relation that the
+    # Premium Interpreter receives. Otherwise logs can report a valid invitation
+    # reply while downstream components see only `expects_user_input=false` and
+    # incorrectly downgrade an affirmative artifact request to plain discussion.
+    latest_answer_relation["answer_invitation_reply"] = bool(answer_invitation_reply)
     prefer_hot_branch = bool(
         (not hot_branch_probe_missed or latest_exchange_link)
         and not route_blocked
@@ -10858,12 +10863,131 @@ def search_dialogue_context(
             "prefer_active_branch": False, "prefer_named_history": False, "selected_message_ids": [],
             "coverage_policy": "answer_new_request", "query_composition": "current_request_only",
         })
+
+    # Preserve one exact canonical exchange for semantically confirmed continuation,
+    # correction or an affirmative reply to April's latest invitation. Without this
+    # marker the Provider's emergency compactor may discard CONTINUATION_CONTEXT,
+    # leaving only a short summary and making it impossible to repair the full answer
+    # or keep all of its original sections/artifact references intact. The source row
+    # is resolved strictly from selected_for_context (already authenticated and
+    # branch-scoped); this does not broaden the search or import unrelated history.
+    preserve_latest_exchange = bool(
+        relation == "CONTINUE"
+        and not history_request
+        and (
+            repair_active_branch
+            or semantic_active_branch_intent
+            or latest_answer_followup
+            or answer_invitation_reply
+            or latest_exchange_link
+            or query_interpretation.get("previous_answer_reference")
+            or pragmatic_features.get("previous_answer_reference")
+        )
+    )
+    preserved_exchange_count = 0
+    if preserve_latest_exchange and selected_for_context:
+        selected_by_id = {
+            _text(item.get("message_id")): item
+            for item in selected_for_context
+            if isinstance(item, dict) and _text(item.get("message_id"))
+        }
+        preferred_source_ids = [
+            _text(latest_answer_relation.get("message_id")),
+            _text((artifact_recovery or {}).get("source_message_id")),
+            _text((anchor or {}).get("message_id")),
+        ]
+        ordered_source_ids = list(dict.fromkeys(
+            source_id for source_id in preferred_source_ids if source_id in selected_by_id
+        ))
+        if not ordered_source_ids:
+            ordered_source_ids = [
+                _text(item.get("message_id")) for item in selected_for_context
+                if isinstance(item, dict) and _text(item.get("message_id"))
+            ][:1]
+        source_rows_by_id = {
+            _text(row.get("message_id")): row for row in all_rows
+            if isinstance(row, dict) and _text(row.get("message_id"))
+        }
+        # The latest answer remains the primary discourse vector. During a repair,
+        # however, the immediately previous answer may itself be only an apology or
+        # short status. Preserve one preceding substantive exchange from this same
+        # selected branch as a second exact source so the model can retain the full
+        # answer that is being corrected instead of rebuilding from the apology.
+        artifact_source_id = _text((artifact_recovery or {}).get("source_message_id"))
+        preserve_prior_answer = bool(
+            repair_active_branch
+            or latest_answer_followup
+            or latest_exchange_link
+            or query_interpretation.get("previous_answer_reference")
+            or pragmatic_features.get("previous_answer_reference")
+        )
+        if artifact_source_id and artifact_source_id in selected_by_id:
+            if artifact_source_id not in ordered_source_ids:
+                ordered_source_ids.append(artifact_source_id)
+        elif preserve_prior_answer and ordered_source_ids:
+            primary_id = ordered_source_ids[0]
+            prior_candidates = [
+                _text(item.get("message_id")) for item in selected_for_context
+                if isinstance(item, dict)
+                and _text(item.get("message_id"))
+                and _text(item.get("message_id")) != primary_id
+            ]
+            def _prior_exchange_value(source_id: str) -> tuple[int, int, int]:
+                row = source_rows_by_id.get(source_id) or selected_by_id.get(source_id) or {}
+                assistant_text = _text(
+                    row.get("april_text") or row.get("april")
+                    or row.get("source_april_text") or row.get("assistant_last_message")
+                )
+                structured = row.get("assistant_structured_output")
+                artifact_count = len(structured) if isinstance(structured, list) else 0
+                return (artifact_count, min(len(assistant_text), 12000), prior_candidates.index(source_id))
+            if prior_candidates:
+                prior_candidates.sort(key=_prior_exchange_value, reverse=True)
+                ordered_source_ids.append(prior_candidates[0])
+        ordered_source_ids = ordered_source_ids[:2]
+        for source_id in ordered_source_ids:
+            pair = selected_by_id.get(source_id)
+            if not isinstance(pair, dict):
+                continue
+            source_row = source_rows_by_id.get(source_id) or {}
+            source_user = _text(
+                source_row.get("user_text") or source_row.get("user")
+                or pair.get("source_user_text") or pair.get("user")
+            )
+            source_april = _text(
+                source_row.get("april_text") or source_row.get("april")
+                or pair.get("source_april_text") or pair.get("assistant_last_message")
+            )
+            if not source_user or not source_april:
+                continue
+            user_cap, april_cap = 1800, 5200
+            pair.update({
+                "preserve_source_text": True,
+                "source_user_text": source_user[:user_cap],
+                "source_april_text": source_april[:april_cap],
+                "source_user_text_chars": len(source_user),
+                "source_april_text_chars": len(source_april),
+                "source_user_text_complete": len(source_user) <= user_cap,
+                "source_april_text_complete": len(source_april) <= april_cap,
+                "source_content_complete": len(source_user) <= user_cap and len(source_april) <= april_cap,
+                "source_text_origin": "authenticated_selected_branch_latest_exchange",
+            })
+            preserved_exchange_count += 1
+    if preserved_exchange_count:
+        _apr_timing_log(
+            "selected_branch_source_text_preserved",
+            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+            preserved_pairs=preserved_exchange_count,
+            source_message_keys=[_apr_diag_ref(source_id) for source_id in ordered_source_ids[:2]],
+            policy="latest_exchange_first_exact_source_text_before_prompt_compaction",
+        )
+
     result = {
         "hot_branch_first": bool(_hot_branch_only),
         "history_scan_skipped": False,
         "search_stage": "HOT_BRANCH_PROBE" if _hot_branch_only else "FULL_CONTEXT",
         "hot_branch_window_count": len(rows or []) if _hot_branch_only else 0,
-        "engine": "premium_state_manager_topic_section_search_v13_last_answer_branch_link",
+        "engine": "premium_state_manager_topic_section_search_v14_two_exchange_repair_context",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
