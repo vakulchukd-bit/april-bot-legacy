@@ -69,7 +69,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v10_image_source_recovery"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v11_branch_typed_artifact_actions"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -3457,19 +3457,280 @@ def _image_source_subject_terms(value: Any) -> list[str]:
     return [words[0][:12]]
 
 
+
+_ARTIFACT_FAMILY_ALIASES = {
+    "table_data": "table", "chart": "graph", "plot": "graph", "svg": "diagram",
+    "flowchart": "diagram", "mermaid": "diagram", "equation": "formula", "math": "formula",
+    "latex": "formula", "source_code": "code", "hyperlink": "link", "links": "link",
+    "url": "link", "image_gallery": "image", "generated_image": "image", "image_edit": "image",
+    "gallery": "image", "photo": "image", "picture": "image", "copy_block": "copy",
+}
+
+
+def _artifact_family(value: Any) -> str:
+    raw = _text(value).strip().lower().replace("-", "_").replace(" ", "_")
+    return _ARTIFACT_FAMILY_ALIASES.get(raw, raw)
+
+
+def _artifact_block_payload(block: dict[str, Any]) -> dict[str, Any]:
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if payload:
+        return payload
+    data = block.get("data") if isinstance(block.get("data"), dict) else {}
+    if data:
+        return data
+    return block
+
+
+def _artifact_block_is_concrete(block: Any, family: str) -> bool:
+    if not isinstance(block, dict):
+        return False
+    family = _artifact_family(family or block.get("type") or block.get("artifact_type") or block.get("kind"))
+    payload = _artifact_block_payload(block)
+    if family == "diagram":
+        svg = _text(payload.get("svg") or payload.get("source_svg") or payload.get("svg_payload"))
+        # An <svg> wrapper alone is not a diagram. Require actual drawable geometry
+        # or labels so a repaired empty shell cannot be selected as a completed source.
+        if len(svg) > 80 and re.search(r"<(?:path|rect|circle|ellipse|polygon|polyline|line|text|image|use)\b", svg, re.I):
+            return True
+        for key in ("elements", "shapes", "nodes", "edges", "geometry", "primitives"):
+            value = payload.get(key)
+            if isinstance(value, (list, dict)) and bool(value):
+                return True
+        mermaid = _text(payload.get("mermaid") or payload.get("source") or payload.get("diagram_source"))
+        if mermaid:
+            declared = re.findall(r"(?m)^\s*[A-Za-z][A-Za-z0-9_-]*\s*(?:\[[^]]+\]|\([^)]*\)|\{[^}]+\})", mermaid)
+            if len(declared) >= 2 or re.search(r"<svg|<path|<line|<rect|<circle", mermaid, re.I):
+                return True
+        return False
+    if family == "graph":
+        for key in ("series", "datasets", "traces", "points", "data", "values"):
+            value = payload.get(key)
+            if isinstance(value, (list, dict)) and len(value) >= 1:
+                return True
+        return False
+    if family == "table":
+        headers = payload.get("headers") or payload.get("columns")
+        rows = payload.get("rows") or payload.get("data")
+        return isinstance(headers, list) and bool(headers) and isinstance(rows, list) and bool(rows)
+    if family == "formula":
+        return any(_text(payload.get(key)) for key in ("latex", "formula", "equation", "expression", "math"))
+    if family == "code":
+        return any(len(_text(payload.get(key))) > 8 for key in ("code", "source_code", "content", "text"))
+    if family == "link":
+        return bool(re.match(r"https?://", _text(payload.get("url") or payload.get("href") or payload.get("uri")))) or bool(payload.get("links"))
+    if family == "copy":
+        return any(_text(payload.get(key)) for key in ("content", "text", "code"))
+    if family == "image":
+        if _decode_image_source_item(payload):
+            return True
+        if any(payload.get(key) not in (None, "", [], {}) for key in ("asset_ref", "asset_id", "image_base64", "image_data_uri", "src", "url")):
+            return True
+        return _artifact_family(block.get("type") or block.get("artifact_type")) == "image"
+    if family in {"file", "audio", "video"}:
+        return any(payload.get(key) not in (None, "", [], {}) for key in ("asset_ref", "asset_id", "filename", "url", "src", "content"))
+    return False
+
+
+def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_request: str) -> dict[str, Any]:
+    """Resolve a revision/recovery target from the exact branch State Manager selected.
+
+    The latest USER↔APRIL exchange is inspected first. Only then are compatible
+    selected pairs consulted. Candidate rows outside selected_pairs are never
+    admitted merely because they share a chat/dialog ID.
+    """
+    selected = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+    anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in [*selected, anchor]:
+        if not isinstance(row, dict):
+            continue
+        message_id = _text(row.get("message_id") or row.get("source_message_id"))
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        rows.append(row)
+    if not rows:
+        return {}
+
+    def _stamp(row: dict[str, Any]) -> float:
+        try:
+            return float(row.get("created_at") or row.get("timestamp") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    rows.sort(key=_stamp)
+    latest = rows[-1]
+    low = _text(current_request).lower().replace("ё", "е")
+    if not low:
+        return {}
+
+    mutation = bool(re.search(
+        r"(?:измен\w*|помен\w*|повер\w*|развер\w*|перевер\w*|ориентир\w*|передел\w*|исправ\w*|поправ\w*|"
+        r"доработ\w*|обнов\w*|добав\w*|убер\w*|удал\w*|замен\w*|редактир\w*|перестро\w*|"
+        r"revise\w*|edit\w*|change\w*|rotate\w*|flip\w*|turn\w*|correct\w*|fix\w*|update\w*|add\w*|remove\w*|replace\w*)",
+        low, re.IGNORECASE,
+    ))
+    status_or_wait = bool(re.search(
+        r"(?:^\s*(?:где|куда|когда|ну\s+и\s+где|покажи\s+результат|пришло\s+ли|готово\s+ли)\b|"
+        r"\b(?:жду|ожидаю|где\s+(?:результат|файл|изображение|схема)|куда\s+(?:пришло|отправил))\b|"
+        r"\b(?:where|when)\s+(?:is|did|was)\b|\bstill\s+waiting\b)", low, re.IGNORECASE,
+    ))
+    # A genuinely new output request must not accidentally edit an older artifact.
+    explicit_fresh = bool(re.search(
+        r"(?:с\s+нуля|заново\s+создай|создай\s+нов\w*|нарисуй\s+нов\w*|построй\s+нов\w*|"
+        r"from\s+scratch|create\s+a\s+new|draw\s+a\s+new|generate\s+a\s+new)", low, re.IGNORECASE
+    ))
+
+    latest_user = _text(latest.get("user") or latest.get("user_text"))
+    latest_answer = _text(latest.get("assistant_last_message") or latest.get("april") or latest.get("april_text"))
+    affirmative_reply = bool(re.match(
+        r"^\s*(?:да|ага|угу|ок(?:ей)?|хорошо|конечно|верно|точно|yes|yeah|yep|sure|okay|ok)\b",
+        low, re.IGNORECASE,
+    ))
+    latest_answer_offers_action = bool(
+        re.search(r"(?:\b(?:хочешь|хотите|могу|можем|предлагаю|нужно\s+ли|можно\s+я|would\s+you\s+like|shall\s+i|want\s+me\s+to|can\s+i)\b)", latest_answer, re.I)
+        and re.search(r"(?:повер\w*|развер\w*|перевер\w*|измен\w*|исправ\w*|добав\w*|убер\w*|замен\w*|редактир\w*|перестро\w*|показ\w*|выдать|пришл\w*|rotate|flip|change|fix|edit|add|remove|replace|show|send)", latest_answer, re.I)
+    )
+    affirmative_action = bool(affirmative_reply and latest_answer_offers_action)
+    corrective_feedback = bool(
+        re.search(r"(?:я\s+просил\w*|я\s+просила|не\s+так|не\s+то|не\s+тот|не\s+та|неверн\w*|ошиб\w*|wrong|not\s+what\s+i\s+asked|i\s+asked)", low, re.I)
+        and re.search(r"(?:вертик\w*|горизонт\w*|повер\w*|развер\w*|перевер\w*|цвет\w*|красн\w*|зелен\w*|размер\w*|положен\w*|располож\w*|форм\w*|вид\w*|rotate|vertical|horizontal|color|size|position)", low, re.I)
+    )
+    latest_blocks = latest.get("assistant_structured_output") if isinstance(latest.get("assistant_structured_output"), list) else []
+    latest_families = {_artifact_family(block.get("type") or block.get("artifact_type") or block.get("kind"))
+                       for block in latest_blocks if isinstance(block, dict) and _artifact_block_is_concrete(block, _artifact_family(block.get("type") or block.get("artifact_type") or block.get("kind")))}
+    latest_requested_output = bool(re.search(
+        r"(?:выдай|пришли|покажи|нарисуй|изобрази|создай|построй|сделай|сформируй|экспортируй|"
+        r"send|show|draw|create|build|generate|render|deliver|output)", latest_user, re.IGNORECASE
+    ))
+    pending_output = bool(latest_requested_output and not latest_families and latest_answer)
+    mutation = bool(mutation or affirmative_action or corrective_feedback)
+    actionable = mutation or (status_or_wait and pending_output)
+    if not actionable or explicit_fresh:
+        return {}
+
+    # An affirmative response is meaningful only because the exact previous April
+    # answer offered a concrete operation. Use that offer to resolve the artifact
+    # subject when the user's reply is simply "да"/"сделай".
+    scoring_request = current_request
+    if affirmative_action:
+        scoring_request = (current_request + " " + latest_answer).strip()
+    current_terms = set(_subject_tokens(scoring_request))
+    latest_topic_id = _text(latest.get("topic_id"))
+    latest_branch_id = _text(latest.get("branch_id"))
+    candidates: list[tuple[float, float, int, dict[str, Any], dict[str, Any], str]] = []
+    for pair in rows:
+        pair_topic = _text(pair.get("topic_id"))
+        pair_branch = _text(pair.get("branch_id"))
+        if latest_topic_id and pair_topic and latest_topic_id != pair_topic:
+            continue
+        if latest_branch_id and pair_branch and latest_branch_id != pair_branch:
+            continue
+        blocks = pair.get("assistant_structured_output") if isinstance(pair.get("assistant_structured_output"), list) else []
+        pair_text = " ".join(_text(pair.get(key)) for key in (
+            "topic", "user", "assistant_last_message", "april", "branch_summary", "memory_summary"
+        ))
+        pair_terms = set(_subject_tokens(pair_text))
+        overlap = _subject_overlap(current_terms, pair_terms) if current_terms and pair_terms else 0.0
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            family = _artifact_family(block.get("type") or block.get("artifact_type") or block.get("kind") or block.get("renderer"))
+            if family not in {"image", "diagram", "graph", "table", "formula", "code", "link", "copy", "file"}:
+                continue
+            if not _artifact_block_is_concrete(block, family):
+                continue
+            desc = " ".join(_text(block.get(key)) for key in ("title", "caption", "alt", "description", "explanation", "prompt"))
+            desc_terms = set(_subject_tokens(desc))
+            alignment = max(overlap, _subject_overlap(current_terms, desc_terms) if current_terms and desc_terms else 0.0)
+            # A direct edit uses the most semantically aligned artifact. A status
+            # follow-up may use the unique artifact family behind the unfinished turn.
+            candidates.append((alignment, _stamp(pair), len(blocks), pair, block, family))
+
+    if not candidates:
+        return {}
+
+    explicit_family = _explicit_artifact_followup_kind(current_request)
+    if explicit_family:
+        explicit_family = _artifact_family(explicit_family)
+        family_filtered = [item for item in candidates if item[5] == explicit_family]
+        if family_filtered:
+            candidates = family_filtered
+    elif mutation:
+        # Prefer the family whose saved source best matches the requested subject;
+        # use recency only as a tie-breaker. A newer portrait must not outrank an
+        # older magnet diagram when the current operation clearly refers to a magnet.
+        best_alignment = max((item[0] for item in candidates), default=0.0)
+        top_subject_candidates = [item for item in candidates if item[0] >= max(0.12, best_alignment - 0.08)]
+        family_rank: dict[str, tuple[float, float]] = {}
+        for item in top_subject_candidates or candidates:
+            family = item[5]
+            rank = (item[0], _stamp(item[3]))
+            if family not in family_rank or rank > family_rank[family]:
+                family_rank[family] = rank
+        preferred_family = max(family_rank, key=family_rank.get) if family_rank else ""
+        same_family = [item for item in candidates if item[5] == preferred_family]
+        if same_family:
+            candidates = same_family
+    elif status_or_wait and pending_output:
+        # For an unfulfilled delivery request, recover the family already present
+        # in the exact same topic/branch. Do not guess a different renderer.
+        latest_compatible = [item for item in candidates if item[3] is not latest]
+        if latest_compatible:
+            candidates = latest_compatible
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    best = candidates[0]
+    # If a self-contained edit names a subject unrelated to every selected source,
+    # decline the implicit binding instead of mutating a coincidental artifact.
+    if mutation and current_terms and best[0] < 0.12 and len(candidates) > 1:
+        return {}
+
+    pair, block, family = best[3], deepcopy(best[4]), best[5]
+    source_message_id = _text(pair.get("message_id") or pair.get("source_message_id"))
+    operation = "complete_pending" if status_or_wait and pending_output else "revise"
+    return {
+        "family": family,
+        "operation": operation,
+        "source_message_id": source_message_id,
+        "topic_id": _text(pair.get("topic_id")),
+        "branch_id": _text(pair.get("branch_id")),
+        "topic_origin_message_id": _text(pair.get("topic_origin_message_id") or pair.get("origin_message_id")),
+        "revision_chain_id": _text(block.get("revision_chain_id") or block.get("artifact_id") or block.get("id") or source_message_id),
+        "source_block": block,
+        "source_summary": _text(block.get("caption") or block.get("explanation") or block.get("description") or pair.get("topic") or pair.get("user"))[:1200],
+        "source_pair_user": _text(pair.get("user") or pair.get("user_text"))[:800],
+        "source_pair_answer": _text(pair.get("assistant_last_message") or pair.get("april"))[:1600],
+        "selection_method": "selected_authenticated_branch_artifact",
+        "pending_previous_output": bool(pending_output),
+        "affirmative_action_from_latest_answer": bool(affirmative_action),
+        "correction_feedback_linked_to_latest_answer": bool(corrective_feedback),
+        "latest_answer_message_id": _text(latest.get("message_id")),
+    }
+
 def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[dict[str, Any]]:
-    """Combine ranked rows with the selected compact pairs without crossing dialogue scope."""
+    """Return raster sources only from the selected topic/branch and artifact family."""
+    selected_artifact = dialogue_context.get("selected_source_artifact") if isinstance(dialogue_context.get("selected_source_artifact"), dict) else {}
+    selected_family = _artifact_family(selected_artifact.get("family"))
+    # A diagram/table/code revision must never fall through into the raster editor.
+    if selected_family and selected_family != "image":
+        return []
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
-    sources = list(dialogue_context.get("candidates") or [])
     selected_pairs = dialogue_context.get("selected_pairs") or []
-    sources.extend(selected_pairs)
+    # Search candidates are only ranking evidence. They are not permission to
+    # attach a raster from a sibling topic in the same chat. Only State Manager's
+    # selected branch pairs may supply an edit source.
+    sources = list(selected_pairs)
     anchor = dialogue_context.get("anchor")
     selected_message_ids = {
         _text(item.get("message_id") or item.get("source_message_id"))
         for item in selected_pairs if isinstance(item, dict)
         and _text(item.get("message_id") or item.get("source_message_id"))
     }
+    anchor_topic_id = _text(anchor.get("topic_id") or anchor.get("selected_topic_id")) if isinstance(anchor, dict) else ""
+    anchor_branch_id = _text(anchor.get("branch_id") or anchor.get("active_branch_id")) if isinstance(anchor, dict) else ""
     if isinstance(anchor, dict):
         anchor_id = _text(anchor.get("message_id") or anchor.get("source_message_id"))
         if anchor_id:
@@ -3497,12 +3758,16 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
     for source in sources:
         if not isinstance(source, dict):
             continue
+        source_topic_id = _text(source.get("topic_id") or source.get("selected_topic_id"))
+        source_branch_id = _text(source.get("branch_id") or source.get("active_branch_id"))
+        if anchor_topic_id and source_topic_id and source_topic_id != anchor_topic_id:
+            continue
+        if anchor_branch_id and source_branch_id and source_branch_id != anchor_branch_id:
+            continue
         message_id = _text(source.get("message_id") or source.get("source_message_id"))
         same_dialog = bool(source.get("same_dialog"))
-        selected_historical_source = bool(
-            allow_selected_historical and message_id and message_id in selected_message_ids
-        )
-        if not same_dialog and not selected_historical_source:
+        selected_historical_source = bool(message_id and message_id in selected_message_ids)
+        if not message_id or message_id not in selected_message_ids:
             continue
         if not message_id or message_id in seen:
             continue
@@ -3530,7 +3795,7 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
             continue
         item = dict(source)
         item["message_id"] = message_id
-        item["selected_historical_source"] = bool(selected_historical_source)
+        item["selected_historical_source"] = bool(selected_historical_source and not same_dialog)
         item["row_modalities"] = sorted(modalities | {"image"})
         if item.get("created_at") is None:
             item["created_at"] = item.get("topic_last_at") or item.get("topic_origin_at") or 0
@@ -4067,7 +4332,7 @@ def _restore_selected_assets(
             and _text(item.get("message_id"))
         ]
         unique_branch_fallback = False
-        if not selected_image_id and len(eligible_candidates) == 1:
+        if not selected_image_id and not source_terms and len(eligible_candidates) == 1:
             selected_image_id = _select_active_image_candidate(eligible_candidates, [])
             unique_branch_fallback = bool(selected_image_id)
         message_ids = [selected_image_id] if selected_image_id else []
@@ -4112,7 +4377,7 @@ def _restore_selected_assets(
             and "image" in set(item.get("row_modalities") or [])
             and _text(item.get("message_id"))
         ]
-        if not selected_image_id and len(eligible_candidates) == 1:
+        if not selected_image_id and not subject_terms and len(eligible_candidates) == 1:
             selected_image_id = _select_active_image_candidate(eligible_candidates, [], now_ts=now_ts)
         if selected_image_id:
             message_ids = [selected_image_id]
@@ -5265,6 +5530,45 @@ async def execute(
         anchor_message_key=_apr_diag_ref(anchor.get("message_id")), topic_index_count=len(dialogue_context.get("topic_index") or []),
     )
 
+    # Resolve the exact typed output from the selected branch before considering
+    # any raster restoration. This prevents a diagram task from borrowing the
+    # newest unrelated portrait simply because both live in one chat.
+    selected_source_artifact = _selected_branch_artifact_target(dialogue_context, original or current_text)
+    if selected_source_artifact:
+        dialogue_context["selected_source_artifact"] = selected_source_artifact
+        if selected_source_artifact.get("operation") in {"revise", "complete_pending"}:
+            dialogue_context["relation"] = "CONTINUE"
+            dialogue_context["active_branch_preserved"] = True
+            dialogue_context["reason"] = "selected_branch_artifact_action"
+            semantic_interpretation["primary_intent"] = "ACTIVE_BRANCH_REPAIR"
+            semantic_interpretation["direction"] = "RESOLVE_AGAINST_LATEST_EXCHANGE"
+            semantic_interpretation["topic_reference"] = "PREVIOUS_OR_ACTIVE_TOPIC"
+            semantic_interpretation["requires_memory"] = True
+            semantic_interpretation["active_branch_repair"] = True
+            semantic_interpretation["pre_response_route_reason"] = "selected_branch_artifact_action"
+            for _step in question_sequence:
+                if not isinstance(_step, dict):
+                    continue
+                _step["relation"] = "CONTINUE"
+                _step["semantic_intent"] = "ACTIVE_BRANCH_REPAIR"
+                _step["search_direction"] = "RESOLVE_AGAINST_LATEST_EXCHANGE"
+                _step["output_types"] = list(dict.fromkeys(["text", selected_source_artifact["family"]]))
+                _search = _step.get("dialogue_search") if isinstance(_step.get("dialogue_search"), dict) else {}
+                _search.update({"relation": "CONTINUE", "active_branch_repair": True,
+                                "selected_source_message_id": selected_source_artifact.get("source_message_id"),
+                                "selected_artifact_family": selected_source_artifact.get("family")})
+                _step["dialogue_search"] = _search
+            _apr_timing_log(
+                "selected_branch_artifact_action_linked", None,
+                family=selected_source_artifact.get("family"),
+                operation=selected_source_artifact.get("operation"),
+                source_message_key=_apr_diag_ref(selected_source_artifact.get("source_message_id")),
+                pending_previous_output=bool(selected_source_artifact.get("pending_previous_output")),
+                affirmative_action_from_latest_answer=bool(selected_source_artifact.get("affirmative_action_from_latest_answer")),
+                correction_feedback_linked_to_latest_answer=bool(selected_source_artifact.get("correction_feedback_linked_to_latest_answer")),
+                selection_method=selected_source_artifact.get("selection_method"),
+            )
+
     # A follow-up may refer to an image/file from earlier in this conversation.
     # Rehydrate only the assets attached to State Manager's selected anchor/pairs;
     # do not mix older files into NEW requests or when a fresh attachment exists.
@@ -5274,19 +5578,23 @@ async def execute(
         restored_assets = []
     else:
         asset_context = dialogue_context
-        if len(question_sequence) > 1:
-            for question_item, task_context in zip(question_sequence, question_contexts):
-                if (
-                    isinstance(task_context, dict)
-                    and _text(task_context.get("relation")).upper() == "CONTINUE"
-                    and _explicit_prior_asset_reference(question_item.get("request"))
-                ):
-                    asset_context = task_context
-                    break
-        visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
-            uid, identity, asset_context, visual_context, attachments, file_inputs, file_contents,
-            current_request=current_text,
-        )
+        _selected_family_for_restore = _artifact_family((selected_source_artifact or {}).get("family"))
+        if _selected_family_for_restore and _selected_family_for_restore != "image" and not (visual_context or attachments or file_inputs or file_contents):
+            restored_assets = []
+        else:
+            if len(question_sequence) > 1:
+                for question_item, task_context in zip(question_sequence, question_contexts):
+                    if (
+                        isinstance(task_context, dict)
+                        and _text(task_context.get("relation")).upper() == "CONTINUE"
+                        and _explicit_prior_asset_reference(question_item.get("request"))
+                    ):
+                        asset_context = task_context
+                        break
+            visual_context, attachments, file_inputs, file_contents, restored_assets = _restore_selected_assets(
+                uid, identity, asset_context, visual_context, attachments, file_inputs, file_contents,
+                current_request=current_text,
+            )
     _apr_timing_log(
         "selected_asset_restore", restore_started, user_key=_apr_diag_ref(uid),
         restored_assets=len(restored_assets or []), visual_items=len(visual_context or []),
@@ -5378,6 +5686,8 @@ async def execute(
         and _latest_answer_offers_image(dialogue_context)
     )
     interpretation_memory["dialogue_transition_analysis"] = transition_analysis
+    if selected_source_artifact:
+        interpretation_memory["selected_source_artifact"] = selected_source_artifact
     interpretation_memory["dialogue_thread_context"] = dialogue_thread_context
     # The inline data URI is private to the renderer/reuse branch and must never
     # enter the model prompt, structured card, or response metadata.
@@ -5395,6 +5705,41 @@ async def execute(
         identity=identity,
         semantic_interpretation=semantic_interpretation,
     )
+    if selected_source_artifact:
+        _selected_family = _artifact_family(selected_source_artifact.get("family"))
+        if _selected_family and _selected_family != "image":
+            _intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+            _outputs = _intent.get("requested_outputs") if isinstance(_intent.get("requested_outputs"), list) else ["text"]
+            _intent["requested_outputs"] = list(dict.fromkeys([*[_text(x).lower() for x in _outputs if _text(x)], _selected_family]))
+            _intent.update({
+                "task": "answer_request",
+                "wants_image": False,
+                "wants_diagram": _selected_family == "diagram",
+                "wants_graph": _selected_family == "graph",
+                "wants_file": _selected_family == "file",
+                "artifact_operation": _text(selected_source_artifact.get("operation")) or "revise",
+                "artifact_revision_requested": True,
+                "selected_source_artifact_family": _selected_family,
+            })
+            interpretation["intent"] = _intent
+            interpretation["selected_source_artifact"] = selected_source_artifact
+            _request_structure = interpretation.setdefault("request_structure", {})
+            _request_structure["selected_source_artifact"] = selected_source_artifact
+            _request_structure["artifact_revision_lineage"] = {
+                key: selected_source_artifact.get(key)
+                for key in ("family", "source_message_id", "topic_id", "branch_id", "topic_origin_message_id", "revision_chain_id", "operation")
+                if selected_source_artifact.get(key) not in (None, "", [], {})
+            }
+            for _seq_item in question_sequence:
+                if isinstance(_seq_item, dict):
+                    _seq_item["output_types"] = list(dict.fromkeys(["text", _selected_family]))
+                    _seq_item["artifact_operation"] = _intent["artifact_operation"]
+            _apr_timing_log(
+                "interpretation_bound_to_selected_artifact", None,
+                family=_selected_family, operation=_intent["artifact_operation"],
+                requested_outputs=_intent["requested_outputs"],
+                source_message_key=_apr_diag_ref(selected_source_artifact.get("source_message_id")),
+            )
     # Carry the selected active branch's non-text output index into the final
     # interpretation. The thread builder already strips binary payloads and keeps
     # stable IDs/lineage for image, table, graph, code, diagram, file and link
@@ -5585,6 +5930,7 @@ async def execute(
                 else {}
             ),
             "restored_assets": restored_assets,
+            "selected_source_artifact": selected_source_artifact,
         },
         visual_context={
             "items": visual_context or [],
@@ -5656,6 +6002,7 @@ async def execute(
                     else {}
                 ),
                 "restored_assets": restored_assets,
+                "selected_source_artifact": selected_source_artifact,
                 # Always carry the literal current request in the structured chain.
                 # This field is active as a topic switch only for NEW dialogue.
                 "new_dialogue_request": original or current_text,
@@ -6239,6 +6586,74 @@ async def execute(
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
+
+    # A selected artifact revision is complete only if the response contains a
+    # value-bearing block of the same family. Text saying "done" is not a renderer.
+    if selected_source_artifact and _text(selected_source_artifact.get("operation")) in {"revise", "complete_pending"}:
+        _expected_family = _artifact_family(selected_source_artifact.get("family"))
+        _response_blocks = raw.get("render_blocks") if isinstance(raw.get("render_blocks"), list) else []
+        _has_concrete_revision = any(
+            isinstance(_block, dict)
+            and _artifact_family(_block.get("type") or _block.get("artifact_type") or _block.get("kind") or _block.get("renderer")) == _expected_family
+            and _artifact_block_is_concrete(_block, _expected_family)
+            for _block in _response_blocks
+        )
+        if not _has_concrete_revision:
+            _source_pair = next((item for item in (dialogue_context.get("selected_pairs") or [])
+                                 if isinstance(item, dict) and _text(item.get("message_id")) == _text(selected_source_artifact.get("source_message_id"))), None)
+            if _source_pair is None and isinstance(dialogue_context.get("anchor"), dict):
+                _candidate_anchor = dialogue_context.get("anchor")
+                if _text(_candidate_anchor.get("message_id")) == _text(selected_source_artifact.get("source_message_id")):
+                    _source_pair = _candidate_anchor
+            _restored_source_blocks = []
+            if _source_pair:
+                _restored_source_blocks, _ = _restore_saved_renderer_blocks(
+                    _source_pair, [_expected_family], original or current_text
+                )
+            _notice = (
+                "Не удалось подтвердить новую версию артефакта: в ответе не сформирован корректный блок результата. "
+                "Ниже оставляю исходный сохранённый материал, не выдавая его за изменённый."
+            )
+            raw["answer"] = (_text(raw.get("answer") or raw.get("content")) + "\n\n" + _notice).strip()
+            raw["content"] = raw["answer"]
+            if _restored_source_blocks:
+                raw["render_blocks"] = [*_response_blocks, *_restored_source_blocks]
+                raw.setdefault("artifacts", []).extend(deepcopy(_restored_source_blocks))
+            raw.setdefault("metadata", {})["artifact_revision"] = {
+                "status": "not_completed",
+                "family": _expected_family,
+                "source_message_id": selected_source_artifact.get("source_message_id"),
+                "topic_id": selected_source_artifact.get("topic_id"),
+                "branch_id": selected_source_artifact.get("branch_id"),
+                "revision_chain_id": selected_source_artifact.get("revision_chain_id"),
+                "source_restored_unchanged": bool(_restored_source_blocks),
+            }
+            _apr_timing_log(
+                "artifact_revision_output_missing", None,
+                family=_expected_family,
+                source_message_key=_apr_diag_ref(selected_source_artifact.get("source_message_id")),
+                source_restored_unchanged=bool(_restored_source_blocks),
+            )
+        else:
+            raw.setdefault("metadata", {})["artifact_revision"] = {
+                "status": "revised",
+                "family": _expected_family,
+                "source_message_id": selected_source_artifact.get("source_message_id"),
+                "topic_id": selected_source_artifact.get("topic_id"),
+                "branch_id": selected_source_artifact.get("branch_id"),
+                "revision_chain_id": selected_source_artifact.get("revision_chain_id"),
+            }
+            for _block in _response_blocks:
+                if not isinstance(_block, dict) or _artifact_family(_block.get("type") or _block.get("artifact_type") or _block.get("kind")) != _expected_family:
+                    continue
+                _block.setdefault("source_message_id", selected_source_artifact.get("source_message_id"))
+                _block.setdefault("topic_id", selected_source_artifact.get("topic_id"))
+                _block.setdefault("branch_id", selected_source_artifact.get("branch_id"))
+                _block.setdefault("topic_origin_message_id", selected_source_artifact.get("topic_origin_message_id"))
+                _block.setdefault("revision_of", selected_source_artifact.get("source_message_id"))
+                _block.setdefault("revision_chain_id", selected_source_artifact.get("revision_chain_id"))
+                _block.setdefault("revision_status", "revised")
+                break
 
     provider_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     asset_summary_started = time.perf_counter()
