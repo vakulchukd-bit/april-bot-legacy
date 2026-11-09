@@ -974,6 +974,9 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     # Provenance questions describe an action/source, not a new topic.
     "слиз", "скопир", "скач", "источник", "автор", "напис", "придум",
     "плагиат", "нет", "нета",
+    # Failure/status wording is a predicate about the preceding result, not an entity.
+    "неуда", "неудал", "удало", "неполуч", "несработ", "сбо", "заверш", "провал",
+    "нарис", "сгенер", "изобраз", "дорис", "отрис",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -5002,8 +5005,8 @@ def _image_source_subject_tokens(query: Any) -> set[str]:
     """
     low = _text(query).lower().replace("ё", "е")
     image_match = re.search(
-        r"(?:фотограф\w*|фотк\w*|фото\b|картинк\w*|изображен\w*|снимк\w*|"
-        r"\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)",
+        r"(?:фотограф\w*|фотк\w*|фото\b|картинк\w*|рисун\w*|изображен\w*|снимк\w*|"
+        r"\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b)",
         low,
         re.IGNORECASE,
     )
@@ -5011,13 +5014,29 @@ def _image_source_subject_tokens(query: Any) -> set[str]:
         return set()
     tail = low[image_match.end():image_match.end() + 120]
     tail = re.split(r"[.!?;\n]", tail, maxsplit=1)[0]
+    # In a clarification such as "я о рисунке, чтобы ты усы дорисовал",
+    # the words after "рисунке" describe the requested edit, not the source
+    # image's subject. Leave source terms empty so the active-dialog image lane
+    # can select the saved image by branch and recency rather than false keywords.
+    if re.match(
+        r"^\s*(?:(?:что\s+бы|чтобы|котор\w*\s+ты|где\s+ты|"
+        r"надо\s+чтобы)\b|(?:ты\s+)?(?:дорис\w*|добав\w*|измен\w*|"
+        r"поправ\w*|перерис\w*|редактир\w*))",
+        tail, re.IGNORECASE,
+    ) and re.search(
+        r"(?:дорис\w*|добав\w*|измен\w*|поправ\w*|перерис\w*|"
+        r"redraw|edit|modify|add|change)",
+        tail, re.IGNORECASE,
+    ):
+        return set()
     raw_words = re.findall(r"[a-zа-яёіїєґ][a-zа-яёіїєґ-]{1,}", tail, re.IGNORECASE)
     skip = {
         "с", "со", "из", "изо", "на", "в", "во", "про", "об", "обо", "о", "от", "для",
+        "что", "чтобы", "бы", "который", "которая", "которое", "надо", "нужно",
         "with", "of", "from", "about", "in", "on", "the", "a", "an", "this", "that",
         "эту", "этой", "этот", "эта", "эти", "ту", "той", "тот", "которую", "который",
         "которое", "ты", "мне", "ты", "моя", "мою", "твою", "твоя", "твой", "твоем", "твоей",
-        "добавь", "добавить", "дорисуй", "дорисовать", "измени", "изменить", "отредактируй",
+        "добавь", "добавить", "дорисуй", "дорисовать", "дорисовал", "дорисовала", "изменил", "изменила", "измени", "изменить", "отредактируй",
         "замени", "удали", "убери", "переделай", "переделать", "перерисуй", "исправь", "исправить",
         "сохрани", "добавить", "какую", "цифрами", "цифры", "цифру", "цифр", "числа", "число",
         "показание", "показания", "показанием", "дисплей", "дисплея", "дисплее", "стрелка", "стрелки",
@@ -5066,7 +5085,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         ("link", r"(?:\bссылк\w*\b|\burl\b|\blinks?\b|\bгиперссылк\w*\b)"),
         ("copy", r"(?:\bcopyable\s+text\b|\bcopy\s+block\b|\bкопируем\w*\s+текст\w*\b|\bкопи(?:руем\w*)?\s+блок\w*\b|\bтекст\s+из\s+(?:прошл\w*|предыдущ\w*|истори\w*)|\bтекст\s+котор\w*\s+(?:ты|мы)\s+(?:создал\w*|сделал\w*|написал\w*))"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
-        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bснимк\w*\b|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"),
+        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bкартинк\w*\b|\bрисун\w*\b|\bизображен\w*\b|\bснимк\w*\b|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
     )
     kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
@@ -5074,7 +5093,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         return ""
     # Explicitly creating a new/another artifact is not a saved-artifact edit.
     fresh_artifact_request = bool(re.search(
-        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|рисун\w*|фото\w*)\b|"
         r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
         r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
         low, re.IGNORECASE,
@@ -5084,7 +5103,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
 
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
-        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|дорис\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
         r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
@@ -5290,7 +5309,7 @@ def _is_visual_scene_development_followup(
     )
     visual_operation_context = bool(re.search(
         r"\b(?:картинк\w*|изображен\w*|фот\w*|скриншот\w*|график\w*|диаграмм\w*|"
-        r"схем\w*|черт[её]ж\w*|рисунк\w*|иллюстрац\w*|рендер\w*|svg|"
+        r"схем\w*|черт[её]ж\w*|рисун\w*|иллюстрац\w*|рендер\w*|svg|"
         r"фон\w*|цвет\w*|ракурс\w*|кадр\w*|объект\w*|корабл\w*|"
         r"image\w*|photo\w*|picture\w*|screenshot\w*|chart\w*|diagram\w*|"
         r"scheme\w*|drawing\w*|render\w*|background\w*|color\w*|camera\w*)\b",
@@ -6617,10 +6636,15 @@ def search_dialogue_context(
         query_interpretation.get("topic_reference_fragment")
         or query_features.get("topic_reference_fragment")
     )
+    # A short topic fragment opens archive search only when it names a subject.
+    # Subjectless fragments are elliptical turns and stay with the latest exchange.
+    explicit_topic_fragment_has_subject = bool(
+        explicit_topic_fragment and _subject_tokens(query) and not latest_exchange_link
+    )
     explicit_prior_pointer_preload = bool(
         query_interpretation.get("resume_anchor_requested")
         or query_interpretation.get("has_explicit_time_window")
-        or explicit_topic_fragment
+        or explicit_topic_fragment_has_subject
         or _text(query_interpretation.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
         or _text(resume_message_id)
     )
@@ -6648,16 +6672,19 @@ def search_dialogue_context(
         and not explicit_history_preload
         and not explicit_prior_pointer_preload
     )
-    # Premium arbitration is deliberately two-pass: the latest authenticated
-    # USER↔APRIL exchange is evaluated first, then a self-contained request may
-    # search the user's retained history if that exchange does not fit. A NEW label
-    # is not permission to skip history; only an interpreted topic boundary or a
-    # genuine request to operate the product UI closes the history-search lane.
+    # Premium routing is latest-exchange-first. The archive is not a fallback for
+    # every ordinary question: it opens only for an explicit history/time/subject
+    # pointer, or when Interpretation requests memory and the latest exchange did
+    # not fit. This prevents unrelated requests from being pulled into an older
+    # topic merely because one archive row scored highest.
     allow_semantic_history_search = bool(
         explicit_history_preload
         or explicit_prior_pointer_preload
         or (
-            not site_navigation_preload
+            semantic_memory_preload
+            and not latest_exchange_link
+            and not latest_exchange_independent_request
+            and not site_navigation_preload
             and not query_interpretation.get("explicit_topic_switch")
         )
     )
@@ -7094,7 +7121,7 @@ def search_dialogue_context(
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
     )), None) if resume_key else None
     low_query_for_assets = _text(query).lower().replace("ё", "е")
-    image_noun_pattern = r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"
+    image_noun_pattern = r"(?:фото\w*|фотк\w*|фотограф\w*|снимк\w*|картинк\w*|рисун\w*|изображени\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b)"
     image_edit_action_pattern = r"(?:измен\w*|отредактир\w*|модифицир\w*|добав\w*|дорис\w*|убер\w*|удал\w*|замен\w*|передел\w*|поправ\w*|исправ\w*|перерис\w*|\bedit\b|\bmodify\b|\badd\b|\bremove\b|\breplace\b|\bredraw\b)"
     image_reference_pattern = rf"(?:{image_noun_pattern}|\b(?:на\s+(?:ней|нее|неё|нем|нём|них)|(?:к\s+)?эту\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|(?:к\s+)?этой\s+(?:фото\w*|фотк\w*|фотограф\w*|картинк\w*|иллюстрац\w*|изображени\w*)|this\s+(?:photo|image|picture)|on\s+it)\b)"
     # A visual correction can refer to an earlier image without uploading it again.
@@ -7130,7 +7157,7 @@ def search_dialogue_context(
     # branch and do not broaden the search to arbitrary old portraits.
     query_subjects_for_typed_edit = _subject_tokens(query)
     explicit_raster_edit_target = bool(re.search(
-        r"(?:фото\w*|фотограф\w*|картинк\w*|изображени\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        r"(?:фото\w*|фотограф\w*|картинк\w*|рисун\w*|изображени\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\bdrawing\b|\billustration\b)",
         _text(query).lower().replace("ё", "е"), re.IGNORECASE,
     ))
     best_typed_nonimage_match = 0.0
@@ -7222,7 +7249,13 @@ def search_dialogue_context(
 
     # Search the whole user's 24-hour window for a distinctly named old topic,
     # but do not let generic words such as "применение" switch the active topic.
-    topic_bearing = _semantic_tokens(subject_query if is_correction and subject_query != query else query) - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+    topic_bearing = {
+        token for token in (
+            _semantic_tokens(subject_query if is_correction and subject_query != query else query)
+            - _SECTION_QUERY_NOISE - _CONTEXT_GENERIC_TERMS
+        )
+        if not _is_non_topical_subject_term(token)
+    }
     if implicit_latest_branch_resume:
         topic_bearing = set()
     # A pure correction such as "I wasn't asking about Mendeleev" rejects that
