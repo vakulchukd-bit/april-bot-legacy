@@ -4430,6 +4430,71 @@ def interpret_request_in_context(
     contextual_visual_revision = bool(
         previous_visual_output and _detect_contextual_image_edit(source)
     )
+
+    # The latest exchange can contain a structured diagram/table/code artifact,
+    # not only a raster image. Track the renderer family and whether the latest
+    # user turn's requested artifact was actually returned. Branch artifact_index
+    # may contain older lineage items, so it is deliberately kept separate from
+    # the current message's assistant_structured_output.
+    previous_artifact_state = _pair_artifact_output_state(row)
+    previous_artifact_families = set(previous_artifact_state.get("branch_saved_families") or [])
+    previous_current_output_families = set(previous_artifact_state.get("current_saved_families") or [])
+    previous_requested_families = _pair_requested_artifact_families(row, previous_user)
+    artifact_mutation_pattern = (
+        r"\b(?:измен\w*|помен\w*|повер\w*|развер\w*|перевер\w*|ориентир\w*|"
+        r"передел\w*|исправ\w*|поправ\w*|отредактир\w*|редактир\w*|"
+        r"доработ\w*|обнов\w*|rotate\w*|turn\w*|flip\w*|revise\w*|edit\w*|"
+        r"change\w*|modify\w*|correct\w*|fix\w*)\b"
+    )
+    artifact_mutation_cue = bool(re.search(artifact_mutation_pattern, low, re.IGNORECASE))
+    previous_artifact_mutation_cue = bool(re.search(artifact_mutation_pattern, previous_user, re.IGNORECASE))
+    artifact_status_followup = bool(re.search(
+        r"(?:^|\b)(?:где|куда|когда|ну\s+и\s+где|покажи\s+результат|пришло\s+ли|"
+        r"готово\s+ли|где\s+пришл\w*|где\s+выдал\w*|where|when)\b",
+        low, re.IGNORECASE,
+    ))
+    # A named edit is attached to the latest branch only when the latest turn
+    # contains a compatible structured artifact and the subject matches. Edit
+    # verbs and layout attributes are operation parameters, never subject terms.
+    contextual_artifact_revision = bool(
+        artifact_mutation_cue
+        and previous_artifact_families.intersection({"diagram", "graph", "table", "formula", "code", "link", "copy", "file"})
+    )
+    artifact_contract_requested = set(previous_requested_families)
+    typed_branch_families = previous_artifact_families.intersection(
+        {"diagram", "graph", "table", "formula", "code", "link", "copy", "file"}
+    )
+    previous_user_spatial_operation = bool(re.search(
+        r"(?:вертик\w*|горизонт\w*|повер\w*|развер\w*|перевер\w*|rotate\w*|flip\w*|vertical|horizontal)",
+        previous_user, re.IGNORECASE,
+    ))
+    previous_user_explicit_raster_target = bool(re.search(
+        r"(?:фото\w*|фотограф\w*|картинк\w*|изображени\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        previous_user, re.IGNORECASE,
+    ))
+    if (artifact_mutation_cue or previous_artifact_mutation_cue):
+        # Spatial changes inherit a structured diagram when available, even if
+        # the latest mistaken route requested/generated a raster image instead.
+        if previous_user_spatial_operation and not previous_user_explicit_raster_target and "diagram" in typed_branch_families:
+            artifact_contract_requested.add("diagram")
+        elif not artifact_contract_requested and len(typed_branch_families) == 1:
+            artifact_contract_requested.update(typed_branch_families)
+    missing_artifact_families = (
+        artifact_contract_requested.intersection(previous_artifact_families)
+        - previous_current_output_families
+    )
+    unfulfilled_artifact_contract = bool(missing_artifact_families)
+    previous_artifact_delivery_requested = bool(
+        artifact_contract_requested
+        or re.search(r"\b(?:выдай|пришли|покажи|нарисуй|изобрази|создай|построй|сделай|"
+                     r"сформируй|экспортируй|send|show|draw|create|build|generate|render|deliver)\b",
+                     previous_user, re.IGNORECASE)
+    )
+    artifact_delivery_followup = bool(
+        artifact_status_followup
+        and previous_artifact_delivery_requested
+        and previous_artifact_families
+    )
     # An unresolved image deliverable only owns a follow-up when the new turn is
     # itself an image reference/deliverable or is a genuinely underspecified
     # pointer (for example, "Где?"). A separate content request such as
@@ -4501,7 +4566,14 @@ def interpret_request_in_context(
         "истор", "делал", "котор", "которы", "пожал", "нов", "новую", "новый",
         "схем", "диаграм", "граф", "таблиц", "формул", "код", "скрипт", "ссыл",
         "откры", "опис", "расскаж", "объясн", "поясн", "постро", "сравн", "исправ",
-        "image", "photo", "picture", "portrait", "real", "actual", "genuine",
+        # These terms describe an operation or presentation attribute, not the
+        # object being revised. Keeping them here preserves magnet/magnetism and
+        # similar subject matches across short edit commands.
+        "измен", "помен", "повер", "развер", "перевер", "ориентир", "передел",
+        "поправ", "редакт", "модифиц", "доработ", "добав", "вертик", "горизонт",
+        "перпендик", "параллел", "наклон", "положен", "располож", "направлен",
+        "выдай", "пришл", "rotate", "turn", "flip", "revise", "edit", "change",
+        "modify", "vertical", "horizontal", "image", "photo", "picture", "portrait", "real", "actual", "genuine",
         "show", "create", "draw", "generated", "made",
     }
     current_subject_terms = {
@@ -4518,6 +4590,10 @@ def interpret_request_in_context(
     def _subject_term_matches(left: str, right: str) -> bool:
         if left == right:
             return True
+        # Scientific noun/adjective variants can have different first-five
+        # stems (магни… / магне…), while belonging to the same lexical family.
+        if left.startswith(("магни", "магне")) and right.startswith(("магни", "магне")):
+            return True
         if len(left) >= 5 and len(right) >= 5:
             if left.startswith(right[:5]) or right.startswith(left[:5]):
                 return True
@@ -4530,6 +4606,26 @@ def interpret_request_in_context(
         if any(_subject_term_matches(term, prior) for prior in latest_subject_terms)
     )
     latest_subject_overlap = subject_match_count / max(1, len(current_subject_terms))
+    # Score the last assistant answer independently from the user's old request.
+    # This prevents a wrong artifact from inheriting the subject of the request it
+    # failed to satisfy (for example: user asks for a magnet, assistant returns
+    # Einstein's portrait, then the next magnet edit is misbound to that portrait).
+    answer_subject_match_count = sum(
+        1 for term in current_subject_terms
+        if any(_subject_term_matches(term, prior) for prior in prior_answer_content)
+    )
+    answer_subject_overlap = answer_subject_match_count / max(1, len(current_subject_terms))
+    previous_user_signature = _context_signature(previous_user)
+    previous_user_subject_terms = {
+        str(term).strip().lower()
+        for term in (previous_user_signature.get("subject_terms") or [])
+        if str(term).strip() and str(term).strip().lower() not in subject_noise
+    }
+    previous_user_answer_common = sum(
+        1 for term in previous_user_subject_terms
+        if any(_subject_term_matches(term, prior) for prior in prior_answer_content)
+    )
+    previous_user_answer_overlap = previous_user_answer_common / max(1, len(previous_user_subject_terms))
     same_subject_latest = bool(
         current_subject_terms and latest_subject_terms and latest_subject_overlap >= 0.50
     )
@@ -4581,10 +4677,37 @@ def interpret_request_in_context(
         and not output_forms and not numeric_anchors
         and not explicit_switch
     )
+
+    artifact_history_reactivation = bool(
+        typed_branch_families
+        and (
+            (artifact_mutation_cue and current_subject_terms and answer_subject_overlap < 0.20)
+            or (
+                artifact_status_followup and previous_artifact_mutation_cue
+                and previous_user_subject_terms and previous_user_answer_overlap < 0.20
+            )
+        )
+        and not explicit_switch
+    )
+    preferred_history_artifact_family = ""
+    if artifact_history_reactivation:
+        # The current question is not a continuation of the wrong assistant
+        # render. It is a request to recover the matching earlier artifact.
+        contextual_visual_revision = False
+        latest_exchange_subject_match = False
+        visual_continuation_link = False
+        if previous_user_spatial_operation and not previous_user_explicit_raster_target and "diagram" in typed_branch_families:
+            preferred_history_artifact_family = "diagram"
+        elif "diagram" in artifact_contract_requested and artifact_status_followup:
+            preferred_history_artifact_family = "diagram"
+        elif len(typed_branch_families) == 1:
+            preferred_history_artifact_family = next(iter(typed_branch_families))
+        elif len(artifact_contract_requested) == 1:
+            preferred_history_artifact_family = next(iter(artifact_contract_requested))
     # A lexical match is evidence only when it covers most of the new request.
     # One shared noun/action must not drag a separately specified request into
     # the previous branch (for example, a new product named in the same sentence).
-    linked_by_user_turn = bool(user_common and user_overlap >= 0.75)
+    linked_by_user_turn = bool(user_common and user_overlap >= 0.75 and not artifact_history_reactivation)
     linked_by_answer = bool(answer_common and answer_overlap >= 0.75)
     explicit_context_signal = bool(
         contextual_reaction or previous_answer_reference
@@ -4601,11 +4724,24 @@ def interpret_request_in_context(
         )
     )
     explicit_context_signal = bool(explicit_context_signal or direct_april_reference)
+    # A named artifact revision may be phrased as a question ("Можешь
+    # повернуть магнит вертикально?"). Bind it to the latest exchange when that
+    # exchange actually contains the matching structured artifact. A delivery
+    # status question similarly remains on the latest artifact contract.
+    artifact_subject_match = bool(
+        contextual_artifact_revision
+        and current_subject_terms
+        and answer_subject_overlap >= 0.20
+    )
+    contextual_artifact_revision = bool(contextual_artifact_revision and artifact_subject_match)
     latest_exchange_link = bool(
         not profile.get("history_request")
         and not explicit_switch
         and (
-            short_social_only
+            contextual_artifact_revision
+            or (artifact_delivery_followup and not artifact_history_reactivation)
+            or (unfulfilled_artifact_contract and artifact_status_followup and not artifact_history_reactivation)
+            or short_social_only
             or short_continuation_action
             or assistant_repetition_feedback
             or assistant_output_feedback
@@ -4632,6 +4768,9 @@ def interpret_request_in_context(
         "reason": (
             "assistant_response_feedback" if (assistant_repetition_feedback or assistant_output_feedback) else
             "complete_unfulfilled_image_output" if unfulfilled_image_contract and latest_exchange_link else
+            "revise_active_structured_artifact" if contextual_artifact_revision and latest_exchange_link else
+            "complete_unfulfilled_structured_artifact" if unfulfilled_artifact_contract and latest_exchange_link else
+            "artifact_delivery_status_followup" if artifact_delivery_followup and latest_exchange_link else
             "social_or_pragmatic_reaction" if short_social_only else
             "short_continuation_action" if short_continuation_action else
             "semantic_link_to_previous_user_turn" if linked_by_user_turn else
@@ -4652,11 +4791,21 @@ def interpret_request_in_context(
         "unfulfilled_image_contract": bool(unfulfilled_image_contract),
         "previous_visual_output": bool(previous_visual_output),
         "contextual_visual_revision": bool(contextual_visual_revision),
+        "previous_artifact_families": sorted(previous_artifact_families),
+        "previous_current_output_families": sorted(previous_current_output_families),
+        "previous_requested_artifact_families": sorted(artifact_contract_requested),
+        "unfulfilled_artifact_contract": bool(unfulfilled_artifact_contract),
+        "contextual_artifact_revision": bool(contextual_artifact_revision),
+        "artifact_delivery_followup": bool(artifact_delivery_followup),
+        "artifact_history_reactivation": bool(artifact_history_reactivation),
+        "preferred_history_artifact_family": preferred_history_artifact_family,
+        "previous_user_answer_subject_overlap": round(previous_user_answer_overlap, 3),
         "visual_continuation_link": bool(visual_continuation_link),
         "assistant_output_feedback": bool(assistant_output_feedback),
         "same_subject_match": bool(same_subject_latest),
         "same_output_family_match": bool(same_output_family_latest),
         "subject_overlap": round(latest_subject_overlap, 3),
+        "assistant_answer_subject_overlap": round(answer_subject_overlap, 3),
     }
     profile["latest_exchange_analysis"] = analysis
 
@@ -4678,7 +4827,9 @@ def interpret_request_in_context(
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback),
             "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation),
+            "artifact_action_request": bool(contextual_artifact_revision or artifact_history_reactivation),
+            "artifact_delivery_followup": bool(artifact_delivery_followup),
         })
         profile["features"] = features
         signals.update({
@@ -4686,12 +4837,28 @@ def interpret_request_in_context(
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or contextual_reaction or assistant_repetition_feedback),
             "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation),
+            "artifact_action_request": bool(contextual_artifact_revision or artifact_history_reactivation),
+            "artifact_delivery_followup": bool(artifact_delivery_followup),
         })
         profile["pragmatic_features"] = signals
         profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback)
         profile["previous_answer_reference"] = True
-        profile["active_branch_repair"] = bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or profile.get("active_branch_repair"))
+        profile["active_branch_repair"] = bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation or profile.get("active_branch_repair"))
+        if contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup:
+            candidate_families = artifact_contract_requested or previous_artifact_families
+            if len(candidate_families) == 1:
+                profile["saved_artifact_followup_kind"] = next(iter(candidate_families))
+            profile["artifact_revision_requested"] = bool(contextual_artifact_revision)
+            profile["artifact_delivery_followup"] = bool(artifact_delivery_followup)
+            profile["artifact_contract_unfulfilled"] = bool(unfulfilled_artifact_contract)
+            profile["speech_act"] = "CORRECTION_OR_REVISION" if contextual_artifact_revision or unfulfilled_artifact_contract else "REFERENTIAL_CONTINUATION"
+            profile["communicative_act"] = "REVISE_PREVIOUS_STRUCTURED_ARTIFACT" if contextual_artifact_revision else "COMPLETE_OR_LOCATE_PREVIOUS_ARTIFACT"
+            profile["recommended_response_action"] = "REVISE_ACTIVE_STRUCTURED_ARTIFACT" if contextual_artifact_revision else "COMPLETE_UNFULFILLED_ARTIFACT_OUTPUT"
+            features["artifact_action_request"] = bool(contextual_artifact_revision)
+            features["artifact_delivery_followup"] = bool(artifact_delivery_followup)
+            features["active_branch_repair"] = True
+            profile["features"] = features
         if contextual_visual_revision:
             profile["speech_act"] = "CORRECTION_OR_REVISION"
             profile["communicative_act"] = "REVISE_PREVIOUS_VISUAL_OUTPUT"
@@ -4711,6 +4878,49 @@ def interpret_request_in_context(
             profile["communicative_act"] = "REVISE_PREVIOUS_RESPONSE"
             profile["recommended_response_action"] = "COMPLETE_UNFULFILLED_IMAGE_OUTPUT"
         profile["dialogue_act"] = profile.get("dialogue_act") or profile.get("speech_act") or "REFERENTIAL_CONTINUATION"
+    elif artifact_history_reactivation:
+        # The latest assistant output is not a valid source. Reopen authenticated
+        # history using the current subject, then let State Manager select the
+        # correct branch artifact before the executor runs any renderer.
+        profile.update({
+            "history_request": False,
+            "history_recall": False,
+            "requires_memory": True,
+            "search_scope": "TOPIC_OR_ACTIVE_CONTEXT",
+            "primary_intent": "TOPIC_CONTINUATION",
+            "direction": "SEARCH_ACTIVE_OR_REFERENCED_TOPIC",
+            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+            "time_scope": "ACTIVE_DIALOGUE",
+            "relation_hint": "CONTINUE",
+            "previous_answer_reference": True,
+            "active_branch_repair": True,
+            "artifact_revision_requested": bool(artifact_mutation_cue),
+            "artifact_delivery_followup": bool(artifact_delivery_followup),
+            "artifact_contract_unfulfilled": bool(unfulfilled_artifact_contract),
+            "saved_artifact_followup_kind": preferred_history_artifact_family or profile.get("saved_artifact_followup_kind") or "",
+            "speech_act": "CORRECTION_OR_REVISION" if artifact_mutation_cue else "REFERENTIAL_CONTINUATION",
+            "communicative_act": "REVISE_MATCHING_HISTORICAL_ARTIFACT" if artifact_mutation_cue else "COMPLETE_MATCHING_HISTORICAL_ARTIFACT",
+            "recommended_response_action": "REVISE_ACTIVE_STRUCTURED_ARTIFACT" if artifact_mutation_cue else "COMPLETE_UNFULFILLED_ARTIFACT_OUTPUT",
+            "reason": "reactivate_matching_artifact_branch_after_latest_output_mismatch",
+        })
+        features = dict(features)
+        features.update({
+            "latest_exchange_link": False,
+            "previous_answer_reference": True,
+            "active_branch_repair": True,
+            "artifact_action_request": bool(artifact_mutation_cue),
+            "artifact_delivery_followup": bool(artifact_delivery_followup),
+            "context_dependent_reaction": True,
+        })
+        profile["features"] = features
+        signals.update({
+            "previous_answer_reference": True,
+            "active_branch_repair": True,
+            "artifact_action_request": bool(artifact_mutation_cue),
+            "artifact_delivery_followup": bool(artifact_delivery_followup),
+        })
+        profile["pragmatic_features"] = signals
+        profile["dialogue_act"] = profile["speech_act"]
     elif (
         _text(profile.get("primary_intent")).upper() in {"TOPIC_CONTINUATION", "ACTIVE_BRANCH_REPAIR"}
         and has_independent_payload
@@ -4718,6 +4928,7 @@ def interpret_request_in_context(
         and not profile.get("history_request")
         and not explicit_switch
         and not assistant_repetition_feedback
+        and not artifact_history_reactivation
     ):
         # The interpreter inferred continuity from generic question wording, but
         # the current turn has its own subject/deliverable and no verified link to
@@ -6528,6 +6739,128 @@ def _build_dialogue_based_portrait_profile(
         "do_not_infer": ["exact face or physical likeness", "age beyond adult styling", "ethnicity", "medical or psychiatric diagnosis", "private traits not stated in dialogue", "one-off incidental topic as the person's defining identity"],
         "do_not_substitute": ["unrelated weapon or object", "random stock portrait", "source-photo request when no source photo was requested", "text-only substitute for requested image"],
     }
+
+
+def _artifact_family_name(value: Any) -> str:
+    raw = _text(value).strip().lower().replace("-", "_").replace(" ", "_")
+    return {
+        "svg": "diagram", "flowchart": "diagram", "mermaid": "diagram", "diagramblock": "diagram", "svgblock": "diagram",
+        "chart": "graph", "plot": "graph", "graphblock": "graph",
+        "table_data": "table", "tableblock": "table",
+        "equation": "formula", "math": "formula", "latex": "formula",
+        "source_code": "code", "codeblock": "code", "script": "code",
+        "hyperlink": "link", "links": "link", "url": "link",
+        "image_edit": "image", "generated_image": "image", "gallery": "image", "image_gallery": "image",
+        "copy_block": "copy", "copyable_text": "copy",
+    }.get(raw, raw)
+
+
+def _artifact_block_is_saved(block: dict[str, Any], family: str) -> bool:
+    """Check for value-bearing renderer content, not a renderer label/placeholder."""
+    payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
+    if not payload and isinstance(block.get("data"), dict):
+        payload = block.get("data")
+    if not payload:
+        payload = block
+    if family == "diagram":
+        svg = _text(payload.get("svg") or payload.get("source_svg") or payload.get("svg_payload"))
+        if len(svg) > 60 and re.search(r"<(?:path|rect|circle|ellipse|polygon|polyline|line|text|image|use)\b", svg, re.I):
+            return True
+        if any(isinstance(payload.get(key), (list, dict)) and bool(payload.get(key)) for key in ("elements", "shapes", "nodes", "edges", "geometry", "primitives")):
+            return True
+        source = _text(payload.get("mermaid") or payload.get("source") or payload.get("diagram_source"))
+        return bool(source and len(source.strip()) > 12)
+    if family == "graph":
+        return any(isinstance(payload.get(key), (list, dict)) and bool(payload.get(key)) for key in ("series", "datasets", "traces", "points", "data", "values"))
+    if family == "table":
+        headers = payload.get("headers") or payload.get("columns")
+        rows = payload.get("rows") or payload.get("data")
+        return bool(isinstance(headers, list) and headers and isinstance(rows, list) and rows)
+    if family == "formula":
+        return any(_text(payload.get(key)).strip() for key in ("latex", "formula", "equation", "expression", "math"))
+    if family == "code":
+        return any(len(_text(payload.get(key)).strip()) > 8 for key in ("code", "source_code", "content", "text"))
+    if family == "link":
+        return bool(re.match(r"https?://", _text(payload.get("url") or payload.get("href") or payload.get("uri")))) or bool(payload.get("links"))
+    if family == "copy":
+        return any(_text(payload.get(key)).strip() for key in ("content", "text", "code"))
+    if family == "file":
+        return any(payload.get(key) not in (None, "", [], {}) for key in ("asset_ref", "asset_id", "filename", "url", "src", "content"))
+    if family == "image":
+        return any(payload.get(key) not in (None, "", [], {}) for key in ("asset_ref", "asset_id", "artifact_id", "filename", "url", "src", "image_data_uri", "data_uri"))
+    return False
+
+
+def _pair_artifact_output_state(pair: dict[str, Any]) -> dict[str, Any]:
+    """Return attempted/current/branch artifact families for one compact history pair."""
+    current_families: set[str] = set()
+    branch_families: set[str] = set()
+    attempted_families: set[str] = set()
+    current_keys = ("assistant_structured_output", "render_blocks", "assistant_artifact_index")
+    branch_keys = ("artifact_index",)
+    for key in current_keys + branch_keys:
+        value = pair.get(key)
+        if not isinstance(value, list):
+            continue
+        destination = current_families if key in current_keys else branch_families
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            raw_family = item.get("family") or item.get("artifact_family") or item.get("type") or item.get("artifact_type") or item.get("kind") or item.get("output_type") or item.get("renderer")
+            family = _artifact_family_name(raw_family)
+            if family not in {"image", "diagram", "graph", "table", "formula", "code", "link", "copy", "file", "audio", "video"}:
+                continue
+            attempted_families.add(family)
+            durable_branch_reference = bool(
+                key in branch_keys
+                and any(_text(item.get(ref)).strip() for ref in (
+                    "artifact_id", "asset_id", "id", "source_message_id", "message_id",
+                    "filename", "url", "href", "uri", "representation", "data_summary",
+                ))
+            )
+            if _artifact_block_is_saved(item, family) or durable_branch_reference:
+                destination.add(family)
+    # The thread-level index can be the only place an earlier artifact is
+    # retained after a text-only correction turn. It establishes branch lineage,
+    # but never counts as an output produced by the current turn.
+    branch_families.update(current_families)
+    attempted = bool(attempted_families)
+    saved = bool(branch_families)
+    return {
+        "attempted": attempted,
+        "saved": saved,
+        "attempted_families": sorted(attempted_families),
+        "current_saved_families": sorted(current_families),
+        "branch_saved_families": sorted(branch_families),
+    }
+
+
+def _pair_requested_artifact_families(pair: dict[str, Any], previous_user: str) -> set[str]:
+    """Recover the output families promised by the saved request/task sequence."""
+    requested: set[str] = set()
+    known = {"image", "diagram", "graph", "table", "formula", "code", "link", "copy", "file"}
+    sequence = pair.get("question_sequence") if isinstance(pair.get("question_sequence"), list) else []
+    for item in sequence:
+        if not isinstance(item, dict):
+            continue
+        for family in item.get("output_types") or []:
+            normalized = _artifact_family_name(family)
+            if normalized in known:
+                requested.add(normalized)
+    # A saved task sequence is preferable, but rebuild it from the exact persisted
+    # user wording when old records do not contain one.
+    if not requested and previous_user:
+        try:
+            for item in build_question_sequence(previous_user):
+                if not isinstance(item, dict):
+                    continue
+                for family in item.get("output_types") or []:
+                    normalized = _artifact_family_name(family)
+                    if normalized in known:
+                        requested.add(normalized)
+        except Exception:
+            pass
+    return requested
 
 
 def _pair_image_output_state(pair: dict[str, Any]) -> tuple[bool, bool]:
