@@ -267,7 +267,7 @@ _IMAGE_EDIT_TARGET_RE = re.compile(
     r"монет\w*|банкнот\w*|купюр\w*|евро|деньг\w*|доллар\w*|гривн\w*|ценник\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
     r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|стрелк\w*|указател\w*|маркер\w*|"
-    r"кнопк\w*|точк\w*|област\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
+    r"кнопк\w*|точк\w*|област\w*|усы|бород\w*|волос\w*|бров\w*|ресниц\w*|глаз\w*|нос\w*|губ\w*|лиц\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
     r"check\s?mark|tick|arrow|pointer|marker|highlight|annotat\w*|outline|circle|button|click|"
     r"background|quality|sharpen|contrast|brightness|text|logo|realistic|remove|red|green)",
     re.IGNORECASE,
@@ -285,7 +285,8 @@ def _detect_contextual_image_edit(text: str) -> bool:
     # An attribute correction (e.g. the pointer was green but should be red) is
     # an edit intent even when the user omits the word "изменить".
     visual_target = bool(re.search(
-        r"(?:стрелк\w*|arrow|указател\w*|pointer|маркер\w*|marker|цвет\w*|красн\w*|зелен\w*|red|green|обводк\w*|highlight|кнопк\w*|button|надпис\w*|text)",
+        r"(?:стрелк\w*|arrow|указател\w*|pointer|маркер\w*|marker|цвет\w*|красн\w*|зелен\w*|red|green|обводк\w*|highlight|кнопк\w*|button|надпис\w*|text|лишн\w*|"
+        r"\b(?:усы|усам|усами)\b|бород\w*|волос\w*|бров\w*|ресниц\w*|глаз\w*|нос\w*|губ\w*|лиц\w*)",
         low, re.IGNORECASE,
     ))
     revision_of_visual = bool(
@@ -304,6 +305,7 @@ def _detect_contextual_image_edit(text: str) -> bool:
     # operations so this contextual rule does not hijack unrelated work.
     implicit_target_edit = bool(
         _IMAGE_EDIT_ACTION_RE.search(low)
+        and visual_target
         and not _has_independent_nonvisual_artifact_request(low)
         and not re.search(r"\b(?:истори\w*|диалог\w*|памят\w*|сообщен\w*|аккаунт\w*|профил\w*|подписк\w*|таблиц\w*|диаграмм\w*|график\w*|код\w*|скрипт\w*|файл\w*|документ\w*|отчет\w*|отч[её]т\w*|презентац\w*|раздел\w*|параграф\w*|строк\w*|формул\w*|уравнен\w*|расчет\w*|расч[её]т\w*|решени\w*|ответ\w*|объяснен\w*|перевод\w*|спис\w*|план\w*|конспект\w*|резюме\w*|сводк\w*|сравнен\w*|информац\w*)\b", low, re.IGNORECASE)
     )
@@ -665,7 +667,7 @@ def _is_explicit_visual_revision_request(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)"
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|рисун\w*|изображени\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b)"
     if not re.search(image_noun, low, re.IGNORECASE):
         return False
     direct_edit = bool(re.search(
@@ -713,7 +715,7 @@ def _has_affirmative_visual_instruction(text: str) -> bool:
     if _is_explicit_visual_revision_request(low):
         return True
 
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     negated_prefix = re.compile(
         r"(?:\bне|\bни|\bникогда|\bnever|\bnot|\bdon't|\bdo\s+not|\bdidn't|\bdoesn't|"
         r"\b(?:i\s+)?(?:did\s+not|didn't)\s+ask\s+you\s+to|"
@@ -867,7 +869,7 @@ def _is_visual_capability_question(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     if not re.search(image_noun, low, re.IGNORECASE):
         return False
     # If a concrete present-turn action is expressed, let the edit/generation path
@@ -913,7 +915,7 @@ def _is_image_discussion_without_new_visual_action(text: str) -> bool:
         # A single image-related item must not turn an unrelated numbered list into
         # an image continuation. Apply the detector to each semantic item alone.
         return all(_is_image_discussion_without_new_visual_action(item) for item in inline_items)
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисунк\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     visual_overlay_noun = bool(re.search(r"(?:стрелк\w*|указател\w*|маркер\w*|подсветк\w*|обводк\w*|callout\w*|pointer|arrow|marker|highlight)", low, re.IGNORECASE))
     visual_feedback_marker = bool(re.search(
         r"(?:лишн\w*|не\s+надо\s+было|не\s+должн\w*\s+был\w*|"
@@ -1068,7 +1070,7 @@ def _detect_image_modification(text: str) -> bool:
     # previous, or demonstratively selected). Possessives such as "его фотку"
     # identify the subject, not a source file. This prevents a new portrait request
     # from being converted into "please send me a photo to edit".
-    image_noun_for_creation = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b)"
+    image_noun_for_creation = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|рисун\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b|\bdrawing\b)"
     create_action_for_image = r"(?:нарис\w*|созда\w*|сгенерир\w*|изобраз\w*|draw|create|generate|make)"
     creates_image_object = bool(re.search(
         rf"(?<![\w\u0080-\uffff]){create_action_for_image}\b.{{0,100}}{image_noun_for_creation}",
@@ -1136,7 +1138,7 @@ def _detect_image_modification(text: str) -> bool:
     if explicit_new_creation and (correction_rejects_edit or correction_explicitly_requests_new_image):
         return False
 
-    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисун\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
     create_action = r"(?:нарис\w*|изобраз\w*|созда\w*|сгенерир\w*|\bdraw\b|\bcreate\b|\bgenerate\b)"
     edit_action = r"(?:добав\w*|дорис\w*|нанес\w*|постав\w*|размест\w*|помест\w*|убер\w*|удал\w*|замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|укаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*|\b(?:add|insert|remove|erase|replace|change|edit|modify|retouch|improve|redraw)\b)"
     generic_canvas_creation = bool(re.search(
@@ -1162,7 +1164,7 @@ def _detect_image_modification(text: str) -> bool:
         r"замен\w*|измен\w*|отредактир\w*|обработ\w*|улучш\w*|осветл\w*|затемн\w*|перекрас\w*|"
         r"нарис\w*|укаж\w*|покаж\w*|помет\w*|отмет\w*|выдел\w*|обвед\w*|подсвет\w*|передел\w*|исправ\w*|перерис\w*)"
     )
-    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисунк\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
+    image_target = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|изображени\w*|иллюстрац\w*|рисун\w*|снимк\w*|канистр\w*|этикетк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b|\bcanister\b|\blabel\b)"
     # Explicit image target can appear after an action ("нарисуй на фото") or
     # before it ("на фотографии дорисуй"). Keep this phrase-aware rather than
     # treating every occurrence of "draw" or "photo" as editing.
@@ -1210,7 +1212,7 @@ def _detect_image_generation_request(text: str) -> bool:
         return True
 
     action = r"(?:draw|show|display|send|give|provide|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|дай\w*|выдай\w*|предостав\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
-    image_noun = r"(?:picture|image|illustration|photo|картинк\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
+    image_noun = r"(?:picture|image|illustration|drawing|photo|картинк\w*|рисун\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -1403,7 +1405,7 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         ("link", r"(?:\bссылк\w*\b|\burl\b|\blinks?\b|\bгиперссылк\w*\b)"),
         ("copy", r"(?:\bcopyable\s+text\b|\bcopy\s+block\b|\bкопируем\w*\s+текст\w*\b|\bкопи(?:руем\w*)?\s+блок\w*\b|\bтекст\s+из\s+(?:прошл\w*|предыдущ\w*|истори\w*)|\bтекст\s+котор\w*\s+(?:ты|мы)\s+(?:создал\w*|сделал\w*|написал\w*))"),
         ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
-        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bснимк\w*\b|\bкартинк\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
+        ("image", r"(?:\bфото\w*\b|\bфотк\w*\b|\bфотограф\w*\b|\bснимк\w*\b|\bкартинк\w*\b|\bрисун\w*\b|\bизображен\w*\b|\bimage\b|\bphoto\b|\bpicture\b)"),
         ("file", r"(?:\bфайл\w*\b|\bдокумент\w*\b|\bfile\b|\bdocument\b)"),
     )
     kind = next((name for name, pattern in artifact_patterns if re.search(pattern, low, re.IGNORECASE)), "")
@@ -1411,7 +1413,7 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         return ""
     # Explicitly creating a new/another artifact is not a saved-artifact edit.
     fresh_artifact_request = bool(re.search(
-        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|фото\w*)\b|"
+        r"(?:\bнов\w*\s+(?:график\w*|диаграмм\w*|таблиц\w*|формул\w*|схем\w*|код\w*|скрипт\w*|файл\w*|документ\w*|картинк\w*|рисун\w*|фото\w*)\b|"
         r"\bnew\s+(?:graph|chart|plot|table|formula|diagram|code|script|file|document|image|photo|picture)\b|"
         r"\b(?:созда\w*|постро\w*|сдела\w*|build|create|make|generate)\b.{0,28}\b(?:нов\w*|new|another)\b)",
         low, re.IGNORECASE,
@@ -1420,7 +1422,7 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
         return ""
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
-        r"редакт\w*|улучш\w*|замен\w*|убер\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
+        r"редакт\w*|улучш\w*|замен\w*|убер\w*|дорис\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
         r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
@@ -2390,6 +2392,8 @@ _CONTEXT_SIGNATURE_DISCOURSE_ROOTS = (
     "wonderful", "excellent", "awesome", "good", "wrong", "misunderstood",
     "understand", "disagree", "agree", "hate", "frustrat", "annoy", "irritat",
     "revise", "rewrite", "improve", "redo", "fix", "correct", "mean", "what",
+    "неуда", "неудал", "удало", "неполуч", "несработ", "заверш", "провал",
+    "нарис", "сгенер", "изобраз", "дорис", "отрис",
 )
 
 _PARTICIPANT_SPEAKER_WORDS = {
@@ -2998,6 +3002,9 @@ def _infer_dialogue_act_profile(
         "друго", "смысл", "так", "это", "получ", "непон", "понял", "поняла", "нрав",
         "ужас", "бесит", "раздраж", "разочар", "передел", "перепиш", "исправ", "улучш",
         "поправ", "ошиб", "мимо", "передум", "неверн", "неправил", "именн", "прави",
+        # Failure/status predicates refer to an existing result, not a new subject.
+        "неуда", "неудал", "удало", "неполуч", "несработ", "сбо", "заверш", "провал",
+        "нарис", "сгенер", "изобраз", "дорис", "отрис",
         "согла", "опять", "лучше",
     )
     meaningful_subjects = [
@@ -4413,6 +4420,40 @@ def interpret_request_in_context(
         or signals.get("previous_answer_reference")
         or signals.get("active_branch_repair")
     )
+    # When April explicitly asks the user to clarify an underspecified request,
+    # a direct "я о/об ..." answer is a continuation of that invitation even
+    # when the clarified object does not lexically overlap the clarification text.
+    assistant_requested_clarification = bool(
+        previous_answer and re.search(
+            r"(?:уточн\w*|что\s+именно|какой\s+именно|какая\s+именно|"
+            r"о\s+каком\s+(?:опыт\w*|предмет\w*|вопрос\w*|объект\w*)|"
+            r"пришл\w*.{0,50}(?:изображени\w*|фото\w*|картинк\w*)|"
+            r"please\s+clarify|what\s+exactly|which\s+one)",
+            previous_answer, re.IGNORECASE | re.DOTALL,
+        )
+    )
+    clarification_pointer_reply = bool(
+        assistant_requested_clarification
+        and re.match(
+            r"^\s*(?:(?:ну|нет|да)\s*[,;:]?\s*)?"
+            r"(?:я\s+)?(?:именно\s+)?(?:о|об|обо|про|насч[её]т|"
+            r"говорю\s+(?:о|об|про)|имею\s+в\s+виду)\s+\S+",
+            low, re.IGNORECASE,
+        )
+        and not profile.get("explicit_topic_switch")
+        and not profile.get("history_request")
+    )
+    # A clarification answer can also be an imperative with a concrete object:
+    # "дорисуй ему красные усы" after "что именно изменить?". Bind it only when
+    # the previous assistant message actually requested clarification and the
+    # current turn contains both a recognized edit action and an explicit target.
+    clarification_visual_action_reply = bool(
+        assistant_requested_clarification
+        and _IMAGE_EDIT_ACTION_RE.search(low)
+        and _IMAGE_EDIT_TARGET_RE.search(low)
+        and not profile.get("explicit_topic_switch")
+        and not profile.get("history_request")
+    )
     # Audit whether the immediately preceding user request produced its declared
     # image deliverable. A blank GalleryBlock is an attempted render, not a saved
     # asset. When the output contract is still open, short follow-ups must repair
@@ -4495,13 +4536,21 @@ def interpret_request_in_context(
         and previous_artifact_delivery_requested
         and previous_artifact_families
     )
+    # A clearly requested *new* visual artifact is not a retry of the previous
+    # image contract, even when the previous assistant answer asked a clarifying
+    # question. Keep that explicit boundary ahead of the latest-branch fallback.
+    explicit_new_visual_artifact = bool(re.search(
+        r"(?:\bнов\w*\s+(?:фото\w*|фотограф\w*|рисун\w*|картинк\w*|изображен\w*|иллюстрац\w*|портрет\w*)"
+        r"|\b(?:еще\s+один|еще\s+одну|ещ[её]\s+один|ещ[её]\s+одну|another|new)\s+(?:photo|picture|image|drawing|portrait)\b)",
+        low, re.IGNORECASE,
+    ))
     # An unresolved image deliverable only owns a follow-up when the new turn is
     # itself an image reference/deliverable or is a genuinely underspecified
-    # pointer (for example, "Где?"). A separate content request such as
-    # "Расскажи про Менделеева всё" must remain a new text task even if an older
-    # image request in the same conversation was not fulfilled.
+    # pointer (for example, "Где?"). A clearly requested new artifact must remain
+    # independent even if an older image request in this conversation is pending.
     image_contract_followup = bool(
-        _detect_image_generation_request(source)
+        not explicit_new_visual_artifact
+        and (_detect_image_generation_request(source)
         or _bare_image_object_request(source)
         or re.search(
             r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b)",
@@ -4510,12 +4559,14 @@ def interpret_request_in_context(
         or (
             len(current_tokens_list) <= 2
             and bool(re.search(r"\b(?:где|куда|ну|так|что|она|он|оно|их|его|ее|её|этот|эта|это|тот|та|the|where|it|this|that)\b", low, re.IGNORECASE))
-        )
+        ))
     )
     # A named subject is not automatically a branch switch. First test whether
-    # it belongs to the latest exchange; only a semantically explicit switch is
-    # allowed to bypass that primary discourse vector.
-    explicit_switch = bool(profile.get("explicit_topic_switch"))
+    # it belongs to the latest exchange; only a semantically explicit switch or
+    # an explicit request for a new visual artifact bypasses that primary vector.
+    explicit_switch = bool(
+        profile.get("explicit_topic_switch") or explicit_new_visual_artifact
+    )
 
     # A complaint about April repeating/restating history mentions the same words
     # as a recall request, but its communicative act is correction of the last answer.
@@ -4658,6 +4709,23 @@ def interpret_request_in_context(
         or numeric_anchors
         or (len(current_content) >= 2 and not (gratitude or positive or acknowledgement or disagreement))
     )
+    # Predicate-only failure questions ("Почему не удалось?", "Why did it fail?")
+    # do not identify a new subject. Resolve them against the immediately preceding
+    # answer instead of searching the archive for a random row containing a failure
+    # word. The anchored, short form leaves complete questions with their own
+    # object/topic on the normal new-request path.
+    failure_status_followup = bool(
+        previous_answer
+        and re.match(
+            r"^\s*(?:а\s+)?(?:почему|отчего|как\s+так|why\s+did)\s+"
+            r"(?:не\s*)?(?:удал\w*|получ\w*|сработ\w*|выш\w*|"
+            r"заверш\w*|провал\w*|неудач\w*|fail\w*|work\w*)"
+            r"\s*[?!.,;:]*\s*$",
+            low, re.IGNORECASE,
+        )
+        and not explicit_switch
+        and not profile.get("history_request")
+    )
     short_social_only = bool(
         (gratitude or positive or acknowledgement or disagreement or dissatisfaction)
         and not output_forms and not numeric_anchors
@@ -4743,11 +4811,14 @@ def interpret_request_in_context(
             or (unfulfilled_artifact_contract and artifact_status_followup and not artifact_history_reactivation)
             or short_social_only
             or short_continuation_action
+            or failure_status_followup
             or assistant_repetition_feedback
             or assistant_output_feedback
             or (unfulfilled_image_contract and image_contract_followup)
             or contextual_visual_revision
             or visual_continuation_link
+            or clarification_pointer_reply
+            or clarification_visual_action_reply
             or latest_exchange_subject_match
             or linked_by_user_turn
             or linked_by_answer
@@ -4773,10 +4844,12 @@ def interpret_request_in_context(
             "artifact_delivery_status_followup" if artifact_delivery_followup and latest_exchange_link else
             "social_or_pragmatic_reaction" if short_social_only else
             "short_continuation_action" if short_continuation_action else
+            "failure_status_question_about_latest_result" if failure_status_followup and latest_exchange_link else
             "semantic_link_to_previous_user_turn" if linked_by_user_turn else
             "semantic_link_to_previous_april_answer" if linked_by_answer else
             "explicit_april_reference_to_latest_exchange" if latest_exchange_link and direct_april_reference else
             "visual_continuation_to_prior_subject" if visual_continuation_link and latest_exchange_link else
+            "answer_to_assistant_clarification" if (clarification_pointer_reply or clarification_visual_action_reply) and latest_exchange_link else
             "contextual_reference_validated_against_latest_exchange" if latest_exchange_link else
             "self_contained_or_unmatched_request"
         ),
@@ -4791,6 +4864,10 @@ def interpret_request_in_context(
         "unfulfilled_image_contract": bool(unfulfilled_image_contract),
         "previous_visual_output": bool(previous_visual_output),
         "contextual_visual_revision": bool(contextual_visual_revision),
+        "clarification_pointer_reply": bool(clarification_pointer_reply),
+        "clarification_visual_action_reply": bool(clarification_visual_action_reply),
+        "assistant_requested_clarification": bool(assistant_requested_clarification),
+        "failure_status_followup": bool(failure_status_followup),
         "previous_artifact_families": sorted(previous_artifact_families),
         "previous_current_output_families": sorted(previous_current_output_families),
         "previous_requested_artifact_families": sorted(artifact_contract_requested),
@@ -7139,12 +7216,26 @@ def build_interpretation(
         and _text(item.get("asset_role")).lower() in {"april_output", "assistant_output", "generated"}
         for item in restored_assets if isinstance(item, dict)
     )
-    explicit_edit_source_reference = bool(re.search(
-        r"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+(?:фото|фотограф\w*|фотк\w*|картинк\w*|изображени\w*)|"
-        r"\b(?:на\s+ней|на\s+нем|в\s+ней|в\s+нем|по\s+ней|по\s+нему)\b|"
-        r"(?:созданн\w*|сгенерированн\w*)\s+тобой\s+(?:фото|картинк\w*|изображени\w*))",
-        normalized_visual_request, re.IGNORECASE,
-    ))
+    explicit_drawing_pointer = bool(
+        re.match(
+            r"^\s*(?:(?:ну|нет|да)\s*[,;:]?\s*)?(?:я\s+)?(?:именно\s+)?"
+            r"(?:о|об|обо|про)\s+(?:этом\s+)?рисун\w*",
+            normalized_visual_request, re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:дорис\w*|добав\w*|измен\w*|поправ\w*|перерис\w*|"
+            r"отредактир\w*|modify|edit|redraw|add|change)",
+            normalized_visual_request, re.IGNORECASE,
+        )
+    )
+    explicit_edit_source_reference = bool(
+        explicit_drawing_pointer or re.search(
+            r"(?:\b(?:на|в|по|с)\s+(?:эт\w*|мо\w*|прикрепл\w*|загруженн\w*|присланн\w*|предыдущ\w*)\s+(?:фото|фотограф\w*|фотк\w*|картинк\w*|рисун\w*|изображени\w*)|"
+            r"\b(?:на\s+ней|на\s+нем|в\s+ней|в\s+нем|по\s+ней|по\s+нему)\b|"
+            r"(?:созданн\w*|сгенерированн\w*)\s+тобой\s+(?:фото|картинк\w*|рисун\w*|изображени\w*))",
+            normalized_visual_request, re.IGNORECASE,
+        )
+    )
     current_creation_request = _detect_image_generation_request(normalized_visual_request)
     image_edit_requested = bool(
         (explicit_image_edit or contextual_image_edit)
