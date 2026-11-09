@@ -25,6 +25,7 @@ from storage import get_conn, is_authenticated_user as _is_authenticated_user, n
 from blocks.Premium_interpretation_identity import (
     extract_temporal_window, extract_topic_count_bounds, intersect_retention_window,
     _is_image_discussion_without_new_visual_action, _detect_image_modification,
+    _detect_contextual_image_edit,
     _is_explicit_visual_revision_request, _has_independent_nonvisual_artifact_request,
     interpret_request_in_context,
 )
@@ -2659,42 +2660,93 @@ def _is_failed_provider_row(row: dict[str, Any]) -> bool:
 
 
 def _row_modalities(row: dict[str, Any]) -> set[str]:
-    """Recover persisted input modalities without storing a second memory copy."""
+    """Recover both persisted input and assistant-output modalities from one pair."""
     result: set[str] = set()
     structured = _parse_json(row.get("structured_request"))
-    if not structured:
-        return result
-    interpretation = structured.get("intent") if isinstance(structured.get("intent"), dict) else {}
-    input_data = interpretation.get("input") if isinstance(interpretation, dict) else {}
-    if isinstance(input_data, dict):
-        for modality in input_data.get("modalities") or []:
-            if str(modality):
-                result.add(str(modality).lower())
-        if input_data.get("has_image"):
-            result.add("image")
-        if input_data.get("has_file"):
-            result.add("file")
-        if input_data.get("has_voice"):
-            result.add("voice")
-    for item in structured.get("attachments") or []:
-        if isinstance(item, dict):
-            kind = _text(item.get("kind") or item.get("source_type")).lower()
-            if kind:
-                result.add("text_file" if kind == "text_file" else kind)
-    visual = structured.get("visual_context")
-    if isinstance(visual, dict) and visual.get("has_input_images"):
-        result.add("image")
-    if structured.get("file_contents"):
-        result.add("file")
-    attachment_index = structured.get("attachment_index")
-    if isinstance(attachment_index, list):
-        for item in attachment_index:
+    if isinstance(structured, dict):
+        interpretation = structured.get("intent") if isinstance(structured.get("intent"), dict) else {}
+        input_data = interpretation.get("input") if isinstance(interpretation, dict) else {}
+        if isinstance(input_data, dict):
+            for modality in input_data.get("modalities") or []:
+                if str(modality):
+                    result.add(str(modality).lower())
+            if input_data.get("has_image"):
+                result.add("image")
+            if input_data.get("has_file"):
+                result.add("file")
+            if input_data.get("has_voice"):
+                result.add("voice")
+        for item in structured.get("attachments") or []:
             if isinstance(item, dict):
-                kind = _text(item.get("kind")).lower()
-                if kind in {"file", "text_file"}:
-                    result.add("file")
-                elif kind == "image":
-                    result.add("image")
+                kind = _text(item.get("kind") or item.get("source_type")).lower()
+                if kind:
+                    result.add("text_file" if kind == "text_file" else kind)
+        visual = structured.get("visual_context")
+        if isinstance(visual, dict) and visual.get("has_input_images"):
+            result.add("image")
+        if structured.get("file_contents"):
+            result.add("file")
+        attachment_index = structured.get("attachment_index")
+        if isinstance(attachment_index, list):
+            for item in attachment_index:
+                if isinstance(item, dict):
+                    kind = _text(item.get("kind")).lower()
+                    if kind in {"file", "text_file"}:
+                        result.add("file")
+                    elif kind == "image":
+                        result.add("image")
+
+    # Assistant-generated images live in structured_response, not in the
+    # original user-input attachment index. They must still be discoverable as
+    # editable sources in the same authenticated topic/branch.
+    response = _parse_json(row.get("structured_response"))
+    response_meta = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    memory_record = response.get("dialogue_memory_record") or response_meta.get("dialogue_memory_record") or {}
+    if not isinstance(memory_record, dict):
+        memory_record = {}
+
+    def _contains_output_image(value: Any, depth: int = 0) -> bool:
+        if depth > 8:
+            return False
+        if isinstance(value, list):
+            return any(_contains_output_image(item, depth + 1) for item in value[:120])
+        if not isinstance(value, dict):
+            return False
+        tags = {
+            _text(value.get(key)).lower().replace("-", "_").replace(" ", "_")
+            for key in ("kind", "type", "artifact_type", "output_type", "artifact_family", "family")
+            if _text(value.get(key))
+        }
+        image_tags = {
+            "image", "generated_image", "image_edit",
+            "gallery", "image_gallery", "galleryblock", "imagerenderer", "screenshotblock",
+            "photo", "picture", "visual_image",
+        }
+        if tags.intersection(image_tags):
+            return True
+        mime = _text(value.get("mime_type") or value.get("content_type")).lower()
+        if mime.startswith("image/"):
+            return True
+        renderer = _text(value.get("renderer") or value.get("viewer")).lower().replace("_", "").replace("-", "")
+        if renderer in {"galleryblock", "imagerenderer", "screenshotblock"}:
+            return True
+        # Only typed image payload keys count; ordinary prose mentioning a photo
+        # must not turn a text-only answer into an image source.
+        if any(value.get(key) not in (None, "", [], {}) for key in (
+            "image_url", "image_data_uri", "image_base64", "asset_ref", "asset_id", "storage_key"
+        )):
+            return True
+        return any(_contains_output_image(child, depth + 1) for child in value.values() if isinstance(child, (dict, list)))
+
+    for owner in (response, memory_record):
+        if not isinstance(owner, dict):
+            continue
+        for key in ("render_blocks", "artifacts", "rendered_artifacts", "outputs", "asset_refs", "asset_payloads", "assets"):
+            if _contains_output_image(owner.get(key)):
+                result.add("image")
+                break
+        if "image" in result:
+            break
     return result
 
 
@@ -5031,6 +5083,12 @@ def _explicit_historical_artifact_reference(query: str) -> bool:
 
 def _row_has_value_bearing_artifact(row: dict[str, Any], kind: str) -> bool:
     """Check the persisted canonical response, not text mentions of an artifact."""
+    # Generated image bytes are persisted in the existing durable asset payload
+    # attached to the response. They count as a value-bearing artifact even when
+    # a legacy renderer envelope does not expose the nested PNG field to the
+    # generic protected-structure extractor.
+    if _text(kind).lower() == "image" and _row_has_saved_image_output(row):
+        return True
     protected = _protected_structured_data_from_row(row)
     items = protected.get("items") if isinstance(protected, dict) else None
     if not isinstance(items, list):
@@ -5127,7 +5185,8 @@ def _row_has_saved_image_output(row: dict[str, Any]) -> bool:
                     item.get("artifact_type") or item.get("type") or item.get("kind")
                     or signal.get("artifact_type") or signal.get("type") or ""
                 ).strip().lower()
-                if kind in {"image", "gallery", "generated_image", "image_edit"}:
+                renderer = _text(item.get("renderer") or item.get("viewer")).lower().replace("_", "").replace("-", "").replace(" ", "")
+                if kind in {"image", "gallery", "generated_image", "image_edit"} or renderer in {"galleryblock", "imagerenderer", "screenshotblock"}:
                     # The saved response contract represents an output. Explicitly
                     # input-only asset records are handled below and never qualify.
                     return True
@@ -6791,10 +6850,12 @@ def search_dialogue_context(
     # does not ask to edit that artifact again. Voice transcripts are text turns,
     # so the semantic continuation route (below) should preserve the active branch
     # without the expensive saved-image recovery lane.
+    contextual_image_edit = bool(_detect_contextual_image_edit(query))
     if (
         retrospective_image_discussion
         and _text(explicit_artifact_kind).lower() == "image"
         and not explicit_historical_artifact_request
+        and not contextual_image_edit
     ):
         explicit_artifact_kind = ""
     # A request can be both a history lookup and an explicit artifact retrieval
@@ -6993,10 +7054,13 @@ def search_dialogue_context(
     # Treat that as an image retrieval operation so continuation narrowing does not
     # collapse the search to the latest unrelated generated render in the hot branch.
     image_edit_reference = bool(
-        not retrospective_image_discussion
-        and (
-            re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
-            or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+        contextual_image_edit
+        or (
+            not retrospective_image_discussion
+            and (
+                re.search(rf"\b{image_edit_action_pattern}\b.{{0,140}}?{image_reference_pattern}", low_query_for_assets, re.I | re.S)
+                or re.search(rf"{image_reference_pattern}.{{0,140}}?\b{image_edit_action_pattern}\b", low_query_for_assets, re.I | re.S)
+            )
         )
     )
     explicit_new_visual = bool(re.search(
@@ -9576,6 +9640,7 @@ def search_dialogue_context(
     # was that NEW_INFORMATION overrode semantic continuity and returned zero pairs.
     artifact_source_row: dict[str, Any] | None = None
     artifact_source_candidate: dict[str, Any] | None = None
+    artifact_recovery: dict[str, Any] = {}
     historical_artifact_reactivation = False
     explicit_historical_artifact_reference = _explicit_historical_artifact_reference(query)
     artifact_search_scope: list[dict[str, Any]] = []
@@ -9744,6 +9809,13 @@ def search_dialogue_context(
             else:
                 artifact_options.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
             _, _, _, artifact_source_row, artifact_source_candidate = artifact_options[0]
+            artifact_recovery = {
+                "status": "historical_match" if not bool((artifact_source_candidate or {}).get("same_dialog")) else "active_dialogue_match",
+                "family": explicit_artifact_kind,
+                "source_message_id": _text(artifact_source_row.get("message_id")),
+                "topic_id": _text(artifact_source_row.get("topic_id")),
+                "branch_id": _text(artifact_source_row.get("branch_id")),
+            }
             source_id = _text(artifact_source_row.get("message_id"))
             # Recover user-entered values from the originating turn when it belongs
             # to the same topic; include at most one origin plus the exact artifact.
@@ -11081,13 +11153,7 @@ def search_dialogue_context(
         "contextual_history_match": contextual_history_match,
         "historical_artifact_reactivation": bool(historical_artifact_reactivation),
         "image_edit_reference": bool(image_edit_reference),
-        "artifact_recovery": ({
-            "status": "historical_match" if historical_artifact_reactivation else "active_dialogue_match",
-            "family": explicit_artifact_kind,
-            "source_message_id": _text(artifact_source_row.get("message_id")) if isinstance(artifact_source_row, dict) else "",
-            "topic_id": _text(artifact_source_row.get("topic_id")) if isinstance(artifact_source_row, dict) else "",
-            "branch_id": _text(artifact_source_row.get("branch_id")) if isinstance(artifact_source_row, dict) else "",
-        } if artifact_source_row else {}),
+        "artifact_recovery": deepcopy(artifact_recovery),
         "historical_topic_reactivated": bool(
             contextual_history_match and relation == "CONTINUE"
             and selected_for_context and branch_route_kind == "MATCHED_HISTORY"
