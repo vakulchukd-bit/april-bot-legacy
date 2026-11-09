@@ -6720,7 +6720,13 @@ def search_dialogue_context(
             has_image=has_image,
             has_file=has_file,
             has_voice=has_voice,
-            query_interpretation=query_interpretation,
+            # Re-run the latest-exchange precheck in the nested strict probe.
+            # The outer call's flag is local to that call; carrying it forward
+            # used to leave the recursive search without its latest row anchor.
+            query_interpretation={
+                key: value for key, value in query_interpretation.items()
+                if key != "_latest_exchange_pass_done"
+            },
             _hot_branch_only=True,
         )
         hot_result = _promote_grounded_recent_anaphoric_candidate(hot_result, query_interpretation)
@@ -6828,6 +6834,36 @@ def search_dialogue_context(
             all_rows = [dict(latest_exchange_row_precheck)]
         else:
             all_rows = []
+
+    # The first-stage latest exchange is authenticated evidence, not a search
+    # candidate that may be discarded by a later scope/filter operation. Keep it
+    # in the local candidate set even when a strict DB hydration returns an empty
+    # page (e.g. a rotated dialog id with a stable conversation id).
+    if isinstance(latest_exchange_row_precheck, dict):
+        latest_precheck_id = _text(latest_exchange_row_precheck.get("message_id"))
+        latest_precheck_dialog = _text(latest_exchange_row_precheck.get("dialog_id"))
+        latest_precheck_conversation = _text(latest_exchange_row_precheck.get("conversation_id"))
+        identity_matches = bool(
+            (dialog_id and latest_precheck_dialog == _text(dialog_id))
+            or (conversation_id and latest_precheck_conversation == _text(conversation_id))
+            or (not _text(dialog_id) and not _text(conversation_id))
+        )
+        if latest_precheck_id and identity_matches and not any(
+            _text(row.get("message_id")) == latest_precheck_id for row in all_rows
+        ):
+            preserved_latest = dict(latest_exchange_row_precheck)
+            preserved_latest["same_dialog"] = True
+            all_rows.append(preserved_latest)
+            all_rows.sort(key=lambda row: (
+                float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)
+            ))
+            _apr_timing_log(
+                "latest_exchange_anchor_preserved_after_scope_filter",
+                None,
+                message_key=_apr_diag_ref(latest_precheck_id),
+                dialog_match=bool(dialog_id and latest_precheck_dialog == _text(dialog_id)),
+                conversation_match=bool(conversation_id and latest_precheck_conversation == _text(conversation_id)),
+            )
     active_repair_rows: list[dict[str, Any]] = []
     if targeted_active_repair:
         same_dialog_rows = [row for row in all_rows if (
