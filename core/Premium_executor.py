@@ -69,7 +69,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v9_multimodal_full_answer_branch_repair"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v10_image_source_recovery"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -3509,10 +3509,23 @@ def _dialogue_image_source_candidates(dialogue_context: dict[str, Any]) -> list[
         modalities = set(source.get("row_modalities") or [])
         evidence = _text(source.get("attachment_evidence"))
         structured = source.get("protected_structured_data")
+        assistant_output = source.get("assistant_structured_output")
+        assistant_artifacts = source.get("assistant_artifact_index")
+        branch_artifacts = source.get("artifact_index")
+        output_evidence = " ".join(
+            _text(source.get(key)) for key in ("assistant_last_message", "april", "summary", "memory_summary")
+        )
+        output_evidence += " " + " ".join(
+            _text(item.get(key))
+            for collection in (assistant_artifacts, branch_artifacts, assistant_output)
+            if isinstance(collection, list)
+            for item in collection if isinstance(item, dict)
+            for key in ("kind", "type", "artifact_type", "output_type", "artifact_family", "mime_type", "renderer", "viewer", "filename", "prompt", "caption", "alt", "summary", "description")
+        )
         has_image = "image" in modalities or bool(re.search(
             r"(?i)(?:image[/_-](?:png|jpe?g|webp)|\.(?:png|jpe?g|webp)\b|\b(?:image|photo|picture|фото|фотограф|изображени|картинк)\b)",
             evidence,
-        )) or contains_image_artifact(structured)
+        )) or contains_image_artifact(structured) or contains_image_artifact(assistant_artifacts) or contains_image_artifact(branch_artifacts) or contains_image_artifact(assistant_output)
         if not has_image:
             continue
         item = dict(source)
@@ -3560,10 +3573,23 @@ def _select_active_image_candidate(
             created_at = 0.0
         if created_at and (now - created_at > 24 * 60 * 60 or created_at > now + 60):
             continue
+        artifact_descriptors = []
+        for collection_key in ("assistant_artifact_index", "artifact_index", "assistant_structured_output"):
+            collection = candidate.get(collection_key)
+            if isinstance(collection, list):
+                for descriptor in collection[:24]:
+                    if isinstance(descriptor, dict):
+                        artifact_descriptors.append(" ".join(
+                            _text(descriptor.get(key)) for key in (
+                                "kind", "type", "artifact_type", "output_type", "artifact_family",
+                                "filename", "prompt", "caption", "alt", "summary", "description",
+                            )
+                        ))
         evidence = " ".join(
             _text(candidate.get(key))
-            for key in ("topic", "user", "april", "attachment_evidence", "memory_summary")
-        ).lower().replace("ё", "е")
+            for key in ("topic", "user", "april", "assistant_last_message", "attachment_evidence", "memory_summary")
+        ) + " " + " ".join(artifact_descriptors)
+        evidence = evidence.lower().replace("ё", "е")
         hits = sum(1 for term in (source_terms or []) if term and term in evidence)
         evidence_token_set = set(_subject_tokens(evidence))
         semantic_source_match = _subject_overlap(source_token_set, evidence_token_set) if source_token_set and evidence_token_set else 0.0
@@ -3974,6 +4000,22 @@ def _restore_selected_assets(
         for item in (visual_context or [])
     )
     if has_current_asset and current_has_user_upload and not explicit_asset_reference and not image_retrieval:
+        # The user-uploaded image is already in visual_context from bot.py. Keep it
+        # intact for the Executor's _select_image_edit_source rather than replacing
+        # it with a recalled assistant output from history.
+        if referential_edit:
+            _apr_timing_log(
+                "current_upload_preserved_as_image_edit_source",
+                None,
+                visual_items=len(visual_context),
+                current_user_uploads=sum(
+                    1 for item in visual_context
+                    if isinstance(item, dict)
+                    and not item.get("recalled_from_memory")
+                    and _text(item.get("asset_role") or "user_input").lower() not in {"april_output", "assistant_output", "generated"}
+                    and _decode_image_source_item(item)
+                ),
+            )
         return visual_context, attachments, file_inputs, file_contents, []
     if has_current_asset and not explicit_asset_reference and not referential_edit and not image_retrieval:
         return visual_context, attachments, file_inputs, file_contents, []
@@ -4227,6 +4269,8 @@ def _restore_selected_assets(
             relation_for_asset = _text(dialogue_context.get("relation")).upper()
             should_use_saved_output_as_edit_source = bool(
                 _looks_like_referential_image_edit(current_request)
+                or dialogue_context.get("image_edit_reference")
+                or _text(artifact_recovery.get("family")).lower() == "image"
                 or (
                     relation_for_asset == "CONTINUE"
                     and (
