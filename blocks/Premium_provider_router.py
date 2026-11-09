@@ -57,7 +57,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v7_multireading_scene_preservation"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v10_latest_answer_action_followthrough"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -118,11 +118,20 @@ PRE-RESPONSE SELF-AUDIT AND TASK SHAPING:
 - Before drafting, compare the exact current request with April's immediately previous answer and the selected active branch. Classify each requested task as new information, continuation, correction, expansion, missing-item recovery, or artifact revision; follow REQUEST_SEQUENCE task count and order rather than guessing a count from topic nouns.
 - When the user is dissatisfied or asks to correct/complete the prior answer, identify the specific omission or error from the prior answer and the current request, repair it directly, and avoid asking for clarification when the target is recoverable from the selected branch. Do not repeat completed material.
 - Acknowledging a correction is not the repair. Preserve every previously correct section and every still-valid artifact, change only the part the user corrected, then return the actual corrected/expanded answer and synchronized render blocks. Never replace a substantive response with an apology, a one-line status, or a generic promise to do better.
+- LATEST-ANSWER INVITATION FOLLOW-THROUGH: if the immediately preceding April answer offered a concrete action and the user accepts it (including a brief affirmative or a short inflected instruction), perform that offered action on the selected source artifact and keep its topic/branch/revision lineage. An acceptance is not merely conversational acknowledgement when it clearly authorizes the action. If no concrete offer or valid source artifact exists, do not invent one.
 - **AMBIGUITY PRESERVATION (Premium):** interpret the complete current request against the exact latest exchange and selected branch. If two or more materially plausible readings remain and they lead to meaningfully different answers or artifacts, do not silently choose one, discard the other, or collapse the response to one familiar entity. Present each plausible reading as a clearly named, self-contained section in the same answer, preserve all requested facts and deliverables for each, and let the user correct/select a reading afterward. Do not invent implausible alternatives; do not ask a blocking clarification when both readings can be usefully answered. Ask one concise question only when a missing detail makes a safe or meaningful response impossible. Independent readings are cumulative sections, not mutually exclusive substitutions.
 - When an ambiguous request asks for a visual result and the readings require different subjects, keep the prose sections separate and return separate `image_specs` (one concrete prompt per materially distinct visual subject) so the executor can deliver distinct images in the same GalleryBlock/SceneContract. Never merge unrelated identities into one composite image or use a text-only status in place of a requested visual. Keep all non-image renderers and citations attached to the section they support.
 - Adaptive visuals are optional: emit a renderer only when its concrete payload adds non-redundant explanatory information to this request. A topical word alone is never a reason to create a diagram, image, table, formula, or local-site/community route. Keep image generation behind the interpreted image/generator signal.
 - When a formula is requested, a formula render block must contain at least one actual non-empty mathematical expression in `latex`, `formula`, or `equation`. A title, caption, artifact shell, empty list, or prose explanation is not a formula; do not claim the formula was supplied unless the expression is present.
 - Every renderer placed within a narrative must carry an exact, unique `anchor_text` copied from the answer after which it belongs. Keep the prose before and after the renderer as separate narrative fragments when appropriate. If no grounded anchor exists, do not insert the renderer into an unrelated paragraph or manufacture a placeholder.
+
+SELECTED ARTIFACT REVISION AND ACTION FOLLOW-THROUGH:
+- When SELECTED_SOURCE_ARTIFACT is present, it is the exact value-bearing artifact selected from this authenticated topic/branch. Treat it as the source object, not a vague description or a cue to choose another image/document from the chat.
+- Preserve its artifact family: a diagram remains a diagram, a graph remains a graph, a table remains a table, code remains code, and a raster image remains an image. Never substitute a sibling artifact merely because it is newer or visually similar.
+- For operation=revise, apply the user's current instruction to the selected source and return a new concrete render block of that same family. For operation=complete_pending, finish the previously requested artifact output using the same source and branch. A prose description alone is not completion.
+- Preserve source_message_id, topic_id, branch_id, topic_origin_message_id and revision_chain_id in the resulting artifact metadata. Do not move the revision into a new unrelated topic.
+- For diagrams, return real drawable SVG/elements/nodes/edges/geometry. An SVG wrapper with no actual geometry, or a title-only shell, is not a valid diagram. For tables/graphs/code, return concrete data/source values, not empty shells.
+- If the source artifact is absent or invalid, say exactly what is unavailable. Do not claim a successful change and do not ask the user to re-upload a saved artifact already present in SELECTED_SOURCE_ARTIFACT.
 
 CURRENT-TURN SEMANTIC CONSISTENCY:
 - Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
@@ -2659,6 +2668,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "HISTORY_TOPIC_MINIMUM": minimum_topic_count if is_history else 0,
             "HISTORY_TIME_WINDOW": (data.get("HISTORY_TIME_WINDOW") or {}) if is_history else {},
             "DIALOGUE_ANCHOR": anchor_min,
+            "SELECTED_SOURCE_ARTIFACT": data.get("SELECTED_SOURCE_ARTIFACT") or {},
             "CONTINUATION_CONTEXT": pairs_min,
             "PROTECTED_STRUCTURED_DATA": data.get("PROTECTED_STRUCTURED_DATA") or [],
             "PROTECTED_CURRENT_INPUT": data.get("PROTECTED_CURRENT_INPUT") or {},
@@ -3120,7 +3130,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
-            "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
+            "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS", "SELECTED_SOURCE_ARTIFACT",
         )
         emergency = {key: minimal[key] for key in essential_keys if key in minimal}
 
@@ -3327,6 +3337,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "Room IDs and room knowledge are domain/provenance metadata, never renderer triggers. "
             "Preserve every REQUEST_SEQUENCE step and all protected source values. "
             + emergency_task_guidance + " "
+            + "When SELECTED_SOURCE_ARTIFACT exists, apply CURRENT_REQUEST to that exact selected artifact and return a concrete renderer of the same family; never substitute another topic's artifact or claim a prose-only revision is complete. Preserve source/topic/branch/revision IDs. "
             + "Use Markdown headings and short nested subsections for substantive multi-part answers. Preserve every materially plausible interpretation as a separate complete section; never silently collapse ambiguity into one subject. "
             + "When distinct visual interpretations are requested, return a separate image_specs item for each; never merge unrelated subjects into one image. "
             + "A correction must repair the selected answer while retaining all still-correct sections and artifacts; never replace a substantive answer with an apology or one-line image status. "
@@ -3461,6 +3472,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 pairs.append({k: v for k, v in row.items() if v not in (None, "", [], {})})
             if pairs:
                 ultra["CONTINUATION_CONTEXT"] = pairs
+
+        selected_artifact = source.get("SELECTED_SOURCE_ARTIFACT")
+        if isinstance(selected_artifact, dict) and selected_artifact:
+            source_block = selected_artifact.get("source_block") if isinstance(selected_artifact.get("source_block"), dict) else {}
+            ultra["SELECTED_SOURCE_ARTIFACT"] = {
+                "family": _text(selected_artifact.get("family"))[:24],
+                "operation": _text(selected_artifact.get("operation"))[:32],
+                "source_message_id": _text(selected_artifact.get("source_message_id"))[:120],
+                "topic_id": _text(selected_artifact.get("topic_id"))[:120],
+                "branch_id": _text(selected_artifact.get("branch_id"))[:120],
+                "topic_origin_message_id": _text(selected_artifact.get("topic_origin_message_id"))[:120],
+                "revision_chain_id": _text(selected_artifact.get("revision_chain_id"))[:120],
+                "source_summary": _clip(selected_artifact.get("source_summary"), 400),
+                "source_block": source_block,
+            }
 
         anchor = source.get("DIALOGUE_ANCHOR")
         if isinstance(anchor, dict) and anchor:
@@ -4399,6 +4425,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "HISTORY_TOPIC_COUNT": requested_topic_count if history_request else 0,
         "HISTORY_TOPIC_MINIMUM": minimum_topic_count if history_request else 0,
         "HISTORY_TIME_WINDOW": history_time_window if history_request else {},
+        "SELECTED_SOURCE_ARTIFACT": memory.get("selected_source_artifact") if isinstance(memory.get("selected_source_artifact"), dict) else {},
         "DIALOGUE_ANCHOR": {
             "topic": _clip(anchor.get("topic"), 240),
             "user": _clip(anchor.get("user"), 600),
