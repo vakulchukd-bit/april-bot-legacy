@@ -949,6 +949,10 @@ _CONTEXT_REFERENCE_TERMS = {
 
 def _subject_family(token: Any) -> str:
     value = _text(token).lower().replace("ё", "е")
+    # Russian forms "магнит" and "магнетизм" share the same scientific root;
+    # preserve that semantic match without coupling routing to a fixed phrase.
+    if value.startswith(("магнит", "магнет")):
+        return "магн"
     return value[:5] if len(value) >= 5 else value
 
 _CONTEXT_NON_TOPICAL_ROOTS = (
@@ -2696,57 +2700,94 @@ def _row_modalities(row: dict[str, Any]) -> set[str]:
                     elif kind == "image":
                         result.add("image")
 
-    # Assistant-generated images live in structured_response, not in the
-    # original user-input attachment index. They must still be discoverable as
-    # editable sources in the same authenticated topic/branch.
+    # Assistant-generated artifacts live in structured_response, not in the
+    # original user-input attachment index. Recover every concrete output family
+    # so semantic history ranking can find diagrams/tables/code as well as images.
     response = _parse_json(row.get("structured_response"))
     response_meta = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
     memory_record = response.get("dialogue_memory_record") or response_meta.get("dialogue_memory_record") or {}
     if not isinstance(memory_record, dict):
         memory_record = {}
 
-    def _contains_output_image(value: Any, depth: int = 0) -> bool:
+    family_aliases = {
+        "image": {"image", "generated_image", "image_edit", "gallery", "galleryblock", "imagerenderer", "screenshotblock", "image_gallery", "photo", "picture", "visual_image"},
+        "diagram": {"diagram", "svg", "flowchart", "mermaid", "diagramblock", "svgblock"},
+        "graph": {"graph", "chart", "plot", "graph_data", "graphblock"},
+        "table": {"table", "table_data", "tableblock"},
+        "formula": {"formula", "equation", "math", "latex"},
+        "code": {"code", "source_code", "codeblock", "script"},
+        "link": {"link", "hyperlink", "url"},
+        "file": {"file", "document", "spreadsheet", "pdf", "download"},
+        "audio": {"audio", "voice", "audio_clip"},
+        "video": {"video", "video_clip"},
+    }
+
+    def _family_has_concrete_payload(block: Any, family: str) -> bool:
+        if not isinstance(block, dict):
+            return False
+        payload = block.get("payload") if isinstance(block.get("payload"), dict) else block.get("data") if isinstance(block.get("data"), dict) else block
+        if family == "image":
+            mime = _text(payload.get("mime_type") or payload.get("content_type")).lower()
+            return bool(
+                mime.startswith("image/")
+                or any(payload.get(key) not in (None, "", [], {}) for key in (
+                    "image_url", "image_data_uri", "image_base64", "asset_ref", "asset_id", "storage_key", "src"
+                ))
+            )
+        if family == "diagram":
+            svg = _text(payload.get("svg") or payload.get("svg_payload") or payload.get("source_svg"))
+            if len(svg) > 80 and re.search(r"<(?:path|rect|circle|ellipse|polygon|polyline|line|text|image|use)\b", svg, re.I):
+                return True
+            return any(isinstance(payload.get(key), (list, dict)) and bool(payload.get(key)) for key in (
+                "elements", "shapes", "nodes", "edges", "geometry", "primitives"
+            )) or bool(_text(payload.get("mermaid")) and len(_text(payload.get("mermaid"))) > 40)
+        if family == "graph":
+            return any(isinstance(payload.get(key), (list, dict)) and bool(payload.get(key)) for key in (
+                "series", "datasets", "traces", "points", "data", "values", "nodes", "edges"
+            ))
+        if family == "table":
+            headers = payload.get("headers") or payload.get("columns")
+            rows = payload.get("rows") or payload.get("data")
+            return isinstance(headers, list) and bool(headers) and isinstance(rows, list) and bool(rows)
+        if family == "formula":
+            return any(_text(payload.get(key)) for key in ("latex", "formula", "equation", "expression", "math"))
+        if family == "code":
+            return any(_text(payload.get(key)) for key in ("code", "source_code", "content", "text"))
+        if family == "link":
+            return bool(re.match(r"https?://", _text(payload.get("url") or payload.get("href") or payload.get("uri")))) or bool(payload.get("links"))
+        if family in {"file", "audio", "video"}:
+            return any(payload.get(key) not in (None, "", [], {}) for key in (
+                "asset_ref", "asset_id", "storage_key", "filename", "url", "src", "content", "mime_type"
+            ))
+        return False
+
+    seen_objects: set[int] = set()
+    def _scan_outputs(value: Any, depth: int = 0) -> None:
         if depth > 8:
-            return False
+            return
         if isinstance(value, list):
-            return any(_contains_output_image(item, depth + 1) for item in value[:120])
-        if not isinstance(value, dict):
-            return False
+            for child in value[:160]:
+                _scan_outputs(child, depth + 1)
+            return
+        if not isinstance(value, dict) or id(value) in seen_objects:
+            return
+        seen_objects.add(id(value))
         tags = {
             _text(value.get(key)).lower().replace("-", "_").replace(" ", "_")
-            for key in ("kind", "type", "artifact_type", "output_type", "artifact_family", "family")
+            for key in ("kind", "type", "artifact_type", "output_type", "artifact_family", "family", "renderer", "viewer")
             if _text(value.get(key))
         }
-        image_tags = {
-            "image", "generated_image", "image_edit",
-            "gallery", "image_gallery", "galleryblock", "imagerenderer", "screenshotblock",
-            "photo", "picture", "visual_image",
-        }
-        if tags.intersection(image_tags):
-            return True
-        mime = _text(value.get("mime_type") or value.get("content_type")).lower()
-        if mime.startswith("image/"):
-            return True
-        renderer = _text(value.get("renderer") or value.get("viewer")).lower().replace("_", "").replace("-", "")
-        if renderer in {"galleryblock", "imagerenderer", "screenshotblock"}:
-            return True
-        # Only typed image payload keys count; ordinary prose mentioning a photo
-        # must not turn a text-only answer into an image source.
-        if any(value.get(key) not in (None, "", [], {}) for key in (
-            "image_url", "image_data_uri", "image_base64", "asset_ref", "asset_id", "storage_key"
-        )):
-            return True
-        return any(_contains_output_image(child, depth + 1) for child in value.values() if isinstance(child, (dict, list)))
+        for family, aliases in family_aliases.items():
+            if tags.intersection(aliases) and _family_has_concrete_payload(value, family):
+                result.add(family)
+        for key in ("render_blocks", "artifacts", "rendered_artifacts", "outputs", "asset_refs", "asset_payloads", "assets", "scene_contract"):
+            child = value.get(key)
+            if isinstance(child, (dict, list)):
+                _scan_outputs(child, depth + 1)
 
     for owner in (response, memory_record):
-        if not isinstance(owner, dict):
-            continue
-        for key in ("render_blocks", "artifacts", "rendered_artifacts", "outputs", "asset_refs", "asset_payloads", "assets"):
-            if _contains_output_image(owner.get(key)):
-                result.add("image")
-                break
-        if "image" in result:
-            break
+        if isinstance(owner, dict):
+            _scan_outputs(owner)
     return result
 
 
@@ -7076,8 +7117,40 @@ def search_dialogue_context(
     # trigger expensive full-JSON scoring for every retained message. The targeted
     # fast path below includes all image-bearing rows in this same dialogue and
     # ranks a smaller semantic set for the active-work branch.
+    # A visual edit can target a structured artifact, not necessarily a raster.
+    # Before opening the image-only history fast path, compare the current subject
+    # with recent concrete non-image outputs in this same dialogue. If a diagram,
+    # graph, table, formula or code artifact is the stronger match, keep that typed
+    # branch and do not broaden the search to arbitrary old portraits.
+    query_subjects_for_typed_edit = _subject_tokens(query)
+    best_typed_nonimage_match = 0.0
+    if image_edit_reference and not has_image and not has_file and query_subjects_for_typed_edit:
+        active_dialog_rows = [row for row in rows if isinstance(row, dict) and (
+            (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
+        )]
+        for candidate_row in active_dialog_rows:
+            modalities = _row_modalities(candidate_row)
+            if not modalities.intersection({"diagram", "graph", "table", "formula", "code", "link"}):
+                continue
+            candidate_subjects = _row_subject_tokens(candidate_row)
+            match_score = _subject_overlap(query_subjects_for_typed_edit, candidate_subjects) if candidate_subjects else 0.0
+            best_typed_nonimage_match = max(best_typed_nonimage_match, match_score)
+    typed_artifact_edit_reference = bool(image_edit_reference and best_typed_nonimage_match >= 0.20)
+    if typed_artifact_edit_reference:
+        # The strongest same-dialog source is a structured non-raster artifact.
+        # Keep the operation in its native renderer family; do not label it as an
+        # image attachment/edit just because the user said "change/rotate".
+        image_edit_reference = False
+        _apr_timing_log(
+            "typed_artifact_edit_selected_over_raster_history",
+            None,
+            best_typed_nonimage_match=round(best_typed_nonimage_match, 4),
+            families=[family for family in ("diagram", "graph", "table", "formula", "code", "link")],
+        )
     image_edit_history_fast_path = bool(
         image_edit_reference
+        and best_typed_nonimage_match < 0.20
         and not has_image
         and not has_file
         and not history_request
@@ -7428,6 +7501,7 @@ def search_dialogue_context(
             _apr_timing_log(
                 "image_edit_history_fast_path",
                 None,
+                best_typed_nonimage_match=round(best_typed_nonimage_match, 4),
                 source_terms=sorted(source_image_terms)[:4],
                 image_rows_found=len(image_source_rows),
                 image_rows_added=len(added_rows),
@@ -7438,6 +7512,7 @@ def search_dialogue_context(
             _apr_timing_log(
                 "image_edit_history_fast_path",
                 None,
+                best_typed_nonimage_match=round(best_typed_nonimage_match, 4),
                 source_terms=sorted(source_image_terms)[:4],
                 image_rows_found=0,
                 image_rows_added=0,
