@@ -965,6 +965,12 @@ _CONTEXT_NON_TOPICAL_ROOTS = (
     "формул", "график", "таблиц", "диаграмм", "уравнен", "данн", "значен",
     "придум", "предложи", "почем", "почему", "зачем", "открыл", "изобрел", "изобрёл",
     "доказал", "обосновал", "считал", "называл",
+    # Editing verbs and spatial/presentation attributes describe the requested
+    # operation on an existing subject; they are not new topic entities.
+    "измен", "помен", "повер", "развер", "перевер", "ориентир", "передел",
+    "поправ", "исправ", "редакт", "модифиц", "доработ", "дорис", "добав",
+    "вертик", "горизонт", "перпендик", "параллел", "наклон", "положен",
+    "располож", "направлен", "сдела", "выдай", "пришл", "покаж",
     # Provenance questions describe an action/source, not a new topic.
     "слиз", "скопир", "скач", "источник", "автор", "напис", "придум",
     "плагиат", "нет", "нета",
@@ -7123,9 +7129,17 @@ def search_dialogue_context(
     # graph, table, formula or code artifact is the stronger match, keep that typed
     # branch and do not broaden the search to arbitrary old portraits.
     query_subjects_for_typed_edit = _subject_tokens(query)
+    explicit_raster_edit_target = bool(re.search(
+        r"(?:фото\w*|фотограф\w*|картинк\w*|изображени\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        _text(query).lower().replace("ё", "е"), re.IGNORECASE,
+    ))
     best_typed_nonimage_match = 0.0
-    if image_edit_reference and not has_image and not has_file and query_subjects_for_typed_edit:
-        active_dialog_rows = [row for row in rows if isinstance(row, dict) and (
+    if (image_edit_reference and not explicit_raster_edit_target
+            and not has_image and not has_file and query_subjects_for_typed_edit):
+        # `all_rows` is the authenticated retained-history collection loaded at
+        # the start of this request. `rows` is not defined in this scope; using it
+        # here caused UnboundLocalError on some image/diagram edit requests.
+        active_dialog_rows = [row for row in all_rows if isinstance(row, dict) and (
             (_text(dialog_id) and _text(row.get("dialog_id")) == _text(dialog_id))
             or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
         )]
