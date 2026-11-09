@@ -69,7 +69,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v11_branch_typed_artifact_actions"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v12_structured_artifact_reactivation"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -3541,9 +3541,17 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
     """
     selected = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
     anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
+    # State Manager returns the authenticated latest exchange separately from the
+    # selected historical source. Keep it for the pending-output audit: a saved
+    # source diagram alone cannot tell us that the immediately preceding edit
+    # attempt returned the wrong family (for example, an Einstein portrait).
+    latest_exchange = (
+        dialogue_context.get("latest_assistant_anchor")
+        if isinstance(dialogue_context.get("latest_assistant_anchor"), dict) else {}
+    )
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in [*selected, anchor]:
+    for row in [*selected, anchor, latest_exchange]:
         if not isinstance(row, dict):
             continue
         message_id = _text(row.get("message_id") or row.get("source_message_id"))
@@ -3561,7 +3569,8 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
             return 0.0
 
     rows.sort(key=_stamp)
-    latest = rows[-1]
+    latest_id = _text(latest_exchange.get("message_id"))
+    latest = next((row for row in rows if latest_id and _text(row.get("message_id")) == latest_id), rows[-1])
     low = _text(current_request).lower().replace("ё", "е")
     if not low:
         return {}
@@ -3605,7 +3614,39 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
         r"(?:выдай|пришли|покажи|нарисуй|изобрази|создай|построй|сделай|сформируй|экспортируй|"
         r"send|show|draw|create|build|generate|render|deliver|output)", latest_user, re.IGNORECASE
     ))
-    pending_output = bool(latest_requested_output and not latest_families and latest_answer)
+    latest_request_mutation = bool(re.search(
+        r"(?:измен\w*|помен\w*|повер\w*|развер\w*|перевер\w*|ориентир\w*|передел\w*|"
+        r"исправ\w*|поправ\w*|редактир\w*|доработ\w*|обнов\w*|rotate\w*|flip\w*|revise\w*|edit\w*)",
+        latest_user, re.IGNORECASE,
+    ))
+    # A wrong-family result (for example, a raster portrait returned instead of
+    # the requested magnet diagram) does not fulfil the requested artifact. Audit
+    # the selected same-subject branch before declaring the output complete.
+    latest_user_terms = set(_subject_tokens(latest_user))
+    missing_same_subject_families: set[str] = set()
+    if latest_request_mutation and latest_user_terms:
+        for candidate_row in rows:
+            candidate_text = " ".join(_text(candidate_row.get(key)) for key in (
+                "topic", "user", "user_text", "assistant_last_message", "april", "branch_summary"
+            ))
+            candidate_terms = set(_subject_tokens(candidate_text))
+            if not candidate_terms or _subject_overlap(latest_user_terms, candidate_terms) < 0.50:
+                continue
+            candidate_blocks = candidate_row.get("assistant_structured_output") if isinstance(candidate_row.get("assistant_structured_output"), list) else []
+            for candidate_block in candidate_blocks:
+                if not isinstance(candidate_block, dict):
+                    continue
+                candidate_family = _artifact_family(
+                    candidate_block.get("type") or candidate_block.get("artifact_type")
+                    or candidate_block.get("kind") or candidate_block.get("renderer")
+                )
+                if candidate_family in {"diagram", "graph", "table", "formula", "code", "link", "copy", "file"} and _artifact_block_is_concrete(candidate_block, candidate_family):
+                    if candidate_family not in latest_families:
+                        missing_same_subject_families.add(candidate_family)
+    pending_output = bool(
+        latest_requested_output and latest_answer
+        and (not latest_families or bool(missing_same_subject_families))
+    )
     mutation = bool(mutation or affirmative_action or corrective_feedback)
     actionable = mutation or (status_or_wait and pending_output)
     if not actionable or explicit_fresh:
@@ -3617,6 +3658,11 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
     scoring_request = current_request
     if affirmative_action:
         scoring_request = (current_request + " " + latest_answer).strip()
+    elif status_or_wait and pending_output:
+        # A status question has no subject of its own; score it against the exact
+        # user request whose artifact is still missing, not the possibly-wrong
+        # latest assistant prose.
+        scoring_request = latest_user.strip() or latest_answer
     current_terms = set(_subject_tokens(scoring_request))
     latest_topic_id = _text(latest.get("topic_id"))
     latest_branch_id = _text(latest.get("branch_id"))
@@ -3624,16 +3670,24 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
     for pair in rows:
         pair_topic = _text(pair.get("topic_id"))
         pair_branch = _text(pair.get("branch_id"))
-        if latest_topic_id and pair_topic and latest_topic_id != pair_topic:
-            continue
-        if latest_branch_id and pair_branch and latest_branch_id != pair_branch:
-            continue
         blocks = pair.get("assistant_structured_output") if isinstance(pair.get("assistant_structured_output"), list) else []
         pair_text = " ".join(_text(pair.get(key)) for key in (
             "topic", "user", "assistant_last_message", "april", "branch_summary", "memory_summary"
         ))
         pair_terms = set(_subject_tokens(pair_text))
         overlap = _subject_overlap(current_terms, pair_terms) if current_terms and pair_terms else 0.0
+        topic_mismatch = bool(latest_topic_id and pair_topic and latest_topic_id != pair_topic)
+        branch_mismatch = bool(latest_branch_id and pair_branch and latest_branch_id != pair_branch)
+        # State Manager has already restricted this list to the authenticated
+        # selected branch/history. A concrete noun match on an explicit mutation
+        # is sufficient to reactivate a prior artifact even if a mistaken previous
+        # answer created a sibling topic/branch. Unrelated artifacts remain gated.
+        semantic_reactivation = bool(
+            overlap >= 0.50
+            and (mutation or (status_or_wait and pending_output and latest_request_mutation))
+        )
+        if (topic_mismatch or branch_mismatch) and not semantic_reactivation:
+            continue
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -3653,11 +3707,38 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
         return {}
 
     explicit_family = _explicit_artifact_followup_kind(current_request)
+    operation_text = (current_request + " " + latest_user).lower().replace("ё", "е")
+    spatial_mutation = bool(
+        (mutation or (status_or_wait and pending_output and latest_request_mutation))
+        and re.search(
+            r"(?:вертик\w*|горизонт\w*|повер\w*|развер\w*|перевер\w*|rotate\w*|flip\w*|vertical|horizontal)",
+            operation_text, re.IGNORECASE,
+        )
+    )
+    explicit_raster_target = bool(re.search(
+        r"(?:фото\w*|фотограф\w*|картинк\w*|изображени\w*|портрет\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b)",
+        operation_text, re.IGNORECASE,
+    ))
     if explicit_family:
         explicit_family = _artifact_family(explicit_family)
         family_filtered = [item for item in candidates if item[5] == explicit_family]
         if family_filtered:
             candidates = family_filtered
+    elif spatial_mutation and not explicit_raster_target:
+        # A request to turn a magnet vertically in the context of a field diagram
+        # is a structured-diagram edit, not permission to reuse a nearby portrait.
+        # Prefer semantically aligned non-raster renderer artifacts in this case.
+        typed_candidates = [
+            item for item in candidates
+            if item[5] in {"diagram", "graph", "table", "formula", "code"}
+            and item[0] >= 0.20
+        ]
+        if typed_candidates:
+            preferred_typed_family = "diagram" if any(item[5] == "diagram" for item in typed_candidates) else max(
+                {item[5] for item in typed_candidates},
+                key=lambda family: max((item[0], item[1]) for item in typed_candidates if item[5] == family),
+            )
+            candidates = [item for item in typed_candidates if item[5] == preferred_typed_family]
     elif mutation:
         # Prefer the family whose saved source best matches the requested subject;
         # use recency only as a tie-breaker. A newer portrait must not outrank an
@@ -3703,6 +3784,13 @@ def _selected_branch_artifact_target(dialogue_context: dict[str, Any], current_r
         "source_pair_user": _text(pair.get("user") or pair.get("user_text"))[:800],
         "source_pair_answer": _text(pair.get("assistant_last_message") or pair.get("april"))[:1600],
         "selection_method": "selected_authenticated_branch_artifact",
+        "semantic_cross_branch_reactivation": bool(
+            (mutation or (status_or_wait and pending_output and latest_request_mutation))
+            and current_terms and pair_terms
+            and _subject_overlap(current_terms, pair_terms) >= 0.50
+            and ((latest_topic_id and _text(pair.get("topic_id")) and latest_topic_id != _text(pair.get("topic_id")))
+                 or (latest_branch_id and _text(pair.get("branch_id")) and latest_branch_id != _text(pair.get("branch_id"))))
+        ),
         "pending_previous_output": bool(pending_output),
         "affirmative_action_from_latest_answer": bool(affirmative_action),
         "correction_feedback_linked_to_latest_answer": bool(corrective_feedback),
@@ -5402,6 +5490,7 @@ async def execute(
         and not dialogue_context.get("history_request")
         and not explicit_topic_switch
         and explicit_previous_answer_action
+        and not latest_exchange_analysis.get("artifact_history_reactivation")
         and latest_anchor_id
         and latest_assistant_anchor.get("same_dialog", True) is not False
         and not existing_selected_pairs
@@ -5630,7 +5719,10 @@ async def execute(
                 or pragmatic_features.get("active_branch_repair")
                 or latest_exchange_analysis.get("assistant_output_feedback")
                 or latest_exchange_analysis.get("contextual_visual_revision")
+                or latest_exchange_analysis.get("contextual_artifact_revision")
                 or latest_exchange_analysis.get("unfulfilled_image_contract")
+                or latest_exchange_analysis.get("unfulfilled_artifact_contract")
+                or latest_exchange_analysis.get("artifact_history_reactivation")
             ) else "DEVELOP_PREVIOUS_ANSWER" if explicit_previous_answer_action
             else "ANSWER_CURRENT_REQUEST"
         )
@@ -5647,7 +5739,11 @@ async def execute(
             "latest_exchange_reason": _text(latest_exchange_analysis.get("reason"))[:80],
             "assistant_output_feedback": bool(latest_exchange_analysis.get("assistant_output_feedback")),
             "contextual_visual_revision": bool(latest_exchange_analysis.get("contextual_visual_revision")),
+            "contextual_artifact_revision": bool(latest_exchange_analysis.get("contextual_artifact_revision")),
             "unfulfilled_image_contract": bool(latest_exchange_analysis.get("unfulfilled_image_contract")),
+            "unfulfilled_artifact_contract": bool(latest_exchange_analysis.get("unfulfilled_artifact_contract")),
+            "artifact_history_reactivation": bool(latest_exchange_analysis.get("artifact_history_reactivation")),
+            "preferred_history_artifact_family": _text(latest_exchange_analysis.get("preferred_history_artifact_family"))[:32],
             "visual_continuation_link": bool(latest_exchange_analysis.get("visual_continuation_link")),
         }
         pre_response_analysis["request_vector"] = _text(
@@ -5773,9 +5869,19 @@ async def execute(
     # Only elevate to edit when the user's current wording actually requests a
     # visual modification; a plain reference/status question must not mutate it.
     intent_for_source_audit = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    _selected_artifact_family_for_audit = _artifact_family(
+        (selected_source_artifact or {}).get("family")
+    )
+    # Once State Manager selected a structured source (diagram/table/graph/etc.),
+    # a generic edit verb must not reopen the raster editor and replace that
+    # source with an unrelated old portrait. Raster editing is allowed only when
+    # no typed artifact was selected or the selected family is explicitly image.
     current_visual_edit_requested = bool(
-        _detect_contextual_image_edit(original or current_text)
-        or _detect_image_modification(original or current_text)
+        _selected_artifact_family_for_audit in {"", "image"}
+        and (
+            _detect_contextual_image_edit(original or current_text)
+            or _detect_image_modification(original or current_text)
+        )
     )
     selected_edit_source = (
         _select_image_edit_source(visual_context or [], request_text=original or current_text)
