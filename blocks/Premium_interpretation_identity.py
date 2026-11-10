@@ -1423,7 +1423,8 @@ def _explicit_saved_artifact_followup_kind(text: str) -> str:
     edit_or_extend = bool(re.search(
         r"(?:добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|"
         r"редакт\w*|улучш\w*|замен\w*|убер\w*|дорис\w*|восстанов\w*|верни\w*|подним\w*|достань\w*|"
-        r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|продолж\w*|retrieve\w*|reopen\w*|copy\w*|"
+        r"найди\w*|открой\w*|вытащи\w*|подым\w*|скопир\w*|покаж\w*|отобраз\w*|выдай\w*|продолж\w*|"
+        r"retrieve\w*|reopen\w*|show\w*|display\w*|fetch\w*|copy\w*|"
         r"add\w*|edit\w*|update\w*|change\w*|modify\w*|revise\w*|improve\w*|restore\w*|"
         r"промежуточ\w*|по\s+дням|по\s+датам|кажд\w*\s+дн\w*|точк\w*|значени\w*|"
         r"данн\w*\s+(?:на|в|к)|с\s+данн\w*|с\s+точк\w*|with\s+(?:intermediate|daily|dated)\s+(?:data|points))",
@@ -3374,7 +3375,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
             "requested_topic_count": 10, "minimum_topic_count": 5,
             "intent_score": 0, "features": {}, "reason": "empty_request",
         "routing_policy": {
-            "version": "hot_branch_then_semantic_history_v1",
+            "version": "hot_branch_then_recent_10_then_semantic_history_v2",
             "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
             "active_branch_must_match_semantically": True,
             "history_fallback_on_active_branch_miss": True,
@@ -4181,7 +4182,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         # Shared routing contract: active dialogue first, semantically matched
         # retained history only on conflict, and a clean new topic on a history miss.
         "routing_policy": {
-            "version": "hot_branch_then_semantic_history_v1",
+            "version": "hot_branch_then_recent_10_then_semantic_history_v2",
             "order": ["ACTIVE_BRANCH_RELEVANCE", "ALL_RETAINED_HISTORY_SEMANTIC_MATCH", "NEW_TOPIC"],
             "active_branch_must_match_semantically": True,
             "history_fallback_on_active_branch_miss": True,
@@ -5024,6 +5025,182 @@ def interpret_request_in_context(
     return profile
 
 
+
+def interpret_request_across_recent_exchanges(
+    text: Any,
+    recent_exchanges: Any,
+    semantic_interpretation: dict[str, Any] | None = None,
+    *,
+    window_size: int = 10,
+) -> dict[str, Any]:
+    """Resolve an incoming turn against the last 5–10 USER↔APRIL exchanges.
+
+    The newest answer is evaluated first. If it does not explain a named or
+    referential request, the same request is compared with earlier answers in
+    the current dialogue window before the archive router is allowed to run.
+    The returned profile keeps both the real latest answer and the matched
+    recent-branch anchor; no old pair is silently substituted for the latest one.
+    """
+    source = _text(text)
+    rows = [dict(item) for item in (recent_exchanges or []) if isinstance(item, dict)]
+    rows.sort(key=lambda item: (float(item.get("created_at") or 0.0), int(item.get("turn_index") or 0)))
+    rows = rows[-max(5, min(10, int(window_size or 10))):]
+    supplied_profile = dict(semantic_interpretation or {})
+    original_profile = supplied_profile.get("_recent_exchange_original_semantics")
+    base = dict(original_profile) if isinstance(original_profile, dict) else supplied_profile
+    if not base:
+        base = dict(interpret_request_semantics(source) or {})
+    if not rows or not source.strip():
+        fallback = interpret_request_in_context(source, rows[-1] if rows else None, base)
+        fallback["_recent_exchange_original_semantics"] = dict(base)
+        return fallback
+
+    latest_row = rows[-1]
+    latest_profile = interpret_request_in_context(source, latest_row, base)
+    latest_analysis = dict(latest_profile.get("latest_exchange_analysis") or {})
+    explicit_history = bool(base.get("history_request") or latest_profile.get("history_request"))
+    explicit_switch = bool(
+        base.get("explicit_topic_switch") or base.get("explicit_topic_introduction")
+        or latest_profile.get("explicit_topic_switch")
+    )
+
+    def _analysis_score(analysis: dict[str, Any], recency_rank: int) -> tuple[float, int, float]:
+        answer = float(analysis.get("answer_overlap") or 0.0)
+        user = float(analysis.get("user_turn_overlap") or 0.0)
+        subject = float(analysis.get("assistant_answer_subject_overlap") or analysis.get("subject_overlap") or 0.0)
+        # Semantic linkage is the gate; these values only rank already-linked
+        # candidates. A small recency tie-breaker favours the closest exchange.
+        return (answer * 0.52 + user * 0.28 + subject * 0.20, recency_rank, answer)
+
+    evaluated: list[tuple[tuple[float, int, float], dict[str, Any], dict[str, Any]]] = []
+    for index, row in enumerate(rows):
+        candidate_profile = latest_profile if index == len(rows) - 1 else interpret_request_in_context(source, row, base)
+        analysis = candidate_profile.get("latest_exchange_analysis")
+        analysis = dict(analysis) if isinstance(analysis, dict) else {}
+        analysis.update({
+            "message_id": _text(row.get("message_id"))[:120],
+            "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+            "branch_id": _text(row.get("branch_id") or row.get("work_id"))[:120],
+            "same_dialog": True,
+            "window_position": index + 1,
+        })
+        if analysis.get("linked"):
+            evaluated.append((_analysis_score(analysis, index), row, candidate_profile))
+
+    # The latest exchange always wins when it already explains the request.
+    # Otherwise the best linked exchange in the preceding 9 turns may restore
+    # the active branch. Explicit history/time requests retain their own route.
+    chosen_row = latest_row if latest_analysis.get("linked") else None
+    chosen_profile = latest_profile if chosen_row else None
+    chosen_analysis = latest_analysis if chosen_row else {}
+    if not chosen_row and not explicit_history and not explicit_switch and evaluated:
+        evaluated.sort(key=lambda item: item[0], reverse=True)
+        _, chosen_row, chosen_profile = evaluated[0]
+        chosen_analysis = dict((chosen_profile or {}).get("latest_exchange_analysis") or {})
+
+    # A genuinely elliptical turn (no new subject/payload, but a contextual
+    # speech act or deictic/continuation signal) belongs to April's last answer
+    # even if lexical overlap is zero. This is the core implicit-continuation rule.
+    features = base.get("features") if isinstance(base.get("features"), dict) else {}
+    pragmatic = base.get("pragmatic_features") if isinstance(base.get("pragmatic_features"), dict) else {}
+    tokens = _semantic_normalize(source)[1]
+    contextual_signal = any(bool(source_map.get(key)) for source_map in (features, pragmatic, base) for key in (
+        "context_dependent_question", "context_dependent_reaction", "answer_followup",
+        "continuation_action", "topic_reference_fragment", "strong_anaphoric_reference",
+        "previous_answer_reference", "active_branch_repair", "deictic_reference",
+        "clarification_request", "explanation_request",
+    ))
+    no_named_subject = not _context_signature(source).get("subject_terms")
+    implicit_latest = bool(
+        not chosen_row and not explicit_history and not explicit_switch
+        and len(tokens) <= 18 and no_named_subject and contextual_signal
+    )
+    if implicit_latest:
+        chosen_row = latest_row
+        chosen_profile = latest_profile
+        chosen_analysis = dict(latest_analysis)
+        chosen_analysis.update({
+            "linked": True,
+            "reason": "implicit_elliptical_turn_attached_to_latest_april_answer",
+            "route": "LATEST_EXCHANGE_FIRST",
+            "implicit_continuation": True,
+            "matched_recent_exchange_id": _text(latest_row.get("message_id"))[:120],
+        })
+
+    window = []
+    for index, row in enumerate(rows):
+        user_text = _text(row.get("user_text") or row.get("user") or row.get("user_request"))
+        answer_text = _text(row.get("april_text") or row.get("april") or row.get("assistant_last_message"))
+        window.append({
+            "message_id": _text(row.get("message_id"))[:120],
+            "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+            "branch_id": _text(row.get("branch_id") or row.get("work_id"))[:120],
+            "turn_index": int(row.get("turn_index") or 0),
+            "created_at": row.get("created_at"),
+            "user_request": user_text[:1200],
+            "april_answer": answer_text[:2400],
+            "artifact_count": sum(len(row.get(key) or []) for key in ("render_blocks", "artifacts", "assistant_artifact_index", "artifact_index") if isinstance(row.get(key), list)),
+        })
+
+    result = dict(chosen_profile or latest_profile)
+    if chosen_row:
+        chosen_id = _text(chosen_row.get("message_id"))[:120]
+        actual_latest_id = _text(latest_row.get("message_id"))[:120]
+        chosen_analysis = dict(chosen_analysis)
+        chosen_analysis.update({
+            "available": True,
+            "linked": True,
+            "route": "LATEST_EXCHANGE_FIRST" if chosen_id == actual_latest_id else "RECENT_BRANCH_EXCHANGE_MATCH",
+            "matched_recent_exchange_id": chosen_id,
+            "matched_recent_exchange_position": int(chosen_analysis.get("window_position") or len(rows)),
+            "actual_latest_exchange_id": actual_latest_id,
+            "recent_exchange_count": len(rows),
+            "recent_exchange_window": window,
+            "matched_older_exchange": chosen_id != actual_latest_id,
+        })
+        result["latest_exchange_analysis"] = chosen_analysis
+        result["recent_branch_anchor"] = {
+            "message_id": chosen_id,
+            "topic_id": _text(chosen_row.get("topic_id") or chosen_row.get("selected_topic_id"))[:120],
+            "branch_id": _text(chosen_row.get("branch_id") or chosen_row.get("work_id"))[:120],
+            "same_dialog": True,
+            "user": _text(chosen_row.get("user_text") or chosen_row.get("user"))[:1200],
+            "april": _text(chosen_row.get("april_text") or chosen_row.get("april"))[:480],
+            "assistant_last_message": _text(chosen_row.get("april_text") or chosen_row.get("april") or chosen_row.get("assistant_last_message"))[:5200],
+        }
+        result.update({
+            "history_request": False,
+            "history_recall": False,
+            "requires_memory": True,
+            "search_scope": "RECENT_DIALOGUE_BRANCH",
+            "primary_intent": "TOPIC_CONTINUATION",
+            "direction": "RESOLVE_AGAINST_RECENT_BRANCH",
+            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+            "time_scope": "ACTIVE_DIALOGUE",
+            "relation_hint": "CONTINUE",
+            "previous_answer_reference": True,
+            "recent_branch_match": True,
+            "reason": _text(chosen_analysis.get("reason") or "recent_branch_exchange_match"),
+        })
+        result_features = dict(result.get("features") or {})
+        result_features.update({"recent_branch_match": True, "previous_answer_reference": True})
+        result["features"] = result_features
+        result_pragmatic = dict(result.get("pragmatic_features") or {})
+        result_pragmatic.update({"recent_branch_match": True, "previous_answer_reference": True})
+        result["pragmatic_features"] = result_pragmatic
+    else:
+        analysis = dict(latest_analysis)
+        analysis.update({
+            "recent_exchange_count": len(rows),
+            "recent_exchange_window": window,
+            "matched_recent_exchange_id": "",
+            "matched_older_exchange": False,
+        })
+        result["latest_exchange_analysis"] = analysis
+        result["recent_branch_match"] = False
+    result["_recent_exchange_original_semantics"] = dict(base)
+    return result
+
 def analyze_dialogue_transition(
     current_request: Any,
     dialogue_context: dict[str, Any] | None = None,
@@ -5052,9 +5229,14 @@ def analyze_dialogue_transition(
     selected = context.get("selected_pairs") if isinstance(context.get("selected_pairs"), list) else []
     # A historical search must use the matched historical anchor, not accidentally
     # the most recent unrelated message in the current chat.
+    recent_branch = context.get("recent_branch_anchor") if isinstance(context.get("recent_branch_anchor"), dict) else {}
     if historical_match or (history_request and anchor):
         # Explicit history retrieval must stay anchored to the historical match.
         source_pair = anchor or (selected[0] if selected and isinstance(selected[0], dict) else {})
+    elif recent_branch and not explicit_switch:
+        # State Manager has compared the request against the last ten exchanges
+        # and selected a concrete earlier answer in this same active branch.
+        source_pair = recent_branch
     elif latest and not explicit_switch:
         # Always audit the immediately preceding April answer before interpreting
         # a new turn. State Manager still decides the route; this local comparison
@@ -7685,6 +7867,8 @@ def build_interpretation(
                 # anchor. The selected branch is only expanded after this message
                 # has matched; unrelated 24-hour history must not replace it.
                 "latest_assistant_anchor": dict(memory.get("latest_assistant_anchor") or {}) if isinstance(memory.get("latest_assistant_anchor"), dict) else {},
+                "recent_branch_anchor": dict(memory.get("recent_branch_anchor") or {}) if isinstance(memory.get("recent_branch_anchor"), dict) else {},
+                "recent_exchange_window": [dict(item) for item in (memory.get("recent_exchange_window") or []) if isinstance(item, dict)][:10],
                 "last_turn_link": (
                     dict((memory.get("dialogue_thread_context") or {}).get("last_turn_link") or {})
                     if isinstance(memory.get("dialogue_thread_context"), dict) else {}
@@ -7749,6 +7933,8 @@ def build_interpretation(
                 dict((memory.get("dialogue_thread_context") or {}).get("last_turn_link") or {})
                 if isinstance(memory.get("dialogue_thread_context"), dict) else {}
             ),
+            "recent_branch_anchor": dict(memory.get("recent_branch_anchor") or {}) if isinstance(memory.get("recent_branch_anchor"), dict) else {},
+            "recent_exchange_window": [dict(item) for item in (memory.get("recent_exchange_window") or []) if isinstance(item, dict)][:10],
             "selected_section": dict(memory.get("selected_section") or {}),
             "clarification_needed": bool(memory.get("clarification_needed")),
             "pending_clarification": dict(memory.get("pending_clarification") or {}),
@@ -7870,6 +8056,7 @@ __all__ = [
     "build_question_sequence",
     "build_presentation_sequence",
     "interpret_request_semantics",
+    "interpret_request_across_recent_exchanges",
     "assert_same_identity",
 ]
 
