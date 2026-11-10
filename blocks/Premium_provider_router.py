@@ -57,7 +57,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v10_latest_answer_action_followthrough"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v11_recent_exchange_branch_context"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -68,7 +68,7 @@ NATURAL CONVERSATION AND USER INTENT:
 - First identify the action the user actually wants. A question containing words such as "picture", "graph", "file" or "button" may ask how to use or find an existing item; it does not automatically request a new artifact. Explain an operation when the verb is about downloading, saving, copying, opening, sharing, finding or navigating.
 - When correcting a misunderstanding, briefly acknowledge the specific point missed and immediately answer the corrected request. Do not repeat the previous wrong instruction or create a new image/diagram merely because the user said "show me".
 - For interface help, name the exact visible control/icon and its on-screen label, describe each tap in order, and distinguish actions confirmed in the April code/UI map from device/browser options that may vary. If the control is not present, say so instead of inventing it.
-- Answer each independent request in the order asked; keep dependent clauses together. If an elliptical follow-up clearly belongs to the current topic, use that topic and its artifacts. If the current branch lacks evidence, search the user's retained dialogue history by semantic subject and branch provenance; if no safe match exists, start a new topic rather than importing unrelated history.
+- Answer each independent request in the order asked; keep dependent clauses together. Resolve every turn in this order: (1) compare the current request with the immediately preceding April answer; (2) if it does not fit, compare it with the previous nine April answers in RECENT_DIALOGUE_EXCHANGE_WINDOW; (3) for a named subject not found in that window, search the authenticated user's retained Premium history by subject, topic and branch; (4) create a new topic only after those searches find no relevant branch. A short/elliptical reply with no newly named subject continues from the latest answer or the best-matching answer in the recent branch; do not require the user to repeat the topic. Preserve the actual latest answer separately from an older matched branch anchor.
 APRIL SITE NAVIGATION CONTEXT:
 When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Add a DiagramRenderer block only when the user explicitly asks for a diagram/visual route map or when the route relationships genuinely clarify the next action. A diagram must add navigation structure (for example, route-to-route transitions), not copy the prose steps or repeat the answer's headings. When a diagram does not add new information, return the text and links only. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.
 
@@ -195,7 +195,7 @@ CONTINUATION / HOT-DISCUSSION PROGRESSION:
 PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
 - APRIL PROJECT IDENTITY: When asked who created/developed/authored April, name APRIL_PROJECT_IDENTITY.creator_name as the April project creator. Do not substitute the model provider: APRIL_PROJECT_IDENTITY.model_provider supplies the underlying AI model, not April product authorship. When asked the current user's name, use CURRENT_USER_PROFILE.display_name (or AUTHENTICATED_IDENTITY.display_name) exactly as provided; never confuse the profile user with April's creator and never guess either name.
 For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
-DIALOGUE_TRANSITION_ANALYSIS is a mandatory pre-response analysis stage, not decorative metadata. Before drafting, privately execute its ordered pre_response_analysis.sequence: count and classify every current subtask; compare the current request with April's actual latest answer; check the active branch, its unresolved steps and exact answer direction; only if the current branch does not match, use the authenticated history-selected branch; restore the matched branch's relevant artifact inventory and revision lineage; distinguish a request to recall, continue, revise, or start a new topic; then verify that every answer part is grounded in the selected source. Use request_task_count and request_vector as routing evidence, but let the actual current request remain authoritative. Never expose hidden reasoning or internal analysis. Read these as one semantic transition: identify what was already answered, what is newly requested, and what remains unfinished. For TOPIC_CONTINUATION and HISTORICAL_TOPIC_REACTIVATION, begin with one brief, factual reminder of the prior discussion, then move directly to the new step; never repeat completed sections merely to prove memory. For ARTIFACT_REVISION, retrieve and modify the exact revision target, preserve its original topic_id/branch_id/origin_message_id, and append a revision linked by revision_chain_id/revision_of; do not create an unrelated replacement. Mentioning or referring to an artifact is not itself an edit instruction. For NEW_TOPIC, do not reuse unrelated prior answers or artifacts. Treat this analysis as supporting evidence; the current user request and selected canonical source remain authoritative.
+DIALOGUE_TRANSITION_ANALYSIS is a mandatory pre-response analysis stage, not decorative metadata. Before drafting, privately execute its ordered pre_response_analysis.sequence and RECENT_DIALOGUE_EXCHANGE_WINDOW comparison order: inspect April's latest answer first, then the preceding nine answers in the same dialogue; only after a miss search the authenticated Premium history for a named topic/branch; create a new topic only after no relevant history match exists. Identify which exact prior user↔April exchange best explains the current request, while retaining the real latest answer as a separate chronological fact. Restore the matched branch's complete relevant artifact inventory and exact payloads (code, tables, charts, diagrams, images, files and user uploads), including revision lineage. Distinguish recall, continuation, edit/extension, and new creation; then verify every answer part against the selected source. Use request_task_count and request_vector as routing evidence, but let the actual current request remain authoritative. Never expose hidden reasoning or internal analysis. Read these as one semantic transition: identify what was already answered, what is newly requested, and what remains unfinished. For TOPIC_CONTINUATION and HISTORICAL_TOPIC_REACTIVATION, begin with one brief, factual reminder of the prior discussion, then move directly to the new step; never repeat completed sections merely to prove memory. For ARTIFACT_REVISION, retrieve and modify the exact revision target, preserve its original topic_id/branch_id/origin_message_id, and append a revision linked by revision_chain_id/revision_of; do not create an unrelated replacement. Mentioning or referring to an artifact is not itself an edit instruction. For NEW_TOPIC, do not reuse unrelated prior answers or artifacts. Treat this analysis as supporting evidence; the current user request and selected canonical source remain authoritative.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
@@ -382,7 +382,7 @@ Keep internal fields concise. Interleave step-specific text and its requested/ma
 in REQUEST_SEQUENCE order. Never emit an empty table shell; rows and cells must carry real values.
 Composite output requests are cumulative, but there is no required renderer count or prose/render ratio: each visual must add concrete information, and the full explanation stays in the text answer. Generated illustrations are not authentic photographs.
 When multiple visual outputs are in C_ARTIFACT_RENDER_PLAN, render each one only when it is explicitly requested or materially useful and has a concrete payload. For non-numeric concepts use a grounded network graph only when relationships matter; never fake numeric data. Images need the generator signal; links need real URLs.
-Use CURRENT_REQUEST as the task. LATEST-ANSWER-FIRST CONTINUATION: On every turn, first compare CURRENT_REQUEST with the exact DIALOGUE_ANCHOR.assistant_message and its structured_output/artifact_index. If semantically related, continue that authenticated chat branch and inspect its complete ACTIVE_TOPIC_CONTEXT (all compatible branch steps, questions, and created artifacts) before answering; do not repeat completed work. Only when the latest assistant answer does not match may selected 24-hour history be used. If no history topic matches, start a clean NEW topic. Old active-work labels or artifact manifests cannot override the latest answer's real subject. Voice, image, video, and file attachments do not bypass this sequence. On CONTINUE, SELECTED_SECTION is the target when present; use
+Use CURRENT_REQUEST as the task. RECENT-BRANCH-FIRST CONTINUATION: On every turn, compare CURRENT_REQUEST with the exact latest DIALOGUE_ANCHOR first, then with the preceding nine April answers in RECENT_DIALOGUE_EXCHANGE_WINDOW. If one of those exchanges matches, continue that authenticated branch and inspect its compatible steps, questions, and created/supplied artifacts before answering; do not repeat completed work. If no recent exchange matches a named subject, search the authenticated 24-hour history by topic and artifact provenance. Only after no relevant history match may a clean NEW topic be created. Keep the real latest answer separate from an older matched exchange. Old active-work labels or artifact manifests cannot override the current request's meaning. Voice, image, video, and file attachments do not bypass this sequence. On CONTINUE, SELECTED_SECTION is the target when present; use
 its concise summary and selected anchor rather than full previous answers. When ACTIVE_WORK_BRANCH is
 active, it is the first context lane for the matched turn: keep current state and original task constraints
 before generic history ranking. Continue choices, scene actions, code/image edits, diagram changes and solution
@@ -2316,9 +2316,29 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
             "waiting_acknowledgement": bool(raw_guidance.get("waiting_acknowledgement")),
             "active_task_policy": _text(raw_guidance.get("active_task_policy"))[:80],
+            "recent_exchange_analysis_order": [_text(value)[:100] for value in (raw_guidance.get("recent_exchange_analysis_order") or [])[:4]],
+            "implicit_followup_policy": _text(raw_guidance.get("implicit_followup_policy"))[:220],
+            "artifact_continuity_policy": _text(raw_guidance.get("artifact_continuity_policy"))[:220],
             "interpretive_classification": _text(raw_guidance.get("interpretive_classification"))[:48],
             "response_strategy": _text(raw_guidance.get("response_strategy"))[:48],
             "continuation_summary": _semantic_compress(raw_guidance.get("continuation_summary"), max(24, summary_budget)),
+        }
+        raw_recent_window = data.get("RECENT_DIALOGUE_EXCHANGE_WINDOW") if isinstance(data.get("RECENT_DIALOGUE_EXCHANGE_WINDOW"), dict) else {}
+        recent_window_min = {
+            "window_size": max(0, min(10, int(raw_recent_window.get("window_size") or 0))),
+            "matched_branch_anchor_id": _text(raw_recent_window.get("matched_branch_anchor_id"))[:120],
+            "comparison_policy": _text(raw_recent_window.get("comparison_policy"))[:180],
+            "exchanges": [
+                {
+                    "message_id": _text(item.get("message_id"))[:120],
+                    "topic_id": _text(item.get("topic_id"))[:120],
+                    "branch_id": _text(item.get("branch_id"))[:120],
+                    "turn_index": item.get("turn_index"),
+                    "user_request": _semantic_compress(item.get("user_request"), 28),
+                    "april_answer": _semantic_compress(item.get("april_answer"), 64),
+                }
+                for item in (raw_recent_window.get("exchanges") or [])[-10:] if isinstance(item, dict)
+            ],
         }
         raw_transition = data.get("DIALOGUE_TRANSITION_ANALYSIS") if isinstance(data.get("DIALOGUE_TRANSITION_ANALYSIS"), dict) else {}
         raw_transition_previous = raw_transition.get("previous_exchange") if isinstance(raw_transition.get("previous_exchange"), dict) else {}
@@ -2654,6 +2674,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "RECENT_LIMITATIONS": recent_limitations_min,
             "CONTINUATION_GUIDANCE": guidance_min,
             "DIALOGUE_TRANSITION_ANALYSIS": transition_min,
+            "RECENT_DIALOGUE_EXCHANGE_WINDOW": recent_window_min,
             "SCENE_COMPLEMENTARITY_POLICY": renderer_policy_min,
             "ACTIVE_WORK_BRANCH": {
                 key: value for key, value in (data.get("ACTIVE_WORK_BRANCH") or {}).items()
@@ -3127,7 +3148,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
             "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
             "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "DIALOGUE_RETRIEVAL_PLAN", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
-            "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
+            "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "DIALOGUE_TRANSITION_ANALYSIS", "RECENT_DIALOGUE_EXCHANGE_WINDOW", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
             "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS", "SELECTED_SOURCE_ARTIFACT",
@@ -3251,7 +3272,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "mode", "semantic_intent", "search_direction", "topic_reference", "active_topic_seed",
                     "selection_method", "selected_message_ids", "covered_sections", "selected_section",
                     "coverage_policy", "avoid_cross_topic_injection", "do_not_repeat_completed_answer_or_artifact",
-                    "waiting_acknowledgement", "active_task_policy", "interpretive_classification",
+                    "waiting_acknowledgement", "active_task_policy", "recent_exchange_analysis_order",
+                    "implicit_followup_policy", "artifact_continuity_policy", "interpretive_classification",
                     "response_strategy", "continuation_summary",
                 ) if key in guidance
             }
@@ -3498,6 +3520,22 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "same_dialog": bool(anchor.get("same_dialog")),
                 "artifact_index": (anchor.get("artifact_index") or [])[:4],
                 "structured_output": (anchor.get("structured_output") or [])[:2],
+            }
+
+        recent_window = source.get("RECENT_DIALOGUE_EXCHANGE_WINDOW")
+        if isinstance(recent_window, dict) and recent_window:
+            ultra["RECENT_DIALOGUE_EXCHANGE_WINDOW"] = {
+                "window_size": recent_window.get("window_size", 0),
+                "matched_branch_anchor_id": recent_window.get("matched_branch_anchor_id", ""),
+                "comparison_policy": _clip(recent_window.get("comparison_policy"), 180),
+                "exchanges": [
+                    {
+                        "message_id": _clip(item.get("message_id"), 120),
+                        "user_request": _clip(item.get("user_request"), 100),
+                        "april_answer": _clip(item.get("april_answer"), 180),
+                    }
+                    for item in (recent_window.get("exchanges") or [])[-10:] if isinstance(item, dict)
+                ],
             }
 
         guidance = source.get("CONTINUATION_GUIDANCE")
@@ -4038,6 +4076,19 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
 
     continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
     selected_pairs = continuation.get("selected_pairs") or memory.get("selected_pairs") or []
+    recent_branch_anchor = continuation.get("recent_branch_anchor") if isinstance(continuation.get("recent_branch_anchor"), dict) else memory.get("recent_branch_anchor", {})
+    recent_exchange_window = continuation.get("recent_exchange_window") if isinstance(continuation.get("recent_exchange_window"), list) else memory.get("recent_exchange_window", [])
+    recent_exchange_window_card = [
+        {
+            "message_id": _clip(item.get("message_id"), 120),
+            "topic_id": _clip(item.get("topic_id"), 120),
+            "branch_id": _clip(item.get("branch_id"), 120),
+            "turn_index": item.get("turn_index"),
+            "user_request": _clip(item.get("user_request"), 240),
+            "april_answer": _clip(item.get("april_answer"), 520),
+        }
+        for item in recent_exchange_window[-10:] if isinstance(item, dict)
+    ]
     new_dialogue = dialogue.get("new_dialogue") if isinstance(dialogue.get("new_dialogue"), dict) else {}
     history_request = bool(structured_intent.get("history_request") or memory.get("history_request") or request_input.get("history_request"))
     requested_topic_count = int(structured_intent.get("history_count") or memory.get("requested_topic_count") or 10)
@@ -4190,10 +4241,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         and not memory.get("contextual_history_match")
         and isinstance(latest_assistant_anchor, dict)
         and latest_assistant_anchor.get("message_id")
+        and not _text((recent_branch_anchor or {}).get("message_id"))
     )
     if current_dialog_latest_is_primary:
-        # Latest April response is the first semantic anchor. A stale persisted
-        # work marker may enrich the branch only after this exact response matches.
+        # Use the latest answer only when the recent-branch resolver did not
+        # identify a better-matching earlier exchange in the same dialogue.
         anchor = {
             **(anchor if isinstance(anchor, dict) else {}),
             "topic": latest_assistant_anchor.get("topic") or (anchor.get("topic") if isinstance(anchor, dict) else ""),
@@ -4205,6 +4257,17 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "message_id": latest_assistant_anchor.get("message_id"),
             "topic_id": latest_assistant_anchor.get("topic_id"),
             "topic_origin_message_id": latest_assistant_anchor.get("topic_origin_message_id") or latest_assistant_anchor.get("origin_message_id"),
+            "same_dialog": True,
+        }
+    elif relation == "CONTINUE" and isinstance(recent_branch_anchor, dict) and recent_branch_anchor.get("message_id"):
+        anchor = {
+            **(anchor if isinstance(anchor, dict) else {}),
+            "message_id": recent_branch_anchor.get("message_id"),
+            "topic_id": recent_branch_anchor.get("topic_id") or (anchor.get("topic_id") if isinstance(anchor, dict) else ""),
+            "branch_id": recent_branch_anchor.get("branch_id") or (anchor.get("branch_id") if isinstance(anchor, dict) else ""),
+            "user": recent_branch_anchor.get("user") or (anchor.get("user") if isinstance(anchor, dict) else ""),
+            "april": recent_branch_anchor.get("april") or (anchor.get("april") if isinstance(anchor, dict) else ""),
+            "assistant_last_message": recent_branch_anchor.get("assistant_last_message") or (anchor.get("assistant_last_message") if isinstance(anchor, dict) else ""),
             "same_dialog": True,
         }
 
@@ -4326,6 +4389,14 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "coverage_policy": "recall_requested_history" if history_request else ("continue_uncovered_sections" if relation == "CONTINUE" else "answer_new_request"),
         "waiting_acknowledgement": bool(_current_is_waiting_acknowledgement or (raw_retrieval_profile.get("features") or {}).get("waiting_acknowledgement") or (raw_retrieval_profile.get("pragmatic_features") or {}).get("waiting_acknowledgement")),
         "active_task_policy": "resume_latest_unfinished_same_dialogue_task_without_reasking" if relation == "CONTINUE" else "answer_current_request",
+        "recent_exchange_analysis_order": [
+            "COMPARE_CURRENT_REQUEST_WITH_IMMEDIATELY_PRECEDING_APRIL_ANSWER",
+            "IF_NOT_MATCHED_COMPARE_WITH_PREVIOUS_NINE_APRIL_ANSWERS_IN_THE_SAME_DIALOGUE",
+            "IF_NAMED_TOPIC_NOT_FOUND_IN_RECENT_WINDOW_SEARCH_AUTHENTICATED_PREMIUM_HISTORY",
+            "ONLY_AFTER_ALL_RELEVANT_HISTORY_MISSES_CREATE_A_NEW_TOPIC_AND_BRANCH",
+        ],
+        "implicit_followup_policy": "A_short_or_elliptical_request_without_a_new_named_subject_continues_from_the_latest_answer_or_the_best_matching_answer_in_the_recent_branch; do_not_require_the_user_to_repeat_the_topic_name.",
+        "artifact_continuity_policy": "Keep user uploads and April-created code, tables, charts, diagrams, images and documents attached to their originating message/topic/branch; retrieve exact payloads before edit/extension and preserve revision lineage.",
         "avoid_cross_topic_injection": True,
         "do_not_repeat_completed_answer_or_artifact": relation == "CONTINUE" and not history_request,
         "interpretive_classification": _clip(transition_card.get("classification"), 48),
@@ -4407,6 +4478,12 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "RECENT_LIMITATIONS": dialogue.get("recent_limitations") if isinstance(dialogue.get("recent_limitations"), dict) else {"has_recent_limitation": False, "count": 0, "events": []},
         "CONTINUATION_GUIDANCE": continuation_guidance,
         "DIALOGUE_TRANSITION_ANALYSIS": transition_card,
+        "RECENT_DIALOGUE_EXCHANGE_WINDOW": {
+            "window_size": len(recent_exchange_window_card),
+            "matched_branch_anchor_id": _clip((recent_branch_anchor or {}).get("message_id"), 120),
+            "comparison_policy": "compare_current_request_with_latest_answer_then_previous_9_april_answers_before_full_history",
+            "exchanges": recent_exchange_window_card,
+        },
         "SCENE_COMPLEMENTARITY_POLICY": scene_complementarity_policy,
         "ACTIVE_WORK_BRANCH": active_work_branch,
         "ACTIVE_TOPIC_CONTEXT": memory.get("topic_context") if isinstance(memory.get("topic_context"), dict) else {},
