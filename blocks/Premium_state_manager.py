@@ -27,7 +27,7 @@ from blocks.Premium_interpretation_identity import (
     _is_image_discussion_without_new_visual_action, _detect_image_modification,
     _detect_contextual_image_edit,
     _is_explicit_visual_revision_request, _has_independent_nonvisual_artifact_request,
-    interpret_request_in_context,
+    interpret_request_in_context, interpret_request_across_recent_exchanges,
 )
 
 
@@ -6587,13 +6587,14 @@ def search_dialogue_context(
     query_interpretation = dict(query_interpretation or {})
 
     # Every request first reads a bounded recent view and evaluates the new turn
-    # against the last saved USER↔APRIL pair. This happens before the archive router,
+    # against the latest answer and up to nine preceding USER↔APRIL exchanges. This happens before the archive router,
     # regardless of whether the classifier initially called the turn NEW or CONTINUE.
     latest_exchange_row_precheck = None
+    recent_exchange_window_rows: list[dict[str, Any]] = []
     latest_exchange_analysis: dict[str, Any] = {}
     if not query_interpretation.get("_latest_exchange_pass_done"):
         recent_probe = hydrate(
-            uid, limit=5, dialog_id=str(dialog_id or ""),
+            uid, limit=10, dialog_id=str(dialog_id or ""),
             conversation_id=str(conversation_id or ""),
             strict_dialog_scope=bool(_text(dialog_id) or _text(conversation_id)),
         )
@@ -6604,13 +6605,88 @@ def search_dialogue_context(
             recent_probe_rows = [row for row in (recent_probe.get("dialogue_pairs") or [])
                                  if isinstance(row, dict) and not _row_is_pending_clarification(row)
                                  and not _is_failed_provider_row(row)]
+        recent_probe_rows.sort(key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)))
+        recent_exchange_window_rows = list(recent_probe_rows[-10:])
         latest_exchange_row_precheck = max(
             recent_probe_rows,
             key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
             default=None,
         )
-        query_interpretation = interpret_request_in_context(
-            query, latest_exchange_row_precheck, query_interpretation
+        query_interpretation = interpret_request_across_recent_exchanges(
+            query, recent_exchange_window_rows or ([latest_exchange_row_precheck] if latest_exchange_row_precheck else []),
+            query_interpretation, window_size=10,
+        )
+        # If April explicitly requested an input and the user supplies that
+        # modality without text (photo/screenshot/file), bind the upload to that
+        # exact open exchange instead of treating an empty caption as a new topic.
+        if latest_exchange_row_precheck and (has_image or has_file or has_voice):
+            _latest_answer_text = _text(
+                latest_exchange_row_precheck.get("april_text")
+                or latest_exchange_row_precheck.get("april")
+                or latest_exchange_row_precheck.get("assistant_last_message")
+            )
+            _answer_low = _latest_answer_text.lower().replace("ё", "е")
+            _image_requested = bool(re.search(
+                r"(?:пришл\w*.{0,80}(?:фото|картин|изображен|скриншот|снимок)|"
+                r"загрузи\w*.{0,80}(?:изображен|картин|фото|скриншот)|"
+                r"send.{0,60}(?:photo|image|screenshot)|upload.{0,60}(?:photo|image|screenshot))",
+                _answer_low, re.I | re.S,
+            ))
+            _file_requested = bool(re.search(
+                r"(?:пришл\w*.{0,80}(?:файл|документ|архив|исходник|код|скрипт)|"
+                r"загрузи\w*.{0,80}(?:файл|документ|архив)|"
+                r"send.{0,60}(?:file|document|archive|source|code)|upload.{0,60}(?:file|document|archive|source))",
+                _answer_low, re.I | re.S,
+            ))
+            _voice_requested = bool(re.search(r"(?:пришл\w*.{0,50}(?:голос|аудио|запис)|send.{0,40}audio|voice message)", _answer_low, re.I | re.S))
+            _requested_modality_supplied = bool(
+                (has_image and _image_requested)
+                or (has_file and _file_requested)
+                or (has_voice and _voice_requested)
+            )
+            if _requested_modality_supplied and _assistant_expects_user_input(_latest_answer_text):
+                _attachment_analysis = dict(query_interpretation.get("latest_exchange_analysis") or {})
+                _attachment_analysis.update({
+                    "available": True,
+                    "linked": True,
+                    "route": "LATEST_EXCHANGE_FIRST",
+                    "reason": "assistant_requested_attachment_received",
+                    "assistant_requested_attachment_received": True,
+                    "matched_recent_exchange_id": _text(latest_exchange_row_precheck.get("message_id"))[:120],
+                    "actual_latest_exchange_id": _text(latest_exchange_row_precheck.get("message_id"))[:120],
+                })
+                query_interpretation.update({
+                    "latest_exchange_analysis": _attachment_analysis,
+                    "recent_branch_anchor": {
+                        "message_id": _text(latest_exchange_row_precheck.get("message_id"))[:120],
+                        "topic_id": _text(latest_exchange_row_precheck.get("topic_id"))[:120],
+                        "branch_id": _text(latest_exchange_row_precheck.get("branch_id") or latest_exchange_row_precheck.get("work_id"))[:120],
+                        "same_dialog": True,
+                        "user": _text(latest_exchange_row_precheck.get("user_text") or latest_exchange_row_precheck.get("user"))[:1200],
+                        "april": _latest_answer_text[:480],
+                        "assistant_last_message": _latest_answer_text[:5200],
+                    },
+                    "primary_intent": "TOPIC_CONTINUATION",
+                    "direction": "RESOLVE_AGAINST_LATEST_EXCHANGE",
+                    "topic_reference": "PREVIOUS_ASSISTANT_ANSWER",
+                    "requires_memory": True,
+                    "history_request": False,
+                    "search_scope": "LATEST_EXCHANGE",
+                    "relation_hint": "CONTINUE",
+                    "previous_answer_reference": True,
+                    "active_branch_repair": True,
+                    "reason": "assistant_requested_attachment_received",
+                })
+        _recent_analysis = query_interpretation.get("latest_exchange_analysis") if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
+        _apr_timing_log(
+            "recent_exchange_window_analysis", None,
+            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+            window_count=len(recent_exchange_window_rows),
+            latest_message_key=_apr_diag_ref((latest_exchange_row_precheck or {}).get("message_id")),
+            matched_message_key=_apr_diag_ref(_recent_analysis.get("matched_recent_exchange_id")),
+            matched_older_exchange=bool(_recent_analysis.get("matched_older_exchange")),
+            linked=bool(_recent_analysis.get("linked")),
+            reason=_text(_recent_analysis.get("reason"))[:100],
         )
         query_interpretation["_latest_exchange_pass_done"] = True
     latest_exchange_analysis = (
@@ -6672,6 +6748,20 @@ def search_dialogue_context(
         and not explicit_history_preload
         and not explicit_prior_pointer_preload
     )
+    # A named subject that did not match the last ten exchanges must be checked
+    # against this authenticated user's retained Premium history before it can
+    # become a new topic. This is a lookup stage, not a HISTORY_RECALL response.
+    named_topic_preload = bool(
+        not latest_exchange_link
+        and not explicit_history_preload
+        and not explicit_prior_pointer_preload
+        and not query_interpretation.get("explicit_topic_switch")
+        and bool(_subject_tokens(query))
+    )
+    # A typed artifact reference (code/table/chart/diagram/image/file) opens
+    # authenticated history retrieval even when the user does not repeat the
+    # artifact's topic name. Exact source selection remains branch/provenance based.
+    artifact_history_preload = bool(preclassified_artifact_kind and not explicit_history_preload)
     # Premium routing is latest-exchange-first. The archive is not a fallback for
     # every ordinary question: it opens only for an explicit history/time/subject
     # pointer, or when Interpretation requests memory and the latest exchange did
@@ -6680,6 +6770,8 @@ def search_dialogue_context(
     allow_semantic_history_search = bool(
         explicit_history_preload
         or explicit_prior_pointer_preload
+        or named_topic_preload
+        or artifact_history_preload
         or (
             semantic_memory_preload
             and not latest_exchange_link
@@ -6690,6 +6782,7 @@ def search_dialogue_context(
     )
     independent_new_topic_preload = bool(
         not allow_semantic_history_search
+        and not query_interpretation.get("recent_branch_match")
         and not explicit_history_preload and not explicit_prior_pointer_preload
         and _text(query_interpretation.get("primary_intent")).upper() not in {"HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL", "PLAN_RECALL"}
     )
@@ -6723,10 +6816,11 @@ def search_dialogue_context(
             # Re-run the latest-exchange precheck in the nested strict probe.
             # The outer call's flag is local to that call; carrying it forward
             # used to leave the recursive search without its latest row anchor.
-            query_interpretation={
-                key: value for key, value in query_interpretation.items()
-                if key != "_latest_exchange_pass_done"
-            },
+            query_interpretation=dict(
+                query_interpretation.get("_recent_exchange_original_semantics")
+                if isinstance(query_interpretation.get("_recent_exchange_original_semantics"), dict)
+                else query_interpretation
+            ),
             _hot_branch_only=True,
         )
         hot_result = _promote_grounded_recent_anaphoric_candidate(hot_result, query_interpretation)
@@ -6782,9 +6876,9 @@ def search_dialogue_context(
         # a persisted branch cannot be fully expanded. Do not widen to all history
         # merely because the local hot-branch probe was inconclusive.
 
-    # A latest-exchange miss on a self-contained NEW request is a topic boundary,
-    # not permission to scan every historical topic. The regular path below receives
-    # a five-pair view containing only the most recent exchange in this case.
+    # A latest/recent-branch miss on a self-contained NEW request is a topic
+    # boundary, not permission to import unrelated history. Named subjects and
+    # typed artifact lookups explicitly open the authenticated history fallback.
     retrospective_image_discussion = _is_image_discussion_without_new_visual_action(query)
     explicit_visual_revision = _is_explicit_visual_revision_request(query)
     visual_misroute_correction = _is_visual_misroute_correction(query)
@@ -6816,7 +6910,7 @@ def search_dialogue_context(
         # retention window, not a 16-row current-dialog slice. Otherwise a request
         # about an older topic/artifact is silently prevented from reaching the
         # history fallback merely because the latest exchange is unrelated.
-        limit=5 if (_hot_branch_only or independent_new_topic_preload or not allow_semantic_history_search) else 0,
+        limit=10 if (_hot_branch_only or independent_new_topic_preload or not allow_semantic_history_search) else 0,
         dialog_id=str(dialog_id or ""),
         conversation_id=str(conversation_id or ""),
         strict_dialog_scope=bool(_hot_branch_only),
@@ -7252,6 +7346,8 @@ def search_dialogue_context(
         dialog_key=_apr_diag_ref(dialog_id),
         query_key=_apr_diag_ref(query),
         history_request=history_request,
+        named_topic_preload=bool(named_topic_preload),
+        artifact_history_preload=bool(artifact_history_preload),
         semantic_intent=interpreted_intent,
         resume_anchor_requested=bool(resume_key),
         resume_anchor_found=bool(resume_anchor_row),
@@ -7280,6 +7376,12 @@ def search_dialogue_context(
         scoped_rows = list(all_rows)
     if targeted_active_repair and active_repair_rows:
         active_repair_ids = {_text(row.get("message_id")) for row in active_repair_rows if _text(row.get("message_id"))}
+        # The semantic last-ten resolver's exact same-dialog anchor must survive
+        # image/work repair narrowing; otherwise the later route silently falls
+        # back to the newest unrelated pair and loses the selected branch.
+        _recent_anchor_id = _text((query_interpretation.get("recent_branch_anchor") or {}).get("message_id")) if isinstance(query_interpretation.get("recent_branch_anchor"), dict) else ""
+        if _recent_anchor_id:
+            active_repair_ids.add(_recent_anchor_id)
         if active_repair_ids:
             scoped_rows = [row for row in scoped_rows if _text(row.get("message_id")) in active_repair_ids]
 
@@ -7386,6 +7488,11 @@ def search_dialogue_context(
                 key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
             )[-8:]
             scope_reason = "latest_active_dialogue_window"
+        _recent_anchor_id = _text((query_interpretation.get("recent_branch_anchor") or {}).get("message_id")) if isinstance(query_interpretation.get("recent_branch_anchor"), dict) else ""
+        if _recent_anchor_id and not any(_text(row.get("message_id")) == _recent_anchor_id for row in narrowed_rows):
+            _recent_anchor_row = next((row for row in rows if _text(row.get("message_id")) == _recent_anchor_id), None)
+            if _recent_anchor_row is not None:
+                narrowed_rows.append(_recent_anchor_row)
         if narrowed_rows:
             rows = narrowed_rows
         _apr_timing_log(
@@ -10174,11 +10281,64 @@ def search_dialogue_context(
             or (not _text(row.get("dialog_id")) and _text(conversation_id) and _text(row.get("conversation_id")) == _text(conversation_id))
         )
     ]
-    latest_route_row = max(
+    # Candidate narrowing may leave only the matched anchor. Restore the bounded
+    # same-dialog evidence window for branch expansion so adjacent answers that
+    # contain the actual graph/code/table payload are not lost.
+    current_dialog_seen_ids = {_text(row.get("message_id")) for row in current_dialog_rows if _text(row.get("message_id"))}
+    for recent_row in recent_exchange_window_rows[-10:]:
+        if not isinstance(recent_row, dict) or _row_is_pending_clarification(recent_row) or _is_failed_provider_row(recent_row):
+            continue
+        same_dialog_recent = bool(
+            (_text(dialog_id) and _text(recent_row.get("dialog_id")) == _text(dialog_id))
+            or (not _text(recent_row.get("dialog_id")) and _text(conversation_id) and _text(recent_row.get("conversation_id")) == _text(conversation_id))
+        )
+        recent_id = _text(recent_row.get("message_id"))
+        if same_dialog_recent and recent_id and recent_id not in current_dialog_seen_ids:
+            current_dialog_rows.append(recent_row)
+            current_dialog_seen_ids.add(recent_id)
+    current_dialog_rows.sort(key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)))
+    actual_latest_route_row = max(
         current_dialog_rows,
         key=lambda row: (float(row.get("created_at") or 0.0), int(row.get("turn_index") or 0)),
         default=None,
     )
+    recent_branch_anchor_probe = query_interpretation.get("recent_branch_anchor") if isinstance(query_interpretation.get("recent_branch_anchor"), dict) else {}
+    recent_branch_anchor_probe_id = _text(recent_branch_anchor_probe.get("message_id"))
+    recent_branch_artifact_rows = [
+        row for row in current_dialog_rows
+        if _text(row.get("message_id")) in {
+            _text(item.get("message_id")) for item in recent_exchange_window_rows[-10:] if isinstance(item, dict)
+        }
+        and _row_modalities(row)
+    ]
+    if recent_branch_anchor_probe_id and recent_branch_artifact_rows and not needs_structured_search:
+        # The request may say only “make it larger” or “change these values”.
+        # The matched recent answer identifies the renderer; exact source payload
+        # retrieval must still run even when the user did not repeat “graph/code”.
+        needs_structured_search = True
+        _apr_timing_log(
+            "recent_branch_structured_source_search_enabled", None,
+            user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+            anchor_message_key=_apr_diag_ref(recent_branch_anchor_probe_id),
+            artifact_source_count=len(recent_branch_artifact_rows),
+            source_families=sorted({family for row in recent_branch_artifact_rows for family in _row_modalities(row)}),
+            reason="contextual_request_targets_artifact_in_recent_branch",
+        )
+    latest_route_row = actual_latest_route_row
+    recent_branch_anchor_meta = query_interpretation.get("recent_branch_anchor") if isinstance(query_interpretation.get("recent_branch_anchor"), dict) else {}
+    recent_branch_anchor_id = _text(recent_branch_anchor_meta.get("message_id"))
+    if recent_branch_anchor_id and not history_request and not new_topic_request:
+        matched_recent_row = next((row for row in current_dialog_rows if _text(row.get("message_id")) == recent_branch_anchor_id), None)
+        if matched_recent_row is not None:
+            latest_route_row = matched_recent_row
+            _apr_timing_log(
+                "recent_branch_exchange_anchor_selected", None,
+                user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                latest_message_key=_apr_diag_ref((actual_latest_route_row or {}).get("message_id")),
+                matched_message_key=_apr_diag_ref(recent_branch_anchor_id),
+                window_count=len(recent_exchange_window_rows),
+                matched_older_exchange=bool(recent_branch_anchor_id != _text((actual_latest_route_row or {}).get("message_id"))),
+            )
     # A correction like “you used green, I asked for red” changes an attribute of
     # the active visual, not the topic. The exception is intentionally gated by
     # both a revision act and an image annotation target plus a same-dialog anchor.
@@ -10642,7 +10802,7 @@ def search_dialogue_context(
         and not new_topic_request
         and latest_route_row
         and underspecified_turn
-        and route_policy_version == "hot_branch_then_semantic_history_v1"
+        and route_policy_version == "hot_branch_then_recent_10_then_semantic_history_v2"
     ):
         # A short, subjectless response belongs to the current exchange even when
         # pragmatic labeling did not assign an explicit acknowledgement category.
@@ -10695,8 +10855,24 @@ def search_dialogue_context(
                 seed_origin_id = _text(active_work_branch.get("origin_message_id"))
             seed_subjects = _row_subject_tokens(branch_seed_row)
             seed_topic_text = " ".join((_row_subject_text_lightweight(branch_seed_row), _topic_label_lightweight(branch_seed_row)))
+            recent_exchange_ids = {
+                _text(item.get("message_id")) for item in recent_exchange_window_rows[-10:]
+                if isinstance(item, dict) and _text(item.get("message_id"))
+            }
+            branch_target_family = (
+                _explicit_artifact_followup_kind(query)
+                or next((family for family, pattern in (
+                    ("graph", r"график\w*|диаграмм\w*|\bgraph\b|\bchart\b|\bplot\b"),
+                    ("table", r"таблиц\w*|\btable\b"),
+                    ("diagram", r"схем\w*|чертеж\w*|\bdiagram\b|\bdrawing\b"),
+                    ("code", r"код\w*|скрипт\w*|\bcode\b|\bscript\b"),
+                    ("image", r"фото\w*|картинк\w*|изображен\w*|\bimage\b|\bphoto\b"),
+                    ("file", r"файл\w*|документ\w*|\bfile\b|\bdocument\b"),
+                ) if re.search(pattern, seed_topic_text, re.I)), "")
+            )
             exact_branch_rows = []
             semantic_branch_rows = []
+            recent_artifact_rows: list[dict[str, Any]] = []
             for row in branch_pool:
                 if not isinstance(row, dict) or _row_is_pending_clarification(row) or _is_failed_provider_row(row):
                     continue
@@ -10722,6 +10898,33 @@ def search_dialogue_context(
                 title_similarity = _topic_query_overlap(seed_topic_text, row_topic_text) if seed_topic_text and row_topic_text else 0.0
                 if not subject_conflict and (subject_similarity >= 0.52 or title_similarity >= 0.62):
                     semantic_branch_rows.append(row)
+                    continue
+                # Legacy exchanges often lack stable topic_id/branch_id metadata.
+                # A compatible artifact in the last-ten window is still part of
+                # this branch when its source subject aligns with the matched
+                # answer and its renderer family matches the requested operation.
+                row_modalities = _row_modalities(row)
+                shared_branch_subject = bool(seed_subjects.intersection(row_subjects))
+                if (
+                    row_id in recent_exchange_ids
+                    and row_modalities
+                    and (
+                        (branch_target_family and branch_target_family in row_modalities and shared_branch_subject)
+                        or (not branch_target_family and not subject_conflict and subject_similarity >= 0.34)
+                    )
+                ):
+                    semantic_branch_rows.append(row)
+                    recent_artifact_rows.append(row)
+
+            if recent_artifact_rows:
+                _apr_timing_log(
+                    "recent_branch_artifact_sources_attached", None,
+                    user_key=_apr_diag_ref(uid), dialog_key=_apr_diag_ref(dialog_id),
+                    anchor_message_key=_apr_diag_ref(branch_seed_id),
+                    target_family=branch_target_family or "semantic_match",
+                    source_message_keys=[_apr_diag_ref(item.get("message_id")) for item in recent_artifact_rows[:10]],
+                    source_count=len(recent_artifact_rows),
+                )
 
             # When the active branch has no persisted provenance (legacy rows), or
             # the current branch is thin, search the full authenticated retained
@@ -11162,6 +11365,7 @@ def search_dialogue_context(
                 and _text(item.get("message_id"))
                 and _text(item.get("message_id")) != primary_id
             ]
+            prior_candidate_order = {source_id: index for index, source_id in enumerate(prior_candidates)}
             def _prior_exchange_value(source_id: str) -> tuple[int, int, int]:
                 row = source_rows_by_id.get(source_id) or selected_by_id.get(source_id) or {}
                 assistant_text = _text(
@@ -11170,7 +11374,7 @@ def search_dialogue_context(
                 )
                 structured = row.get("assistant_structured_output")
                 artifact_count = len(structured) if isinstance(structured, list) else 0
-                return (artifact_count, min(len(assistant_text), 12000), prior_candidates.index(source_id))
+                return (artifact_count, min(len(assistant_text), 12000), prior_candidate_order.get(source_id, 0))
             if prior_candidates:
                 prior_candidates.sort(key=_prior_exchange_value, reverse=True)
                 ordered_source_ids.append(prior_candidates[0])
@@ -11217,7 +11421,7 @@ def search_dialogue_context(
         "history_scan_skipped": False,
         "search_stage": "HOT_BRANCH_PROBE" if _hot_branch_only else "FULL_CONTEXT",
         "hot_branch_window_count": len(rows or []) if _hot_branch_only else 0,
-        "engine": "premium_state_manager_topic_section_search_v14_two_exchange_repair_context",
+        "engine": "premium_state_manager_topic_section_search_v15_recent_10_exchange_arbitration",
         "authenticated": True,
         "window_hours": DIALOGUE_WINDOW_HOURS,
         "dialog_id": str(dialog_id or ""),
@@ -11307,6 +11511,8 @@ def search_dialogue_context(
         "latest_exchange_independent_request": bool(latest_exchange_independent_request),
         "effective_interpretation": deepcopy(query_interpretation),
         "semantic_history_search_allowed": bool(allow_semantic_history_search),
+        "named_topic_history_fallback": bool(named_topic_preload),
+        "artifact_history_preload": bool(artifact_history_preload),
         "implicit_latest_branch_resume": bool(resume_latest_branch and not history_request),
         "contextual_history_match": contextual_history_match,
         "historical_artifact_reactivation": bool(historical_artifact_reactivation),
@@ -11323,7 +11529,19 @@ def search_dialogue_context(
         "time_filter": time_filter,
         "active_topic": active_topic,
         "anchor": anchor_payload,
-        "latest_assistant_anchor": (_compact_pair(latest_route_row) if latest_route_row else {}),
+        "latest_assistant_anchor": ({**_compact_pair(actual_latest_route_row), "same_dialog": True} if actual_latest_route_row else {}),
+        "recent_branch_anchor": ({**_compact_pair(latest_route_row), "same_dialog": True} if latest_route_row and recent_branch_anchor_id else {}),
+        "recent_exchange_window": [
+            {
+                "message_id": _text(row.get("message_id"))[:120],
+                "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+                "branch_id": _text(row.get("branch_id") or row.get("work_id"))[:120],
+                "turn_index": int(row.get("turn_index") or 0),
+                "user_request": _text(row.get("user_text") or row.get("user"))[:1200],
+                "april_answer": _text(row.get("april_text") or row.get("april") or row.get("assistant_last_message"))[:2400],
+            }
+            for row in recent_exchange_window_rows[-10:] if isinstance(row, dict)
+        ],
         "matches": matches[:max(1, int(limit or 12))] if matches else [],
         "selected": selected_for_context[:12 if (
             history_request or resume_anchor_row
@@ -11487,6 +11705,8 @@ def prepare_dialogue_context(
         "latest_exchange_analysis": deepcopy(context.get("latest_exchange_analysis") or {}),
         "effective_interpretation": deepcopy(context.get("effective_interpretation") or {}),
         "semantic_history_search_allowed": bool(context.get("semantic_history_search_allowed")),
+        "named_topic_history_fallback": bool(context.get("named_topic_history_fallback")),
+        "artifact_history_preload": bool(context.get("artifact_history_preload")),
         "contextual_history_match": bool(context.get("contextual_history_match")),
         "image_edit_reference": bool(context.get("image_edit_reference")),
         "historical_artifact_reactivation": bool(context.get("historical_artifact_reactivation")),
@@ -11499,6 +11719,8 @@ def prepare_dialogue_context(
         "topic_table_markdown": _text(context.get("topic_table_markdown")),
         "anchor": deepcopy(context.get("anchor") or {}),
         "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
+        "recent_branch_anchor": deepcopy(context.get("recent_branch_anchor") or {}),
+        "recent_exchange_window": deepcopy(context.get("recent_exchange_window") or []),
         "latest_answer_relation": deepcopy(
             ((context.get("routing_evidence") or {}).get("latest_answer_relation") or {})
             if isinstance(context.get("routing_evidence"), dict) else {}
