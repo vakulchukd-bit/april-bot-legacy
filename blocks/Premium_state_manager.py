@@ -7259,6 +7259,7 @@ def search_dialogue_context(
     # collapse the search to the latest unrelated generated render in the hot branch.
     image_edit_reference = bool(
         contextual_image_edit
+        or explicit_visual_revision
         or (
             not retrospective_image_discussion
             and (
