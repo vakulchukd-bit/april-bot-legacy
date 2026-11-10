@@ -3015,9 +3015,12 @@ async def _edit_image_artifact(
     """Edit the selected source image through the existing GPT Image edit route."""
     intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     input_data = interpretation.get("input") if isinstance(interpretation.get("input"), dict) else {}
-    request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
+    # A requested source upload often arrives with a short acknowledgement
+    # ("Вот", "Добавляй", "Прикрепил"). In that case the actual edit operation
+    # is the still-pending instruction recovered from the authenticated prior pair.
+    request_text = _text(intent.get("image_edit_instruction"))
     if not request_text:
-        request_text = _text(intent.get("image_edit_instruction"))
+        request_text = _text(input_data.get("original_request") or input_data.get("normalized_request"))
     if not request_text:
         return None
     selected = _select_image_edit_source(visual_context or [], request_text=request_text)
@@ -3025,7 +3028,7 @@ async def _edit_image_artifact(
         return None
     source_bytes, source_mime, source_item = selected
     edit_prompt_parts = [
-        "Edit the supplied source image according to this exact current user instruction: " + request_text + ".",
+        "Edit the supplied source image according to this exact user edit instruction: " + request_text + ".",
         "STRICT EDIT SCOPE: make only the changes explicitly requested in this current instruction. Preserve every unaffected pixel and detail, including composition, background, perspective, lighting, layout, existing text, and controls.",
         "Do not add any unrequested element: no arrows, pointers, red markers, labels, circles, highlights, callouts, captions, icons, decorative accents, explanatory annotations, or extra UI. Do not add a marker merely to indicate which text or number was changed.",
         "Treat constraints such as 'without the red arrow', 'remove the pointer', 'do not add a marker', and equivalent wording as strict prohibitions. If a prohibited element is already present in the supplied source, remove only that element and preserve the requested edits.",
