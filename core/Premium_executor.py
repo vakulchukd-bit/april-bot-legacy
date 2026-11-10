@@ -69,7 +69,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v12_structured_artifact_reactivation"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v13_recent_branch_10_exchange_continuity"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -1065,21 +1065,24 @@ def _build_dialogue_thread_context(
     topic_context = context.get("topic_context") if isinstance(context.get("topic_context"), dict) else {}
     relation = _text(context.get("relation") or "NEW").upper()
     latest_assistant_anchor = context.get("latest_assistant_anchor") if isinstance(context.get("latest_assistant_anchor"), dict) else {}
+    recent_branch_anchor = context.get("recent_branch_anchor") if isinstance(context.get("recent_branch_anchor"), dict) else {}
+    recent_exchange_window = context.get("recent_exchange_window") if isinstance(context.get("recent_exchange_window"), list) else []
     latest_answer_relation = context.get("latest_answer_relation") if isinstance(context.get("latest_answer_relation"), dict) else {}
     current_dialog_continuation = relation == "CONTINUE" and not context.get("contextual_history_match") and bool(latest_assistant_anchor)
     if current_dialog_continuation:
-        # Re-anchor thread construction to the last assistant message in the
-        # authenticated chat. Older active-work metadata may enrich the branch,
-        # but it cannot replace the current last answer as the starting point.
+        # A contextual request may resolve to an earlier answer inside the same
+        # active 5–10 exchange branch. Keep that matched answer as the operation
+        # anchor; the real latest answer remains separately available in the trail.
+        selected_anchor = recent_branch_anchor or latest_assistant_anchor
         anchor = {
             **anchor,
-            "message_id": _text(latest_assistant_anchor.get("message_id")),
-            "user": _text(latest_assistant_anchor.get("user") or latest_assistant_anchor.get("user_request")),
-            "april": _text(latest_assistant_anchor.get("april"))[:480],
-            "assistant_last_message": _text(latest_assistant_anchor.get("assistant_last_message") or latest_assistant_anchor.get("assistant_message"))[:5200],
-            "assistant_structured_output": latest_assistant_anchor.get("assistant_structured_output") or [],
-            "topic_id": _text(latest_assistant_anchor.get("topic_id")),
-            "topic_origin_message_id": _text(latest_assistant_anchor.get("topic_origin_message_id") or latest_assistant_anchor.get("origin_message_id")),
+            "message_id": _text(selected_anchor.get("message_id") or anchor.get("message_id")),
+            "user": _text(selected_anchor.get("user") or selected_anchor.get("user_request") or anchor.get("user")),
+            "april": _text(selected_anchor.get("april") or anchor.get("april"))[:480],
+            "assistant_last_message": _text(selected_anchor.get("assistant_last_message") or selected_anchor.get("assistant_message") or anchor.get("assistant_last_message"))[:5200],
+            "assistant_structured_output": selected_anchor.get("assistant_structured_output") or anchor.get("assistant_structured_output") or [],
+            "topic_id": _text(selected_anchor.get("topic_id") or anchor.get("topic_id")),
+            "topic_origin_message_id": _text(selected_anchor.get("topic_origin_message_id") or selected_anchor.get("origin_message_id") or anchor.get("topic_origin_message_id")),
         }
     continuing = relation == "CONTINUE" and bool(anchor or selected)
     uid = _text(user_id)
@@ -1319,6 +1322,13 @@ def _build_dialogue_thread_context(
         "topic": topic,
         "branch_summary": _text(branch.get("branch_summary") or anchor.get("branch_summary") or topic)[:640],
         "relation": relation,
+        "recent_exchange_window": [dict(item) for item in recent_exchange_window[-10:] if isinstance(item, dict)],
+        "matched_recent_branch_anchor": {
+            "message_id": _text(recent_branch_anchor.get("message_id"))[:120],
+            "topic_id": _text(recent_branch_anchor.get("topic_id"))[:120],
+            "branch_id": _text(recent_branch_anchor.get("branch_id"))[:120],
+            "same_dialog": bool(recent_branch_anchor.get("same_dialog", True)),
+        } if recent_branch_anchor else {},
         "last_turn_link": {
             "decision": (
                 "CURRENT_BRANCH_CONTINUATION" if current_dialog_continuation
@@ -5857,7 +5867,7 @@ async def execute(
     request_structure["active_branch_artifact_index"] = active_branch_artifact_index
     request_structure["question_sequence"] = question_sequence
     request_structure["answer_sequence_in_order"] = True
-    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v4_last_answer_branch_link"
+    request_structure["question_search_engine"] = "state_manager_per_question_semantic_v5_recent_10_branch_link"
     request_structure["semantic_interpretation"] = semantic_interpretation
     request_structure["dialogue_retrieval_plan"] = dict(dialogue_retrieval_plan)
     request_structure["dialogue_transition_analysis"] = transition_analysis
@@ -5991,6 +6001,8 @@ async def execute(
             "dialogue_thread_context": dict(dialogue_thread_context),
             "dialogue_transition_analysis": dict(transition_analysis),
             "latest_assistant_anchor": dict(dialogue_context.get("latest_assistant_anchor") or {}),
+            "recent_branch_anchor": dict(dialogue_context.get("recent_branch_anchor") or {}),
+            "recent_exchange_window": [dict(item) for item in (dialogue_context.get("recent_exchange_window") or []) if isinstance(item, dict)][:10],
             "latest_answer_relation": dict(dialogue_context.get("latest_answer_relation") or {}),
             "topic_context": dict(dialogue_context.get("topic_context") or {}),
             "topic_context_expansion": dict(dialogue_context.get("topic_context_expansion") or {}),
