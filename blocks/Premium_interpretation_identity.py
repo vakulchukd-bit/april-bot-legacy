@@ -266,7 +266,8 @@ _IMAGE_EDIT_TARGET_RE = re.compile(
     r"контраст\w*|цвет\w*|надпис\w*|текст\w*|логотип\w*|объект\w*|"
     r"монет\w*|банкнот\w*|купюр\w*|евро|деньг\w*|доллар\w*|гривн\w*|ценник\w*|"
     r"реалистич\w*|красив\w*|лишн\w*|размыти\w*|тень\w*|яркост\w*|"
-    r"мяч\w*|игрушк\w*|предмет\w*|котен\w*|котён\w*|стрелк\w*|указател\w*|маркер\w*|"
+    r"мяч\w*|игрушк\w*|предмет\w*|кот\w*|котен\w*|котён\w*|собак\w*|птиц\w*|"
+    r"стрелк\w*|указател\w*|маркер\w*|"
     r"кнопк\w*|точк\w*|област\w*|усы|бород\w*|волос\w*|бров\w*|ресниц\w*|глаз\w*|нос\w*|губ\w*|лиц\w*|место\s+(?:нажатия|клик\w*)|куда\s+нажать|навигац\w*|"
     r"check\s?mark|tick|arrow|pointer|marker|highlight|annotat\w*|outline|circle|button|click|"
     r"background|quality|sharpen|contrast|brightness|text|logo|realistic|remove|red|green)",
@@ -286,7 +287,8 @@ def _detect_contextual_image_edit(text: str) -> bool:
     # an edit intent even when the user omits the word "изменить".
     visual_target = bool(re.search(
         r"(?:стрелк\w*|arrow|указател\w*|pointer|маркер\w*|marker|цвет\w*|красн\w*|зелен\w*|red|green|обводк\w*|highlight|кнопк\w*|button|надпис\w*|text|лишн\w*|"
-        r"\b(?:усы|усам|усами)\b|бород\w*|волос\w*|бров\w*|ресниц\w*|глаз\w*|нос\w*|губ\w*|лиц\w*)",
+        r"\b(?:усы|усам|усами)\b|бород\w*|волос\w*|бров\w*|ресниц\w*|глаз\w*|нос\w*|губ\w*|лиц\w*|"
+        r"кот\w*|котен\w*|котён\w*|собак\w*|пес\w*|пёс\w*|птиц\w*|животн\w*|cat\w*|dog\w*|bird\w*)",
         low, re.IGNORECASE,
     ))
     revision_of_visual = bool(
@@ -668,7 +670,32 @@ def _is_explicit_visual_revision_request(text: str) -> bool:
     if not low:
         return False
     image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|картинк\w*|рисун\w*|изображени\w*|снимк\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b|\bdrawing\b)"
-    if not re.search(image_noun, low, re.IGNORECASE):
+    has_image_noun = bool(re.search(image_noun, low, re.IGNORECASE))
+    # Users often refer to an image from the active authenticated branch with a
+    # pronoun instead of repeating "photo/image": e.g. "измени её, добавь ей
+    # кота". Treat this as an explicit visual revision only when all three pieces
+    # are present: a mutation verb, a concrete visual object/attribute, and a
+    # deictic/possessive reference. This prevents a bare new-image request from
+    # importing an unrelated image from history.
+    anaphoric_visual_edit = bool(
+        not has_image_noun
+        and _IMAGE_EDIT_ACTION_RE.search(low)
+        and _IMAGE_EDIT_TARGET_RE.search(low)
+        and re.search(
+            r"\b(?:ее|его|него|нее|ней|нем|нём|этот|эта|это|эту|этого|этой|этом|"
+            r"предыдущ\w*|it|her|him|this|that)\b",
+            low, re.IGNORECASE,
+        )
+        and not _has_independent_nonvisual_artifact_request(low)
+        and not re.search(
+            r"\b(?:не\s+(?:надо|нужно|меняй|добавляй|изменяй|редактируй)|"
+            r"отмен\w*|передумал\w*|забуд\w*|cancel|do\s+not|don't)\b",
+            low, re.IGNORECASE,
+        )
+    )
+    if anaphoric_visual_edit:
+        return True
+    if not has_image_noun:
         return False
     direct_edit = bool(re.search(
         r"\b(?:переделай(?:те)?|перерисуй(?:те)?|исправь(?:те)?|поправь(?:те)?|"
@@ -7222,6 +7249,133 @@ def _active_branch_image_audit(memory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pending_visual_edit_from_memory(
+    memory: dict[str, Any],
+    *,
+    current_request: str,
+    has_source_image: bool,
+) -> dict[str, Any]:
+    """Recover an edit instruction when the user supplies an image April requested.
+
+    This is deliberately narrower than general dialogue continuation: it requires
+    the State Manager's authenticated attachment-handoff signal, an actual source
+    image in the current turn, an immediately preceding assistant request for an
+    image, and a concrete edit instruction in that same exchange.
+    """
+    context = memory if isinstance(memory, dict) else {}
+    if not has_source_image or _text(context.get("relation")).upper() != "CONTINUE":
+        return {}
+
+    exchange = context.get("latest_exchange_analysis")
+    exchange = exchange if isinstance(exchange, dict) else {}
+    if not (
+        exchange.get("assistant_requested_attachment_received")
+        and exchange.get("linked")
+        and _text(exchange.get("reason")) == "assistant_requested_attachment_received"
+    ):
+        return {}
+
+    anchors = [
+        context.get("recent_branch_anchor"),
+        context.get("latest_assistant_anchor"),
+        context.get("anchor"),
+    ]
+    anchor: dict[str, Any] = {}
+    for candidate in anchors:
+        if isinstance(candidate, dict):
+            candidate_user = _text(
+                candidate.get("source_user_text") or candidate.get("user")
+                or candidate.get("user_request") or candidate.get("user_text")
+            )
+            candidate_answer = _text(
+                candidate.get("assistant_last_message") or candidate.get("april")
+                or candidate.get("april_text") or candidate.get("assistant_message")
+            )
+            if candidate_user and candidate_answer:
+                anchor = candidate
+                break
+
+    if not anchor:
+        recent = context.get("recent_exchange_window")
+        if isinstance(recent, list):
+            for candidate in reversed(recent):
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_user = _text(candidate.get("user_request") or candidate.get("user"))
+                candidate_answer = _text(candidate.get("april_answer") or candidate.get("assistant_last_message"))
+                if candidate_user and candidate_answer:
+                    anchor = candidate
+                    break
+
+    prior_user = _text(
+        anchor.get("source_user_text") or anchor.get("user")
+        or anchor.get("user_request") or anchor.get("user_text")
+    )[:1600]
+    prior_answer = _text(
+        anchor.get("assistant_last_message") or anchor.get("april")
+        or anchor.get("april_text") or anchor.get("assistant_message")
+    )[:5200]
+    if not prior_user or not prior_answer:
+        return {}
+
+    prior_answer_low = prior_answer.lower().replace("ё", "е")
+    assistant_requested_image = bool(re.search(
+        r"(?:пришл\w*.{0,100}(?:фото|картин|изображен|скриншот|снимок)|"
+        r"загрузи\w*.{0,100}(?:фото|картин|изображен|скриншот)|"
+        r"send.{0,80}(?:photo|image|picture|screenshot)|"
+        r"upload.{0,80}(?:photo|image|picture|screenshot))",
+        prior_answer_low, re.IGNORECASE | re.DOTALL,
+    ))
+    if not assistant_requested_image:
+        return {}
+
+    current_low = _text(current_request).lower().replace("ё", "е")
+    # A standalone cancellation must clear the pending edit as well. Requiring
+    # the user to repeat the edit verb made short replies such as "не надо,
+    # просто посмотри" accidentally resume the old operation.
+    if re.search(
+        r"(?:\b(?:не\s+надо|не\s+нужно|отмена|отмени(?:ть)?|передумал\w*|забудь|cancel)\b|"
+        r"\bне\s+(?:изменяй|меняй|добавляй|редактируй|трогай|делай)\b|"
+        r"\bdo\s+not\s+(?:change|edit|modify|add)\b|\bdon't\s+(?:change|edit|modify|add)\b)",
+        current_low, re.IGNORECASE,
+    ):
+        return {}
+
+    prior_user_low = prior_user.lower().replace("ё", "е")
+    edit_action = bool(_IMAGE_EDIT_ACTION_RE.search(prior_user_low))
+    edit_target = bool(
+        _IMAGE_EDIT_TARGET_RE.search(prior_user_low)
+        or re.search(
+            r"\b(?:кот\w*|собак\w*|пес\w*|пёс\w*|человек\w*|мужчин\w*|женщин\w*|"
+            r"машин\w*|автомобил\w*|дом\w*|дерев\w*|птиц\w*|животн\w*|"
+            r"cat\w*|dog\w*|person|man|woman|car|house|tree|bird)\b",
+            prior_user_low, re.IGNORECASE,
+        )
+    )
+    source_reference = bool(re.search(
+        r"\b(?:ее|её|ему|ей|него|неё|ней|нем|нём|этот|эта|это|эту|этом|"
+        r"предыдущ\w*|прикрепл\w*|загруженн\w*|присланн\w*|"
+        r"it|her|him|this|that|previous|attached|uploaded)\b",
+        prior_user_low, re.IGNORECASE,
+    ))
+    if not edit_action or not (edit_target or source_reference):
+        return {}
+    if re.search(
+        r"(?:\bне\s+(?:надо\s+)?(?:измен\w*|добав\w*|редактир\w*|трог\w*)|"
+        r"\bне\s+(?:меняй|добавляй|редактируй|трогай)|"
+        r"\bdo\s+not\s+(?:change|edit|modify|add)\b)",
+        prior_user_low, re.IGNORECASE,
+    ):
+        return {}
+
+    return {
+        "instruction": prior_user,
+        "source_message_id": _text(anchor.get("message_id") or anchor.get("source_message_id"))[:120],
+        "assistant_invitation": prior_answer[:1200],
+        "handoff_reason": "assistant_requested_attachment_received",
+    }
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -7343,6 +7497,18 @@ def build_interpretation(
             for item in visual_context if isinstance(item, dict)
         )
     )
+    pending_visual_edit = _pending_visual_edit_from_memory(
+        memory, current_request=text, has_source_image=source_image_available
+    )
+    if pending_visual_edit:
+        _apr_timing_log(
+            "pending_visual_edit_restored",
+            user_key=_apr_diag_ref((identity or {}).get("user_id") or (identity or {}).get("april_id")),
+            dialog_key=_apr_diag_ref((identity or {}).get("dialog_id") or (identity or {}).get("conversation_id")),
+            source_message_key=_apr_diag_ref(pending_visual_edit.get("source_message_id")),
+            current_image_available=True,
+            handoff_confirmed=True,
+        )
     # A compact image phrase can be a direct affirmative answer to an image
     # offer in April's immediately preceding response. In that case it is a
     # deliverable request, not an image discussion; the authenticated branch
@@ -7420,7 +7586,7 @@ def build_interpretation(
     )
     current_creation_request = _detect_image_generation_request(normalized_visual_request)
     image_edit_requested = bool(
-        (explicit_image_edit or contextual_image_edit)
+        (explicit_image_edit or contextual_image_edit or pending_visual_edit)
         and not dialogue_profile_request
         and (has_original_image or saved_output_image_metadata or explicit_edit_source_reference)
     )
@@ -7784,7 +7950,15 @@ def build_interpretation(
             "source_image_available": bool(source_image_available),
             "source_asset_message_id": next((_text(item.get("asset_message_id")) for item in visual_context if _text(item.get("asset_message_id"))), ""),
             "source_asset_role": next((_text(item.get("asset_role") or "user_input") for item in visual_context if _text(item.get("image_url") or item.get("data_uri"))), ""),
-            "image_edit_instruction": original or text if image_edit_requested else "",
+            # If the current turn is the requested source-image upload, preserve
+            # the exact edit instruction from the preceding authenticated pair;
+            # a short caption such as "Вот добавляй" is only a handoff receipt.
+            "image_edit_instruction": (
+                _text(pending_visual_edit.get("instruction"))
+                or original or text
+            ) if image_edit_requested else "",
+            "pending_visual_edit_restored": bool(pending_visual_edit),
+            "pending_visual_edit_source_message_id": _text(pending_visual_edit.get("source_message_id")),
             "reuse_saved_image": bool(reuse_saved_image),
             "image_status_request": bool(image_status_request),
             "has_saved_output_image": bool(has_saved_output_image),
