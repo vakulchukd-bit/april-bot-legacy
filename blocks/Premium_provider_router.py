@@ -1461,7 +1461,7 @@ def _requires_prior_structured_payload(
         r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|схем\w*|"
         r"координат\w*|значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
         r"матриц\w*|csv|json|массив\w*|решен\w*|шаги?\s+решен\w*|ссылк\w*|url-?адрес\w*|"
-        r"источник\w*|код\w*|скрипт\w*|картинк\w*|изображен\w*|иллюстрац\w*|визуал\w*|"
+        r"источник\w*|код\w*|скрипт\w*|копирован\w*|copy(?:able)?\s+text|copy\s+block|файл\w*|документ\w*|pdf|xlsx|xls|docx|\bfile\w*|\bdocument\w*|картинк\w*|изображен\w*|иллюстрац\w*|визуал\w*|"
         r"\btable\w*|\brows?\b|\bcolumns?\b|\bgraph\w*|\bcharts?\b|\bplots?\b|"
         r"\bcoordinates?\b|\bvalues?\b|\bdata\b|\bformulas?\b|\bequations?\b|"
         r"\bcalculat\w*|\bsolutions?\b|\bmatrices\b|\bmatrix\b|\barrays?\b|"
@@ -1474,7 +1474,7 @@ def _requires_prior_structured_payload(
         r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
         r"\bтой\b|\bэтой\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|\bсохранен\w*\b|"
         r"\bиз\s+истории\b|\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|\bте\s+же\b|"
-        r"\bпо\s+этим\b|\bпо\s+тем\b|\bзначения\s+из\b|\bданные\s+из\b|"
+        r"\bпо\s+этим\b|\bпо\s+тем\b|\bзначения\s+из\b|\bданные\s+из\b|\bего\b|\bее\b|\bеё\b|\bих\b|\bтолько\b|\bименно\b|\bвозьми\w*\b|\bбери\w*\b|\bвыдай\w*\b|\bвыведи\w*\b|\bдостань\w*\b|\bвытащи\w*\b|\bпокажи\w*\b|\bотдай\w*\b|\bпередай\w*\b|\bсохрани\w*\b|\bэкспортируй\w*\b|\bскачай\w*\b|\bпришли\w*\b|\bпредоставь\w*\b|"
         r"\bверни\w*\b|\bвосстанови\w*\b|\bповтори\w*\b|\bснова\b|"
         r"\bеще\s+раз\b|\bпродолжи\w*\b|\bдобавь\w*\b|\bизмени\w*\b|"
         r"\bисправь\w*\b|\bдоработай\w*\b|\bобнови\w*\b|"
@@ -1493,33 +1493,60 @@ def _requires_prior_structured_payload(
 
 
 def _prior_structured_kind_targets(current_request: Any) -> set[str]:
-    """Infer only the kinds of saved structures explicitly requested by the user."""
+    """Infer source artifact kinds without confusing them with output containers."""
     query = _text(current_request).lower().replace("ё", "е")
     targets: set[str] = set()
-    has_table_target = bool(re.search(r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)", query))
-    has_graph_target = bool(re.search(r"(?:график\w*|диаграмм\w*|построен\w*|крив\w*|\bgraph\w*|\bcharts?\b|\bplots?\b)", query))
+
+    has_table_target = bool(re.search(
+        r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)",
+        query,
+    ))
+    has_graph_target = bool(re.search(
+        r"(?:график\w*|диаграмм\w*|построен\w*|крив\w*|\bgraph\w*|\bcharts?\b|\bplots?\b)",
+        query,
+    ))
     if has_table_target:
         targets.add("table")
-    # Bare "coordinates/points" usually means graph data, except when the user
-    # explicitly asks for a table containing those coordinates.
-    if has_graph_target or (not has_table_target and re.search(r"(?:координат\w*|точк\w*|\bcoordinates?\b|\bpoints?\b)", query)):
+    if has_graph_target or (
+        not has_table_target
+        and re.search(r"(?:координат\w*|точк\w*|\bcoordinates?\b|\bpoints?\b)", query)
+    ):
         targets.add("graph")
     if re.search(r"(?:формул\w*|уравнен\w*|выражен\w*|экспонент\w*|\bformula\w*|\bequation\w*|\bexpression\w*|\bexponential\w*)", query):
         targets.add("formula")
     if re.search(r"(?:решен\w*|вычислен\w*|расчет\w*|расчёт\w*|шаг\w*\s+решен\w*|математическ\w*\s+задач\w*|\bsolution\w*|\bcalculat\w*|\bderivation\w*|\bmath\s+problem\w*)", query):
         targets.add("solution")
-    if re.search(r"(?:ссылк\w*|url-?адрес\w*|источник\w*|\blinks?\b|\burls?\b|\bsources?\b)", query):
+    if re.search(r"(?:ссылк\w*|url-?адрес\w*|источник\w*|\blinks?\b|\burls?\b|\bsources?\b|\bhyperlinks?\b)", query):
         targets.add("link")
     if re.search(r"(?:код\w*|скрипт\w*|программ\w*|\bcodes?\b|\bscripts?\b|\bsource\s+code\b)", query):
         targets.add("code")
-    if re.search(r"(?:схем\w*|диаграмм\w*|блок-?схем\w*|\bdiagrams?\b|\bschemes?\b|\bflowcharts?\b|\bmermaid\b)", query):
+    if re.search(r"(?:схем\w*|блок-?схем\w*|\bdiagrams?\b|\bschemes?\b|\bflowcharts?\b|\bmermaid\b)", query):
         targets.add("diagram")
     if re.search(r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фото\b|фотограф\w*|\bimages?\b|\bpictures?\b|\bphotos?\b)", query):
         targets.add("image")
+    if re.search(r"(?:текст\w*\s+для\s+копирован\w*|блок\w*\s+для\s+копирован\w*|копирован\w*|\bcopy(?:able)?\s+text\b|\bcopy\s+block\b)", query):
+        targets.add("copy")
+
+    # "Put/export this graph in a file" asks for the graph as source and a
+    # file as its delivery format. Only select a stored file when the file
+    # itself is the object being restored, edited, or downloaded.
+    file_target = bool(re.search(
+        r"(?:файл\w*|документ\w*|pdf|xlsx|xls|docx|\bfile\w*|\bdocument\w*|\bworkbook\b|\bspreadsheet\b)",
+        query,
+    ))
+    explicit_file_source = bool(re.search(
+        r"(?:\b(?:этот|этого|эту|этой|последн\w*|предыдущ\w*|сохранен\w*|исходн\w*)\s+(?:файл\w*|документ\w*)|"
+        r"\b(?:скачай|верни|восстанови|открой|измени|исправь|дополни|обнови)\w*\s+(?:мне\s+)?(?:этот\s+|последн\w*\s+|предыдущ\w*\s+)?(?:файл\w*|документ\w*)|"
+        r"\b(?:download|restore|open|edit|update)\s+(?:this|the|last|previous)?\s*(?:file|document)\b|"
+        r"\b(?:file|document)\s+(?:from|in)\s+history\b)",
+        query,
+    ))
+    if file_target and (not targets or explicit_file_source):
+        targets.add("file")
+
     if re.search(r"(?:данн\w*|значени\w*|массив\w*|матриц\w*|csv|json|\bdata\b|\bvalues?\b|\barrays?\b|\bmatrix\b)", query) and not targets:
         targets.update({"graph", "table", "formula", "solution"})
     return targets
-
 
 def _structured_item_has_exact_values(item: Any) -> bool:
     """Reject empty renderer shells while retaining exact typed data."""
@@ -1551,9 +1578,9 @@ def _structured_item_has_exact_values(item: Any) -> bool:
         return False
 
     if kind == "table":
-        return nonempty_key({"rows", "cells", "matrix", "data_rows"})
+        return nonempty_key({"rows", "cells", "matrix", "data_rows", "data", "values"})
     if kind == "graph":
-        return nonempty_key({"points", "data_points", "series", "datasets", "traces", "x_values", "y_values", "expression", "expressions", "equation", "function"})
+        return nonempty_key({"points", "data_points", "coordinates", "series", "datasets", "traces", "curves", "data", "values", "x_values", "y_values", "z_values", "expression", "expressions", "equation", "function", "functions", "surface_grid"})
     if kind == "formula":
         return nonempty_key({"formula", "formulas", "latex", "latex_formulas", "equation", "equations", "expression", "expressions"})
     if kind == "solution":
@@ -1562,6 +1589,10 @@ def _structured_item_has_exact_values(item: Any) -> bool:
         return nonempty_key({"url", "href", "uri", "target_url", "destination"})
     if kind == "code":
         return nonempty_key({"code", "source_code", "source", "content", "text"})
+    if kind == "copy":
+        return nonempty_key({"text", "content", "copy_text", "value"})
+    if kind == "file":
+        return nonempty_key({"file_id", "asset_id", "asset_ref", "storage_key", "download_url", "uri"})
     if kind == "diagram":
         return nonempty_key({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry", "positions", "code"})
     if kind == "image":
