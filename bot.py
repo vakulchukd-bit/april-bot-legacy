@@ -1703,10 +1703,12 @@ def _history_payload(
     message_id: str = "",
     *,
     single_turn: bool = False,
+    current_dialog_only: bool = False,
 ) -> tuple[int, dict[str, Any]]:
-    """Restore a selected topic, or just one exact turn for interrupted chat recovery.
+    """Restore a selected topic, one exact recovery turn, or a bounded active thread.
 
-    Older versions forced the Premium/Free state manager to hydrate every retained
+    Free users may restore only their current 12-hour dialog thread; the archive
+    remains Premium-only. Older versions forced the Premium/Free state manager to hydrate every retained
     row, including all JSONB scenes and image data, on every history click. Here the
     semantic match uses the lightweight history index, and full renderer data is read
     only for the topic pairs selected for display.
@@ -1724,7 +1726,7 @@ def _history_payload(
 
         active_plan = _text(snapshot.get("plan")).lower() or "free"
         is_premium = active_plan == "premium"
-        if not is_premium and not single_turn:
+        if not is_premium and not (single_turn or current_dialog_only):
             _apr_timing_log(
                 "history_restore_entitlement_denied",
                 index_started,
@@ -1769,9 +1771,31 @@ def _history_payload(
         target_topic = _text(target_row.get("topic_label") or topic_label(target_match_row) or target_row.get("title") or target_row.get("user_text"))
         target_subjects = row_subject_tokens(target_match_row)
         candidates = []
+        current_dialog_rows: list[dict[str, Any]] = []
+        if current_dialog_only:
+            target_dialog_id = _text(target_row.get("dialog_id"))
+            target_conversation_id = _text(target_row.get("conversation_id"))
+            if target_dialog_id:
+                current_dialog_rows = [
+                    row for row in light_rows
+                    if _text(row.get("dialog_id")) == target_dialog_id
+                ]
+            elif target_conversation_id:
+                current_dialog_rows = [
+                    row for row in light_rows
+                    if _text(row.get("conversation_id")) == target_conversation_id
+                ]
+            else:
+                current_dialog_rows = [target_row]
+            current_dialog_rows.sort(key=lambda row: (
+                float(row.get("created_at") or 0),
+                int(row.get("turn_index") or 0),
+            ))
+            current_dialog_rows = current_dialog_rows[-10:]
         # Free's interrupted-current-chat repair must not turn into a history
-        # download: for that path, skip topic matching and return only the target pair.
-        for row_position, row in enumerate([] if single_turn else light_rows):
+        # download: single_turn returns one exact pair; current_dialog_only returns
+        # only the latest bounded thread from the same active dialog.
+        for row_position, row in enumerate([] if (single_turn or current_dialog_only) else light_rows):
             candidate_id = _text(row.get("message_id"))
             if not candidate_id or candidate_id == message_id:
                 continue
@@ -1795,8 +1819,11 @@ def _history_payload(
             float(value[1].get("created_at") or 0),
             int(value[1].get("turn_index") or 0),
         ), reverse=True)
-        MAX_RESTORE_PAIRS = 1 if single_turn else (24 if is_premium else 4)
-        chosen_rows = [target_row] + [row for _score, row in candidates[:MAX_RESTORE_PAIRS - 1]]
+        if current_dialog_only:
+            chosen_rows = list(current_dialog_rows or [target_row])
+        else:
+            MAX_RESTORE_PAIRS = 1 if single_turn else (24 if is_premium else 4)
+            chosen_rows = [target_row] + [row for _score, row in candidates[:MAX_RESTORE_PAIRS - 1]]
         selected_ids = list(dict.fromkeys(_text(row.get("message_id")) for row in chosen_rows if _text(row.get("message_id"))))
 
         detail_started = time.perf_counter()
@@ -2714,9 +2741,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                     status, payload = _history_payload(user_id, message_id, single_turn=recovery_only)
                 elif latest_chat_restore:
                     # The active chat must be recoverable even when the browser's
-                    # sessionStorage/IndexedDB snapshot is missing. Restore the
-                    # latest durable topic and its SceneContract instead of asking
-                    # the provider to recreate an already-generated image.
+                    # sessionStorage/IndexedDB snapshot is missing. Premium restores
+                    # the selected saved topic; Free restores only the bounded current
+                    # dialog thread. Both reuse saved SceneContracts/assets rather
+                    # than asking the provider to recreate already-generated output.
                     user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     snapshot = load_dialogue_history_index(user_id) if user_id else None
@@ -2724,9 +2752,8 @@ class AprilHandler(BaseHTTPRequestHandler):
                         status, payload = 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
                     elif not snapshot.get("authenticated"):
                         status, payload = 401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
-                    elif _text(snapshot.get("plan")).lower() != "premium":
-                        status, payload = 403, {"success": False, "error": "PREMIUM_HISTORY_REQUIRED"}
                     else:
+                        is_premium_restore = _text(snapshot.get("plan")).lower() == "premium"
                         rows = [row for row in (snapshot.get("rows") or []) if isinstance(row, dict)]
                         requested_dialog = _text(query.get("dialog_id", [""])[0])
                         requested_conversation = _text(query.get("conversation_id", [""])[0])
@@ -2750,8 +2777,15 @@ class AprilHandler(BaseHTTPRequestHandler):
                                 "canonical_route": CANONICAL_CHAT_ROUTE,
                             }
                         else:
-                            status, payload = _history_payload(user_id, latest_message_id, single_turn=False)
-                            payload["restore_reason"] = "latest_saved_topic"
+                            status, payload = _history_payload(
+                                user_id,
+                                latest_message_id,
+                                single_turn=False,
+                                current_dialog_only=not is_premium_restore,
+                            )
+                            payload["restore_reason"] = (
+                                "latest_active_dialog" if not is_premium_restore else "latest_saved_topic"
+                            )
                             payload["restored_message_id"] = latest_message_id
                 else:
                     status, payload = _history_index_payload(canonical_user_id or supplied_user_id)
