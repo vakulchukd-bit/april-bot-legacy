@@ -2741,6 +2741,11 @@ async def execute(
                 if (dialogue_context.get("relation") == "CONTINUE" or dialogue_context.get("history_request"))
                 else {}
             ),
+            # A compact, authenticated ten-exchange comparison ledger lets the
+            # provider understand which recent answer/branch was matched. It is
+            # secondary to the exact selected artifact values and is compressed first.
+            "recent_exchange_window": dialogue_context.get("recent_exchange_window") or [],
+            "recent_branch_anchor": dialogue_context.get("recent_branch_anchor") or {},
             "restored_assets": restored_assets,
         },
         visual_context={
