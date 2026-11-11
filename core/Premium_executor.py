@@ -41,7 +41,14 @@ from blocks.Premium_C_ARTIFACT_CONTRACT import (
 )
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
 from blocks.C_COPY_ROOM import attach_copy_block
-from blocks.C_FILE_DELIVERY_ROOM import attach_file_delivery_blocks
+from blocks.C_FILE_DELIVERY_ROOM import (
+    attach_file_delivery_blocks,
+    build_memory_artifact_sources,
+    table_payload_to_xlsx_bytes,
+    csv_text_to_xlsx_bytes,
+    _safe_xlsx_filename,
+    XLSX_MIME,
+)
 from blocks.Premium_interpretation_identity import (
     build_interpretation_identity,
     build_interpretation,
@@ -4166,10 +4173,11 @@ def _source_code_from_block(block: dict[str, Any]) -> tuple[str, str, str] | Non
         "html": "html", "css": "css", "yaml": "yml", "toml": "toml",
         "markdown": "md", "md": "md", "text": "txt",
     }
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else extensions.get(language, "txt")
+    filename_ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     allowed_exts = {"py", "js", "ts", "tsx", "jsx", "json", "sql", "sh", "html", "css", "yml", "toml", "md", "txt"}
-    if ext not in allowed_exts:
-        ext = extensions.get(language, "txt")
+    # The declared source language outranks a misleading provider filename
+    # extension (e.g. Python content named output.txt).
+    ext = extensions.get(language) or (filename_ext if filename_ext in allowed_exts else "txt")
     return code, language, ext
 
 
@@ -6834,11 +6842,12 @@ async def execute(
         )
     )
     _artifact_is_retrieval = bool(
-        _artifact_kind in {"table", "graph", "diagram", "formula", "code", "link", "copy", "gallery", "audio", "video"}
+        _artifact_kind in {"table", "graph", "diagram", "formula", "code", "file", "link", "copy", "gallery", "audio", "video"}
         and not _artifact_is_revision
         and re.search(
             r"(?:покаж\w*|подним\w*|подым\w*|верни\w*|восстанов\w*|достань\w*|найди\w*|"
-            r"открой\w*|вывед\w*|отобраз\w*|пришл\w*|show|restore|recover|retrieve|bring\s+back|display|find|open)",
+            r"открой\w*|вывед\w*|отобраз\w*|пришл\w*|выдай\w*|скачай\w*|где|"
+            r"show|restore|recover|retrieve|bring\s+back|display|find|open|where|download|give)",
             _artifact_request_text, re.IGNORECASE,
         )
     )
@@ -8082,8 +8091,8 @@ async def execute(
         or (interpretation.get("intent") or {}).get("wants_file")
         or code_blocks or render_file_blocks
     )
+    seen_source_hashes: set[str] = set()
     if should_persist_code:
-        seen_source_hashes: set[str] = set()
         for block_index, block in enumerate(code_blocks[:4], 1):
             extracted = _source_code_from_block(block)
             if not extracted:
@@ -8095,8 +8104,18 @@ async def execute(
                 continue
             seen_source_hashes.add(source_hash)
             filename = _text(block.get("filename")) or f"april-output-{identity['message_id'][-10:]}-{block_index}.{extension}"
+            if not filename.lower().endswith(f".{extension.lower()}"):
+                filename = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", filename) + f".{extension}"
+            code_mimes = {
+                "py": "text/x-python", "js": "text/javascript", "ts": "text/typescript",
+                "tsx": "text/typescript", "jsx": "text/javascript", "json": "application/json",
+                "html": "text/html", "css": "text/css", "sql": "application/sql",
+                "sh": "text/x-shellscript", "yml": "application/yaml", "xml": "application/xml",
+                "md": "text/markdown",
+            }
+            code_mime = code_mimes.get(extension.lower(), "text/plain; charset=utf-8")
             saved_ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=code_bytes,
-                mime_type="text/plain", kind="text_file", asset_role="april_output", output_type="code",
+                mime_type=code_mime, kind="text_file", asset_role="april_output", output_type="code",
                 metadata={"source_type": "april_generated", "language": language})
             if saved_ref:
                 saved_ref["metadata"] = {**(saved_ref.get("metadata") or {}), "language": language}
@@ -8105,20 +8124,62 @@ async def execute(
             # USER↔APRIL pair so it survives container replacement. Cap large payloads.
             if len(code_bytes) <= 25 * 1024 * 1024:
                 durable_asset_payloads.append({
-                    "kind": "text_file", "mime_type": "text/plain", "asset_role": "april_output",
+                    "kind": "text_file", "mime_type": code_mime, "asset_role": "april_output",
                     "output_type": "code", "filename": filename, "message_id": identity["message_id"],
                     "size_bytes": len(code_bytes), "sha256": source_hash, "language": language,
                     "content_base64": base64.b64encode(code_bytes).decode("ascii"),
                 })
 
+        # TableBlock is a view, not a downloadable file. For an explicit Premium
+        # file request, materialize a genuine XLSX workbook and persist its exact
+        # bytes before FileDeliveryBlock can be emitted. This is never a CSV rename.
+        if "file" in requested_outputs:
+            for table_index, table_block in enumerate(
+                [item for item in normalized_blocks if isinstance(item, dict)
+                 and str(item.get("type") or item.get("artifact_type") or "").lower() in {"table", "table_data"}][:8],
+                1,
+            ):
+                try:
+                    table_payload = table_block.get("payload") if isinstance(table_block.get("payload"), dict) else {}
+                    table_source = dict(table_block)
+                    table_source.update(table_payload)
+                    workbook_bytes = table_payload_to_xlsx_bytes(table_source)
+                    title = _text(table_source.get("title") or table_source.get("caption") or "April table")
+                    filename = _safe_xlsx_filename(table_source.get("filename") or title)
+                    source_hash = hashlib.sha256(workbook_bytes).hexdigest()
+                    if source_hash in seen_source_hashes:
+                        continue
+                    saved_ref = _save_premium_asset(
+                        uid, identity["message_id"], filename=filename, content=workbook_bytes,
+                        mime_type=XLSX_MIME, kind="file", asset_role="april_output", output_type="file",
+                        metadata={"source_type": "table_xlsx_export", "sheet_count": 1 + len(table_source.get("additional_sheets") or [])},
+                    )
+                    if not saved_ref:
+                        continue
+                    seen_source_hashes.add(source_hash)
+                    output_asset_refs.append(saved_ref)
+                    generated_asset_saved = True
+                    durable_asset_payloads.append({
+                        "kind": "file", "mime_type": XLSX_MIME, "asset_role": "april_output",
+                        "output_type": "file", "filename": filename, "message_id": identity["message_id"],
+                        "size_bytes": len(workbook_bytes), "sha256": source_hash,
+                        "content_base64": base64.b64encode(workbook_bytes).decode("ascii"),
+                        "source_type": "table_xlsx_export",
+                    })
+                except Exception as exc:
+                    _apr_timing_log("table_xlsx_materialization_failed", None,
+                        table_index=table_index, error_code=_text(type(exc).__name__),
+                        reason=_text(exc)[:180])
+
         # Persist explicit file artifacts as actual bytes/text, not only as a
-        # caption in JSONB. Do not duplicate an already-saved CodeBlock.
+        # caption in JSONB. CSV sources are accepted only as import material and
+        # are converted to XLSX; a .csv is never saved or exposed to Premium users.
         file_output_candidates = list(raw_artifacts or []) + render_file_blocks
         for artifact_index, artifact in enumerate(file_output_candidates[:10], 1):
             if not isinstance(artifact, dict):
                 continue
             artifact_type = _text(artifact.get("type") or artifact.get("artifact_type") or artifact.get("kind")).lower()
-            if artifact_type not in {"file", "document", "text_file", "code_file", "pdf", "spreadsheet", "presentation"}:
+            if artifact_type not in {"file", "document", "text_file", "code_file", "pdf", "spreadsheet", "presentation", "unknown"}:
                 continue
             payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
             if not payload and isinstance(artifact.get("spec"), dict):
@@ -8131,7 +8192,8 @@ async def execute(
             if isinstance(body_value, str) and body_value.strip():
                 text_content = body_value
                 file_bytes = body_value.encode("utf-8")
-            encoded = artifact.get("file_base64") or artifact.get("base64") or artifact.get("b64_json") or payload.get("file_base64") or payload.get("base64") or payload.get("b64_json")
+            encoded = (artifact.get("file_base64") or artifact.get("content_base64") or artifact.get("base64") or artifact.get("b64_json")
+                       or payload.get("file_base64") or payload.get("content_base64") or payload.get("base64") or payload.get("b64_json"))
             data_uri = artifact.get("data_uri") or artifact.get("file_data_uri") or payload.get("data_uri") or payload.get("file_data_uri")
             try:
                 if isinstance(data_uri, str) and data_uri.startswith("data:") and ";base64," in data_uri:
@@ -8146,6 +8208,18 @@ async def execute(
                         text_content = file_bytes.decode("utf-8", errors="replace")
             except Exception:
                 file_bytes = b""
+            is_csv_source = filename.lower().endswith(".csv") or "csv" in mime.lower()
+            if is_csv_source:
+                try:
+                    csv_source = text_content or file_bytes.decode("utf-8-sig")
+                    workbook_bytes = csv_text_to_xlsx_bytes(csv_source, title=filename.rsplit("/", 1)[-1])
+                    file_bytes = workbook_bytes
+                    filename = _safe_xlsx_filename(filename)
+                    mime = XLSX_MIME
+                    text_content = ""
+                except Exception:
+                    # A malformed CSV is intentionally not exposed as a download.
+                    continue
             if not file_bytes or len(file_bytes) > 10 * 1024 * 1024:
                 continue
             source_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -8166,6 +8240,37 @@ async def execute(
                     "size_bytes": len(file_bytes), "sha256": source_hash,
                     "content_base64": base64.b64encode(file_bytes).decode("ascii"),
                 })
+
+        # Plain narrative/document exports use TXT. Code and structured tables
+        # have already taken their language-native and XLSX paths above.
+        if "file" in requested_outputs and not ({"table", "code", "graph", "diagram", "formula"} & requested_outputs) \
+            and not code_blocks and not any(
+                isinstance(item, dict) and str(item.get("type") or item.get("artifact_type") or "").lower() in {"table", "table_data"}
+                for item in normalized_blocks
+            ) and not any(str(ref.get("output_type") or "").lower() == "file" for ref in output_asset_refs):
+            txt = str(answer or "").strip()
+            if txt:
+                txt_bytes = txt.encode("utf-8")
+                txt_name = f"april-answer-{identity['message_id'][-8:]}.txt"
+                txt_hash = hashlib.sha256(txt_bytes).hexdigest()
+                if txt_hash not in seen_source_hashes:
+                    txt_ref = _save_premium_asset(
+                        uid, identity["message_id"], filename=txt_name, content=txt_bytes,
+                        mime_type="text/plain; charset=utf-8", kind="text_file",
+                        asset_role="april_output", output_type="file",
+                        metadata={"source_type": "plain_text_export"},
+                    )
+                    if txt_ref:
+                        seen_source_hashes.add(txt_hash)
+                        output_asset_refs.append(txt_ref)
+                        generated_asset_saved = True
+                        durable_asset_payloads.append({
+                            "kind": "text_file", "mime_type": "text/plain; charset=utf-8",
+                            "asset_role": "april_output", "output_type": "file", "filename": txt_name,
+                            "message_id": identity["message_id"], "size_bytes": len(txt_bytes),
+                            "sha256": txt_hash, "content_base64": base64.b64encode(txt_bytes).decode("ascii"),
+                            "source_type": "plain_text_export",
+                        })
 
     _apr_timing_log("output_asset_persist", output_asset_persist_started,
         generated_asset_saved=generated_asset_saved, output_asset_refs=len(output_asset_refs),
@@ -8190,7 +8295,51 @@ async def execute(
         file_delivery_mode=str(plan_intent.get("file_delivery_mode") or "with_inline"),
         language=str(display_language or "en"),
         message_id=str(identity.get("message_id") or ""),
+        require_persisted_asset=True,
     )
+    file_delivery_failed = "file" in {str(x).lower() for x in requested_for_delivery} and not attached_file_blocks
+    if file_delivery_failed:
+        failure_notices = {
+            "ru": "Не удалось сформировать и сохранить файл для скачивания. Поэтому я не показываю фиктивную ссылку. Содержимое созданного артефакта остаётся в сообщении.",
+            "uk": "Не вдалося сформувати й зберегти файл для завантаження. Тому я не показую фіктивне посилання. Вміст створеного артефакту залишається в повідомленні.",
+            "ua": "Не вдалося сформувати й зберегти файл для завантаження. Тому я не показую фіктивне посилання. Вміст створеного артефакту залишається в повідомленні.",
+            "en": "I could not generate and persist a downloadable file, so I am not showing a fake link. The created artifact remains in the message.",
+        }
+        failure_notice = failure_notices.get(str(display_language or "en").lower().split("-")[0], failure_notices["en"])
+        text_block = next((b for b in delivery_blocks if isinstance(b, dict) and str(b.get("type") or b.get("artifact_type") or "").lower() in {"text", "markdown", "message", "message_text", "answer"}), None)
+        if text_block is None:
+            text_block = {"type": "text", "artifact_type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock"}
+            delivery_blocks.insert(0, text_block)
+        text_block["content"] = failure_notice
+        text_block["text"] = failure_notice
+        answer = failure_notice
+        response.answer = failure_notice
+        response.content = failure_notice
+        response.summary = failure_notice
+        response.response = failure_notice
+        result["answer"] = failure_notice
+        result["content"] = failure_notice
+        result["summary"] = failure_notice
+    elif attached_file_blocks and str(plan_intent.get("file_delivery_mode") or "").lower() != "file_only":
+        # Use the sanitized text renderer as the canonical chat bubble, so a
+        # provider's stale CSV/sandbox claim cannot survive beside the real file.
+        text_block = next((b for b in delivery_blocks if isinstance(b, dict) and str(b.get("type") or b.get("artifact_type") or "").lower() in {"text", "markdown", "message", "message_text", "answer"}), None)
+        if isinstance(text_block, dict):
+            synchronized_text = _text(text_block.get("content") or text_block.get("text") or answer)
+            if synchronized_text:
+                answer = synchronized_text
+                response.answer = synchronized_text
+                response.content = synchronized_text
+                response.summary = synchronized_text
+                response.response = synchronized_text
+                result["answer"] = synchronized_text
+                result["content"] = synchronized_text
+                result["summary"] = synchronized_text
+    _apr_timing_log("premium_file_delivery_contract", None,
+        requested=("file" in {str(x).lower() for x in requested_for_delivery}),
+        status="delivered" if attached_file_blocks else ("failed_no_verified_asset" if file_delivery_failed else "not_requested"),
+        delivered_count=len(attached_file_blocks),
+        delivered_names=[_text((b.get("payload") or {}).get("filename")) for b in attached_file_blocks if isinstance(b, dict)])
     if delivery_blocks:
         scene_contract["render_blocks"] = delivery_blocks
         result["render_blocks"] = delivery_blocks
@@ -8446,6 +8595,11 @@ async def execute(
             or result.get("render_blocks")
             or response.render_blocks
             or []
+        ),
+        "saved_artifact_sources": (
+            build_memory_artifact_sources(source_render_blocks)
+            if attached_file_blocks and str(plan_intent.get("file_delivery_mode") or "").lower() == "file_only"
+            else []
         ),
         "artifacts": list(response.artifacts or []),
         "metadata": dict(response.metadata or {}),
