@@ -3225,8 +3225,8 @@ _PROTECTED_STRUCTURED_TYPE_ALIASES = {
 
 _PROTECTED_DATA_KEYS = {
     "graph": {
-        "points", "data_points", "series", "datasets", "traces", "x_values", "y_values",
-        "x_axis", "y_axis", "z_axis", "axes", "labels", "categories", "z_values",
+        "points", "data_points", "coordinates", "series", "datasets", "traces", "data", "values",
+        "x_values", "y_values", "x_axis", "y_axis", "z_axis", "axes", "labels", "categories", "z_values",
         "surface_grid", "surface_function", "z_function", "z_expression", "grid_resolution",
         "spheres", "objects_3d", "objects", "meshes", "geometry", "scene", "dimensions",
         "three_d", "curves", "function", "expression", "equation", "formula", "x_domain",
@@ -3265,7 +3265,8 @@ def _protected_structured_kind(value: Any) -> str:
             tags.append(tag)
 
     renderer_map = {
-        "graphblock": "graph", "graphrenderer": "graph", "graph3dblock": "graph", "surfaceplotrenderer": "graph",
+        "graphblock": "graph", "graphrenderer": "graph", "linechart": "graph", "barchart": "graph",
+        "scatterchart": "graph", "areachart": "graph", "graph3dblock": "graph", "surfaceplotrenderer": "graph",
         "tableblock": "table", "tablerenderer": "table",
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
@@ -3274,7 +3275,7 @@ def _protected_structured_kind(value: Any) -> str:
         "codeblock": "code", "coderenderer": "code",
         "diagramrenderer": "diagram", "diagramblock": "diagram", "schemerenderer": "diagram",
         "galleryblock": "image", "imagerenderer": "image", "screenshotblock": "image",
-        "fileblock": "file", "documentblock": "file", "audioblock": "audio", "videoblock": "video",
+        "fileblock": "file", "filedeliveryblock": "file", "documentblock": "file", "audioblock": "audio", "videoblock": "video",
     }
     # The declared artifact type is more specific than a generic viewer. For
     # example, both a link and a downloadable file can use LinkCard, but they
