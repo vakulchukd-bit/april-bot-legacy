@@ -2356,6 +2356,24 @@ def get_user_subscription_status(user_id):
                 )
                 history_row = cur.fetchone() or {}
                 has_premium_history = bool(history_row.get("found"))
+                # Resolve the most recently paid package for the active profile.
+                # Pending, failed, cancelled and test-grant records never count.
+                cur.execute(
+                    """SELECT product_code, amount, currency, amount_minor, paid_at
+                       FROM payments
+                       WHERE user_id = %s AND plan = 'premium'
+                         AND payment_status = 'paid'
+                         AND product_code IN ('premium_12h', 'premium_7d', 'premium_28d')
+                       ORDER BY paid_at DESC NULLS LAST, created_at DESC
+                       LIMIT 1""",
+                    (uid,),
+                )
+                latest_paid_package = cur.fetchone() or {}
+                package_amount = latest_paid_package.get("amount")
+                try:
+                    package_amount = float(package_amount) if package_amount is not None else None
+                except (TypeError, ValueError):
+                    package_amount = None
 
                 payload = {
                     "user_id": uid,
@@ -2366,6 +2384,11 @@ def get_user_subscription_status(user_id):
                     "subscription_until": int(until_seconds * 1000) if plan in {"lite", "premium"} else None,
                     "remaining_seconds": max(0, int(until_seconds - now_seconds)) if plan in {"lite", "premium"} else 0,
                     "has_premium_history": has_premium_history,
+                    "premium_product_code": str(latest_paid_package.get("product_code") or "") or None,
+                    "premium_amount": package_amount,
+                    "premium_amount_minor": int(latest_paid_package.get("amount_minor") or 0) or None,
+                    "premium_currency": str(latest_paid_package.get("currency") or "").upper() or None,
+                    "premium_paid_at": latest_paid_package.get("paid_at").isoformat() if latest_paid_package.get("paid_at") else None,
                     "is_superadmin": is_superadmin,
                     "subscription_label": "∞ / 100 лет" if is_superadmin else None,
                 }
@@ -4305,6 +4328,15 @@ def settle_premium_payment(
                 if expected_payment_source and payment_source != str(expected_payment_source).strip().lower():
                     return {"success": False, "error": "PAYMENT_PROVIDER_MISMATCH"}
                 uid = str(payment.get("user_id") or "").strip()
+                # Keep the exact package metadata from this specific order.
+                # It is independent of whichever paid package is most recent
+                # for the account when concurrent callbacks are processed.
+                order_metadata = {
+                    "order_product_code": str(payment.get("product_code") or "").strip().lower(),
+                    "order_amount_minor": int(payment.get("amount_minor") or 0),
+                    "order_currency": str(payment.get("currency") or "").strip().upper(),
+                    "order_duration_seconds": int(payment.get("duration_seconds") or 0),
+                }
                 if str(payment.get("payment_status") or "").lower() == "paid":
                     existing_id = str(payment.get("provider_payment_id") or "").strip()
                     already_paid = bool(existing_id and existing_id == payment_id)
@@ -4357,11 +4389,11 @@ def settle_premium_payment(
                         raise RuntimeError("payment settlement lost row lock")
         if already_paid:
             status = get_user_subscription_status(uid)
-            return {"success": bool(status), "already_settled": True, **(status or {})}
+            return {"success": bool(status), "already_settled": True, **(status or {}), **order_metadata}
         status = get_user_subscription_status(uid)
         if not status or status.get("plan") != "premium":
             return {"success": False, "error": "PREMIUM_ENTITLEMENT_NOT_VISIBLE"}
-        return {"success": True, **status}
+        return {"success": True, **status, **order_metadata}
     except psycopg2.errors.UniqueViolation:
         return {"success": False, "error": "DUPLICATE_PROVIDER_PAYMENT_ID"}
     except psycopg2.errors.UndefinedColumn:
