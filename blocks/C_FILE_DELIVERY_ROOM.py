@@ -11,14 +11,200 @@ from copy import deepcopy
 from typing import Any, Dict
 import csv
 import io
+import json
 import re
 import uuid
+from pathlib import PurePath
 
 from blocks.C_ARTIFACT_CONTRACT import create_artifact
 
 ROOM_ID = "C_FILE_DELIVERY_ROOM"
 ARTIFACT_TYPE = "file"
 RENDERER = "FileDeliveryBlock"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _safe_sheet_title(value: Any, fallback: str) -> str:
+    title = re.sub(r"[\\/*?:\[\]]", " ", str(value or fallback)).strip().strip("'")
+    title = re.sub(r"\s+", " ", title)[:31]
+    return title or fallback[:31]
+
+
+def _safe_xlsx_filename(value: Any) -> str:
+    raw = str(value or "april-table").replace("\\", "/").split("/")[-1]
+    if re.search(r"[А-Яа-яЁё]", raw):
+        if re.search(r"менделеев|периодическ", raw, re.I):
+            raw = "periodic_table"
+        else:
+            translit = {
+                "а":"a", "б":"b", "в":"v", "г":"g", "д":"d", "е":"e", "ё":"e", "ж":"zh", "з":"z", "и":"i", "й":"i", "к":"k", "л":"l", "м":"m", "н":"n", "о":"o", "п":"p", "р":"r", "с":"s", "т":"t", "у":"u", "ф":"f", "х":"kh", "ц":"ts", "ч":"ch", "ш":"sh", "щ":"shch", "ъ":"", "ы":"y", "ь":"", "э":"e", "ю":"yu", "я":"ya",
+            }
+            raw = "".join(translit.get(char.lower(), char) for char in raw)
+    raw = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._")[:100]
+    if not raw:
+        raw = "april-table"
+    if raw.lower().endswith(".csv"):
+        raw = raw[:-4]
+    if raw.lower().endswith(".xlsx"):
+        return raw
+    raw = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", raw)
+    return f"{raw or 'april-table'}.xlsx"
+
+
+def normalize_table_export_payload(table: Any) -> dict[str, Any] | None:
+    """Return a rectangular, renderer-independent table payload for XLSX export."""
+    source = _object(table)
+    nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+    data = dict(source)
+    data.update(nested)
+    export = data.get("export_payload") if isinstance(data.get("export_payload"), dict) else {}
+    if export:
+        merged = dict(data)
+        merged.update(export)
+        data = merged
+
+    headers = data.get("headers") or data.get("columns") or data.get("column_headers") or []
+    rows = data.get("rows") or data.get("data") or data.get("values") or data.get("records") or []
+    if not isinstance(headers, (list, tuple)) or not isinstance(rows, (list, tuple)) or not rows:
+        return None
+    if not headers and not isinstance(rows[0], dict):
+        return None
+
+    keys: list[str] = []
+    labels: list[str] = []
+    for index, column in enumerate(headers):
+        if isinstance(column, dict):
+            key = str(column.get("key") or column.get("field") or column.get("id") or column.get("name") or column.get("header") or column.get("title") or f"column_{index + 1}")
+            label = str(column.get("label") or column.get("title") or column.get("name") or column.get("header") or column.get("key") or key)
+        else:
+            label = str(column if column is not None else f"Column {index + 1}")
+            key = label
+        keys.append(key)
+        labels.append(label[:320])
+
+    normalized_rows: list[list[Any]] = []
+    if rows and isinstance(rows[0], dict):
+        if not keys:
+            keys = list(dict.fromkeys(str(key) for row in rows if isinstance(row, dict) for key in row.keys()))
+            labels = list(keys)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized_rows.append([
+                row.get(key, row.get(labels[index] if index < len(labels) else key, ""))
+                for index, key in enumerate(keys)
+            ])
+    else:
+        for row in rows:
+            if isinstance(row, (list, tuple)):
+                normalized_rows.append([row[index] if index < len(row) else "" for index in range(len(labels))])
+    if not labels or not normalized_rows:
+        return None
+
+    additional = data.get("additional_sheets") or data.get("sheets") or []
+    normalized_sheets: list[dict[str, Any]] = []
+    if isinstance(additional, list):
+        for sheet in additional[:20]:
+            if not isinstance(sheet, dict):
+                continue
+            normalized_sheet = normalize_table_export_payload(sheet)
+            if normalized_sheet:
+                normalized_sheets.append(normalized_sheet)
+    return {
+        "title": str(data.get("title") or data.get("caption") or "April table")[:160],
+        "headers": labels,
+        "rows": normalized_rows,
+        "additional_sheets": normalized_sheets,
+    }
+
+
+def table_payload_to_xlsx_bytes(table: Any) -> bytes:
+    """Create a real XLSX workbook (not a CSV renamed to .xlsx)."""
+    normalized = normalize_table_export_payload(table)
+    if not normalized:
+        raise ValueError("TABLE_EXPORT_HAS_NO_RECTANGULAR_DATA")
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except Exception as exc:  # pragma: no cover - dependency installation failure
+        raise RuntimeError("OPENPYXL_DEPENDENCY_MISSING") from exc
+
+    workbook = Workbook()
+
+    def append_sheet(sheet: Any, title: str, *, first: bool = False) -> None:
+        name = _safe_sheet_title(title, "Данные")
+        if first:
+            worksheet = workbook.active
+            worksheet.title = name
+        else:
+            candidate = name
+            suffix = 2
+            while candidate in workbook.sheetnames:
+                tag = f" {suffix}"
+                candidate = f"{name[:31-len(tag)]}{tag}"
+                suffix += 1
+            worksheet = workbook.create_sheet(candidate)
+
+        headers = sheet["headers"]
+        rows = sheet["rows"]
+        worksheet.append(headers)
+        for row in rows:
+            worksheet.append(list(row))
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(fill_type="solid", fgColor="24445C")
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+        worksheet.row_dimensions[1].height = 30
+        for column_index, header in enumerate(headers, 1):
+            sample_values = [str(header or "")]
+            sample_values.extend(str(row[column_index - 1] or "") for row in rows[:250] if column_index - 1 < len(row))
+            width = min(42, max(10, max((len(value) for value in sample_values), default=10) + 2))
+            worksheet.column_dimensions[get_column_letter(column_index)].width = width
+        # Treat all strings as literal cell values; user/model text must never
+        # become an executable spreadsheet formula.
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    append_sheet(normalized, normalized["title"], first=True)
+    for sheet in normalized["additional_sheets"]:
+        append_sheet(sheet, sheet["title"])
+
+    stream = io.BytesIO()
+    workbook.save(stream)
+    content = stream.getvalue()
+    if not content.startswith(b"PK\x03\x04"):
+        raise ValueError("XLSX_SIGNATURE_INVALID")
+    return content
+
+
+def csv_text_to_xlsx_bytes(text: str, *, title: str = "April data") -> bytes:
+    """Convert a legacy CSV text payload into a genuine XLSX workbook."""
+    source = str(text or "").lstrip("\ufeff")
+    if not source.strip():
+        raise ValueError("CSV_SOURCE_EMPTY")
+    sample = source[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t|")
+    except csv.Error:
+        delimiter = "\t" if sample.count("\t") > max(sample.count(";"), sample.count(",")) else (";" if sample.count(";") > sample.count(",") else ",")
+        rows = [row for row in csv.reader(io.StringIO(source), delimiter=delimiter) if any(str(cell).strip() for cell in row)]
+    else:
+        rows = [row for row in csv.reader(io.StringIO(source), dialect) if any(str(cell).strip() for cell in row)]
+    if len(rows) < 2 or len(rows[0]) < 2:
+        raise ValueError("CSV_SOURCE_NOT_TABULAR")
+    headers = [str(cell).strip()[:320] or f"Column {index + 1}" for index, cell in enumerate(rows[0])]
+    values = []
+    for row in rows[1:1_000_001]:
+        values.append([str(row[index]).strip()[:32000] if index < len(row) else "" for index in range(len(headers))])
+    if not values:
+        raise ValueError("CSV_SOURCE_HAS_NO_DATA_ROWS")
+    return table_payload_to_xlsx_bytes({"title": title, "headers": headers, "rows": values})
 
 
 def _object(value: Any) -> Dict[str, Any]:
@@ -104,6 +290,217 @@ ROOM = FileDeliveryRoom()
 
 
 
+def build_memory_artifact_sources(render_blocks: Any) -> list[dict[str, Any]]:
+    """Keep editable table/code sources when file-only UI hides their blocks.
+
+    These are stored in a private structured-response field, never in the
+    visible SceneContract. Binary payloads are removed; exact tabular values
+    and source code remain available to Premium continuation/edit requests.
+    """
+    preserved: list[dict[str, Any]] = []
+
+    def strip_binary(value: Any, depth: int = 0) -> Any:
+        if depth > 10:
+            return None
+        if isinstance(value, dict):
+            cleaned = {}
+            for key, child in value.items():
+                normalized = str(key).lower()
+                if normalized in {"image_base64", "base64_data", "binary_payload", "raw_bytes", "content_base64", "file_base64", "b64_json"}:
+                    continue
+                if normalized in {"src", "data_uri", "image_data", "image_base64", "video_data", "audio_data"}:
+                    if isinstance(child, str) and child.strip().lower().startswith("data:"):
+                        continue
+                cleaned[key] = strip_binary(child, depth + 1)
+            return cleaned
+        if isinstance(value, list):
+            return [strip_binary(child, depth + 1) for child in value[:1000]]
+        if isinstance(value, str) and value.strip().lower().startswith("data:"):
+            return "[binary asset stored separately]"
+        return value
+
+    for block in render_blocks or []:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or block.get("artifact_type") or block.get("kind") or "").strip().lower()
+        if kind not in {"table", "table_data", "code", "source_code"}:
+            continue
+        safe = strip_binary(deepcopy(block))
+        try:
+            if len(json.dumps(safe, ensure_ascii=False, default=str)) <= 24000:
+                preserved.append(safe)
+        except Exception:
+            continue
+        if len(preserved) >= 8:
+            break
+    return preserved
+
+
+def _attach_premium_persisted_file_blocks(
+    render_blocks: Any,
+    output_asset_refs: Any,
+    requested_outputs: Any,
+    *,
+    file_delivery_mode: str,
+    language: str,
+    message_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Premium-only delivery: expose only files verified in the asset store."""
+    blocks = [deepcopy(item) for item in (render_blocks or []) if isinstance(item, dict)]
+    requested = {str(item).strip().lower() for item in (requested_outputs or []) if str(item).strip()}
+    if "file" not in requested:
+        return blocks, []
+
+    refs: list[dict[str, Any]] = []
+    seen_refs: set[tuple[str, str]] = set()
+    for raw_ref in output_asset_refs or []:
+        if not isinstance(raw_ref, dict):
+            continue
+        ref = dict(raw_ref)
+        filename = str(ref.get("filename") or "").strip()
+        mime = str(ref.get("mime_type") or "").lower()
+        digest = str(ref.get("sha256") or "")
+        owner_message = str(ref.get("message_id") or message_id or "").strip()
+        if filename.lower().endswith(".csv") or "csv" in mime:
+            continue
+        if str(ref.get("asset_role") or "april_output") != "april_output":
+            continue
+        if str(ref.get("output_type") or "").lower() not in {"code", "file", "spreadsheet"}:
+            continue
+        if not owner_message or not filename or not re.fullmatch(r"[a-f0-9]{64}", digest, re.I):
+            continue
+        key = (owner_message, digest.lower())
+        if key in seen_refs:
+            continue
+        seen_refs.add(key)
+        refs.append(ref)
+
+    table_blocks = [
+        block for block in blocks
+        if str(block.get("type") or block.get("artifact_type") or "").strip().lower() == "table"
+    ]
+    code_blocks = [
+        block for block in blocks
+        if str(block.get("type") or block.get("artifact_type") or "").strip().lower() == "code"
+    ]
+    table_requested = "table" in requested or "spreadsheet" in requested
+    code_requested = "code" in requested
+
+    def is_xlsx(ref: dict[str, Any]) -> bool:
+        filename = str(ref.get("filename") or "").lower()
+        mime = str(ref.get("mime_type") or "").lower()
+        return filename.endswith(".xlsx") and ("spreadsheetml" in mime or mime == XLSX_MIME)
+
+    # A requested table must resolve to an actual XLSX workbook. Code assets
+    # must retain their language-specific extension; all other files may be TXT
+    # or another explicitly supported native format, but never CSV.
+    selected: list[dict[str, Any]] = []
+    table_refs = [ref for ref in refs if is_xlsx(ref)]
+    code_refs = [ref for ref in refs if str(ref.get("output_type") or "").lower() == "code"]
+    requires_table_asset = table_requested or bool(table_blocks)
+    requires_code_asset = code_requested or bool(code_blocks)
+    if requires_table_asset:
+        selected.extend(table_refs)
+    if requires_code_asset:
+        selected.extend(code_refs)
+    if not requires_table_asset and not requires_code_asset:
+        selected.extend(refs)
+
+    # Never let an unrelated TXT/other file satisfy a requested table or code
+    # export. A file-only response is all-or-nothing for every requested family,
+    # even when the provider forgot to emit the matching renderer block.
+    required_family_missing = bool(
+        (requires_table_asset and not table_refs) or (requires_code_asset and not code_refs)
+    )
+    if required_family_missing:
+        selected = []
+
+    cards: list[dict[str, Any]] = []
+    for ref in selected[:8]:
+        filename = str(ref.get("filename") or "april-output.txt")[:180]
+        mime = str(ref.get("mime_type") or "text/plain; charset=utf-8")
+        asset_ref = {
+            "message_id": str(ref.get("message_id") or message_id),
+            "sha256": str(ref.get("sha256") or ""),
+            "filename": filename,
+            "mime_type": mime,
+            "size_bytes": int(ref.get("size_bytes") or 0),
+        }
+        cards.append({
+            "type": "file",
+            "artifact_type": "file",
+            "renderer": RENDERER,
+            "viewer": RENDERER,
+            "source_room": ROOM_ID,
+            "payload": {
+                "title": filename,
+                "filename": filename,
+                "mime_type": mime,
+                "size_bytes": asset_ref["size_bytes"],
+                "asset_ref": asset_ref,
+                "source": "premium_dialogue_asset",
+                "description": "",
+            },
+        })
+
+    # Remove unverified provider file blocks, legacy CSV blocks and links to
+    # ephemeral sandbox paths. The authenticated asset card is the only route.
+    cleaned: list[dict[str, Any]] = []
+    for block in blocks:
+        kind = str(block.get("type") or block.get("artifact_type") or "").strip().lower()
+        if kind in {"file", "document", "file_card", "text_file", "code_file", "spreadsheet"}:
+            continue
+        if kind == "link":
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else block
+            url = str(payload.get("url") or payload.get("href") or payload.get("uri") or "")
+            label = " ".join(str(payload.get(key) or "") for key in (
+                "title", "label", "text", "description", "filename", "name"
+            )).lower()
+            looks_like_download = bool(re.search(
+                r"(?:скача\w*|загруз\w*|download|attachment|\bfile\b|\bфайл\w*)",
+                label, re.IGNORECASE,
+            ))
+            if url.lower().startswith("sandbox:") or "/mnt/data/" in url.lower() or looks_like_download:
+                continue
+        if kind in {"text", "markdown", "message", "message_text", "answer"}:
+            targets = [block]
+            if isinstance(block.get("payload"), dict):
+                targets.append(block["payload"])
+            for target in targets:
+                for key in ("content", "text", "answer", "summary", "markdown"):
+                    value = target.get(key)
+                    if not isinstance(value, str):
+                        continue
+                    # Remove Markdown download links supplied by the model; only
+                    # the persisted asset_ref card is a verified download route.
+                    value = re.sub(
+                        r"\[([^\]]*(?:скача\w*|загруз\w*|download|\bfile\b|файл\w*)[^\]]*)\]\([^)]+\)",
+                        r"\1", value, flags=re.I,
+                    )
+                    value = re.sub(r"\[[^\]]*\]\(sandbox:[^)]+\)", "", value, flags=re.I)
+                    value = re.sub(r"sandbox:/mnt/data/\S+", "", value, flags=re.I)
+                    value = re.sub(r"(?i)\bCSV(?:-файл| файл| file)?\b", "Excel-файл", value)
+                    target[key] = re.sub(r"[ \t]{2,}", " ", value).strip()
+        cleaned.append(block)
+
+    cleaned.extend(cards)
+    delivered = cards
+    if str(file_delivery_mode or "").lower() == "file_only" and delivered:
+        cleaned = [block for block in cleaned if str(block.get("type") or block.get("artifact_type") or "").lower() not in {
+            "code", "table", "text", "markdown", "message", "message_text", "answer"
+        }]
+        localized = {
+            "ru": "Файл прикреплён к сообщению.",
+            "uk": "Файл прикріплено до повідомлення.",
+            "ua": "Файл прикріплено до повідомлення.",
+            "en": "The file is attached to this message.",
+        }
+        notice = localized.get(str(language or "en").lower().split("-")[0], localized["en"])
+        cleaned.insert(0, {"type": "text", "artifact_type": "text", "content": notice,
+                           "renderer": "MessageTextBlock", "viewer": "MessageTextBlock"})
+    return cleaned, delivered
+
+
 def attach_file_delivery_blocks(
     render_blocks: Any,
     output_asset_refs: Any,
@@ -112,6 +509,7 @@ def attach_file_delivery_blocks(
     file_delivery_mode: str = "with_inline",
     language: str = "en",
     message_id: str = "",
+    require_persisted_asset: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Attach explicit file deliveries to existing blocks in one SceneContract.
 
@@ -119,6 +517,12 @@ def attach_file_delivery_blocks(
     their own limits; this function only binds already-persisted bytes or an
     existing structured table payload to the common FileDeliveryBlock renderer.
     """
+    if require_persisted_asset:
+        return _attach_premium_persisted_file_blocks(
+            render_blocks, output_asset_refs, requested_outputs,
+            file_delivery_mode=file_delivery_mode, language=language,
+            message_id=message_id,
+        )
     blocks = [deepcopy(item) for item in (render_blocks or []) if isinstance(item, dict)]
     refs = [dict(item) for item in (output_asset_refs or []) if isinstance(item, dict)]
     requested = {str(item).strip().lower() for item in (requested_outputs or []) if str(item).strip()}
