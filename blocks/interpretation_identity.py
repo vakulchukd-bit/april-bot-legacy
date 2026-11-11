@@ -1946,12 +1946,28 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     # shape, or an explicit inventory/time request; complaints about April's
     # previous answer therefore remain answer-feedback turns.
 
+    # A bare invitation to talk is a social opener, not a reference to an old
+    # work branch. Treat it as a fresh conversational turn unless it explicitly
+    # asks to resume a named/previous subject (handled by the history signals).
+    # This prevents "Пообщаемся" from reopening a stale file/artifact branch.
+    social_conversation_opener = bool(re.fullmatch(
+        r"\s*(?:(?:ну\s+)?давай(?:те)?\s+)?"
+        r"(?:пообщаемся|пообщаться|поговорим|поговорить|поболтаем|поболтать|"
+        r"общаться|беседовать|поговори(?:те)?\s+со\s+мной|"
+        r"let(?:'|’)s\s+talk|talk\s+with\s+me|chat\s+with\s+me)"
+        r"[.!?…\s]*",
+        low,
+        flags=re.IGNORECASE,
+    )) and not history_recall and not explicit_topic_introduction
     context_dependent_question = _looks_like_context_dependent_question(
         source, interrogative=interrogative,
         explicit_topic_introduction=explicit_topic_introduction,
     )
-    topic_reference_fragment = _looks_like_topic_reference_fragment(
-        source, explicit_topic_introduction=explicit_topic_introduction,
+    topic_reference_fragment = (
+        False if social_conversation_opener else
+        _looks_like_topic_reference_fragment(
+            source, explicit_topic_introduction=explicit_topic_introduction,
+        )
     )
     dialogue_act_profile = _infer_dialogue_act_profile(
         source,
@@ -1963,7 +1979,18 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     )
     context_dependent_reaction = bool(dialogue_act_profile.get("context_dependent_reaction"))
 
-    if history_recall:
+    if social_conversation_opener:
+        primary_intent = "NEW_INFORMATION"
+        direction = "ANSWER_NEW_REQUEST"
+        topic_reference = "UNSPECIFIED"
+        time_scope = "UNSPECIFIED"
+        requires_memory = False
+        history_request = False
+        search_scope = "CURRENT_DIALOGUE"
+        intent_score = 0
+        relation_hint = "NEW"
+        reason = "standalone_social_conversation_opener"
+    elif history_recall:
         requires_memory = True
         history_request = True
         search_scope = "ALL_DIALOGUE_HISTORY"
@@ -2113,6 +2140,7 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         "future_reference": bool(temporal_future),
         "interrogative": bool(interrogative),
         "site_navigation_request": bool(site_navigation_request),
+        "social_conversation_opener": bool(social_conversation_opener),
     }
     context_signature = _context_signature(source)
     intent_upper = _text(primary_intent).upper()
@@ -3100,6 +3128,16 @@ def interpret_request_across_recent_exchanges(
     base = dict(original_profile) if isinstance(original_profile, dict) else supplied_profile
     if not base:
         base = dict(interpret_request_semantics(source) or {})
+    source_low = source.lower().replace("ё", "е")
+    social_conversation_opener = bool(re.fullmatch(
+        r"\s*(?:(?:ну\s+)?давай(?:те)?\s+)?"
+        r"(?:пообщаемся|пообщаться|поговорим|поговорить|поболтаем|поболтать|"
+        r"общаться|беседовать|поговори(?:те)?\s+со\s+мной|"
+        r"let(?:'|’)s\s+talk|talk\s+with\s+me|chat\s+with\s+me)"
+        r"[.!?…\s]*",
+        source_low,
+        flags=re.IGNORECASE,
+    )) and not bool(base.get("history_request"))
     if not rows or not source.strip():
         fallback = interpret_request_in_context(source, rows[-1] if rows else None, base)
         fallback["_recent_exchange_original_semantics"] = dict(base)
@@ -3109,9 +3147,57 @@ def interpret_request_across_recent_exchanges(
     latest_profile = interpret_request_in_context(source, latest_row, base)
     latest_analysis = dict(latest_profile.get("latest_exchange_analysis") or {})
     explicit_history = bool(base.get("history_request") or latest_profile.get("history_request"))
+    if social_conversation_opener and not explicit_history:
+        # Keep a plain social invitation independent of any stale saved topic,
+        # including when the latest answer itself was a capacity fallback.
+        latest_profile = dict(base)
+        latest_profile.update({
+            "primary_intent": "NEW_INFORMATION",
+            "direction": "ANSWER_NEW_REQUEST",
+            "topic_reference": "UNSPECIFIED",
+            "time_scope": "UNSPECIFIED",
+            "requires_memory": False,
+            "history_request": False,
+            "search_scope": "CURRENT_DIALOGUE",
+            "relation_hint": "NEW",
+            "reason": "standalone_social_conversation_opener",
+        })
+        latest_analysis = {
+            "available": bool(rows),
+            "linked": False,
+            "reason": "standalone_social_opener_new_topic",
+            "route": "NEW_TOPIC",
+            "actual_latest_exchange_id": _text(latest_row.get("message_id"))[:120],
+        }
+        latest_profile["latest_exchange_analysis"] = latest_analysis
     explicit_switch = bool(
         base.get("explicit_topic_switch") or base.get("explicit_topic_introduction")
         or latest_profile.get("explicit_topic_switch")
+    )
+    explicit_conversation_repair = bool(re.search(
+        r"\bя\s+(?:же\s+)?(?:спросил|спрашивал)\s*(?:[,;:—-]\s*)?"
+        r"(?:мы\s+)?(?:пообщаемся|пообщаться|общаться|поговорим|поговорить|"
+        r"поболтаем|поболтать)\b|"
+        r"\bя\s+(?:же\s+)?(?:не\s+это\s+спрашивал|не\s+об\s+этом\s+спрашивал)\b|"
+        r"\bя\s+(?:же\s+)?просил\s+(?:просто\s+)?(?:пообщаться|поговорить)\b",
+        source_low,
+    )) and len(_semantic_normalize(source)[1]) <= 18
+    standalone_action = bool(
+        _context_signature(source).get("subject_terms")
+        and re.search(
+            r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
+            r"покажи|создай|сделай|построй|вычисли|сравни|найди|проверь|проанализируй|"
+            r"перечисли|нарисуй|рассчитай|tell|describe|explain|write|show|create|build|"
+            r"make|calculate|compare|find|check|analyze)\b",
+            source_low,
+        )
+        and not re.search(
+            r"\b(?:подробнее|продолж\w*|предыдущ\w*|прошл\w*|вернись|восстанови|"
+            r"эта\s+таблиц\w*|этот\s+график|эту\s+формул\w*|из\s+истории)\b",
+            source_low,
+        )
+        and not explicit_history
+        and not explicit_switch
     )
 
     def _analysis_score(analysis: dict[str, Any], recency_rank: int) -> tuple[float, int, float]:
@@ -3124,6 +3210,8 @@ def interpret_request_across_recent_exchanges(
 
     evaluated: list[tuple[tuple[float, int, float], dict[str, Any], dict[str, Any]]] = []
     for index, row in enumerate(rows):
+        if social_conversation_opener:
+            break
         candidate_profile = latest_profile if index == len(rows) - 1 else interpret_request_in_context(source, row, base)
         analysis = candidate_profile.get("latest_exchange_analysis")
         analysis = dict(analysis) if isinstance(analysis, dict) else {}
@@ -3143,7 +3231,20 @@ def interpret_request_across_recent_exchanges(
     chosen_row = latest_row if latest_analysis.get("linked") else None
     chosen_profile = latest_profile if chosen_row else None
     chosen_analysis = latest_analysis if chosen_row else {}
-    if not chosen_row and not explicit_history and not explicit_switch and evaluated:
+    if explicit_conversation_repair and not explicit_history and not explicit_switch:
+        # The user is correcting the conversational move, not opening a topic.
+        # Attach it to the actual latest exchange even when lexical overlap is low.
+        chosen_row = latest_row
+        chosen_profile = latest_profile
+        chosen_analysis = dict(latest_analysis)
+        chosen_analysis.update({
+            "linked": True,
+            "reason": "explicit_user_correction_to_latest_conversational_exchange",
+            "route": "LATEST_EXCHANGE_FIRST",
+            "implicit_continuation": True,
+        })
+    if (not chosen_row and not explicit_history and not explicit_switch and not standalone_action
+            and not social_conversation_opener and evaluated):
         evaluated.sort(key=lambda item: item[0], reverse=True)
         _, chosen_row, chosen_profile = evaluated[0]
         chosen_analysis = dict((chosen_profile or {}).get("latest_exchange_analysis") or {})
@@ -3162,7 +3263,8 @@ def interpret_request_across_recent_exchanges(
     ))
     no_named_subject = not _context_signature(source).get("subject_terms")
     implicit_latest = bool(
-        not chosen_row and not explicit_history and not explicit_switch
+        not chosen_row and not explicit_history and not explicit_switch and not standalone_action
+        and not social_conversation_opener
         and len(tokens) <= 18 and no_named_subject and contextual_signal
     )
     if implicit_latest:
