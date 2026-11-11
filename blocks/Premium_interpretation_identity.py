@@ -7376,6 +7376,95 @@ def _pending_visual_edit_from_memory(
     }
 
 
+def _recover_contextual_artifact_outputs(text: str, memory: dict[str, Any]) -> set[str]:
+    """Recover an omitted output modality from a clear active dialogue branch."""
+    low = _text(text).lower().replace("ё", "е")
+    recovered: set[str] = set()
+    relation = _text(memory.get("relation") or "NEW").upper()
+    if relation != "CONTINUE":
+        return recovered
+
+    prior_texts: list[str] = []
+    anchor = memory.get("latest_assistant_anchor") if isinstance(memory.get("latest_assistant_anchor"), dict) else {}
+    anchor_answer = _text(
+        anchor.get("assistant_last_message") or anchor.get("assistant_message")
+        or anchor.get("april_text") or anchor.get("april")
+    )
+    if anchor_answer:
+        prior_texts.append(anchor_answer)
+    recent = memory.get("recent_exchange_window") if isinstance(memory.get("recent_exchange_window"), list) else []
+    for item in recent[-5:]:
+        if isinstance(item, dict):
+            answer = _text(item.get("april_answer") or item.get("assistant_last_message") or item.get("april_text"))
+            if answer:
+                prior_texts.append(answer)
+
+    prior_text = " ".join(prior_texts).lower().replace("ё", "е")
+    graph_antecedent = bool(re.search(r"(?:график\w*|диаграмм\w*|chart\w*|graph\w*|plot\w*)", prior_text, re.I))
+    graph_action = bool(re.search(
+        r"(?:\b(?:постро\w*|созда\w*|сдела\w*|покаж\w*|нарису\w*|вывед\w*|сформир\w*|build|create|make|show|draw|plot)\b)",
+        low, re.I,
+    ))
+    graph_descriptor = bool(re.search(
+        r"(?:стат[ие]ст\w*|линейн\w*|столбчат\w*|точечн\w*|гистограмм\w*|диаграмм\w*|график\w*|chart\w*|graph\w*|plot\w*|люб\w*\s+данн\w*)",
+        low, re.I,
+    ))
+    explicit_no_graph = bool(re.search(r"(?:без\s+(?:график\w*|диаграмм\w*)|no\s+(?:graph|chart))", low, re.I))
+    if graph_antecedent and graph_action and graph_descriptor and not explicit_no_graph:
+        recovered.add("graph")
+
+    # The saved pair carries the value-bearing table/code source. Only explicit
+    # delivery-repair wording can turn a short "where is the file?" into a file
+    # request; a generic discussion of files cannot.
+    selected_pairs = memory.get("selected_pairs") if isinstance(memory.get("selected_pairs"), list) else []
+    candidate_pairs = [*selected_pairs, anchor]
+    has_fileable_source = False
+    for pair in candidate_pairs:
+        if not isinstance(pair, dict):
+            continue
+        source_blocks = pair.get("assistant_structured_output") or pair.get("render_blocks") or []
+        if not isinstance(source_blocks, list):
+            continue
+        for block in source_blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
+            payload = block.get("payload") if isinstance(block.get("payload"), dict) else block
+            if kind in {"table", "table_data"}:
+                headers = payload.get("headers") or payload.get("columns") or payload.get("column_headers")
+                rows = payload.get("rows") or payload.get("data") or payload.get("values")
+                if isinstance(headers, list) and headers and isinstance(rows, list) and rows:
+                    has_fileable_source = True
+                    break
+            if kind in {"code", "source_code", "codeblock"} and any(
+                isinstance(payload.get(key), str) and payload.get(key).strip()
+                for key in ("code", "source_code", "source", "content", "text")
+            ):
+                has_fileable_source = True
+                break
+            if kind in {"file", "document", "text_file", "code_file", "spreadsheet"} and (
+                isinstance(payload.get("asset_ref"), dict)
+                or any(isinstance(payload.get(key), str) and payload.get(key).strip()
+                       for key in ("content", "text", "code", "content_base64", "file_base64"))
+            ):
+                has_fileable_source = True
+                break
+        if has_fileable_source:
+            break
+
+    file_repair_request = bool(re.search(
+        r"(?:\bгде\b.{0,45}\b(?:файл\w*|документ\w*|ссылк\w*)\b|"
+        r"\b(?:файл\w*|документ\w*)\b.{0,45}\bгде\b|"
+        r"\bне\s+(?:прикрепил\w*|приложил\w*|пришел|приш\w*|отобража\w*)\b|"
+        r"\b(?:ведет\s+на\s+чат|веде\s+в\s+чат|where\s+(?:is\s+)?(?:the\s+)?(?:file|document|link)|"
+        r"file\s+(?:was\s+)?not\s+attached|not\s+attached|broken\s+download\s+link)\b)",
+        low, re.I,
+    ))
+    if has_fileable_source and file_repair_request:
+        recovered.add("file")
+    return recovered
+
+
 def build_interpretation(
     *,
     current_request: str,
@@ -7450,6 +7539,22 @@ def build_interpretation(
             normalized_output = _text(output_type).lower()
             if normalized_output and normalized_output not in requested_outputs:
                 requested_outputs.append(normalized_output)
+    contextual_output_recovery = _recover_contextual_artifact_outputs(original or text, memory)
+    for recovered_output in sorted(contextual_output_recovery):
+        if recovered_output not in requested_outputs:
+            requested_outputs.append(recovered_output)
+        if question_sequence and isinstance(question_sequence[-1], dict):
+            child_outputs = question_sequence[-1].get("output_types")
+            child_outputs = list(child_outputs) if isinstance(child_outputs, (list, tuple)) else ["text"]
+            if recovered_output not in child_outputs:
+                child_outputs.append(recovered_output)
+            question_sequence[-1]["output_types"] = child_outputs
+        if presentation_sequence and isinstance(presentation_sequence[-1], dict):
+            presentation_outputs = presentation_sequence[-1].get("output_types")
+            presentation_outputs = list(presentation_outputs) if isinstance(presentation_outputs, (list, tuple)) else ["text"]
+            if recovered_output not in presentation_outputs:
+                presentation_outputs.append(recovered_output)
+            presentation_sequence[-1]["output_types"] = presentation_outputs
     if "text" not in requested_outputs:
         requested_outputs.insert(0, "text")
     if dialogue_profile_request:
@@ -7804,6 +7909,8 @@ def build_interpretation(
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     file_delivery_mode = _file_delivery_mode(original or text, requested_outputs)
+    if "file" in contextual_output_recovery:
+        file_delivery_mode = "file_only"
     wants_copy = "copy" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
