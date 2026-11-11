@@ -5143,7 +5143,7 @@ def _explicit_artifact_followup_kind(query: str) -> str:
             r"(?:не\s+(?:прикрепил\w*|приложил\w*|пришел|приш\w*|скачал\w*)|"
             r"не\s+отобража\w*|ведет\s+на\s+чат|веде\s+в\s+чат|"
             r"no\s+file|file\s+was\s+not\s+attached|not\s+attached|"
-            r"download\s+link\s+(?:is\s+)?broken|link\s+opens\s+(?:the\s+)?chat)",
+            r"download\s+link\s+(?:is\s+)?broken|link\s+opens\s+(?:the\s+)?chat))",
             low, re.IGNORECASE,
         )
     )
