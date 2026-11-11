@@ -280,14 +280,121 @@ def _normalize_saved_periodic_table(block: dict[str, Any]) -> tuple[dict[str, An
     return normalized, "normalized_118_elements"
 
 
+def _resolve_artifact_delivery_kind(query: str, requested_outputs: Any) -> str:
+    """Resolve an explicit file-delivery request to its named saved artifact family.
+
+    The general state-manager helper intentionally does not treat every "give me
+    a table" as a historical edit. Here the provider interpretation has already
+    classified the request as a file export, so the named family plus an explicit
+    download/delivery phrase is enough to select the corresponding active-branch
+    source. The caller still requires an authenticated selected pair before reuse.
+    """
+    kind = _explicit_artifact_followup_kind(query)
+    if kind:
+        return kind
+    requested = {str(value).strip().lower() for value in (requested_outputs or []) if str(value).strip()}
+    if "file" not in requested:
+        return ""
+    text = str(query or "").lower().replace("ё", "е")
+    # An explicit creation/build instruction starts a new artifact. Do not
+    # replace it with an older saved table merely because a prior branch exists.
+    explicit_creation = bool(re.search(
+        r"(?:\bсозда\w*|\bпостро\w*|\bсгенерир\w*|\bсостав\w*|\bнарис\w*|"
+        r"\bcreate\w*|\bbuild\w*|\bgenerate\w*|\bmake\b)"
+        r".{0,40}(?:\bтаблиц\w*\b|\bкод\w*\b|\bскрипт\w*\b|\bграфик\w*\b|\bдиаграмм\w*\b|"
+        r"\btable\b|\bcode\b|\bscript\b|\bgraph\b|\bchart\b)",
+        text, re.IGNORECASE,
+    ))
+    if explicit_creation:
+        return ""
+    delivery_requested = bool(re.search(
+        r"(?:\bвыдай\w*|\bпришл\w*|\bдай\w*|\bскачай\w*|\bсохрани\w*|"
+        r"\bdownload\b|\bexport\b|\bsend\b|\battach\b)"
+        r"|(?:\bв\s+файл\w*\b|\bфайлом\b|\bдля\s+скачиван\w*\b|\bas\s+a\s+file\b)",
+        text, re.IGNORECASE,
+    ))
+    if not delivery_requested:
+        return ""
+    family_patterns = (
+        ("table", r"(?:\bтаблиц\w*\b|\btable\b)"),
+        ("code", r"(?:\bкод\w*\b|\bскрипт\w*\b|\bcode\b|\bscript\b)"),
+        ("graph", r"(?:\bграфик\w*\b|\bдиаграмм\w*\b|\bgraph\b|\bchart\b|\bplot\b)"),
+        ("diagram", r"(?:\bсхем\w*\b|\bdiagram\b)"),
+        ("formula", r"(?:\bформул\w*\b|\bуравнен\w*\b|\bformula\b|\bequation\b)"),
+        ("copy", r"(?:\bкопируем\w*\s+текст\w*\b|\bcopyable\s+text\b)"),
+    )
+    return next((family for family, pattern in family_patterns
+                 if family in requested and re.search(pattern, text, re.IGNORECASE)), "")
+
+
 def _restore_saved_renderer_blocks(
     pair: dict[str, Any], requested_outputs: Any, current_request: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Restore selected, non-binary render blocks from the matched Premium DB pair."""
     requested = {str(value).strip().lower() for value in (requested_outputs or []) if str(value).strip()}
     explicit_kind = _explicit_artifact_followup_kind(current_request)
+    if not explicit_kind and "file" in requested:
+        explicit_kind = _resolve_artifact_delivery_kind(current_request, requested)
     source_blocks = pair.get("assistant_structured_output")
     if not isinstance(source_blocks, list):
+        source_blocks = []
+    # `assistant_structured_output` is the lightweight renderer index. The exact
+    # value-bearing source is also stored in `protected_structured_data` so it
+    # survives older rows, stripped renderer envelopes and file-only responses.
+    # Rehydrate that canonical record when the renderer index is missing or has
+    # no value-bearing block of a requested family.
+    protected_record = pair.get("protected_structured_data")
+    protected_items = protected_record.get("items") if isinstance(protected_record, dict) else []
+    if isinstance(protected_items, list):
+        for item in protected_items[:24]:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            data = item.get("data")
+            if not isinstance(data, dict):
+                continue
+            normalized_kind = {"table_data": "table", "chart": "graph", "plot": "graph", "source_code": "code"}.get(kind, kind)
+            if normalized_kind not in {"table", "graph", "diagram", "formula", "code", "link", "copy"}:
+                continue
+            # A complete renderer block is already the primary source. Add the
+            # protected copy only when the lightweight block is absent or is an
+            # empty shell, avoiding duplicate tables/charts in the visible scene.
+            existing_value = False
+            for existing in source_blocks:
+                if not isinstance(existing, dict):
+                    continue
+                existing_kind = str(existing.get("type") or existing.get("artifact_type") or existing.get("kind") or "").strip().lower()
+                existing_kind = {"table_data": "table", "chart": "graph", "plot": "graph", "source_code": "code"}.get(existing_kind, existing_kind)
+                if existing_kind != normalized_kind:
+                    continue
+                existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else existing
+                if normalized_kind == "table":
+                    existing_value = bool(
+                        (isinstance(existing_payload.get("headers") or existing_payload.get("columns"), list)
+                         and (existing_payload.get("rows") or existing_payload.get("data")))
+                        or any(str(existing_payload.get(key) or "").strip() for key in ("markdown", "content", "text"))
+                    )
+                elif normalized_kind == "code":
+                    existing_value = any(str(existing_payload.get(key) or "").strip() for key in ("code", "source_code", "content", "text"))
+                elif normalized_kind == "graph":
+                    existing_value = any(existing_payload.get(key) not in (None, "", [], {}) for key in ("series", "points", "nodes", "data", "values", "edges"))
+                else:
+                    existing_value = bool(existing_payload)
+                if existing_value:
+                    break
+            if existing_value:
+                continue
+            # Preserve nested renderer payload exactly; older protected records
+            # may instead store the structured fields directly in `data`.
+            recovered = deepcopy(data)
+            recovered["type"] = normalized_kind
+            recovered["artifact_type"] = normalized_kind
+            registration = get_web_renderer_registration(normalized_kind)
+            recovered.setdefault("renderer", registration.get("renderer") or "MessageTextBlock")
+            recovered.setdefault("viewer", registration.get("viewer") or recovered["renderer"])
+            source_blocks.append(recovered)
+
+    if not source_blocks:
         return [], {"source_blocks": 0, "restored_blocks": 0, "restored_types": []}
 
     aliases = {
@@ -380,6 +487,7 @@ def _restore_saved_renderer_blocks(
 
     return restored, {
         "source_blocks": len(source_blocks),
+        "protected_items": len(protected_items) if isinstance(protected_items, list) else 0,
         "restored_blocks": len(restored),
         "restored_types": [str(block.get("type") or "") for block in restored],
         "periodic_table_status": locals().get("periodic_status", "not_applicable"),
@@ -6831,8 +6939,10 @@ async def execute(
     # selected authenticated branch as the canonical renderer source if the
     # Provider returned prose or an empty renderer shell only.
     _artifact_request_text = original or current_text
-    _artifact_kind = _explicit_artifact_followup_kind(_artifact_request_text)
     _artifact_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    _artifact_kind = _resolve_artifact_delivery_kind(
+        _artifact_request_text, _artifact_intent.get("requested_outputs") or []
+    )
     _artifact_is_revision = bool(
         _text(_artifact_intent.get("task")).lower() in {"edit_image", "edit_artifact", "revise_artifact"}
         or re.search(
@@ -6853,13 +6963,24 @@ async def execute(
     )
     if _artifact_is_retrieval:
         _artifact_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
-        _artifact_pair = next((item for item in _artifact_pairs if isinstance(item, dict) and isinstance(item.get("assistant_structured_output"), list)), None)
+        def _has_recoverable_artifact_source(item: Any) -> bool:
+            if not isinstance(item, dict):
+                return False
+            renderer_rows = item.get("assistant_structured_output")
+            protected = item.get("protected_structured_data")
+            protected_rows = protected.get("items") if isinstance(protected, dict) else None
+            return bool(
+                (isinstance(renderer_rows, list) and renderer_rows)
+                or (isinstance(protected_rows, list) and protected_rows)
+            )
+
+        _artifact_pair = next((item for item in _artifact_pairs if _has_recoverable_artifact_source(item)), None)
         if _artifact_pair is None:
             _artifact_anchor = dialogue_context.get("anchor") if isinstance(dialogue_context.get("anchor"), dict) else {}
-            _artifact_pair = _artifact_anchor if isinstance(_artifact_anchor.get("assistant_structured_output"), list) else None
+            _artifact_pair = _artifact_anchor if _has_recoverable_artifact_source(_artifact_anchor) else None
         if _artifact_pair is not None:
             _restored_structured, _restored_structured_stats = _restore_saved_renderer_blocks(
-                _artifact_pair, [_artifact_kind], _artifact_request_text
+                _artifact_pair, [_artifact_kind, "file"], _artifact_request_text
             )
             if _restored_structured:
                 _existing_kinds = {
