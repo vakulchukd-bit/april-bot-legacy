@@ -43,6 +43,7 @@ PREMIUM_12H_PRICE = int(os.getenv("APRIL_PREMIUM_12H_PRICE_USD", "3"))
 LITE_DAYS = int(os.getenv("APRIL_LITE_DAYS", "5"))
 PREMIUM_DAYS = int(os.getenv("APRIL_PREMIUM_DAYS", "28"))
 PREMIUM_28D_SECONDS = 28 * 24 * 60 * 60
+PREMIUM_7D_SECONDS = 7 * 24 * 60 * 60
 PREMIUM_12H_SECONDS = 12 * 60 * 60
 
 FILE_PATH = "data/subscriptions.json"
@@ -4127,6 +4128,11 @@ def _premium_payment_package(product_code: str) -> dict[str, Any] | None:
         return {"product_code": code, "amount": price, "amount_minor": price * 100,
                 "currency": "USD", "duration_seconds": PREMIUM_28D_SECONDS,
                 "description": "April Premium 28 days"}
+    if code == "premium_7d":
+        price = int(os.getenv("APRIL_PREMIUM_7D_PRICE_USD", "12"))
+        return {"product_code": code, "amount": price, "amount_minor": price * 100,
+                "currency": "USD", "duration_seconds": PREMIUM_7D_SECONDS,
+                "description": "April Premium 7 days"}
     if code == "premium_12h":
         price = int(os.getenv("APRIL_PREMIUM_12H_PRICE_USD", str(PREMIUM_12H_PRICE)))
         return {"product_code": code, "amount": price, "amount_minor": price * 100,
@@ -4135,9 +4141,16 @@ def _premium_payment_package(product_code: str) -> dict[str, Any] | None:
     return None
 
 
-def create_pending_premium_payment(user_id: Any, product_code: str) -> dict[str, Any]:
+def create_pending_premium_payment(
+    user_id: Any,
+    product_code: str,
+    payment_source: str = "fondy_google_pay",
+) -> dict[str, Any]:
     """Create a pending one-time payment for the canonical Google-authenticated April user."""
     uid = str(user_id or "").strip()
+    source = str(payment_source or "").strip().lower()
+    if source not in {"fondy_google_pay", "liqpay_google_pay"}:
+        return {"success": False, "error": "INVALID_PAYMENT_SOURCE"}
     package = _premium_payment_package(product_code)
     if not uid:
         return {"success": False, "error": "USER_ID_REQUIRED"}
@@ -4166,10 +4179,10 @@ def create_pending_premium_payment(user_id: Any, product_code: str) -> dict[str,
                     """INSERT INTO payments
                        (user_id, plan, amount, premium_id, payment_status, payment_source,
                         product_code, currency, amount_minor, duration_seconds, order_id)
-                       VALUES (%s, 'premium', %s, %s, 'pending', 'fondy_google_pay',
+                       VALUES (%s, 'premium', %s, %s, 'pending', %s,
                                %s, %s, %s, %s, %s)""",
                     (uid, package["amount"], str(user.get("premium_id") or "") or None,
-                     package["product_code"], package["currency"], package["amount_minor"],
+                     source, package["product_code"], package["currency"], package["amount_minor"],
                      package["duration_seconds"], order_id),
                 )
         return {"success": True, "user_id": uid, "order_id": order_id, **package}
@@ -4196,7 +4209,8 @@ def get_premium_payment_status(user_id: Any, order_id: Any) -> dict[str, Any]:
             cur.execute(
                 """SELECT order_id, payment_status, product_code, currency, amount_minor, paid_at
                    FROM payments
-                   WHERE user_id = %s AND order_id = %s AND payment_source = 'fondy_google_pay'
+                   WHERE user_id = %s AND order_id = %s
+                     AND payment_source IN ('fondy_google_pay', 'liqpay_google_pay')
                    LIMIT 1""",
                 (uid, oid),
             )
@@ -4217,8 +4231,12 @@ def get_premium_payment_status(user_id: Any, order_id: Any) -> dict[str, Any]:
     finally:
         conn.close()
 
-def set_premium_payment_order_status(order_id: str, status: str) -> bool:
-    """Mark an unpaid payment intent failed/cancelled without changing any entitlement."""
+def set_premium_payment_order_status(
+    order_id: str,
+    status: str,
+    expected_payment_source: str | None = None,
+) -> bool:
+    """Mark an unpaid intent failed/cancelled, optionally restricting its provider."""
     oid = str(order_id or "").strip()
     safe_status = str(status or "").strip().lower()
     if not oid or safe_status not in {"failed", "cancelled"}:
@@ -4229,10 +4247,19 @@ def set_premium_payment_order_status(order_id: str, status: str) -> bool:
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE payments SET payment_status = %s WHERE order_id = %s AND payment_status = 'pending'",
-                    (safe_status, oid),
-                )
+                if expected_payment_source:
+                    source = str(expected_payment_source).strip().lower()
+                    if source not in {"fondy_google_pay", "liqpay_google_pay"}:
+                        return False
+                    cur.execute(
+                        "UPDATE payments SET payment_status = %s WHERE order_id = %s AND payment_status = 'pending' AND payment_source = %s",
+                        (safe_status, oid, source),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE payments SET payment_status = %s WHERE order_id = %s AND payment_status = 'pending'",
+                        (safe_status, oid),
+                    )
                 return cur.rowcount == 1
     finally:
         conn.close()
@@ -4243,12 +4270,13 @@ def settle_premium_payment(
     provider_payment_id: str,
     amount_minor: int,
     currency: str,
+    expected_payment_source: str | None = None,
 ) -> dict[str, Any]:
     """Atomically convert a verified provider callback into a Premium entitlement.
 
-    The caller must verify the Fondy signature and merchant ID before invoking this
-    function. This function independently checks order amount/currency and is
-    idempotent: replayed callbacks cannot extend the term twice.
+    The caller must verify the payment provider signature and merchant identity before
+    invoking this function. This function independently checks order amount/currency and
+    is idempotent: replayed callbacks cannot extend the term twice.
     """
     oid = str(order_id or "").strip()
     payment_id = str(provider_payment_id or "").strip()
@@ -4269,8 +4297,12 @@ def settle_premium_payment(
             with conn.cursor() as cur:
                 cur.execute("SELECT * FROM payments WHERE order_id = %s FOR UPDATE", (oid,))
                 payment = cur.fetchone()
-                if not payment or str(payment.get("payment_source") or "") != "fondy_google_pay":
+                payment_source = str(payment.get("payment_source") or "") if payment else ""
+                allowed_sources = {"fondy_google_pay", "liqpay_google_pay"}
+                if not payment or payment_source not in allowed_sources:
                     return {"success": False, "error": "PAYMENT_ORDER_NOT_FOUND"}
+                if expected_payment_source and payment_source != str(expected_payment_source).strip().lower():
+                    return {"success": False, "error": "PAYMENT_PROVIDER_MISMATCH"}
                 uid = str(payment.get("user_id") or "").strip()
                 if str(payment.get("payment_status") or "").lower() == "paid":
                     existing_id = str(payment.get("provider_payment_id") or "").strip()
@@ -4285,7 +4317,7 @@ def settle_premium_payment(
                     if str(payment.get("currency") or "").upper() != currency_code:
                         return {"success": False, "error": "PAYMENT_CURRENCY_MISMATCH"}
                     duration = int(payment.get("duration_seconds") or 0)
-                    if duration not in {PREMIUM_12H_SECONDS, PREMIUM_28D_SECONDS}:
+                    if duration not in {PREMIUM_12H_SECONDS, PREMIUM_7D_SECONDS, PREMIUM_28D_SECONDS}:
                         return {"success": False, "error": "PAYMENT_DURATION_INVALID"}
                     cur.execute(
                         """SELECT user_id, april_id, email, provider, plan, subscription_until, premium_id
