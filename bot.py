@@ -21,13 +21,14 @@ import re
 import socket
 import traceback
 import time
+import threading
 import uuid
 from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as email_policy_default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit, urlencode
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -2061,6 +2062,141 @@ def _liqpay_amount_minor(value: Any) -> int | None:
         return None
 
 
+# Polling is order-scoped and throttled so a browser's short status loop does not
+# create a burst of identical requests to LiqPay. Callback remains the primary path.
+_LIQPAY_STATUS_CHECK_LOCK = threading.Lock()
+_LIQPAY_STATUS_CHECKED_AT: dict[str, float] = {}
+_LIQPAY_STATUS_CHECK_INTERVAL_SECONDS = 8.0
+
+
+def _liqpay_reconcile_pending_order(order: dict[str, Any]) -> None:
+    """Query LiqPay's signed Status API and settle only an exact successful order.
+
+    The Status API request is signed with the merchant private key and sent over
+    HTTPS. We still independently compare order, merchant, amount and currency
+    against the pending database row before creating a Premium entitlement.
+    """
+    order_id = _text(order.get("order_id"))
+    if not order_id or _text(order.get("payment_source")).lower() != "liqpay_google_pay":
+        return
+    now_monotonic = time.monotonic()
+    with _LIQPAY_STATUS_CHECK_LOCK:
+        previous = _LIQPAY_STATUS_CHECKED_AT.get(order_id, 0.0)
+        if now_monotonic - previous < _LIQPAY_STATUS_CHECK_INTERVAL_SECONDS:
+            return
+        _LIQPAY_STATUS_CHECKED_AT[order_id] = now_monotonic
+        if len(_LIQPAY_STATUS_CHECKED_AT) > 2048:
+            cutoff = now_monotonic - 3600.0
+            for key, checked_at in list(_LIQPAY_STATUS_CHECKED_AT.items()):
+                if checked_at < cutoff:
+                    _LIQPAY_STATUS_CHECKED_AT.pop(key, None)
+
+    public_key, private_key, _callback_url = _liqpay_enabled_config()
+    if not public_key or not private_key:
+        return
+
+    try:
+        request_fields = {
+            "action": "status",
+            "version": 7,
+            "public_key": public_key,
+            "order_id": order_id,
+        }
+        encoded_data = base64.b64encode(
+            json.dumps(request_fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        signature = _liqpay_signature(encoded_data, private_key)
+        request_body = urlencode({"data": encoded_data, "signature": signature}).encode("ascii")
+        req = UrlRequest(
+            "https://www.liqpay.ua/api/request",
+            data=request_body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as response:
+            provider_result = json.loads(response.read(128 * 1024).decode("utf-8"))
+        if not isinstance(provider_result, dict):
+            raise ValueError("invalid LiqPay status response")
+
+        response_order = _text(provider_result.get("order_id"))
+        response_public_key = _text(provider_result.get("public_key"))
+        if response_order != order_id or response_public_key != public_key:
+            _apr_timing_log("liqpay_status_identity_mismatch", order_key=_apr_diag_ref(order_id))
+            return
+
+        provider_status = _text(provider_result.get("status")).lower()
+        if provider_status in {"error", "failure", "reversed"}:
+            set_premium_payment_order_status(
+                order_id, "failed", expected_payment_source="liqpay_google_pay"
+            )
+            _apr_timing_log(
+                "liqpay_status_reconciled_failed", order_key=_apr_diag_ref(order_id),
+                provider_status=provider_status,
+            )
+            return
+        if provider_status != "success":
+            _apr_timing_log(
+                "liqpay_status_still_pending", order_key=_apr_diag_ref(order_id),
+                provider_status=provider_status or "missing",
+            )
+            return
+
+        amount_minor = _liqpay_amount_minor(provider_result.get("amount"))
+        expected_amount = int(order.get("amount_minor") or 0)
+        currency = _text(provider_result.get("currency")).upper()
+        expected_currency = _text(order.get("currency")).upper()
+        if (
+            amount_minor is None or amount_minor != expected_amount
+            or not currency or currency != expected_currency
+            or currency != "USD"
+        ):
+            _apr_timing_log(
+                "liqpay_status_amount_currency_mismatch", order_key=_apr_diag_ref(order_id),
+                expected_currency=expected_currency, received_currency=currency,
+                expected_amount_minor=expected_amount, received_amount_minor=amount_minor,
+            )
+            return
+
+        payment_id_raw = _text(
+            provider_result.get("payment_id") or provider_result.get("transaction_id")
+            or provider_result.get("liqpay_order_id")
+        )
+        if not payment_id_raw:
+            _apr_timing_log("liqpay_status_payment_id_missing", order_key=_apr_diag_ref(order_id))
+            return
+        settlement = settle_premium_payment(
+            order_id,
+            "liqpay:" + payment_id_raw,
+            amount_minor,
+            currency,
+            expected_payment_source="liqpay_google_pay",
+        )
+        if settlement.get("success"):
+            _apr_timing_log(
+                "liqpay_status_reconciled_paid", order_key=_apr_diag_ref(order_id),
+                user_key=_apr_diag_ref(settlement.get("user_id")),
+                premium_key=_apr_diag_ref(settlement.get("premium_id")),
+            )
+        else:
+            _apr_timing_log(
+                "liqpay_status_settlement_rejected", order_key=_apr_diag_ref(order_id),
+                error=_text(settlement.get("error") or "PAYMENT_SETTLEMENT_FAILED"),
+            )
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        _apr_timing_log(
+            "liqpay_status_query_failed", order_key=_apr_diag_ref(order_id),
+            error_type=type(exc).__name__,
+        )
+    except Exception as exc:
+        _apr_timing_log(
+            "liqpay_status_reconcile_error", order_key=_apr_diag_ref(order_id),
+            error_type=type(exc).__name__,
+        )
+
+
 class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AprilBotRU/3.0"
@@ -2627,6 +2763,7 @@ class AprilHandler(BaseHTTPRequestHandler):
         # Public LiqPay callback: browser redirects are never proof of payment.
         # Only a valid LiqPay signature plus merchant/order/amount checks can settle.
         if parsed_path == "/api/payments/liqpay/callback":
+            _apr_timing_log("liqpay_callback_received")
             public_key, private_key, _ = _liqpay_enabled_config()
             if not public_key or not private_key:
                 self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
@@ -2882,6 +3019,15 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             order_id = _text(body.get("order_id"))
             result = get_premium_payment_status(canonical_user_id, order_id)
+            if (
+                result.get("success")
+                and _text(result.get("payment_status")).lower() == "pending"
+                and _text(result.get("payment_source")).lower() == "liqpay_google_pay"
+            ):
+                _liqpay_reconcile_pending_order(result)
+                # Read again after reconciliation; Premium is returned as paid only
+                # after the transaction commits in PostgreSQL.
+                result = get_premium_payment_status(canonical_user_id, order_id)
             status = 200 if result.get("success") else 404 if result.get("error") == "PAYMENT_ORDER_NOT_FOUND" else 503
             self._send_json(status, result)
             return
