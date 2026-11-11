@@ -2124,7 +2124,14 @@ def _liqpay_reconcile_pending_order(order: dict[str, Any]) -> None:
         response_order = _text(provider_result.get("order_id"))
         response_public_key = _text(provider_result.get("public_key"))
         if response_order != order_id or response_public_key != public_key:
-            _apr_timing_log("liqpay_status_identity_mismatch", order_key=_apr_diag_ref(order_id))
+            _apr_timing_log(
+                "liqpay_status_identity_mismatch",
+                order_key=_apr_diag_ref(order_id),
+                response_order_present=bool(response_order),
+                order_matches=response_order == order_id,
+                response_public_key_present=bool(response_public_key),
+                public_key_matches=response_public_key == public_key,
+            )
             return
 
         provider_status = _text(provider_result.get("status")).lower()
@@ -2179,6 +2186,10 @@ def _liqpay_reconcile_pending_order(order: dict[str, Any]) -> None:
                 "liqpay_status_reconciled_paid", order_key=_apr_diag_ref(order_id),
                 user_key=_apr_diag_ref(settlement.get("user_id")),
                 premium_key=_apr_diag_ref(settlement.get("premium_id")),
+                product=_text(settlement.get("order_product_code") or "unknown"),
+                amount_minor=int(settlement.get("order_amount_minor") or 0),
+                currency=_text(settlement.get("order_currency") or "unknown"),
+                duration_seconds=int(settlement.get("order_duration_seconds") or 0),
             )
         else:
             _apr_timing_log(
@@ -2821,7 +2832,11 @@ class AprilHandler(BaseHTTPRequestHandler):
                 _apr_timing_log(
                     "liqpay_payment_settled", order_key=_apr_diag_ref(order_id),
                     payment_key=_apr_diag_ref(payment_id), user_key=_apr_diag_ref(result.get("user_id")),
-                    premium_key=_apr_diag_ref(result.get("premium_id")), product="premium_prepaid",
+                    premium_key=_apr_diag_ref(result.get("premium_id")),
+                    product=_text(result.get("order_product_code") or "unknown"),
+                    amount_minor=int(result.get("order_amount_minor") or 0),
+                    currency=_text(result.get("order_currency") or "unknown"),
+                    duration_seconds=int(result.get("order_duration_seconds") or 0),
                 )
                 self._send_json(200, {"success": True, "status": "ok"})
                 return
@@ -2907,7 +2922,10 @@ class AprilHandler(BaseHTTPRequestHandler):
                     payment_key=_apr_diag_ref(payment_id),
                     user_key=_apr_diag_ref(result.get("user_id")),
                     premium_key=_apr_diag_ref(result.get("premium_id")),
-                    product="premium_prepaid",
+                    product=_text(result.get("order_product_code") or "unknown"),
+                    amount_minor=int(result.get("order_amount_minor") or 0),
+                    currency=_text(result.get("order_currency") or "unknown"),
+                    duration_seconds=int(result.get("order_duration_seconds") or 0),
                 )
                 self._send_json(200, {"success": True, "response_status": "success"})
                 return
