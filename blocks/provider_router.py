@@ -192,7 +192,7 @@ DIALOGUE_TRANSITION_ANALYSIS is the synchronous local audit performed before thi
 CONTINUATION / HOT-DISCUSSION PROGRESSION:
 PROVIDER-REFUSAL DIALOGUE RULE: If RECENT_LIMITATIONS contains earlier refusal/explanation events, treat them as part of the same active conversation. Review the current request with the previous attempts and explanations; do not repeat the same canned refusal. Explain the actual limitation in natural RETURN_LANGUAGE, preserve the thread, and offer one genuinely allowed alternative when it helps. Never bypass the restriction by merely renaming or rephrasing the blocked content. Do not expose raw provider/system refusal wording or mention OpenAI/provider machinery unless the user directly asks about the model/provider. Use AUTHENTICATED_IDENTITY.display_name only when present and natural; do not invent identity, policy grounds, product capabilities or UI paths. Do not confuse technical errors or tariff limits with content-policy refusal.
 - APRIL PROJECT IDENTITY: When asked who created/developed/authored April, name APRIL_PROJECT_IDENTITY.creator_name as the April project creator. Do not substitute the model provider: APRIL_PROJECT_IDENTITY.model_provider supplies the underlying AI model, not April product authorship. When asked the current user's name, use CURRENT_USER_PROFILE.display_name (or AUTHENTICATED_IDENTITY.display_name) exactly as provided; never confuse the profile user with April's creator and never guess either name.
-For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail.
+For CONTINUE, use CONTINUATION_GUIDANCE and its selected message IDs/coverage ledger as the authoritative trail. Also compare RECENT_DIALOGUE_EXCHANGE_WINDOW (up to the latest ten authenticated USER↔APRIL exchanges): evaluate the actual latest answer first, then a clearly matched older exchange; never relabel an older match as the latest answer, and never mix unrelated branches. When the request targets a saved artifact, resolve its exact source message/artifact and protected typed values before compressing incidental history.
 A bare waiting/status message (for example “Жду”, “жду ответа”, “waiting”, “still waiting”) is a request to continue the already active unfinished task, not a request to ask what the user means. Use the latest same-dialogue anchor and its unfinished deliverable; if the previous task completed, give a concise status without regenerating it. Never ask the user to restate a task that is already present in CONTINUATION_CONTEXT.
 Continue the selected topic from the latest relevant user or April message. Add the next reasoning step, missing section,
 requested revision, or new evidence; do not restate the completed answer or regenerate an existing artifact unless requested.
@@ -1443,7 +1443,8 @@ def _requires_prior_structured_payload(
         r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|схем\w*|"
         r"координат\w*|значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
         r"матриц\w*|csv|json|массив\w*|решен\w*|шаги?\s+решен\w*|ссылк\w*|url-?адрес\w*|"
-        r"источник\w*|код\w*|скрипт\w*|картинк\w*|изображен\w*|иллюстрац\w*|визуал\w*|"
+        r"источник\w*|код\w*|скрипт\w*|копирован\w*|copy(?:able)?\s+text|copy\s+block|картинк\w*|изображен\w*|иллюстрац\w*|визуал\w*|"
+        r"файл\w*|документ\w*|pdf|xlsx|xls|docx|\bfile\w*|\bdocument\w*|"
         r"\btable\w*|\brows?\b|\bcolumns?\b|\bgraph\w*|\bcharts?\b|\bplots?\b|"
         r"\bcoordinates?\b|\bvalues?\b|\bdata\b|\bformulas?\b|\bequations?\b|"
         r"\bcalculat\w*|\bsolutions?\b|\bmatrices\b|\bmatrix\b|\barrays?\b|"
@@ -1456,8 +1457,13 @@ def _requires_prior_structured_payload(
         r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
         r"\bтой\b|\bэтой\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|\bсохранен\w*\b|"
         r"\bиз\s+истории\b|\bкак\s+раньше\b|\bкак\s+выше\b|\bвыше\b|\bте\s+же\b|"
+        r"\bего\b|\bее\b|\bеё\b|\bих\b|\bтолько\b|\bименно\b|"
         r"\bпо\s+этим\b|\bпо\s+тем\b|\bзначения\s+из\b|\bданные\s+из\b|"
         r"\bверни\w*\b|\bвосстанови\w*\b|\bповтори\w*\b|\bснова\b|"
+        r"\bвозьми\w*\b|\bбери\w*\b|\bвыдай\w*\b|\bвыведи\w*\b|"
+        r"\bдостань\w*\b|\bвытащи\w*\b|\bпокажи\w*\b|\bотдай\w*\b|"
+        r"\bпередай\w*\b|\bсохрани\w*\b|\bэкспортируй\w*\b|"
+        r"\bскачай\w*\b|\bпришли\w*\b|\bпредоставь\w*\b|"
         r"\bеще\s+раз\b|\bпродолжи\w*\b|\bдобавь\w*\b|\bизмени\w*\b|"
         r"\bисправь\w*\b|\bдоработай\w*\b|\bобнови\w*\b|"
         r"\bthis\b|\bthese\b|\bthat\b|\bthose\b|\bprevious\w*\b|\blast\b|"
@@ -1475,33 +1481,60 @@ def _requires_prior_structured_payload(
 
 
 def _prior_structured_kind_targets(current_request: Any) -> set[str]:
-    """Infer only the kinds of saved structures explicitly requested by the user."""
+    """Infer source artifact kinds without confusing them with output containers."""
     query = _text(current_request).lower().replace("ё", "е")
     targets: set[str] = set()
-    has_table_target = bool(re.search(r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)", query))
-    has_graph_target = bool(re.search(r"(?:график\w*|диаграмм\w*|построен\w*|крив\w*|\bgraph\w*|\bcharts?\b|\bplots?\b)", query))
+
+    has_table_target = bool(re.search(
+        r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)",
+        query,
+    ))
+    has_graph_target = bool(re.search(
+        r"(?:график\w*|диаграмм\w*|построен\w*|крив\w*|\bgraph\w*|\bcharts?\b|\bplots?\b)",
+        query,
+    ))
     if has_table_target:
         targets.add("table")
-    # Bare "coordinates/points" usually means graph data, except when the user
-    # explicitly asks for a table containing those coordinates.
-    if has_graph_target or (not has_table_target and re.search(r"(?:координат\w*|точк\w*|\bcoordinates?\b|\bpoints?\b)", query)):
+    if has_graph_target or (
+        not has_table_target
+        and re.search(r"(?:координат\w*|точк\w*|\bcoordinates?\b|\bpoints?\b)", query)
+    ):
         targets.add("graph")
     if re.search(r"(?:формул\w*|уравнен\w*|выражен\w*|экспонент\w*|\bformula\w*|\bequation\w*|\bexpression\w*|\bexponential\w*)", query):
         targets.add("formula")
     if re.search(r"(?:решен\w*|вычислен\w*|расчет\w*|расчёт\w*|шаг\w*\s+решен\w*|математическ\w*\s+задач\w*|\bsolution\w*|\bcalculat\w*|\bderivation\w*|\bmath\s+problem\w*)", query):
         targets.add("solution")
-    if re.search(r"(?:ссылк\w*|url-?адрес\w*|источник\w*|\blinks?\b|\burls?\b|\bsources?\b)", query):
+    if re.search(r"(?:ссылк\w*|url-?адрес\w*|источник\w*|\blinks?\b|\burls?\b|\bsources?\b|\bhyperlinks?\b)", query):
         targets.add("link")
     if re.search(r"(?:код\w*|скрипт\w*|программ\w*|\bcodes?\b|\bscripts?\b|\bsource\s+code\b)", query):
         targets.add("code")
-    if re.search(r"(?:схем\w*|диаграмм\w*|блок-?схем\w*|\bdiagrams?\b|\bschemes?\b|\bflowcharts?\b|\bmermaid\b)", query):
+    if re.search(r"(?:схем\w*|блок-?схем\w*|\bdiagrams?\b|\bschemes?\b|\bflowcharts?\b|\bmermaid\b)", query):
         targets.add("diagram")
     if re.search(r"(?:картинк\w*|изображен\w*|иллюстрац\w*|фото\b|фотограф\w*|\bimages?\b|\bpictures?\b|\bphotos?\b)", query):
         targets.add("image")
+    if re.search(r"(?:текст\w*\s+для\s+копирован\w*|блок\w*\s+для\s+копирован\w*|копирован\w*|\bcopy(?:able)?\s+text\b|\bcopy\s+block\b)", query):
+        targets.add("copy")
+
+    # "Put/export this graph in a file" asks for the graph as source and a
+    # file as its delivery format. Only select a stored file when the file
+    # itself is the object being restored, edited, or downloaded.
+    file_target = bool(re.search(
+        r"(?:файл\w*|документ\w*|pdf|xlsx|xls|docx|\bfile\w*|\bdocument\w*|\bworkbook\b|\bspreadsheet\b)",
+        query,
+    ))
+    explicit_file_source = bool(re.search(
+        r"(?:\b(?:этот|этого|эту|этой|последн\w*|предыдущ\w*|сохранен\w*|исходн\w*)\s+(?:файл\w*|документ\w*)|"
+        r"\b(?:скачай|верни|восстанови|открой|измени|исправь|дополни|обнови)\w*\s+(?:мне\s+)?(?:этот\s+|последн\w*\s+|предыдущ\w*\s+)?(?:файл\w*|документ\w*)|"
+        r"\b(?:download|restore|open|edit|update)\s+(?:this|the|last|previous)?\s*(?:file|document)\b|"
+        r"\b(?:file|document)\s+(?:from|in)\s+history\b)",
+        query,
+    ))
+    if file_target and (not targets or explicit_file_source):
+        targets.add("file")
+
     if re.search(r"(?:данн\w*|значени\w*|массив\w*|матриц\w*|csv|json|\bdata\b|\bvalues?\b|\barrays?\b|\bmatrix\b)", query) and not targets:
         targets.update({"graph", "table", "formula", "solution"})
     return targets
-
 
 def _structured_item_has_exact_values(item: Any) -> bool:
     """Reject empty renderer shells while retaining exact typed data."""
@@ -1533,9 +1566,13 @@ def _structured_item_has_exact_values(item: Any) -> bool:
         return False
 
     if kind == "table":
-        return nonempty_key({"rows", "cells", "matrix", "data_rows"})
+        return nonempty_key({"rows", "cells", "matrix", "data_rows", "data", "values"})
     if kind == "graph":
-        return nonempty_key({"points", "data_points", "series", "datasets", "traces", "x_values", "y_values", "expression", "expressions", "equation", "function"})
+        return nonempty_key({
+            "points", "data_points", "coordinates", "series", "datasets", "traces", "curves",
+            "data", "values", "x_values", "y_values", "z_values", "expression", "expressions",
+            "equation", "function", "functions", "surface_grid",
+        })
     if kind == "formula":
         return nonempty_key({"formula", "formulas", "latex", "latex_formulas", "equation", "equations", "expression", "expressions"})
     if kind == "solution":
@@ -1546,6 +1583,10 @@ def _structured_item_has_exact_values(item: Any) -> bool:
         return nonempty_key({"code", "source_code", "source", "content", "text"})
     if kind == "diagram":
         return nonempty_key({"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry", "positions", "code"})
+    if kind == "copy":
+        return nonempty_key({"text", "content", "copy_text", "value"})
+    if kind == "file":
+        return nonempty_key({"file_id", "asset_id", "asset_ref", "storage_key", "download_url", "uri"})
     if kind == "image":
         return nonempty_key({"image_url", "url", "src", "asset_id", "asset_ref", "storage_key", "filename", "images", "uri"})
     return False
@@ -3150,6 +3191,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "HISTORY_TIME_WINDOW": (data.get("HISTORY_TIME_WINDOW") or {}) if is_history else {},
             "DIALOGUE_ANCHOR": anchor_min,
             "CONTINUATION_CONTEXT": pairs_min,
+            "RECENT_DIALOGUE_EXCHANGE_WINDOW": data.get("RECENT_DIALOGUE_EXCHANGE_WINDOW") or [],
+            "RECENT_BRANCH_ANCHOR": data.get("RECENT_BRANCH_ANCHOR") or {},
             "PROTECTED_STRUCTURED_DATA": data.get("PROTECTED_STRUCTURED_DATA") or [],
             "PROTECTED_CURRENT_INPUT": data.get("PROTECTED_CURRENT_INPUT") or {},
             "SELECTED_SECTION": {
@@ -3621,6 +3664,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "LAST_TURN_LINK", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
+            "RECENT_DIALOGUE_EXCHANGE_WINDOW", "RECENT_BRANCH_ANCHOR",
             "DIALOGUE_TABLE_MARKDOWN", "SELECTED_SECTION", "CLARIFICATION_RESOLUTION", "ACTIVE_WORK_BRANCH",
             "ACTIVE_TOPIC_CONTEXT", "RECENT_LIMITATIONS", "REQUESTED_OUTPUTS",
         )
@@ -4073,6 +4117,53 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             )
             system = compact_system
             _recount_emergency()
+
+    if total > MAX_PROMPT_TOKENS and externalized_structures and _requires_prior_structured_payload(
+        source_current_request, relation=str(minimal.get("DIALOGUE_RELATION") or "NEW"),
+        history_request=bool(minimal.get("HISTORY_REQUEST")),
+    ):
+        # Artifact-first compaction: keep the current operation, output/SceneContract
+        # rules, exact source manifest and selected source IDs. Drop dialogue prose,
+        # identity extras and history indexes before considering any source truncation.
+        source_anchor = minimal.get("DIALOGUE_ANCHOR") if isinstance(minimal.get("DIALOGUE_ANCHOR"), dict) else {}
+        artifact_anchor = {
+            key: source_anchor[key]
+            for key in ("message_id", "topic_id", "branch_id", "origin_message_id", "same_dialog", "artifact_index")
+            if source_anchor.get(key) not in (None, "", [], {})
+        }
+        artifact_keep = (
+            "CURRENT_REQUEST", "RETURN_LANGUAGE", "OUTPUT_CONTRACT", "REQUEST_SEQUENCE",
+            "INTERPRETATION", "DIALOGUE_RELATION", "LAST_TURN_LINK", "SCENE_CONTRACT",
+            "C_ARTIFACT_RENDER_PLAN", "OUTPUT_BUDGET_POLICY", "INPUT_MODALITIES",
+            "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_CURRENT_INPUT",
+        )
+        artifact_minimal = {key: minimal[key] for key in artifact_keep if key in minimal}
+        if artifact_anchor:
+            artifact_minimal["DIALOGUE_ANCHOR"] = artifact_anchor
+        artifact_minimal["ARTIFACT_SOURCE_PRIORITY"] = {
+            "source_message_id": _text((minimal.get("PROTECTED_STRUCTURED_DATA_EXTERNAL") or {}).get("source_message_ids", [""])[0])[:120]
+            if isinstance(minimal.get("PROTECTED_STRUCTURED_DATA_EXTERNAL"), dict) else "",
+            "rule": "Use the exact protected saved artifact values first; do not ask for re-upload when this source is present.",
+        }
+        artifact_system = (
+            "April: fulfill CURRENT_REQUEST in RETURN_LANGUAGE using the exact authenticated saved artifact in "
+            "PROTECTED_STRUCTURED_DATA_SOURCE. The protected source is authoritative and lossless. Preserve all "
+            "values, labels, order and provenance. Apply only the requested edit/export/extension; do not recreate "
+            "from memory and do not ask the user to resend an artifact that is present. Follow OUTPUT_CONTRACT, "
+            "SCENE_CONTRACT and C_ARTIFACT_RENDER_PLAN exactly. Keep within the Free input/output limits. "
+            "Return valid JSON; never claim a file or renderer was produced unless its concrete payload exists."
+        )
+        artifact_card = _json_card(artifact_minimal)
+        artifact_total = (
+            _estimate_tokens(artifact_system) + _estimate_tokens(artifact_card)
+            + max(0, int(reserved_prompt_tokens)) + external_protected_token_cost
+        )
+        if artifact_total <= MAX_PROMPT_TOKENS:
+            return artifact_system, artifact_card, artifact_total, "artifact_source_first_compaction"
+        minimal = artifact_minimal
+        system = artifact_system
+        card = artifact_card
+        total = artifact_total
 
     if total > MAX_PROMPT_TOKENS:
         # This remaining case is a genuine Free input-capacity limit (e.g. an
@@ -4810,6 +4901,35 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "source": "authenticated_settings_profile",
     } if authenticated_identity.get("display_name") else {}
 
+    recent_branch = memory.get("recent_branch_anchor") if isinstance(memory.get("recent_branch_anchor"), dict) else {}
+    include_recent_window = bool(
+        relation == "CONTINUE"
+        or memory.get("contextual_history_match")
+        or recent_branch
+    )
+    recent_window_raw = (
+        memory.get("recent_exchange_window")
+        if include_recent_window and isinstance(memory.get("recent_exchange_window"), list)
+        else []
+    )
+    recent_window_card = []
+    for position, item in enumerate(recent_window_raw[-10:], start=max(1, len(recent_window_raw) - 9)):
+        if not isinstance(item, dict):
+            continue
+        recent_window_card.append({
+            "position": position,
+            "message_id": _clip(item.get("message_id"), 120),
+            "topic_id": _clip(item.get("topic_id"), 120),
+            "branch_id": _clip(item.get("branch_id"), 120),
+            "user_request": _clip(item.get("user_request") or item.get("user"), 160),
+            "april_answer": _clip(item.get("april_answer") or item.get("april"), 240),
+        })
+    recent_branch_card = {
+        key: _clip(recent_branch.get(key), 120 if key.endswith("id") else 180)
+        for key in ("message_id", "topic_id", "branch_id", "user", "april")
+        if recent_branch.get(key) not in (None, "", [], {})
+    }
+
     structured = {
         "AUTHENTICATED_IDENTITY": authenticated_identity,
         "CURRENT_USER_PROFILE": current_user_profile,
@@ -4873,6 +4993,8 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             selected_pairs,
             min(4, requested_topic_count) if history_request else (1 if selected_section else min(8, len(selected_pairs))),
         ) if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
+        "RECENT_DIALOGUE_EXCHANGE_WINDOW": recent_window_card,
+        "RECENT_BRANCH_ANCHOR": recent_branch_card,
         "PROTECTED_STRUCTURED_DATA": protected_structured_data,
         "SELECTED_SECTION": {
             "topic": _clip(selected_section.get("topic"), 240),
