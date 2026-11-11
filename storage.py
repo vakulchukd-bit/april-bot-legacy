@@ -4207,7 +4207,7 @@ def get_premium_payment_status(user_id: Any, order_id: Any) -> dict[str, Any]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT order_id, payment_status, product_code, currency, amount_minor, paid_at
+                """SELECT order_id, payment_status, payment_source, product_code, currency, amount_minor, paid_at
                    FROM payments
                    WHERE user_id = %s AND order_id = %s
                      AND payment_source IN ('fondy_google_pay', 'liqpay_google_pay')
@@ -4221,6 +4221,7 @@ def get_premium_payment_status(user_id: Any, order_id: Any) -> dict[str, Any]:
                 "success": True,
                 "order_id": str(row.get("order_id") or ""),
                 "payment_status": str(row.get("payment_status") or "pending").lower(),
+                "payment_source": str(row.get("payment_source") or "").lower(),
                 "product_code": str(row.get("product_code") or ""),
                 "currency": str(row.get("currency") or ""),
                 "amount_minor": int(row.get("amount_minor") or 0),
