@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import hashlib
 import hmac
 import base64
+from decimal import Decimal, InvalidOperation
 import json
 import os
 import queue
@@ -2026,6 +2027,40 @@ def _fondy_enabled_config() -> tuple[int | None, str, str, str]:
     return _fondy_provider_config()
 
 
+def _liqpay_signature(data: str, private_key: str) -> str:
+    """LiqPay signature: Base64(SHA3-256(private_key + data + private_key))."""
+    digest = hashlib.sha3_256((str(private_key) + str(data) + str(private_key)).encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _liqpay_signature_valid(data: str, supplied_signature: str, private_key: str) -> bool:
+    supplied = str(supplied_signature or "").strip()
+    if not data or not supplied:
+        return False
+    return hmac.compare_digest(_liqpay_signature(data, private_key), supplied)
+
+
+def _liqpay_enabled_config() -> tuple[str, str, str]:
+    enabled = str(os.getenv("APRIL_LIQPAY_ENABLED", "0")).strip().lower() in {"1", "true", "yes"}
+    public_key = str(os.getenv("APRIL_LIQPAY_PUBLIC_KEY", "")).strip()
+    private_key = str(os.getenv("APRIL_LIQPAY_PRIVATE_KEY", "")).strip()
+    callback_url = str(os.getenv("APRIL_LIQPAY_CALLBACK_URL", "")).strip()
+    if not enabled or not public_key or len(private_key) < 16 or not callback_url.startswith("https://"):
+        return "", "", ""
+    return public_key, private_key, callback_url
+
+
+def _liqpay_amount_minor(value: Any) -> int | None:
+    try:
+        amount = Decimal(str(value))
+        minor = amount * Decimal("100")
+        if not amount.is_finite() or minor != minor.to_integral_value() or amount <= 0:
+            return None
+        return int(minor)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 class AprilHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "AprilBotRU/3.0"
@@ -2589,6 +2624,80 @@ class AprilHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
 
+        # Public LiqPay callback: browser redirects are never proof of payment.
+        # Only a valid LiqPay signature plus merchant/order/amount checks can settle.
+        if parsed_path == "/api/payments/liqpay/callback":
+            public_key, private_key, _ = _liqpay_enabled_config()
+            if not public_key or not private_key:
+                self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
+                return
+            raw, body_error = self._read_bounded_request_body(128 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400,
+                                {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                content_type = str(self.headers.get("Content-Type", "application/json")).lower()
+                if "application/x-www-form-urlencoded" in content_type:
+                    parsed_form = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+                    callback_form = {key: values[-1] for key, values in parsed_form.items() if values}
+                else:
+                    callback_form = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(callback_form, dict):
+                    raise ValueError("callback must be an object")
+                encoded_data = _text(callback_form.get("data"))
+                supplied_signature = _text(callback_form.get("signature"))
+                if not _liqpay_signature_valid(encoded_data, supplied_signature, private_key):
+                    _apr_timing_log("liqpay_callback_signature_rejected")
+                    self._send_json(403, {"success": False, "error": "PAYMENT_SIGNATURE_INVALID"})
+                    return
+                decoded = base64.b64decode(encoded_data, validate=True)
+                payload = json.loads(decoded.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("decoded callback must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+                self._send_json(400, {"success": False, "error": "INVALID_PAYMENT_CALLBACK"})
+                return
+
+            if _text(payload.get("public_key")) != public_key:
+                self._send_json(403, {"success": False, "error": "PAYMENT_MERCHANT_MISMATCH"})
+                return
+            order_id = _text(payload.get("order_id"))
+            payment_status = _text(payload.get("status")).lower()
+            if payment_status != "success":
+                if order_id and payment_status in {"error", "failure", "reversed"}:
+                    set_premium_payment_order_status(order_id, "failed", expected_payment_source="liqpay_google_pay")
+                self._send_json(200, {"success": True, "acknowledged": True})
+                return
+            if _text(payload.get("action")).lower() != "pay":
+                self._send_json(400, {"success": False, "error": "PAYMENT_ACTION_INVALID"})
+                return
+            amount_minor = _liqpay_amount_minor(payload.get("amount"))
+            currency = _text(payload.get("currency")).upper()
+            payment_id_raw = _text(payload.get("payment_id") or payload.get("liqpay_order_id"))
+            payment_id = "liqpay:" + payment_id_raw if payment_id_raw else ""
+            if not order_id or not payment_id or amount_minor is None or currency != "USD":
+                self._send_json(400, {"success": False, "error": "PAYMENT_AMOUNT_OR_CURRENCY_INVALID"})
+                return
+            result = settle_premium_payment(order_id, payment_id, amount_minor, currency, expected_payment_source="liqpay_google_pay")
+            if result.get("success"):
+                _apr_timing_log(
+                    "liqpay_payment_settled", order_key=_apr_diag_ref(order_id),
+                    payment_key=_apr_diag_ref(payment_id), user_key=_apr_diag_ref(result.get("user_id")),
+                    premium_key=_apr_diag_ref(result.get("premium_id")), product="premium_prepaid",
+                )
+                self._send_json(200, {"success": True, "status": "ok"})
+                return
+            _apr_timing_log("liqpay_payment_settlement_rejected", order_key=_apr_diag_ref(order_id),
+                            error=_text(result.get("error")))
+            status = 404 if result.get("error") == "PAYMENT_ORDER_NOT_FOUND" else 409 if result.get("error") in {
+                "PAYMENT_ALREADY_SETTLED", "PAYMENT_ORDER_NOT_PENDING", "PAYMENT_AMOUNT_MISMATCH",
+                "PAYMENT_CURRENCY_MISMATCH", "PAYMENT_DURATION_INVALID", "PAYMENT_PROVIDER_MISMATCH",
+                "DUPLICATE_PROVIDER_PAYMENT_ID",
+            } else 503
+            self._send_json(status, {"success": False, "error": result.get("error") or "PAYMENT_SETTLEMENT_FAILED"})
+            return
+
         # Public payment callback: access is controlled by Fondy's cryptographic
         # signature + merchant/order/amount checks, not by a browser session.
         if parsed_path == "/api/payments/fondy/callback":
@@ -2632,7 +2741,7 @@ class AprilHandler(BaseHTTPRequestHandler):
             order_status = _text(payload.get("order_status")).lower()
             if order_status != "approved":
                 if order_id and order_status in {"declined", "expired", "cancelled", "canceled", "reversed"}:
-                    set_premium_payment_order_status(order_id, "failed")
+                    set_premium_payment_order_status(order_id, "failed", expected_payment_source="fondy_google_pay")
                 # Non-approved status is acknowledged; only known final failures
                 # close the pending order. Intermediate statuses remain pending.
                 self._send_json(200, {"success": True, "acknowledged": True})
@@ -2654,7 +2763,7 @@ class AprilHandler(BaseHTTPRequestHandler):
             if amount_minor <= 0 or actual_amount != amount_minor or actual_currency != currency:
                 self._send_json(400, {"success": False, "error": "PAYMENT_AMOUNT_OR_CURRENCY_INVALID"})
                 return
-            result = settle_premium_payment(order_id, payment_id, amount_minor, currency)
+            result = settle_premium_payment(order_id, payment_id, amount_minor, currency, expected_payment_source="fondy_google_pay")
             if result.get("success"):
                 _apr_timing_log(
                     "fondy_payment_settled", order_key=_apr_diag_ref(order_id),
@@ -2670,10 +2779,86 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(status, {"success": False, "error": result.get("error") or "PAYMENT_SETTLEMENT_FAILED"})
             return
 
-        # Read payment-order state for the authenticated account. This is separate
-        # from the user's current Premium status so an old active period cannot be
-        # mistaken for confirmation of a newly-created order.
-        if parsed_path == "/api/subscription/google-pay/payment-status":
+        # Authenticated LiqPay order creation. Price/duration come only from the
+        # server catalogue; the browser can supply a package code and return origin.
+        if parsed_path == "/api/subscription/liqpay/create-order":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "GOOGLE_AUTHENTICATED_USER_REQUIRED"})
+                return
+            public_key, private_key, callback_url = _liqpay_enabled_config()
+            if not public_key or not private_key:
+                self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
+                return
+            raw, body_error = self._read_bounded_request_body(16 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400,
+                                {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("request must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+            product_code = _text(body.get("package_code"))
+            return_origin = _text(body.get("return_origin"))
+            if not return_origin.startswith("https://") or len(return_origin) > 300:
+                self._send_json(400, {"success": False, "error": "PAYMENT_RETURN_URL_INVALID"})
+                return
+            order = create_pending_premium_payment(
+                canonical_user_id, product_code, payment_source="liqpay_google_pay"
+            )
+            if not order.get("success"):
+                error = _text(order.get("error") or "PAYMENT_ORDER_CREATE_FAILED")
+                status = 503 if error in {"DATABASE_UNAVAILABLE", "PAYMENT_SCHEMA_MIGRATION_REQUIRED"} else 400
+                self._send_json(status, {"success": False, "error": error})
+                return
+
+            result_url = return_origin.rstrip("/") + "/settings?liqpay_order=" + quote(order["order_id"])
+            liqpay_fields = {
+                "public_key": public_key,
+                "version": 7,
+                "action": "pay",
+                "amount": f"{Decimal(str(order['amount'])):.2f}",
+                "currency": order["currency"],
+                "description": order["description"],
+                "order_id": order["order_id"],
+                "paytypes": "gpay,card",
+                "language": "uk",
+                "server_url": callback_url,
+                "result_url": result_url,
+            }
+            encoded_data = base64.b64encode(
+                json.dumps(liqpay_fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
+            signature = _liqpay_signature(encoded_data, private_key)
+            _apr_timing_log(
+                "liqpay_checkout_created", order_key=_apr_diag_ref(order.get("order_id")),
+                user_key=_apr_diag_ref(canonical_user_id), product=product_code,
+            )
+            self._send_json(200, {
+                "success": True,
+                "provider": "liqpay",
+                "checkout_url": "https://www.liqpay.ua/api/3/checkout",
+                "order_id": order["order_id"],
+                "package_code": order["product_code"],
+                "amount": order["amount"],
+                "currency": order["currency"],
+                "data": encoded_data,
+                "signature": signature,
+                "auto_renewal": False,
+            })
+            return
+
+        # Payment state is order-specific and independent of any older active Premium.
+        if parsed_path in {"/api/subscription/payment-status", "/api/subscription/google-pay/payment-status"}:
             if not self._service_authorized():
                 self.close_connection = True
                 self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
@@ -2763,7 +2948,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                 if response_signature and not _fondy_signature_valid(gateway_response, payment_key):
                     raise RuntimeError("Fondy response signature invalid")
             except (HTTPError, URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError, RuntimeError, ValueError) as exc:
-                set_premium_payment_order_status(order["order_id"], "failed")
+                set_premium_payment_order_status(order["order_id"], "failed", expected_payment_source="fondy_google_pay")
                 _apr_timing_log("fondy_token_create_failed", order_key=_apr_diag_ref(order.get("order_id")), error_type=type(exc).__name__)
                 self._send_json(502, {"success": False, "error": "PAYMENT_GATEWAY_TEMPORARILY_UNAVAILABLE"})
                 return
