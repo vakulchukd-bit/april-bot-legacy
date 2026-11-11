@@ -1161,18 +1161,50 @@ def _explicit_render_reference_kind(query: str) -> str:
         return "table"
     if re.search(r"(?:график\w*|диаграмм\w*|\bchart\b|\bgraph\b)", low):
         return "graph"
-    if re.search(r"(?:схем\w*|блок-схем\w*|\bdiagram\b|\bflowchart\b)", low):
+    if re.search(r"(?:схем\w*|блок-схем\w*|\bdiagram\b|\bflowchart\b|\bmermaid\b)", low):
         return "diagram"
     if re.search(r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b)", low):
         return "formula"
-    if re.search(r"(?:\bкод\b|скрипт\w*|\bcode\b|\bscript\b)", low):
+    if re.search(r"(?:\bкод\w*|скрипт\w*|\bcode\b|\bscript\b|\bsource\s+code\b)", low):
         return "code"
+    if re.search(r"(?:ссылк\w*|гиперссылк\w*|url-?адрес\w*|\bhyperlinks?\b|\blinks?\b|\burls?\b)", low):
+        return "link"
+    if re.search(r"(?:текст\w*\s+для\s+копирован\w*|блок\w*\s+для\s+копирован\w*|копирован\w*|\bcopy(?:able)?\s+text\b|\bcopy\s+block\b)", low):
+        return "copy"
     if re.search(r"(?:фото\w*|картин\w*|изображен\w*|\bimage\b|\bphoto\b|\bpicture\b)", low):
         return "image"
-    if re.search(r"(?:\bфайл\w*|документ\w*|\bpdf\b|\bfile\b|\bdocument\b)", low):
+    if re.search(r"(?:\bфайл\w*|документ\w*|\bpdf\b|\bfile\b|\bdocument\b|\bspreadsheet\b|\bworkbook\b)", low):
         return "file"
     return ""
 
+
+
+def _looks_like_saved_artifact_operation(query: str) -> bool:
+    """Recognize a retrieval/export/edit operation on an already-created renderer.
+
+    Requires an artifact family, an operation verb and a deictic/selection cue;
+    a normal request to create a new graph or table remains NEW.
+    """
+    low = _text(query).lower().replace("ё", "е")
+    kind = _explicit_render_reference_kind(low)
+    if not kind:
+        return False
+    operation = bool(re.search(
+        r"(?:\b(?:возьми|бери|достань|подними|вытащи|верни|восстанови|выдай|выведи|покажи|отдай|передай|"
+        r"экспортируй|скачай|сохрани|открой|измени|исправь|дополни|обнови|перестрой|"
+        r"переделай|улучши|пришли|предоставь)\w*\b|"
+        r"\b(?:take|get|retrieve|restore|return|export|download|save|open|edit|update|revise|"
+        r"extend|improve|send|provide)\b|\bв\s+файл\w*\b|\bas\s+a\s+file\b)",
+        low, re.IGNORECASE,
+    ))
+    pointer = bool(re.search(
+        r"(?:\b(?:этот|эта|эту|эти|тот|та|те|его|ее|её|их|него|нее|неё|них|последн\w*|"
+        r"только|именно|предыдущ\w*|прошл\w*|сохранен\w*|уже\s+создан\w*)\b|"
+        r"\b(?:this|that|these|those|it|them|previous|earlier|saved|existing|only)\b|"
+        r"\b(?:из\s+него|из\s+нее|из\s+них|на\s+основе\s+этого)\b)",
+        low, re.IGNORECASE,
+    ))
+    return operation and pointer
 
 def _row_has_render_kind(row: dict[str, Any], expected_kind: str) -> bool:
     """Check the canonical saved SceneContract for a concrete prior renderer."""
@@ -1186,8 +1218,6 @@ def _row_has_render_kind(row: dict[str, Any], expected_kind: str) -> bool:
     blocks = list(root_blocks)
     seen_blocks = {id(item) for item in blocks}
     blocks.extend(item for item in scene_blocks if id(item) not in seen_blocks)
-    if not blocks:
-        return False
     expected = str(expected_kind or "").strip().lower()
     aliases = {
         "table": {"table", "tableblock"},
@@ -1202,9 +1232,22 @@ def _row_has_render_kind(row: dict[str, Any], expected_kind: str) -> bool:
     for block in blocks:
         if not isinstance(block, dict):
             continue
+        # Use the same canonical renderer normalizer as protected payload
+        # extraction. Names such as LineChart/BarChart must resolve to graph;
+        # raw string comparison used to miss them and lose the exact source row.
+        try:
+            normalized_kind = _protected_structured_kind(block)
+        except Exception:
+            normalized_kind = ""
         kind = str(block.get("type") or block.get("artifact_type") or block.get("representation") or "").strip().lower()
-        renderer = str(block.get("renderer") or block.get("viewer") or "").strip().lower()
-        if kind not in accepted and renderer not in accepted:
+        renderer = re.sub(r"[ _-]+", "", str(block.get("renderer") or block.get("viewer") or "").strip().lower())
+        renderer_aliases = {
+            "linechart": "graph", "barchart": "graph", "scatterchart": "graph", "areachart": "graph",
+            "graphrenderer": "graph", "graphrenderer": "graph", "tablerenderer": "table",
+            "formularenderer": "formula", "coderenderer": "code", "diagramrenderer": "diagram",
+            "linkrenderer": "link", "filedeliveryblock": "file", "copyblock": "copy",
+        }
+        if normalized_kind != expected and kind not in accepted and renderer_aliases.get(renderer, renderer) not in accepted:
             continue
         payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
         if expected == "table":
@@ -1218,6 +1261,26 @@ def _row_has_render_kind(row: dict[str, Any], expected_kind: str) -> bool:
         # For non-tabular renderers, the presence of a canonical block is enough;
         # exact payload validation and restoration belong to the owning room.
         return True
+    # A file/code/image may be persisted as a turn-scoped binary asset rather than
+    # a renderer block. Check the canonical SceneContract asset manifest even when
+    # the same response also contains unrelated text/graph render blocks.
+    if expected in {"file", "code", "image", "link"}:
+        asset_refs = response.get("asset_refs") if isinstance(response.get("asset_refs"), dict) else {}
+        scene_meta = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+        scene_assets = scene_meta.get("dialogue_assets") if isinstance(scene_meta.get("dialogue_assets"), dict) else {}
+        outputs = asset_refs.get("april_outputs") or scene_assets.get("april_outputs") or []
+        expected_aliases = {
+            "file": {"file", "document", "text_file", "code_file", "pdf", "xlsx", "csv", "docx"},
+            "code": {"code", "text_file", "code_file"},
+            "image": {"image", "photo", "picture"},
+            "link": {"link", "url", "hyperlink"},
+        }.get(expected, {expected})
+        if isinstance(outputs, list) and any(
+            isinstance(item, dict)
+            and str(item.get("output_type") or item.get("kind") or "").strip().lower() in expected_aliases
+            for item in outputs
+        ):
+            return True
     return False
 
 def _looks_like_asset_reference(query: str) -> bool:
@@ -1587,19 +1650,30 @@ _PROTECTED_STRUCTURED_TYPE_ALIASES = {
     "chemistry_formula": "formula", "biology_formula": "formula",
     "solution": "solution", "math_solution": "solution", "problem_solution": "solution",
     "worked_solution": "solution", "solution_steps": "solution",
+    "code": "code", "source_code": "code", "script": "code",
+    "link": "link", "hyperlink": "link", "url": "link",
+    "diagram": "diagram", "flowchart": "diagram", "mermaid": "diagram",
+    "copy": "copy", "copy_block": "copy", "copyable_text": "copy",
+    "file": "file", "document": "file",
 }
 
 _PROTECTED_DATA_KEYS = {
     "graph": {
-        "points", "data_points", "series", "datasets", "traces", "x_values", "y_values",
-        "x_axis", "y_axis", "labels", "categories",
+        "points", "data_points", "coordinates", "series", "datasets", "traces", "curves",
+        "x_values", "y_values", "z_values", "x_axis", "y_axis", "labels", "categories",
+        "data", "values", "functions", "function", "expression", "equation",
     },
-    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels"},
+    "table": {"rows", "columns", "headers", "matrix", "cell_roles", "cells", "row_labels", "column_labels", "data"},
     "formula": {"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions"},
     "solution": {
         "solution_steps", "derivation", "calculations", "given_values", "known_values",
         "unknowns", "variables", "parameters", "result",
     },
+    "code": {"code", "source_code", "source", "content", "text", "language"},
+    "link": {"url", "href", "uri", "target_url", "destination", "label", "title"},
+    "diagram": {"svg", "nodes", "edges", "elements", "shapes", "vertices", "connectors", "mermaid", "geometry", "positions", "code"},
+    "copy": {"text", "content", "copy_text", "value"},
+    "file": {"filename", "file_id", "asset_id", "asset_ref", "storage_key", "mime_type", "download_url"},
 }
 
 
@@ -1614,10 +1688,16 @@ def _protected_structured_kind(value: Any) -> str:
             tags.append(tag)
 
     renderer_map = {
-        "graphblock": "graph", "graphrenderer": "graph",
+        "graphblock": "graph", "graphrenderer": "graph", "linechart": "graph",
+        "barchart": "graph", "scatterchart": "graph", "areachart": "graph",
         "tableblock": "table", "tablerenderer": "table",
         "formularenderer": "formula", "formulablock": "formula",
         "mathsolutionblock": "solution", "problemsolutionblock": "solution",
+        "codeblock": "code", "coderenderer": "code",
+        "diagramblock": "diagram", "diagramrenderer": "diagram",
+        "linkblock": "link", "linkrenderer": "link",
+        "filedeliveryblock": "file", "fileblock": "file",
+        "copyblock": "copy",
     }
     for key in ("renderer", "viewer"):
         renderer = _text(value.get(key)).lower().replace("_", "").replace("-", "").replace(" ", "")
@@ -1631,8 +1711,16 @@ def _protected_structured_kind(value: Any) -> str:
     keys = {str(key).lower() for key in payload} if isinstance(payload, dict) else set()
     if keys.intersection({"rows", "columns", "headers", "matrix", "cell_roles", "cells"}):
         return "table"
-    if keys.intersection({"series", "datasets", "traces", "points", "data_points", "x_values", "y_values", "x_axis", "y_axis"}):
+    if keys.intersection({"series", "datasets", "traces", "curves", "points", "data_points", "coordinates", "x_values", "y_values", "x_axis", "y_axis", "data", "values"}):
         return "graph"
+    if keys.intersection({"code", "source_code", "language"}):
+        return "code"
+    if keys.intersection({"url", "href", "uri", "target_url", "destination"}):
+        return "link"
+    if keys.intersection({"svg", "nodes", "edges", "mermaid", "elements", "shapes", "geometry"}):
+        return "diagram"
+    if keys.intersection({"copy_text", "copyable_text"}):
+        return "copy"
     if keys.intersection({"latex", "latex_formulas", "formula", "formulas", "equation", "equations", "expression", "expressions"}):
         return "formula"
     # Do not classify an arbitrary object with a generic `steps` field as maths.
@@ -1700,6 +1788,9 @@ def _protected_node_payload(kind: str, node: dict[str, Any]) -> dict[str, Any]:
         "artifact_id", "source_room", "content", "text", "answer", "summary",
         "description", "metadata", "metrics", "trace", "diagnostics",
     }
+    if kind in {"code", "copy"}:
+        envelope_keys.discard("content")
+        envelope_keys.discard("text")
     for key, value in node.items():
         if key in envelope_keys or key in {"type", "artifact_type", "renderer", "viewer"}:
             continue
@@ -1759,7 +1850,7 @@ def _protected_structured_data_from_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for kind in ("graph", "table", "formula", "solution"):
+    for kind in ("graph", "table", "formula", "solution", "code", "link", "diagram", "copy", "file"):
         if kind not in kinds:
             continue
         candidates_by_field = {
@@ -3409,9 +3500,9 @@ def search_dialogue_context(
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    # Stage 1: load only the latest five retained pairs and compare the incoming
-    # turn with the immediately preceding USER↔APRIL exchange before any archive scan.
-    recent_state = hydrate(uid, limit=5)
+    # Stage 1: compare the incoming turn with the latest ten same-dialogue
+    # USER↔APRIL exchanges before considering the wider retained-history index.
+    recent_state = hydrate(uid, limit=10)
     recent_rows = [row for row in (recent_state.get("dialogue_pairs") or [])
                    if isinstance(row, dict) and not _is_failed_provider_row(row)]
     query_interpretation = dict(query_interpretation or {})
@@ -3426,14 +3517,48 @@ def search_dialogue_context(
         key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
         default=None,
     )
+    recent_exchange_inputs = [
+        {
+            "message_id": _text(row.get("message_id"))[:120],
+            "topic_id": _text(row.get("topic_id") or row.get("selected_topic_id"))[:120],
+            "branch_id": _text(row.get("branch_id") or row.get("work_id"))[:120],
+            "turn_index": int(row.get("turn_index") or row.get("turn") or 0),
+            "created_at": float(row.get("created_at") or 0.0),
+            "user_text": _text(row.get("user_text") or row.get("user") or row.get("user_request")),
+            "april_text": _text(row.get("april_text") or row.get("april") or row.get("assistant_last_message") or row.get("april_summary")),
+            "assistant_artifact_index": row.get("assistant_artifact_index") if isinstance(row.get("assistant_artifact_index"), list) else [],
+        }
+        for row in recent_dialog_rows[-10:] if isinstance(row, dict)
+    ]
     try:
-        from blocks.interpretation_identity import interpret_request_in_context
-        query_interpretation = interpret_request_in_context(query, latest_exchange_row, query_interpretation)
+        from blocks.interpretation_identity import interpret_request_across_recent_exchanges
+        query_interpretation = interpret_request_across_recent_exchanges(
+            query, recent_exchange_inputs, query_interpretation, window_size=10
+        )
     except Exception as exc:
-        _apr_timing_log("latest_exchange_interpretation_fallback", None,
-            error_type=type(exc).__name__)
+        _apr_timing_log("recent_exchange_interpretation_fallback", None,
+            error_type=type(exc).__name__, window_count=len(recent_exchange_inputs))
+        try:
+            from blocks.interpretation_identity import interpret_request_in_context
+            query_interpretation = interpret_request_in_context(query, latest_exchange_row, query_interpretation)
+        except Exception as fallback_exc:
+            _apr_timing_log("latest_exchange_interpretation_fallback", None,
+                error_type=type(fallback_exc).__name__)
     latest_exchange_analysis = query_interpretation.get("latest_exchange_analysis") if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
-    latest_exchange_link = bool(latest_exchange_analysis.get("linked"))
+    matched_recent_exchange_id = _text(
+        latest_exchange_analysis.get("matched_recent_exchange_id")
+        or latest_exchange_analysis.get("message_id")
+    )
+    actual_latest_exchange_id = _text(latest_exchange_analysis.get("actual_latest_exchange_id"))
+    matched_older_exchange = bool(
+        latest_exchange_analysis.get("matched_older_exchange")
+        or (matched_recent_exchange_id and actual_latest_exchange_id
+            and matched_recent_exchange_id != actual_latest_exchange_id)
+    )
+    # A match to one of the previous nine exchanges is a valid branch match,
+    # but it must never be relabelled as a match to the actual latest exchange.
+    latest_exchange_link = bool(latest_exchange_analysis.get("linked")) and not matched_older_exchange
+    recent_branch_link = bool(latest_exchange_analysis.get("linked")) and matched_older_exchange
     resume_key = _text(resume_message_id)
     interpreted_intent_preload = _text(query_interpretation.get("primary_intent")).upper()
     semantic_memory_preload = bool(
@@ -3465,6 +3590,7 @@ def search_dialogue_context(
     latest_exchange_independent_request = bool(
         latest_exchange_available
         and not latest_exchange_link
+        and not recent_branch_link
         and latest_exchange_analysis.get("has_independent_payload")
         and not explicit_history_preload
         and not resume_key
@@ -3482,6 +3608,15 @@ def search_dialogue_context(
     )
     state = hydrate(uid) if allow_semantic_history_search else recent_state
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    recent_branch_row = next((row for row in all_rows if (
+        recent_branch_link and matched_recent_exchange_id
+        and _text(row.get("message_id")) == matched_recent_exchange_id
+    )), None)
+    if recent_branch_link and recent_branch_row is None:
+        # Fail closed to the real latest exchange if the candidate disappeared
+        # between the ten-row read and the full authenticated history read.
+        recent_branch_link = False
+        latest_exchange_link = False
     resume_anchor_row = next((row for row in all_rows if (
         _text(row.get("message_id")) == resume_key
         or (resume_key.startswith("legacy-memory-") and resume_key == f"legacy-memory-{_text(row.get('id'))}")
@@ -3844,12 +3979,15 @@ def search_dialogue_context(
     # These three signals are grounded in the current exchange or a recent named
     # branch. They outrank a lexical subject-conflict signal produced by words
     # such as "Conference" / "Williams" that April itself just introduced.
-    if correction_turn or answer_to_april_question or recent_named_topic_reentry or short_answer_to_open_slot or latest_answer_relation.get("matched"):
+    if (correction_turn or answer_to_april_question or recent_named_topic_reentry
+            or short_answer_to_open_slot or latest_answer_relation.get("matched") or recent_branch_link):
         semantic_subject_switch = False
     continuation = False
     has_new_attachment = has_new_user_asset
     explicit_attachment_followup = has_new_attachment and (reference_followup or assistant_requested_user_asset)
     if pending_clarification and not new_topic_request:
+        continuation = True
+    elif recent_branch_link and not new_topic_request:
         continuation = True
     elif history_request or new_topic_request:
         continuation = False
@@ -3903,15 +4041,24 @@ def search_dialogue_context(
         r"\bэтот\s+график\b|\bэтот\s+уравнен\w*\b|\bэту\s+формул\w*\b|"
         r"\bэту\s+задач\w*\b)",
         low_query,
-    ))
+    ) or _looks_like_saved_artifact_operation(query))
     explicit_render_kind = _explicit_render_reference_kind(query) if explicit_prior_pointer else ""
     explicit_render_source_row: dict[str, Any] | None = None
     if explicit_render_kind and not history_request:
         # Pronouns such as "этую таблицу" point to the concrete saved renderer,
         # not to a keyword-ranked derivative message about exporting it.
-        render_candidates = current_dialog_rows or rows
+        render_candidates_by_id: dict[str, dict[str, Any]] = {}
+        for candidate_row in list(current_dialog_rows) + list(rows):
+            if not isinstance(candidate_row, dict):
+                continue
+            candidate_id = _text(candidate_row.get("message_id"))
+            if candidate_id:
+                existing = render_candidates_by_id.get(candidate_id)
+                if existing is None or candidate_row in current_dialog_rows:
+                    render_candidates_by_id[candidate_id] = candidate_row
+        render_candidates = list(render_candidates_by_id.values())
         for candidate_row in sorted(
-            (item for item in render_candidates if isinstance(item, dict)),
+            render_candidates,
             key=lambda item: (float(item.get("created_at") or 0), int(item.get("turn_index") or 0)),
             reverse=True,
         ):
@@ -4192,7 +4339,15 @@ def search_dialogue_context(
             selection_method=history_selection_method, topic_index_count=len(topic_index),
         )
     elif relation == "CONTINUE":
-        if latest_exchange_link and latest_exchange_analysis.get("simple_acknowledgement"):
+        if recent_branch_link and recent_branch_row is not None:
+            # Use the exact recent exchange chosen by the 10-turn comparison.
+            # Do not substitute the chronologically latest (but unrelated) turn.
+            anchor = _candidate_score(
+                query, recent_branch_row, dialog_id=str(dialog_id or recent_branch_row.get("dialog_id") or ""),
+                conversation_id=str(conversation_id or recent_branch_row.get("conversation_id") or ""),
+                reference_followup=True, query_modalities=query_modalities,
+            )
+        elif latest_exchange_link and latest_exchange_analysis.get("simple_acknowledgement"):
             selected_for_context = [_compact_pair(latest_dialog_row)] if latest_dialog_row else []
             anchor = _candidate_score(
                 query, latest_dialog_row, dialog_id=str(dialog_id or ""),
@@ -4771,6 +4926,11 @@ def search_dialogue_context(
         "latest_assistant_anchor": _compact_pair(latest_same_dialog) if latest_same_dialog else {},
         "latest_answer_relation": dict(latest_answer_relation),
         "latest_exchange_analysis": deepcopy(latest_exchange_analysis),
+        # The interpreter has already examined the last ten same-dialogue
+        # exchanges. Pass its compact window onward so the provider can reason
+        # from the actual latest answer and a matched older branch when relevant.
+        "recent_exchange_window": deepcopy(latest_exchange_analysis.get("recent_exchange_window") or []),
+        "recent_branch_anchor": deepcopy(query_interpretation.get("recent_branch_anchor") or {}),
         "latest_exchange_independent_request": bool(latest_exchange_independent_request),
         "effective_interpretation": deepcopy(query_interpretation),
         "semantic_history_search_allowed": bool(allow_semantic_history_search),
@@ -4899,6 +5059,8 @@ def prepare_dialogue_context(
         "latest_assistant_anchor": deepcopy(context.get("latest_assistant_anchor") or {}),
         "latest_answer_relation": deepcopy(context.get("latest_answer_relation") or {}),
         "latest_exchange_analysis": deepcopy(context.get("latest_exchange_analysis") or {}),
+        "recent_exchange_window": deepcopy(context.get("recent_exchange_window") or []),
+        "recent_branch_anchor": deepcopy(context.get("recent_branch_anchor") or {}),
         "effective_interpretation": deepcopy(context.get("effective_interpretation") or {}),
         "semantic_history_search_allowed": bool(context.get("semantic_history_search_allowed")),
         "last_turn_link": deepcopy(context.get("last_turn_link") or {}),
