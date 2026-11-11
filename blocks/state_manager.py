@@ -1350,6 +1350,12 @@ def _is_failed_provider_row(row: dict[str, Any]) -> bool:
     response = _parse_json(row.get("structured_response"))
     metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
     if metadata.get("provider_fallback") or metadata.get("provider_error_code"):
+        # A Free capacity notice is a real, user-visible assistant reply. Keep it
+        # in the recent dialogue window so corrections such as "я спросил, пообщаемся"
+        # are compared with the answer the user actually saw. It is still marked as
+        # a fallback and must never be treated as a completed artifact/result.
+        if _text(metadata.get("provider_error_kind")).lower() == "free_capacity_limit":
+            return False
         return True
 
     # Exclude legacy fallback turns created before provider_fallback metadata
@@ -3630,6 +3636,15 @@ def search_dialogue_context(
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
+    social_conversation_opener = bool(re.fullmatch(
+        r"\s*(?:(?:ну\s+)?давай(?:те)?\s+)?"
+        r"(?:пообщаемся|пообщаться|поговорим|поговорить|поболтаем|поболтать|"
+        r"общаться|беседовать|поговори(?:те)?\s+со\s+мной|"
+        r"let(?:'|’)s\s+talk|talk\s+with\s+me|chat\s+with\s+me)"
+        r"[.!?…\s]*",
+        _text(query).lower().replace("ё", "е"),
+        flags=re.IGNORECASE,
+    )) and not history_request
     if correction_turn:
         # The interpreter's raw signature may contain correction words («имел»,
         # «ввиду») as fake entities. Rebuild only the retrieval signature from the
@@ -3953,10 +3968,30 @@ def search_dialogue_context(
         and not has_new_user_asset
     )
     latest_answer_matched = bool(latest_answer_relation.get("matched") or short_answer_to_open_slot)
-    # A brief named phrase can return to an earlier branch within this same chat.
-    # Require a recent same-dialog match; a remote topic elsewhere in the 12h window
-    # is not enough to hijack an otherwise independent request.
-    short_named_topic = len(_tokens(retrieval_query)) <= 4 and len(query_subjects) <= 2 and bool(query_subjects)
+    # A brief named phrase can return to an earlier branch within this same chat,
+    # but a complete imperative request with its own named subject is a new task.
+    # Example: "Давай расскажи про Пушкина" must not reopen an old Pushkin file
+    # merely because that name appeared in an earlier branch.
+    standalone_named_action = bool(
+        query_subjects
+        and not reference_followup
+        and not correction_turn
+        and not history_request
+        and not new_topic_request
+        and re.search(
+            r"\b(?:расскажи|расскажите|объясни|объясните|напиши|напишите|опиши|опишите|"
+            r"покажи|создай|сделай|построй|вычисли|сравни|найди|проверь|проанализируй|"
+            r"перечисли|нарисуй|рассчитай|tell|describe|explain|write|show|create|build|"
+            r"make|calculate|compare|find|check|analyze)\b",
+            retrieval_query.lower().replace("ё", "е"),
+        )
+    )
+    short_named_topic = (
+        len(_tokens(retrieval_query)) <= 4
+        and len(query_subjects) <= 2
+        and bool(query_subjects)
+        and not standalone_named_action
+    )
     recent_same_dialog_rows = sorted(
         [row for row in rows if isinstance(row, dict) and (
             (dialog_id and _text(row.get("dialog_id")) == str(dialog_id))
@@ -3989,7 +4024,7 @@ def search_dialogue_context(
         continuation = True
     elif recent_branch_link and not new_topic_request:
         continuation = True
-    elif history_request or new_topic_request:
+    elif history_request or new_topic_request or standalone_named_action:
         continuation = False
     elif assistant_requested_user_asset:
         continuation = True
@@ -4858,15 +4893,21 @@ def search_dialogue_context(
         "query_composition": topic_vector_query_source,
         "search_method": "deterministic_lexical_fuzzy_topic_section_ranking",
     })
-    if site_navigation_request and not history_request and not resume_anchor_row:
-        # An explicit product-navigation task should not inherit an unrelated hot topic.
+    if (site_navigation_request or social_conversation_opener or standalone_named_action) and not history_request and not resume_anchor_row:
+        # Product navigation, plain social openers, and complete imperative
+        # requests are independent tasks. Do not restore an older artifact branch
+        # solely because a reused noun (for example "Пушкин") matches its topic.
         relation = "NEW"
         selected_for_context = []
         matches = []
         anchor = None
         active_topic = ""
         contextual_history_match = False
-        history_selection_method = "site_navigation_no_memory_source"
+        history_selection_method = (
+            "site_navigation_no_memory_source" if site_navigation_request
+            else "social_opener_no_memory_source" if social_conversation_opener
+            else "standalone_request_no_memory_source"
+        )
         topic_index = []
         history_topics = []
         selected_section = {}
@@ -4879,7 +4920,7 @@ def search_dialogue_context(
         self_contained_new_information = False
         retrieval_profile.update({
             "mode": "NEW_TOPIC", "primary_intent": "NEW_INFORMATION", "direction": "ANSWER_NEW_REQUEST",
-            "selection_method": "site_navigation_no_memory_source", "active_topic_seed": "",
+            "selection_method": history_selection_method, "active_topic_seed": "",
             "prefer_active_branch": False, "prefer_named_history": False, "selected_message_ids": [],
             "coverage_policy": "answer_new_request", "query_composition": "current_request_only",
         })
