@@ -61,7 +61,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "free_provider_router_v10_branch_digest_compaction_8000_output"
+PROVIDER_ROUTER_VERSION = "free_provider_router_v11_continuation_scene_contract_8000_output"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -2311,7 +2311,7 @@ def _compact_free_continuation_card(data: dict[str, Any]) -> dict[str, Any]:
         # compact answer summary and its source IDs, not three parallel excerpts.
         "assistant_message": _semantic_compress(latest_answer, 54),
         "structured_output": [],
-        "artifact_index": artifact_refs[:8],
+        "artifact_index": artifact_refs[:16],
         "message_id": digest.get("anchor_message_id"),
         "topic_id": topic_id,
         "branch_id": branch_id,
@@ -2678,7 +2678,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             }
             if isinstance(item.get("branch_digest"), dict):
                 compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
-                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=8
+                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=16
                 )
                 # The digest replaces repeated answer/section/artifact copies.
                 for duplicate_key in ("user", "april", "sections", "recent_steps", "question_sequence", "assistant_artifact_index", "dialogue_state"):
@@ -3023,7 +3023,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         )
                         if artifact.get(key) not in (None, "", [], {})
                     }
-                    for artifact in (item.get("assistant_artifact_index") or [])[:4]
+                    for artifact in (item.get("assistant_artifact_index") or [])[:16]
                     if isinstance(artifact, dict)
                 ],
                 "dialogue_state": {
@@ -3048,7 +3048,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             }
             if isinstance(item.get("branch_digest"), dict):
                 compact_min_pair["branch_digest"] = _compact_free_branch_digest_payload(
-                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=8
+                    item.get("branch_digest"), step_limit=8, section_limit=8, artifact_limit=16
                 )
                 # The digest already contains the chronological question/answer
                 # summaries, sections and artifact refs. Do not send those twice.
@@ -3573,7 +3573,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         compact_pair[identity_key] = pair.get(identity_key)
                 if isinstance(pair.get("branch_digest"), dict):
                     compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
-                        pair.get("branch_digest"), step_limit=6, section_limit=6, artifact_limit=6
+                        pair.get("branch_digest"), step_limit=6, section_limit=6, artifact_limit=16
                     )
                     compact_pair.pop("topic", None)
                     compact_pair.pop("user", None)
@@ -3759,7 +3759,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         if key in {"message_id", "topic_id", "branch_id", "origin_message_id", "topic_origin_message_id", "same_dialog"}
                     }
                     record["branch_digest"] = _compact_free_branch_digest_payload(
-                        pair.get("branch_digest"), step_limit=5, section_limit=5, artifact_limit=5
+                        pair.get("branch_digest"), step_limit=5, section_limit=5, artifact_limit=16
                     )
                 else:
                     record["assistant_last_message"] = _clip(pair.get("assistant_last_message"), 700)
@@ -3926,10 +3926,25 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             if externalized_structures:
                 total += external_protected_token_cost
         if total > MAX_PROMPT_TOKENS:
-            # Last resort for ordinary turns: discard optional contract metadata,
-            # retaining the source request, language, output shape, sequence, and
-            # any protected data that cannot be paraphrased.
-            for key in ("SCENE_CONTRACT", "OUTPUT_BUDGET_POLICY", "ATTACHMENT_COUNTS", "ATTACHMENT_INDEX", "INPUT_MODALITIES", "C_ARTIFACT_RENDER_PLAN"):
+            # Preserve the canonical scene/render contract even in the last
+            # emergency pass. Renderer types and ordering are functional output
+            # requirements, not disposable descriptive metadata.
+            scene = minimal.get("SCENE_CONTRACT")
+            if isinstance(scene, dict):
+                minimal["SCENE_CONTRACT"] = {
+                    key: scene[key] for key in (
+                        "required", "authenticated_scope_required", "ordered_render_blocks_required",
+                        "continuation_uses_coverage_ledger", "renderers_are_complementary_not_redundant",
+                        "one_clear_explanation_per_renderer",
+                    ) if key in scene
+                }
+            render_plan = minimal.get("C_ARTIFACT_RENDER_PLAN")
+            if isinstance(render_plan, list):
+                minimal["C_ARTIFACT_RENDER_PLAN"] = [
+                    {key: item[key] for key in ("output", "renderer", "viewer") if key in item}
+                    for item in render_plan if isinstance(item, dict)
+                ]
+            for key in ("OUTPUT_BUDGET_POLICY", "ATTACHMENT_COUNTS", "ATTACHMENT_INDEX", "INPUT_MODALITIES"):
                 minimal.pop(key, None)
                 card = _json_card(minimal)
                 total = _estimate_tokens(system) + _estimate_tokens(card) + max(0, int(reserved_prompt_tokens))
@@ -3978,7 +3993,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     continue
                 result[role] = [
                     {key: entry[key] for key in ("kind", "output_type", "filename", "mime_type", "message_id", "title", "sha256") if key in entry}
-                    for entry in entries[:5] if isinstance(entry, dict)
+                    for entry in entries[:16] if isinstance(entry, dict)
                 ]
             return result
 
@@ -4072,22 +4087,26 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 # substeps make even 4-token descriptions too expensive, keep
                 # every ordered step and its renderer contract without replacing
                 # the user's request with misleading one-word fragments.
-                minimal["REQUEST_SEQUENCE"] = [
-                    {
-                        "i": (step.get("step_index") or step.get("i") or index)
-                        if isinstance(step, dict) else index,
-                        "o": [
-                            str(value)[:24] for value in (
-                                step.get("output_types") or step.get("o") or step.get("output") or ["text"]
-                                if isinstance(step, dict) else ["text"]
-                            )[:6] if value
-                        ],
-                        **({"intent": _text(step.get("semantic_intent")).upper()[:32]}
-                           if isinstance(step, dict) and _text(step.get("semantic_intent")).upper() not in {"", "NEW_INFORMATION"}
-                           else {}),
-                    }
-                    for index, step in enumerate(sequence_source, start=1)
-                ]
+                ultra_sequence = []
+                for index, step in enumerate(sequence_source, start=1):
+                    if isinstance(step, dict):
+                        raw_outputs = step.get("output_types") or step.get("o") or step.get("output") or ["text"]
+                        if isinstance(raw_outputs, str):
+                            raw_outputs = [raw_outputs]
+                        elif not isinstance(raw_outputs, (list, tuple, set)):
+                            raw_outputs = ["text"]
+                        output_values = [str(value)[:24] for value in list(raw_outputs)[:6] if value]
+                        record = {
+                            "i": step.get("step_index") or step.get("i") or index,
+                            "o": output_values or ["text"],
+                        }
+                        intent = _text(step.get("semantic_intent")).upper()
+                        if intent and intent != "NEW_INFORMATION":
+                            record["intent"] = intent[:32]
+                    else:
+                        record = {"i": index, "o": ["text"]}
+                    ultra_sequence.append(record)
+                minimal["REQUEST_SEQUENCE"] = ultra_sequence
                 _recount_emergency()
 
         if total > MAX_PROMPT_TOKENS:
@@ -4164,6 +4183,183 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         system = artifact_system
         card = artifact_card
         total = artifact_total
+
+    if total > MAX_PROMPT_TOKENS:
+        # Last-resort Free card. Earlier emergency passes deliberately retain a
+        # broad set of metadata for complex tasks; short conversational turns do
+        # not need those duplicate ledgers. Keep the exact live request, output
+        # schema, renderer contract and authenticated source identity. If this is
+        # an explicit saved-artifact operation, retain its source IDs and protected
+        # payload manifest; otherwise omit old artifacts entirely.
+        artifact_operation = _requires_prior_structured_payload(
+            source_current_request,
+            relation=str(minimal.get("DIALOGUE_RELATION") or "NEW"),
+            history_request=bool(minimal.get("HISTORY_REQUEST")),
+        )
+        ultra: dict[str, Any] = {}
+        keep_always = (
+            "AUTHENTICATED_IDENTITY", "CURRENT_USER_PROFILE", "CURRENT_REQUEST",
+            "RETURN_LANGUAGE", "OUTPUT_CONTRACT", "REQUEST_SEQUENCE",
+            "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL",
+            "PROTECTED_STRUCTURED_DATA", "INTERPRETATION", "DIALOGUE_RELATION",
+            "SCENE_CONTRACT", "C_ARTIFACT_RENDER_PLAN", "INPUT_MODALITIES",
+            "ATTACHMENT_COUNTS", "OUTPUT_BUDGET_POLICY",
+        )
+        for key in keep_always:
+            if key in minimal and minimal[key] not in (None, "", [], {}):
+                ultra[key] = minimal[key]
+
+        # User display-name and plan fields survive; secondary profile metadata does not.
+        identity = ultra.get("AUTHENTICATED_IDENTITY")
+        if isinstance(identity, dict):
+            ultra["AUTHENTICATED_IDENTITY"] = {
+                key: identity[key] for key in ("user_id", "april_id", "display_name", "plan")
+                if identity.get(key) not in (None, "", [], {})
+            }
+        profile = ultra.get("CURRENT_USER_PROFILE")
+        if isinstance(profile, dict):
+            ultra["CURRENT_USER_PROFILE"] = {
+                key: profile[key] for key in ("display_name", "language", "plan")
+                if profile.get(key) not in (None, "", [], {})
+            }
+        intent = ultra.get("INTERPRETATION")
+        if isinstance(intent, dict):
+            ultra["INTERPRETATION"] = {
+                key: intent[key] for key in (
+                    "task", "user_goal", "requested_outputs", "wants_image", "wants_graph",
+                    "wants_diagram", "wants_table", "wants_code", "wants_file", "wants_copy",
+                    "file_delivery_mode", "semantic_intent",
+                ) if intent.get(key) not in (None, "", [], {})
+            }
+        scene = ultra.get("SCENE_CONTRACT")
+        if isinstance(scene, dict):
+            ultra["SCENE_CONTRACT"] = {
+                key: scene[key] for key in (
+                    "required", "authenticated_scope_required", "ordered_render_blocks_required",
+                    "continuation_uses_coverage_ledger", "renderers_are_complementary_not_redundant",
+                    "one_clear_explanation_per_renderer",
+                ) if key in scene
+            }
+        policy = ultra.get("OUTPUT_BUDGET_POLICY")
+        if isinstance(policy, dict):
+            ultra["OUTPUT_BUDGET_POLICY"] = {
+                key: policy[key] for key in (
+                    "application_output_token_limit", "render_payload_token_budget",
+                    "explanation_answer_token_budget", "render_budget_included_in_total",
+                    "protected_structured_data_lossless", "preserve_protected_current_input_losslessly",
+                ) if key in policy
+            }
+        render_plan = ultra.get("C_ARTIFACT_RENDER_PLAN")
+        if isinstance(render_plan, list):
+            ultra["C_ARTIFACT_RENDER_PLAN"] = [
+                {key: item[key] for key in ("output", "renderer", "viewer") if key in item}
+                for item in render_plan if isinstance(item, dict)
+            ]
+        sequence = ultra.get("REQUEST_SEQUENCE")
+        if isinstance(sequence, list):
+            compact_sequence = []
+            for index, item in enumerate(sequence, start=1):
+                if not isinstance(item, dict):
+                    continue
+                output_types = item.get("output_types") or item.get("o") or item.get("output") or ["text"]
+                if isinstance(output_types, str):
+                    output_types = [output_types]
+                elif not isinstance(output_types, (list, tuple, set)):
+                    output_types = ["text"]
+                compact_sequence.append({
+                    "i": item.get("step_index") or item.get("i") or index,
+                    "o": [_text(value)[:24] for value in list(output_types)[:6] if _text(value)],
+                    **({"intent": _text(item.get("semantic_intent")).upper()[:32]}
+                       if _text(item.get("semantic_intent")).upper() not in {"", "NEW_INFORMATION"}
+                       else {}),
+                })
+            ultra["REQUEST_SEQUENCE"] = compact_sequence
+
+        continuation_operation = str(minimal.get("DIALOGUE_RELATION") or "NEW").upper() == "CONTINUE"
+        if artifact_operation or continuation_operation:
+            # Ultra compaction must not sever a legitimate follow-up from the
+            # selected answer. Keep one authenticated anchor and one selected
+            # branch digest even for text-only continuations; artifact operations
+            # additionally preserve exact provenance and source payload manifests.
+            for key in ("DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT", "LAST_TURN_LINK"):
+                if key not in minimal:
+                    continue
+                value = minimal[key]
+                if key == "DIALOGUE_ANCHOR" and isinstance(value, dict):
+                    anchor_fields = (
+                        "message_id", "topic_id", "branch_id", "origin_message_id", "same_dialog",
+                        "topic", "user", "april", "assistant_message", "artifact_index",
+                    )
+                    anchor = {
+                        name: value[name] for name in anchor_fields
+                        if value.get(name) not in (None, "", [], {})
+                    }
+                    if isinstance(anchor.get("artifact_index"), list):
+                        anchor["artifact_index"] = anchor["artifact_index"][:16]
+                    ultra[key] = anchor
+                elif key == "CONTINUATION_CONTEXT" and isinstance(value, list):
+                    compact_items = []
+                    for pair in value[:1]:
+                        if not isinstance(pair, dict):
+                            continue
+                        compact_pair = {
+                            name: pair[name] for name in (
+                                "message_id", "topic_id", "branch_id", "origin_message_id",
+                                "topic_origin_message_id", "same_dialog", "user", "april",
+                            ) if pair.get(name) not in (None, "", [], {})
+                        }
+                        if isinstance(pair.get("branch_digest"), dict):
+                            compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
+                                pair["branch_digest"], step_limit=2, section_limit=2, artifact_limit=16
+                            )
+                        compact_items.append(compact_pair)
+                    ultra[key] = compact_items
+                elif key == "LAST_TURN_LINK" and isinstance(value, dict):
+                    ultra[key] = {
+                        name: value[name] for name in (
+                            "decision", "anchor_message_id", "anchor_topic_id", "anchor_branch_id",
+                            "latest_answer_match", "previous_answer_expects_user_input",
+                        ) if value.get(name) not in (None, "", [], {})
+                    }
+            if artifact_operation:
+                ultra["ARTIFACT_SOURCE_PRIORITY"] = {
+                    "rule": "Use the exact authenticated saved artifact values when present; preserve IDs and provenance."
+                }
+
+        ultra_system = (
+            "April: answer the exact CURRENT_REQUEST in RETURN_LANGUAGE. Use only the authenticated identity and "
+            "selected dialogue source supplied here. When DIALOGUE_RELATION is CONTINUE, compare with "
+            "DIALOGUE_ANCHOR and use the selected CONTINUATION_CONTEXT branch; when it is NEW, do not import "
+            "older answers or artifacts. Preserve PROTECTED_CURRENT_INPUT and all exact values in "
+            "PROTECTED_STRUCTURED_DATA or PROTECTED_STRUCTURED_DATA_SOURCE. Follow OUTPUT_CONTRACT, "
+            "SCENE_CONTRACT and C_ARTIFACT_RENDER_PLAN. Return concrete ordered render_blocks/artifacts only "
+            "when their payloads exist; never invent or claim a missing file, image, table, graph or code artifact. "
+            "Return valid JSON."
+        )
+        ultra_card = _json_card(ultra)
+        ultra_total = (
+            _estimate_tokens(ultra_system) + _estimate_tokens(ultra_card)
+            + max(0, int(reserved_prompt_tokens))
+        )
+        if externalized_structures:
+            ultra_total += external_protected_token_cost
+        # Report the actual last-pass estimate when even the ultra-minimal card
+        # cannot fit. This makes the capacity notice diagnostic truthful and avoids
+        # reporting a stale estimate from an earlier, larger prompt.
+        previous_ultra_estimate = total
+        total = ultra_total
+        if ultra_total <= MAX_PROMPT_TOKENS:
+            _log_json("FREE_PROMPT_ULTRA_COMPACTION", {
+                "status": "applied", "previous_estimate": previous_ultra_estimate,
+                "final_estimate": ultra_total, "budget": MAX_PROMPT_TOKENS,
+                "artifact_operation": bool(artifact_operation),
+                "protected_source_preserved": bool(
+                    ultra.get("PROTECTED_CURRENT_INPUT")
+                    or ultra.get("PROTECTED_STRUCTURED_DATA_EXTERNAL")
+                    or ultra.get("PROTECTED_STRUCTURED_DATA")
+                ),
+            })
+            return ultra_system, ultra_card, ultra_total, "free_ultra_minimal"
 
     if total > MAX_PROMPT_TOKENS:
         # This remaining case is a genuine Free input-capacity limit (e.g. an
