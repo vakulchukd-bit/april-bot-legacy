@@ -4143,6 +4143,11 @@ def _compact_pair(item: dict[str, Any]) -> dict[str, Any]:
     source_message_id = _text(item.get("message_id"))
     _, response_record, _ = _response_and_request_records(item)
     raw_blocks = response_record.get("render_blocks") if isinstance(response_record.get("render_blocks"), list) else []
+    saved_sources = response_record.get("saved_artifact_sources") if isinstance(response_record.get("saved_artifact_sources"), list) else []
+    # file_only hides large table/code renderers in the visible turn, but those
+    # value-bearing sources remain in the private response record for later
+    # Premium edits and retrieval. They must participate in structured memory.
+    raw_blocks = [*raw_blocks, *saved_sources]
     response_blocks = raw_blocks
     response_artifacts = response_record.get("artifacts") if isinstance(response_record.get("artifacts"), list) else []
     assistant_structured_output: list[dict[str, Any]] = []
@@ -5127,7 +5132,22 @@ def _explicit_artifact_followup_kind(query: str) -> str:
         r"\bthis\b|\bthat\b|\bsame\b|\bprevious\b|\bearlier\b|\bagain\b)",
         low, re.IGNORECASE,
     ))
-    return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference else ""
+    # A delivery-repair question ("where is the file?", "the file was not
+    # attached") explicitly refers to the artifact just promised. It must reopen
+    # the active branch even though it contains no edit/extension verb. Keep this
+    # narrower than a general "give me a file" request to avoid reusing stale work.
+    file_delivery_recovery = bool(
+        kind == "file" and re.search(
+            r"(?:\bгде\b.{0,45}\b(?:файл\w*|документ\w*|ссылк\w*)\b|"
+            r"\b(?:файл\w*|документ\w*)\b.{0,45}\bгде\b|"
+            r"(?:не\s+(?:прикрепил\w*|приложил\w*|пришел|приш\w*|скачал\w*)|"
+            r"не\s+отобража\w*|ведет\s+на\s+чат|веде\s+в\s+чат|"
+            r"no\s+file|file\s+was\s+not\s+attached|not\s+attached|"
+            r"download\s+link\s+(?:is\s+)?broken|link\s+opens\s+(?:the\s+)?chat)",
+            low, re.IGNORECASE,
+        )
+    )
+    return kind if edit_or_extend or delivery_with_detail or explicit_saved_reference or file_delivery_recovery else ""
 
 
 def _explicit_historical_artifact_reference(query: str) -> bool:
