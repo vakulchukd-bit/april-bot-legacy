@@ -510,6 +510,75 @@ def _site_control_reference_kind(value: Any) -> str:
     return ""
 
 
+# A social acknowledgement is a conversational move, not a request to navigate
+# the UI. The distinction matters because generic dialogue metadata can mark any
+# reaction as a reference to the preceding assistant answer. Do not let that
+# metadata resurrect an older "Thanks/Report" button tutorial.
+_SOCIAL_ACKNOWLEDGEMENT_RE = re.compile(
+    r"(?:\bспасибо\b|\bблагодар\w*|\bпожалуйста\b|\bпризнател\w*|"
+    r"\bрад\w*\b.{0,65}\b(?:что|тебе|вам|мне)\b|"
+    r"\bпонравил\w*|\bклассно\b|\bкруто\b|\bздорово\b|\bотлично\b|\bсупер\b|"
+    r"\bthanks?\b|\bthank\s+you\b|\bappreciat\w*|\bglad\s+to\s+hear\b)",
+    re.IGNORECASE,
+)
+_SOCIAL_ACTION_OR_QUESTION_RE = re.compile(
+    r"[?？]"
+    r"|\b(?:где|куда|как|зачем|почему|какой|какая|какие|можно\s+ли)\b"
+    r"|(?:^|\bа\s+)что\b"
+    r"|\b(?:покажи|покажите|объясни|объясните|расскажи|расскажите|найди|найдите|"
+    r"открой|откройте|нажми|нажмите|перейди|перейдите|сделай|сделайте|"
+    r"помоги|помогите|давай|придумай|сыграем|поиграем|предложи|начни|"
+    r"show|where|how|what|which|click|open|find|explain|help|let\s+us|let's|play|suggest)\b",
+    re.IGNORECASE,
+)
+_SITE_UI_OBJECT_REFERENCE_RE = re.compile(
+    r"(?:кнопк\w*|стрелк\w*|значк\w*|иконк\w*|жалоб\w*|"
+    r"под\s+(?:этим\s+|этим\s+самым\s+)?ответ\w*|"
+    r"интерфейс\w*|экран\w*|меню\w*|раздел\w*|страниц\w*|"
+    r"переход\w*|ссылк\w*|поле\s+ввод\w*|навигац\w*|"
+    r"button\w*|arrow\w*|icon\w*|screen\w*|interface\w*|menu\w*|"
+    r"section\w*|page\w*|route\w*|navigation\w*|under\s+(?:the\s+)?(?:answer|reply|message))",
+    re.IGNORECASE,
+)
+_SITE_UI_ELLIPTICAL_QUESTION_RE = re.compile(
+    r"(?:\b(?:где|куда|как|что|зачем|почему|какой|какая|какие|where|how|what|which)\b"
+    r".{0,55}\b(?:это|этот|эта|эту|там|туда|она|он|они|ее|её|его|ими|так|"
+    r"работает|делает|нажать|открыть|это\s+делать|it|this|that|there|it\s+works|it\s+does)\b|"
+    r"\b(?:а\s+)?(?:это|этот|эта|эту|там|туда|она|он|они|ее|её|его)\s*\?+|"
+    r"\b(?:а\s+)?(?:она|он|они|это|этот|эта|эту)\s+(?:что\s+)?(?:делает|значит|такое|работает)\s*\?+|"
+    r"\bwhat\s+(?:does\s+it\s+do|is\s+it\s+for|does\s+that\s+do)\s*\?+)",
+    re.IGNORECASE,
+)
+
+
+def _is_social_acknowledgement_only(value: Any) -> bool:
+    """True for thanks/praise/reaction turns with no new question or UI action."""
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if not text or not _SOCIAL_ACKNOWLEDGEMENT_RE.search(text):
+        return False
+    # A genuine follow-up or explicit UI reference wins over the gratitude cue:
+    # "Спасибо, где кнопка?" must still reach the UI-help resolver.
+    if _SOCIAL_ACTION_OR_QUESTION_RE.search(text):
+        return False
+    if _SITE_UI_OBJECT_REFERENCE_RE.search(text) or _site_control_reference_kind(text):
+        return False
+    return True
+
+
+def _has_current_site_ui_reference(value: Any) -> bool:
+    """Require the current turn itself to refer to a UI control or ask an elliptical UI question."""
+    text = str(value or "").strip().lower().replace("ё", "е")
+    return bool(
+        text
+        and not _is_social_acknowledgement_only(text)
+        and (
+            _site_control_reference_kind(text)
+            or _SITE_UI_OBJECT_REFERENCE_RE.search(text)
+            or _SITE_UI_ELLIPTICAL_QUESTION_RE.search(text)
+        )
+    )
+
+
 def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_ids: Any = None) -> Dict[str, List[str]]:
     """Resolve an already-interpreted UI operation to the source-derived control catalog.
 
@@ -14765,6 +14834,12 @@ def _active_site_ui_followup(interpretation: Any, query: str, recent_context: An
     """
     if not isinstance(recent_context, dict) or not isinstance(interpretation, dict):
         return {}
+    # previous_answer_reference is deliberately broad: it also describes ordinary
+    # praise, corrections and social reactions. It cannot by itself authorize a
+    # return to an older UI-help branch. The current user text must name a control
+    # or contain a real elliptical UI question.
+    if _is_social_acknowledgement_only(query) or not _has_current_site_ui_reference(query):
+        return {}
     semantics = _interpretation_semantic_features(interpretation)
     features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
     if not features and isinstance(semantics.get("intent_features"), dict):
@@ -15118,6 +15193,13 @@ def prepare_site_help_interpretation(
     contextual_ui_followup = {}
     semantic_nav = _site_navigation_semantics(interpretation)
     semantic_function_resolution = _site_semantic_function_targets(query, semantic_nav, referent_ids)
+    # Do not turn conversational gratitude (including "спасибо за загадки") into
+    # a tutorial for a button that happened to be discussed earlier in the chat.
+    # A positively validated current-turn April-UI action contract still wins.
+    if _is_social_acknowledgement_only(effective_query) and not (
+        action_contracts or semantic_function_resolution.get("function_ids")
+    ):
+        return False
     # A typed April-UI action from the semantic interpreter is sufficient to
     # enter this help room even when the user's wording does not contain a
     # literal UI keyword (e.g. "how do I zoom this graph?"). The resolver only
