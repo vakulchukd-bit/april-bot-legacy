@@ -2630,12 +2630,71 @@ def _rank_topic_vector_candidates(
     return output
 
 
-def _history_query_topic_tokens(query: str) -> set[str]:
-    """Extract subject-bearing words from a history request, excluding recall wording and times."""
+_HISTORY_TOPIC_TOKEN_ALIASES = {
+    # Payment terminology is frequently stored with a different surface form
+    # from the user's query ("платежи" vs "оплата", "LiqPay", "PayPal").
+    # Canonicalize both query and candidate text so topic matching is semantic,
+    # while the original user wording remains untouched in the provider prompt.
+    "оплат": "платеж", "оплата": "платеж", "платеж": "платеж",
+    "liqpay": "платеж", "paypal": "платеж", "pay": "платеж",
+    "payment": "платеж", "payments": "платеж",
+    "googlepay": "платеж", "applepay": "платеж",
+}
+
+
+def _history_canonical_token(token: str) -> str:
+    value = _text(token).lower().replace("ё", "е")
+    for root, canonical in _HISTORY_TOPIC_TOKEN_ALIASES.items():
+        if value == root or (len(root) >= 4 and value.startswith(root)):
+            return canonical
+    return value
+
+
+def _history_semantic_tokens(text: str) -> set[str]:
     return {
-        token for token in (_semantic_tokens(query) - _HISTORY_QUERY_NOISE)
-        if not token.isdigit() and len(token) > 2
+        _history_canonical_token(token)
+        for token in _semantic_tokens(text)
+        if token and not token.isdigit()
     }
+
+
+_HISTORY_QUERY_DISCOURSE_ROOTS = (
+    # Recall/listing verbs and grammatical forms often arrive as clipped tokens
+    # after morphology normalization (e.g. "расскаж", "кратк"). They describe
+    # what the user wants done, not the topic being searched.
+    "говор", "общ", "обсужд", "разгов", "диалог", "истор", "переписк",
+    "сообщен", "расскаж", "раскаж", "раска", "расск", "объясн", "поясн", "перечисл", "напомн",
+    "вспомн", "покаж", "назов", "скаж", "найд", "вывед", "кратк",
+    "содержан", "резюм", "список", "тем", "вопрос", "последн", "предыдущ",
+    "прошл", "раньш", "недавн", "сегодня", "вчера", "итак", "вообщ",
+    "позавчера", "диалогов", "котор", "мы", "нам", "наш",
+    # Action/decision verbs in broad recall requests are not subject keywords.
+    "реш", "приним", "соглас", "договор", "выбира", "выбр", "планир",
+    "останов", "продолж", "заним", "целом", "полност",
+)
+
+
+def _history_query_topic_tokens(query: str) -> set[str]:
+    """Extract only subject-bearing terms from a history request.
+
+    Ignore recall verbs, summary modifiers, inflectional stems and a trailing
+    conversational insult. The latter is tone, not a subject; a word such as
+    "Идиот" inside a named title remains searchable when it is not a trailing
+    vocative.
+    """
+    source = _text(query).lower().replace("ё", "е")
+    source = re.sub(
+        r"(?:[,;:—-]?\s*)(?:ты\s+)?(?:идиот|дебил|дурак|тупица|кретин|болван)\s*[.!?…]*\s*$",
+        " ", source, flags=re.IGNORECASE,
+    )
+    result = set()
+    for token in _semantic_tokens(source) - _HISTORY_QUERY_NOISE:
+        if token.isdigit() or len(token) <= 2:
+            continue
+        if any(token.startswith(root) for root in _HISTORY_QUERY_DISCOURSE_ROOTS):
+            continue
+        result.add(_history_canonical_token(token))
+    return result
 
 
 _HISTORY_TIME_NUMBERS = {
@@ -3062,9 +3121,13 @@ def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *
         return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
     ranked: list[tuple[float, float, dict[str, Any]]] = []
     for item in bounded:
-        candidate_tokens = _semantic_tokens(_history_topic_text(item))
+        candidate_tokens = _history_semantic_tokens(_history_topic_text(item))
         overlap = _fuzzy_token_overlap(tokens, candidate_tokens)
-        if overlap <= 0:
+        # Two-term history queries must match more than a generic shared brand or
+        # platform name. For example, "April payments" should not pull every April
+        # development topic merely because it contains the product name.
+        minimum_overlap = 0.60 if len(tokens) >= 2 else 0.0
+        if overlap < minimum_overlap or overlap <= 0:
             continue
         phrase = fuzz.token_set_ratio(" ".join(sorted(tokens)), " ".join(sorted(candidate_tokens))) / 100.0 if candidate_tokens else 0.0
         score = 0.78 * overlap + 0.22 * phrase
@@ -3105,8 +3168,12 @@ def _select_history_context_pairs(
                 _text(item.get("april")), _text(item.get("april_en")),
                 _text(item.get("memory_summary")), section_text,
             ))
-            overlap = _fuzzy_token_overlap(tokens, _semantic_tokens(candidate_text))
-            if overlap <= 0:
+            overlap = _fuzzy_token_overlap(tokens, _history_semantic_tokens(candidate_text))
+            # Require meaningful coverage of multi-word subjects. One matching
+            # generic token (e.g. "April") is not enough to retrieve unrelated
+            # branches when the user asked for a narrower subject (e.g. payments).
+            minimum_overlap = 0.60 if len(tokens) >= 2 else 0.0
+            if overlap < minimum_overlap or overlap <= 0:
                 continue
             # Subject overlap must dominate generic recency/current-dialog bonuses.
             relevance = 0.78 * overlap + 0.17 * float(item.get("entity_overlap") or 0) + 0.05 * float(item.get("score") or 0)
@@ -3519,6 +3586,11 @@ def search_dialogue_context(
     # Stage 1: compare the incoming turn with the latest ten same-dialogue
     # USER↔APRIL exchanges before considering the wider retained-history index.
     recent_state = hydrate(uid, limit=10)
+    # Preserve the pre-context semantic decision. The recent-exchange matcher may
+    # discover a related branch, but it must not downgrade an explicit request to
+    # search the user's archive into an ordinary latest-branch continuation.
+    pre_context_interpretation = deepcopy(query_interpretation or {})
+    pre_context_history_request = bool(pre_context_interpretation.get("history_request"))
     recent_rows = [row for row in (recent_state.get("dialogue_pairs") or [])
                    if isinstance(row, dict) and not _is_failed_provider_row(row)]
     query_interpretation = dict(query_interpretation or {})
@@ -3560,6 +3632,27 @@ def search_dialogue_context(
         except Exception as fallback_exc:
             _apr_timing_log("latest_exchange_interpretation_fallback", None,
                 error_type=type(fallback_exc).__name__)
+    if pre_context_history_request and not query_interpretation.get("history_request"):
+        # Explicit archive retrieval has priority over a lexical match to the last
+        # answer. Keep the contextual matcher’s exchange metadata, but restore the
+        # original history intent and search scope for downstream selection.
+        for key in (
+            "primary_intent", "direction", "time_scope", "topic_reference",
+            "topic_reference_fragment", "search_scope", "relation_hint",
+            "history_inventory_request", "has_explicit_time_window",
+        ):
+            if key in pre_context_interpretation:
+                query_interpretation[key] = deepcopy(pre_context_interpretation[key])
+        query_interpretation["history_request"] = True
+        query_interpretation["requires_memory"] = True
+        query_interpretation["reason"] = pre_context_interpretation.get("reason") or "explicit_history_request_preserved"
+        original_profile = pre_context_interpretation.get("retrieval_profile")
+        if isinstance(original_profile, dict):
+            merged_profile = dict(query_interpretation.get("retrieval_profile") or {})
+            merged_profile.update(original_profile)
+            merged_profile["prefer_named_history"] = True
+            query_interpretation["retrieval_profile"] = merged_profile
+
     latest_exchange_analysis = query_interpretation.get("latest_exchange_analysis") if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
     matched_recent_exchange_id = _text(
         latest_exchange_analysis.get("matched_recent_exchange_id")
@@ -3583,7 +3676,7 @@ def search_dialogue_context(
         or query_interpretation.get("active_branch_repair")
         or interpreted_intent_preload in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "HISTORY_RECALL", "HISTORY_SEARCH", "HISTORY_SUMMARY"}
     )
-    explicit_history_preload = bool(query_interpretation.get("history_request"))
+    explicit_history_preload = bool(query_interpretation.get("history_request") or pre_context_history_request)
     query_features = query_interpretation.get("features") if isinstance(query_interpretation.get("features"), dict) else {}
     explicit_topic_fragment = bool(
         query_interpretation.get("topic_reference_fragment")
@@ -3641,8 +3734,11 @@ def search_dialogue_context(
     correction_turn = bool(_looks_like_topic_correction(query) or pragmatic_features.get("correction"))
     retrieval_query = _clarification_target_text(query) if correction_turn else _text(query)
     reference_followup = _looks_like_referential_followup(query) or correction_turn
-    history_request = bool(query_interpretation.get("history_request"))
-    new_topic_request = bool(query_interpretation.get("explicit_topic_switch") or query_interpretation.get("explicit_topic_introduction"))
+    history_request = bool(query_interpretation.get("history_request") or pre_context_history_request)
+    new_topic_request = bool(
+        (query_interpretation.get("explicit_topic_switch") or query_interpretation.get("explicit_topic_introduction"))
+        and not history_request
+    )
     interpreted_direction = _text(query_interpretation.get("direction"))
     interpreted_intent = _text(query_interpretation.get("primary_intent"))
     site_navigation_request = bool(query_interpretation.get("site_navigation_request") or _text(query_interpretation.get("topic_reference")).upper() == "SITE_NAVIGATION")
@@ -3663,12 +3759,24 @@ def search_dialogue_context(
         query_subjects = _subject_tokens(retrieval_query)
     else:
         context_signature = _query_context_signature(query, query_interpretation)
-        # Use normalized source-text entities for retrieval. The interpretation
-        # signature can contain clipped stems ("конф", "виль") and discourse
-        # fillers ("давай", "поподроб"), which are unsafe as subject identities.
-        # Keep the richer signature for diagnostics, but do not let it manufacture
-        # a topic switch or block a match to names in April's immediately prior answer.
-        query_subjects = _subject_tokens(retrieval_query)
+        # For explicit history requests, command verbs and summary modifiers are
+        # not subject entities. Reuse the same normalized terms as topic ranking;
+        # otherwise words like «кратко», «расскажи» and trailing insults create a
+        # fake active subject and incorrectly mark every historical candidate as
+        # conflicting. CURRENT_REQUEST remains untouched for the model.
+        if history_request:
+            query_subjects = {
+                _subject_family(token)
+                for token in _history_query_topic_tokens(retrieval_query)
+                if token
+            }
+        else:
+            # Use normalized source-text entities for retrieval. The interpretation
+            # signature can contain clipped stems ("конф", "виль") and discourse
+            # fillers ("давай", "поподроб"), which are unsafe as subject identities.
+            # Keep the richer signature for diagnostics, but do not let it manufacture
+            # a topic switch or block a match to names in April's immediately prior answer.
+            query_subjects = _subject_tokens(retrieval_query)
     _apr_timing_log(
         "memory_intent_received",
         user_key=_apr_diag_ref(uid),
@@ -4416,6 +4524,16 @@ def search_dialogue_context(
 
             branch_dialog_id = _text(vector_row.get("dialog_id")) or _text((anchor or {}).get("dialog_id"))
             branch_conversation_id = _text(vector_row.get("conversation_id")) or _text((anchor or {}).get("conversation_id"))
+            branch_topic_id = _text(vector_row.get("topic_id") or vector_row.get("selected_topic_id"))
+            branch_id = _text(vector_row.get("branch_id") or vector_row.get("work_id"))
+
+            # A shared product name such as "April" is not a branch identity.
+            # Prefer the persisted topic/branch IDs; when legacy rows have no IDs,
+            # compare subject terms after removing global project/assistant labels.
+            generic_branch_terms = {
+                "april", "април", "проект", "проекта", "бот", "помощник",
+                "assistant", "user", "пользователь", "апрель",
+            }
             branch_subjects = set(_row_subject_tokens(vector_row))
             branch_subjects.update(_subject_tokens(_topic_label(vector_row)))
             branch_subjects.update(_subject_tokens(_text(vector_row.get("april_text") or vector_row.get("april_text_en"))))
@@ -4424,6 +4542,7 @@ def search_dialogue_context(
                     _text(vector_row.get("user_text")), _text(vector_row.get("april_text")),
                     _row_attachment_evidence(vector_row),
                 )))
+            branch_subjects.difference_update(generic_branch_terms)
 
             branch_pairs: list[dict[str, Any]] = []
             for candidate_row in all_rows:
@@ -4439,25 +4558,37 @@ def search_dialogue_context(
                 if not (same_branch_dialog or same_branch_conversation):
                     continue
 
-                candidate_subjects = set(_row_subject_tokens(candidate_row))
-                candidate_subjects.update(_subject_tokens(_topic_label(candidate_row)))
-                candidate_subjects.update(_subject_tokens(_text(candidate_row.get("april_text") or candidate_row.get("april_text_en"))))
-                if not candidate_subjects:
-                    candidate_subjects = _subject_tokens(" ".join((
-                        _text(candidate_row.get("user_text")), _text(candidate_row.get("april_text")),
-                        _row_attachment_evidence(candidate_row),
-                    )))
-                if branch_subjects and candidate_subjects:
-                    branch_overlap = max(
-                        _subject_overlap(branch_subjects, candidate_subjects),
-                        _fuzzy_token_overlap(branch_subjects, candidate_subjects),
-                    )
-                    if branch_overlap < 0.34:
+                candidate_topic_id = _text(candidate_row.get("topic_id") or candidate_row.get("selected_topic_id"))
+                candidate_branch_id = _text(candidate_row.get("branch_id") or candidate_row.get("work_id"))
+                # A present branch ID is authoritative. Otherwise a stable topic
+                # ID is authoritative. This prevents same-chat tasks that all
+                # mention April from being fused into one continuation context.
+                if branch_id and candidate_branch_id:
+                    if candidate_branch_id != branch_id:
                         continue
-                elif candidate_id != _text(vector_row.get("message_id")):
-                    # With no grounded subject signature, keep only the exact
-                    # vector hit rather than widening to an arbitrary same-chat span.
-                    continue
+                elif branch_topic_id and candidate_topic_id:
+                    if candidate_topic_id != branch_topic_id:
+                        continue
+                else:
+                    candidate_subjects = set(_row_subject_tokens(candidate_row))
+                    candidate_subjects.update(_subject_tokens(_topic_label(candidate_row)))
+                    candidate_subjects.update(_subject_tokens(_text(candidate_row.get("april_text") or candidate_row.get("april_text_en"))))
+                    if not candidate_subjects:
+                        candidate_subjects = _subject_tokens(" ".join((
+                            _text(candidate_row.get("user_text")), _text(candidate_row.get("april_text")),
+                            _row_attachment_evidence(candidate_row),
+                        )))
+                    candidate_subjects.difference_update(generic_branch_terms)
+                    if branch_subjects and candidate_subjects:
+                        branch_overlap = max(
+                            _subject_overlap(branch_subjects, candidate_subjects),
+                            _fuzzy_token_overlap(branch_subjects, candidate_subjects),
+                        )
+                        if branch_overlap < 0.45:
+                            continue
+                    elif candidate_id != _text(vector_row.get("message_id")):
+                        # No IDs and no specific subject: keep only exact anchor.
+                        continue
 
                 branch_pairs.append(_candidate_score(
                     query, candidate_row, dialog_id=str(branch_dialog_id or dialog_id or ""),
