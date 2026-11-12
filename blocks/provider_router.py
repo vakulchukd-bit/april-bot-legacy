@@ -351,6 +351,7 @@ You are April's single Provider in the existing canonical route. The processor o
 24-hour memory search, NEW/CONTINUE, interpretation, rooms and renderers. Never create another
 route/memory/identity or expose hidden reasoning.
 PRE-RESPONSE DIALOGUE AUDIT (mandatory): read DIALOGUE_TRANSITION_ANALYSIS and LAST_TURN_LINK. First compare CURRENT_REQUEST with the actual latest April answer and active branch; use selected authenticated history only when the current answer is not a reliable match; answer as NEW_TOPIC when the audit says NEW_TOPIC. A one-word choice may answer an open question; an unrelated named subject must not be attached to that branch.
+OPEN-QUESTION / CROSS-TURN REPLY (mandatory): LAST_TURN_LINK may record reply_to_open_question, open_question_kind, open_question_slots, answered_question_indices, reply_clauses, reply_clause, reply_semantic_vector, dialogue_move_vector, remainder_request and mixed_reply_and_new_request. Each open_question_slots.semantic_vector describes the kind of response April is waiting for; reply_semantic_vector describes the answer type; dialogue_move_vector distinguishes an answer, a new request, a reciprocal question and a topic switch. Treat these as semantic routing evidence, not words to repeat to the user. When reply_to_open_question=true, interpret every reply_clauses item as the user's answer to the corresponding April question; several questions may be answered in one message. Interpret the matched clauses even when their nouns do not overlap with April's wording (for example, a short identification answer). Do not redefine that answer as a vocabulary request. If mixed_reply_and_new_request=true, handle both moves in order: acknowledge/respond to the answer naturally, then address the user's appended request or question. If the user asks a question back, answer it; do not mistake it for an unrelated topic switch. Do not invent a pending question when the last answer did not actually ask for input.
 `answer` is the complete answer in RETURN_LANGUAGE; `content` may be empty because the normalizer fills it from `answer`; the normal text renderer must remain complete after normalization.
 REQUESTED CODE/FILE OUTPUT CONTRACT (mandatory even in compact mode): when INTERPRETATION.intent.wants_code=true, include one concrete render_blocks item with type="code", renderer="CodeBlock", viewer="CodeBlock", language, filename, code and content; code/content must both contain the complete real source, never only a filename or placeholder. When wants_file=true for that code, keep the code block and let the executor persist its exact bytes and attach a FileDeliveryBlock. Code+file means BOTH by default; file_only is valid only when the user explicitly asks not to show the source inline. CodeBlock has its own copy action. CopyBlock is only for a separate plain-text copy request. Never claim a file is ready unless non-empty source bytes can be persisted.
 CURRENT-TURN SEMANTIC CONSISTENCY:
@@ -2367,6 +2368,8 @@ def _compact_free_continuation_card(data: dict[str, Any]) -> dict[str, Any]:
             key: last_link[key] for key in (
                 "decision", "anchor_message_id", "anchor_topic_id", "anchor_branch_id",
                 "latest_answer_match", "answer_subject_overlap", "previous_answer_expects_user_input",
+                "reply_to_open_question", "open_question_kind", "answered_question_index", "answered_question_indices", "reply_clauses", "reply_clause", "reply_semantic_vector", "dialogue_move_vector", "remainder_request",
+                "mixed_reply_and_new_request", "open_question_slots",
             ) if key in last_link
         }
     if isinstance(data.get("CONTEXT"), dict):
@@ -2811,6 +2814,34 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "latest_answer_match": bool((raw_guidance.get("last_turn_link") or {}).get("latest_answer_match")),
                 "answer_subject_overlap": round(max(0.0, min(1.0, float((raw_guidance.get("last_turn_link") or {}).get("answer_subject_overlap") or 0.0))), 4),
                 "previous_answer_expects_user_input": bool((raw_guidance.get("last_turn_link") or {}).get("previous_answer_expects_user_input")),
+                "reply_to_open_question": bool((raw_guidance.get("last_turn_link") or {}).get("reply_to_open_question")),
+                "open_question_kind": _text((raw_guidance.get("last_turn_link") or {}).get("open_question_kind"))[:40],
+                "answered_question_index": int((raw_guidance.get("last_turn_link") or {}).get("answered_question_index", -1)),
+                "answered_question_indices": list((raw_guidance.get("last_turn_link") or {}).get("answered_question_indices") or [])[:4],
+                "reply_clauses": [
+                    {
+                        "question_index": int(item.get("question_index", -1)),
+                        "kind": _text(item.get("kind"))[:40],
+                        "question": _semantic_compress(item.get("question"), 24),
+                        "reply_clause": _semantic_compress(item.get("reply_clause"), 24),
+                    }
+                    for item in ((raw_guidance.get("last_turn_link") or {}).get("reply_clauses") or [])[:4]
+                    if isinstance(item, dict)
+                ],
+                "reply_clause": _semantic_compress((raw_guidance.get("last_turn_link") or {}).get("reply_clause"), max(8, summary_budget // 3)),
+                "reply_semantic_vector": dict((raw_guidance.get("last_turn_link") or {}).get("reply_semantic_vector") or {}),
+                "dialogue_move_vector": dict((raw_guidance.get("last_turn_link") or {}).get("dialogue_move_vector") or {}),
+                "remainder_request": _semantic_compress((raw_guidance.get("last_turn_link") or {}).get("remainder_request"), max(10, summary_budget // 2)),
+                "mixed_reply_and_new_request": bool((raw_guidance.get("last_turn_link") or {}).get("mixed_reply_and_new_request")),
+                "open_question_slots": [
+                    {
+                        "kind": _text(item.get("kind"))[:40],
+                        "question": _semantic_compress(item.get("question"), 24),
+                        "semantic_vector": dict(item.get("semantic_vector") or {}),
+                    }
+                    for item in ((raw_guidance.get("last_turn_link") or {}).get("open_question_slots") or [])[:4]
+                    if isinstance(item, dict)
+                ],
             },
             "avoid_cross_topic_injection": bool(raw_guidance.get("avoid_cross_topic_injection", True)),
             "do_not_repeat_completed_answer_or_artifact": bool(raw_guidance.get("do_not_repeat_completed_answer_or_artifact")),
@@ -3937,6 +3968,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "Room IDs and room knowledge are domain/provenance metadata, never renderer triggers. "
             "Preserve every REQUEST_SEQUENCE step and all protected source values. "
             "PRE-RESPONSE DIALOGUE AUDIT: obey DIALOGUE_TRANSITION_ANALYSIS and LAST_TURN_LINK; compare the latest actual April answer first, then selected authenticated history only on mismatch; never attach unrelated context to NEW_TOPIC. "
+            "OPEN-QUESTION REPLY: when LAST_TURN_LINK.reply_to_open_question=true, treat reply_clause as the answer to April's pending question even without shared nouns; use reply_semantic_vector and dialogue_move_vector to keep the answer, reciprocal question, appended request and explicit topic switch distinct. Handle each move naturally and in order; when topic_switch=1, acknowledge the answer before switching. "
+            "USER/BRANCH CONTINUITY: use authenticated CURRENT_USER_PROFILE and DIALOGUE_COMMUNICATION when relevant; preserve the selected branch's unresolved question, user-stated constraints and expected next step, but never invent personal facts or claim familiarity not supported by context. "
             + emergency_task_guidance + " "
             + "Use Markdown headings and short nested subsections for substantive multi-part answers. Renderers must complement the text: "
             + "never create a diagram by copying prose or headings; add a diagram only when the user explicitly asks for one or a concrete "
@@ -4173,7 +4206,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 "model_provider is only the underlying AI provider. For the signed-in user's name use "
                 "CURRENT_USER_PROFILE.display_name or AUTHENTICATED_IDENTITY.display_name exactly. "
                 "Room IDs are metadata, never renderer triggers. Follow DIALOGUE_RELATION and LAST_TURN_LINK; "
-                "use only selected authenticated history when it matches. Preserve protected source values and every "
+                "when reply_to_open_question=true, honor reply_clause as the answer to April's pending question even without noun overlap; "
+                "use reply_semantic_vector and dialogue_move_vector to separate an answer, a reciprocal question, a new request and an explicit topic switch; acknowledge the answer before switching when topic_switch=1. "
+                "Use authenticated user profile only when relevant; preserve the selected branch's unresolved question and user-stated constraints. "
+                "Use only selected authenticated history when it matches. Preserve protected source values and every "
                 "REQUEST_SEQUENCE step in order with its output type. Use concrete registered renderers only. "
                 "Return valid JSON matching OUTPUT_CONTRACT; do not invent data or claim an artifact without its payload."
             )
@@ -4461,6 +4497,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         name: value[name] for name in (
                             "decision", "anchor_message_id", "anchor_topic_id", "anchor_branch_id",
                             "latest_answer_match", "previous_answer_expects_user_input",
+                            "reply_to_open_question", "open_question_kind", "answered_question_index", "answered_question_indices", "reply_clauses", "reply_clause", "reply_semantic_vector", "dialogue_move_vector", "remainder_request",
+                            "mixed_reply_and_new_request", "open_question_slots",
                         ) if value.get(name) not in (None, "", [], {})
                     }
             if artifact_operation:
@@ -4831,6 +4869,46 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "latest_answer_match": bool(raw_last_turn_link.get("latest_answer_match")),
         "answer_subject_overlap": _bounded_float(raw_last_turn_link.get("answer_subject_overlap"), digits=4),
         "previous_answer_expects_user_input": bool(raw_last_turn_link.get("previous_answer_expects_user_input")),
+        "reply_to_open_question": bool(raw_last_turn_link.get("reply_to_open_question")),
+        "open_question_kind": _clip(raw_last_turn_link.get("open_question_kind"), 40),
+        "answered_question_index": int(raw_last_turn_link.get("answered_question_index", -1)),
+        "answered_question_indices": list(raw_last_turn_link.get("answered_question_indices") or [])[:4],
+        "reply_clauses": [
+            {
+                "question_index": int(item.get("question_index", -1)),
+                "kind": _clip(item.get("kind"), 40),
+                "question": _clip(item.get("question"), 220),
+                "reply_clause": _clip(item.get("reply_clause"), 180),
+            }
+            for item in (raw_last_turn_link.get("reply_clauses") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "reply_clause": _clip(raw_last_turn_link.get("reply_clause"), 180),
+        "reply_semantic_vector": {
+            _clip(key, 48): _bounded_float(value, digits=3)
+            for key, value in (raw_last_turn_link.get("reply_semantic_vector") or {}).items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        } if isinstance(raw_last_turn_link.get("reply_semantic_vector"), dict) else {},
+        "dialogue_move_vector": {
+            _clip(key, 48): _bounded_float(value, digits=3)
+            for key, value in (raw_last_turn_link.get("dialogue_move_vector") or {}).items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        } if isinstance(raw_last_turn_link.get("dialogue_move_vector"), dict) else {},
+        "remainder_request": _clip(raw_last_turn_link.get("remainder_request"), 360),
+        "mixed_reply_and_new_request": bool(raw_last_turn_link.get("mixed_reply_and_new_request")),
+        "open_question_slots": [
+            {
+                "kind": _clip(item.get("kind"), 40),
+                "question": _clip(item.get("question"), 220),
+                "semantic_vector": {
+                    _clip(key, 48): _bounded_float(value, digits=3)
+                    for key, value in (item.get("semantic_vector") or {}).items()
+                    if isinstance(key, str) and isinstance(value, (int, float))
+                } if isinstance(item.get("semantic_vector"), dict) else {},
+            }
+            for item in (raw_last_turn_link.get("open_question_slots") or [])[:4]
+            if isinstance(item, dict)
+        ],
     }
     raw_transition = (
         request_structure.get("dialogue_transition_analysis")
