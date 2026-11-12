@@ -1051,8 +1051,14 @@ def _is_april_premium_navigation_query(value: Any) -> bool:
         r"free\s+trial|trial\s+period|plan\s*(?:&|and)?\s*payments)",
         text, re.I,
     ))
+    # ASR can render the spoken product name April as «Эппл»/«Эпл».
+    # In April's own chat, explicit second-person app/site references also
+    # identify the product; don't fall through to generic subscription advice.
     april_app = bool(re.search(
-        r"(?:\bapril\b|април\w*|эйприл\w*|тво[её]м\s+приложени\w*|в\s+приложени\w*\s+april)",
+        r"(?:\bapril\b|април\w*|эйприл\w*|эппл\w*|эпл\w*|"
+        r"у\s+тебя|у\s+вас|в\s+тво[её]м\s+приложени\w*|"
+        r"в\s+вашем\s+приложени\w*|на\s+тво[её]м\s+сайт\w*|"
+        r"на\s+вашем\s+сайт\w*|в\s+приложени\w*\s+april)",
         text, re.I,
     ))
     return plan and april_app
@@ -2548,9 +2554,19 @@ def _requested_outputs_from_machine_request(machine_request: Any) -> List[str]:
 
 _ELLIPTICAL_SITE_FOLLOWUP_RE = re.compile(
     r"(?:не\s+понима\w*.{0,65}\bкуда\b.{0,35}\b(?:пройти|идти|зайти|нажать|перейти)\b|"
-    r"где\s+(?:это|там|он|она|они|мне|находится)|куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|идти|пройти)|"
+    r"где\s+(?:это|там|он|она|они|мне|находится|ответ)|куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|идти|пройти)|"
     r"покажи\s+(?:мне\s+)?(?:это|где|куда|путь)?|как\s+туда|какую\s+кнопку|"
-    r"where\s+is\s+it|where\s+do\s+i\s+go|show\s+me\s+where|how\s+do\s+i\s+get\s+there)",
+    r"(?:жду|ожидаю)\s+(?:твой\s+|ваш\s+)?ответ|ответа\s+не\s+получил\w*|"
+    r"ты\s+не\s+ответил\w*|где\s+мой\s+ответ|"
+    r"where\s+is\s+(?:it|my\s+answer)|where\s+do\s+i\s+go|show\s+me\s+where|"
+    r"i(?:'m| am)\s+waiting\s+for\s+(?:your\s+)?answer)",
+    re.IGNORECASE,
+)
+_WAITING_FOR_ANSWER_RE = re.compile(
+    r"(?:\b(?:жду|ожидаю)\s+(?:твой\s+|ваш\s+)?ответ\b|"
+    r"\bответа\s+не\s+получил\w*\b|\bты\s+не\s+ответил\w*\b|"
+    r"\bгде\s+мой\s+ответ\b|\bwhere\s+is\s+my\s+answer\b|"
+    r"\bi(?:'m| am)\s+waiting\s+for\s+(?:your\s+)?answer\b)",
     re.IGNORECASE,
 )
 
@@ -2617,7 +2633,10 @@ def _active_site_ui_followup(interpretation: Any, query: str, recent_context: An
     # praise, corrections and social reactions. It cannot by itself authorize a
     # return to an older UI-help branch. The current user text must name a control
     # or contain a real elliptical UI question.
-    if _is_social_acknowledgement_only(query) or not _has_current_site_ui_reference(query):
+    waiting_for_answer = bool(_WAITING_FOR_ANSWER_RE.search(str(query or "")))
+    if _is_social_acknowledgement_only(query) or not (
+        _has_current_site_ui_reference(query) or waiting_for_answer
+    ):
         return {}
     semantics = _interpretation_semantic_features(interpretation)
     features = semantics.get("features") if isinstance(semantics.get("features"), dict) else {}
@@ -2635,6 +2654,7 @@ def _active_site_ui_followup(interpretation: Any, query: str, recent_context: An
         or features.get("strong_anaphoric_reference")
         or interaction.get("previous_answer_reference")
         or control_kind
+        or waiting_for_answer
     )
     if not context_question:
         return {}
@@ -3044,6 +3064,16 @@ def prepare_site_help_interpretation(
     source_image_edit = _interpretation_has_concrete_image_edit(interpretation)
     attachment_help = _is_attachment_instruction_query(query) or any(_text(item.get("action")).upper() == "GUIDE_ATTACH_IMAGE" for item in action_contracts)
     navigation_visual_request = _site_should_render_diagram(query, outputs)
+    if contextual_ui_followup and not navigation_visual_request:
+        selected_pairs = recent_context.get("selected_pairs") if isinstance(recent_context, dict) else []
+        previous_ui_request = " ".join(
+            _text(pair.get("source_user_text") or pair.get("user"))
+            for pair in (selected_pairs or [])[:2] if isinstance(pair, dict)
+        )
+        # A short "I'm waiting for the answer" must receive the unfinished
+        # route, including its requested scheme, rather than a generic apology.
+        if re.search(r"(?:покажи|покажите|схем\w*|диаграмм\w*|flowchart|diagram|visuali[sz]e)", previous_ui_request, re.I):
+            navigation_visual_request = True
     route_picture = navigation_visual_request and not source_image_edit
     explicit_raster_requested = bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(str(query or "")))
     # The application source cannot capture the user's live browser. A UI screenshot
@@ -3091,7 +3121,7 @@ def prepare_site_help_interpretation(
                 visual["wants_image"] = False
                 visual["generator"] = ""
                 visual["image_model"] = ""
-    wants_diagram = _site_should_render_diagram(query, outputs) and not source_image_edit
+    wants_diagram = navigation_visual_request and not source_image_edit
     if source_image_edit:
         # The image edit is the requested visual deliverable; keep text and verified
         # route links, but don't add a redundant UI diagram unless explicitly requested.
