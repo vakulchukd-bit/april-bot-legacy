@@ -1094,6 +1094,16 @@ def _looks_like_referential_followup(query: str) -> bool:
     if not low:
         return False
 
+    # A request for "the remaining tables/graphs" is an elliptical reference to
+    # the active artifact batch, not a new subject. Keep the query bound to the
+    # latest authenticated branch and let normal candidate scoring choose it.
+    if re.search(
+        r"\b(?:где\s+)?(?:остал[ьт]н\w*|оставш\w*|остаточн\w*|друг\w*)\s+(?:таблиц\w*|график\w*|диаграмм\w*|блок\w*|файл\w*|материал\w*|вариант\w*)\b|"
+        r"\bгде\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*|друг\w*)\b|\bа\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*)\b",
+        low,
+    ):
+        return True
+
     phrase_markers = (
         "с кем", "с ним", "с ней", "с ними", "у него", "у нее", "у неe",
         "у неё", "его", "ее", "её", "него", "нее", "неё", "ним", "ней",
