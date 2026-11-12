@@ -616,7 +616,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
             result.append(output)
     # A copy renderer is intentional only when the user asks for a distinct
     # plain-text block/button; ordinary code blocks already have copy support.
-    if re.search(r"(?:блок\w*\s+(?:для|под)\s+копирован\w*|блок\w*\s+с\s+кнопк\w*\s+копирован\w*|текст\w*.{0,35}блок\w*.{0,25}копирован\w*|copyable\s+(?:text\s+)?block|copy\s+block|text\s+block\s+with\s+(?:a\s+)?copy\s+button|block\s+with\s+(?:a\s+)?copy\s+button|блок\w*\s+для\s+копіюван\w*|блок\w*.{0,30}копіюван\w*)", low, re.I):
+    if re.search(r"(?:блок\w*\s+(?:для|под)\s+копирован\w*|блок\w*\s+с\s+кнопк\w*\s+копирован\w*|текст\w*.{0,35}блок\w*.{0,25}копирован\w*|(?:в\s+)?блок\w*\s+(?:копи|копирован\w*)|копи\s*[-–—]?\s*блок|copyable\s+(?:text\s+)?block|copy\s+block|text\s+block\s+with\s+(?:a\s+)?copy\s+button|block\s+with\s+(?:a\s+)?copy\s+button|блок\w*\s+для\s+копіюван\w*|блок\w*.{0,30}копіюван\w*)", low, re.I):
         if "copy" not in result:
             result.append("copy")
     # Explicit requests to receive or export a deliverable as a file. A bare
@@ -667,7 +667,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
     has_graph_action = bool(re.search(
         # Stem matching catches inflected forms like "построим", "построила",
         # and polite/imperative variants without depending on exact endings.
-        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*)\b",
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*|выдай\w*|отдай\w*|верни\w*|предостав\w*|вывед\w*)\b",
         low,
     ))
     if has_graph_noun and has_graph_action and "graph" not in result:
@@ -761,7 +761,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     table_noun = r"(?:\btable\b|\bтаблиц\w*)"
     table_action = (
         r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present)\b|"
-        r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|"
+        r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|выдай\w*|отдай\w*|верни\w*|предостав\w*|вывед\w*|"
         r"состав\w*|вывед\w*|представ\w*|нарис\w*)"
     )
     table_request = bool(
@@ -788,7 +788,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # illustration wording or unmistakable artistic/photorealistic intent.
     visual_action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw(?:ing)?|show|display|create|make|render|visuali[sz]e|add|place|put|remove|replace|"
-        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда(?!тель)\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*)(?![\w\u0080-\uffff])",
+        r"нарис\w*|гарис\w*|рисуй\w*|покаж\w*|отобраз\w*|изобраз\w*|постро\w*|побуд\w*|созда(?!тель)\w*|сдела\w*|визуализир\w*|добав\w*|помест\w*|размест\w*|убер\w*|замен\w*|объясни\w*|поясни\w*|выдай\w*|отдай\w*|верни\w*|предостав\w*|вывед\w*)(?![\w\u0080-\uffff])",
         low,
     ))
     # Geometry, measured figures and mathematical constructions are structured
@@ -1445,6 +1445,16 @@ def _looks_like_previous_answer_followup(text: str) -> bool:
     if explicit_prior_topic_pointer and explicit_resume_action:
         return True
 
+    # Elliptical artifact follow-ups such as "где остальные таблицы/графики?" refer
+    # to the deliverables just discussed, even though they name a renderer.
+    remaining_artifact_followup = bool(re.search(
+        r"\b(?:где\s+)?(?:остал[ьт]н\w*|оставш\w*|остаточн\w*|друг\w*)\s+(?:таблиц\w*|график\w*|диаграмм\w*|блок\w*|файл\w*|материал\w*|вариант\w*)\b|"
+        r"\bгде\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*|друг\w*)\b|\bа\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*)\b",
+        low,
+    ))
+    if remaining_artifact_followup:
+        return True
+
     patterns = (
         r"\bкак\s+(?:ты|вы)\s+(?:решил\w*|посчитал\w*|вычислил\w*|рассчитал\w*|"
         r"получил\w*|вывел\w*|доказал\w*|обосновал\w*)\b",
@@ -1864,6 +1874,23 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
     ))
     explicit_topic_introduction = _has_explicit_topic_introduction(source)
     answer_followup = _looks_like_previous_answer_followup(source)
+    # A compound reissue request naming several renderers (for example,
+    # "выдай четверостишие в коде, copy-блоке, графике и таблице") is very
+    # likely tied to an already-produced deliverable. Route it through the
+    # active-branch matcher first; if no matching saved branch exists, State
+    # Manager still downgrades it to a new request. A single renderer request
+    # remains eligible for fresh generation.
+    artifact_replay_action = bool(re.search(
+        r"(?:выдай\w*|выведи\w*|покажи\w*|верни\w*|повтори\w*|отдай\w*|"
+        r"предоставь\w*|скопируй\w*|retrieve|reissue|return|show|give me)",
+        low,
+    ))
+    artifact_renderer_mentions = sum(bool(re.search(pattern, low)) for pattern in (
+        r"код\w*|скрипт\w*|\bcode\b", r"копи\w*|copy\b",
+        r"график\w*|диаграмм\w*|\bgraph\b|\bchart\b",
+        r"таблиц\w*|\btable\b", r"формул\w*|\bformula\b",
+    ))
+    artifact_replay_cue = artifact_replay_action and artifact_renderer_mentions >= 2
     past_reference = _semantic_group_hit(tokens, "past_reference")
     future_reference = _semantic_group_hit(tokens, "future_reference")
     today_reference = _semantic_group_hit(tokens, "today_reference")
@@ -2068,6 +2095,17 @@ def interpret_request_semantics(text: str) -> dict[str, Any]:
         intent_score = 3 + int(interrogative)
         relation_hint = "CONTINUE"
         reason = "previous_answer_explanation_followup"
+    elif artifact_replay_cue and not explicit_topic_introduction:
+        primary_intent = "TOPIC_CONTINUATION"
+        direction = "SEARCH_ACTIVE_OR_REFERENCED_TOPIC"
+        topic_reference = "PREVIOUS_ASSISTANT_ARTIFACT"
+        time_scope = "ACTIVE_DIALOGUE"
+        requires_memory = True
+        history_request = False
+        search_scope = "TOPIC_OR_ACTIVE_CONTEXT"
+        intent_score = 5 + artifact_renderer_mentions
+        relation_hint = "CONTINUE"
+        reason = "multi_renderer_artifact_reissue_requires_selected_branch"
     elif (continuation_action or (any(token in token_set for token in {"это", "этого", "этом", "тот", "та", "ту", "там", "дальше", "прежнему", "прежней"}) and not temporal_future)) and not explicit_topic_introduction:
         primary_intent = "TOPIC_CONTINUATION"
         direction = "RESUME_OR_RETRIEVE_ACTIVE_TOPIC"
@@ -3717,9 +3755,6 @@ def build_interpretation(
         requested_outputs = [kind for kind in requested_outputs if kind not in {"image", "gallery", "generated_image"}]
         if "text" not in requested_outputs:
             requested_outputs.insert(0, "text")
-    wants_file = "file" in requested_outputs
-    file_delivery_mode = _file_delivery_mode(original or text, requested_outputs)
-    wants_copy = "copy" in requested_outputs
     wants_links = "link" in requested_outputs
     structured_data_extensions = {".csv", ".tsv", ".json", ".xlsx", ".xls", ".ods", ".parquet"}
     data_source_attached = any(
@@ -3735,6 +3770,46 @@ def build_interpretation(
 
     relation = _text(memory.get("relation") or "NEW").upper()
     selected_pairs = _select_continuation_pairs(memory)
+
+    # "Where are the remaining tables/materials?" is a replay request for the
+    # selected branch's saved deliverables. Recover renderer kinds from its
+    # authenticated artifact index rather than asking the model to guess which
+    # outputs existed or generating substitute content.
+    remaining_artifact_request = bool(re.search(
+        r"\b(?:где\s+)?(?:остал[ьт]н\w*|оставш\w*|остаточн\w*|друг\w*)\s+(?:таблиц\w*|график\w*|диаграмм\w*|блок\w*|файл\w*|материал\w*|вариант\w*)\b|"
+        r"\bгде\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*)\b|"
+        r"\bа\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*)\b",
+        request_text.lower().replace("ё", "е"),
+    ))
+    if remaining_artifact_request and (relation == "CONTINUE" or bool(memory.get("contextual_history_match"))):
+        renderer_map = (
+            (r"table|tableblock|таблиц", "table"),
+            (r"graph|chart|plot|graphblock|график", "graph"),
+            (r"diagram|diagramblock|схем|диаграмм|чертеж", "diagram"),
+            (r"code|codeblock|script|скрипт|код", "code"),
+            (r"formula|math|formulablock|формул", "formula"),
+            (r"copy|copyblock|копи|копирован", "copy"),
+        )
+        for pair in selected_pairs:
+            if not isinstance(pair, dict):
+                continue
+            for artifact in (pair.get("assistant_artifact_index") or []):
+                if not isinstance(artifact, dict):
+                    continue
+                descriptor = " ".join(
+                    _text(artifact.get(key)) for key in
+                    ("kind", "type", "artifact_type", "output_type", "renderer", "viewer", "representation")
+                ).lower().replace("ё", "е")
+                for pattern, output_kind in renderer_map:
+                    if re.search(pattern, descriptor) and output_kind not in requested_outputs:
+                        requested_outputs.append(output_kind)
+        # Do not infer a new image-generation request from historical image
+        # assets; those remain handled by the selected asset restoration path.
+        requested_outputs = ["text", *[kind for kind in requested_outputs if kind != "text"]]
+
+    wants_file = "file" in requested_outputs
+    file_delivery_mode = _file_delivery_mode(original or text, requested_outputs)
+    wants_copy = "copy" in requested_outputs
     history_request = (
         bool(memory.get("history_request"))
         or bool(request_semantics.get("history_request"))
