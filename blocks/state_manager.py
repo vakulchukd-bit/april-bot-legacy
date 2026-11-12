@@ -741,12 +741,16 @@ def _is_scalar_or_choice_reply(query: Any) -> bool:
 
 
 def _assistant_expects_user_input(answer_text: Any) -> bool:
-    """Detect whether April's actual previous answer leaves a user input slot open."""
+    """Detect whether April's actual previous answer leaves a user input slot open.
+
+    Trailing emoji and decorative punctuation are ignored when deciding whether
+    the final clause is a question (e.g. "Что это? 😉").
+    """
     text = _text(answer_text)
     if not text:
         return False
     low = text.lower().replace("ё", "е")
-    if re.search(r"[?？](?:[\"'»”\)\]]*)\s*$", text):
+    if re.search(r"[?？](?:[\W_]|\u200d|\ufe0f)*$", text, flags=re.UNICODE):
         return True
     invitation = bool(re.search(
         r"(?:выбери(?:те)?|выбирай|какой\s+(?:вариант|пункт|ход)|твой\s+ход|ваш\s+ход|"
@@ -3933,6 +3937,26 @@ def search_dialogue_context(
             "matched": True,
             "answer_subject_conflict": False,
             "semantic_latest_exchange_link": True,
+            "reply_to_open_question": bool(latest_exchange_analysis.get("reply_to_open_question")),
+            "open_question_kind": _text(latest_exchange_analysis.get("open_question_kind")),
+            "answered_question_index": int(latest_exchange_analysis.get("answered_question_index", -1)),
+            "answered_question_indices": list(latest_exchange_analysis.get("answered_question_indices") or [])[:4],
+            "reply_clauses": deepcopy(latest_exchange_analysis.get("reply_clauses") or [])[:4],
+            "reply_clause": _text(latest_exchange_analysis.get("reply_clause"))[:180],
+            "reply_semantic_vector": dict(latest_exchange_analysis.get("reply_semantic_vector") or {}),
+            "dialogue_move_vector": dict(latest_exchange_analysis.get("dialogue_move_vector") or {}),
+            "remainder_request": _text(latest_exchange_analysis.get("remainder_request"))[:360],
+            "mixed_reply_and_new_request": bool(latest_exchange_analysis.get("mixed_reply_and_new_request")),
+            "open_question_slots": [
+                {
+                    "kind": _text(item.get("kind"))[:40],
+                    "question": _text(item.get("question"))[:220],
+                    "expects_user_input": bool(item.get("expects_user_input")),
+                    "semantic_vector": dict(item.get("semantic_vector") or {}),
+                }
+                for item in (latest_exchange_analysis.get("open_question_slots") or [])[:4]
+                if isinstance(item, dict)
+            ],
             "anchor_role": "LATEST_USER_APRIL_EXCHANGE",
             "message_id": _text(latest_dialog_row.get("message_id")),
         })
@@ -4073,14 +4097,15 @@ def search_dialogue_context(
         and not history_request
         and not has_new_user_asset
     )
-    answer_to_april_question = answer_to_april_question or april_named_answer_followup
+    answer_to_april_question = bool(
+        answer_to_april_question
+        or april_named_answer_followup
+        or latest_answer_relation.get("reply_to_open_question")
+    )
+    # A cross-turn reply is grounded by the open question April actually asked,
+    # not by noun overlap with its clues. This lets "Тень" answer "Что это?".
     short_answer_to_open_slot = bool(
-        latest_answer_relation.get("expects_user_input")
-        and len(_tokens(query)) <= 7
-        and (
-            not latest_answer_relation.get("answer_subject_conflict")
-            or _is_scalar_or_choice_reply(query)
-        )
+        latest_answer_relation.get("reply_to_open_question")
         and not new_topic_request
         and not history_request
         and not has_new_user_asset
@@ -4142,7 +4167,13 @@ def search_dialogue_context(
         continuation = True
     elif recent_branch_link and not new_topic_request:
         continuation = True
-    elif history_request or new_topic_request or standalone_named_action:
+    elif history_request or new_topic_request:
+        continuation = False
+    elif (answer_to_april_question or short_answer_to_open_slot or latest_answer_relation.get("matched")) and not semantic_subject_switch:
+        # A reply to April's question remains part of the live exchange even when
+        # the user appends a separate request after the reply clause.
+        continuation = True
+    elif standalone_named_action:
         continuation = False
     elif assistant_requested_user_asset:
         continuation = True
@@ -4159,8 +4190,6 @@ def search_dialogue_context(
     ):
         continuation = True
     elif correction_turn and explicit_topic_hits:
-        continuation = True
-    elif (answer_to_april_question or short_answer_to_open_slot or latest_answer_relation.get("matched")) and not semantic_subject_switch:
         continuation = True
     elif recent_named_topic_reentry and not semantic_subject_switch:
         continuation = True
@@ -4236,6 +4265,11 @@ def search_dialogue_context(
         and not _is_section_request(query)
         and not _looks_like_topic_correction(query)
         and not explicit_prior_pointer
+        and not latest_exchange_link
+        and not latest_answer_relation.get("reply_to_open_question")
+        and not latest_answer_matched
+        and not answer_to_april_question
+        and not short_answer_to_open_slot
         and (bool(query_subjects) or not reference_followup)
     )
     if self_contained_new_information:
@@ -5034,7 +5068,11 @@ def search_dialogue_context(
         "query_composition": topic_vector_query_source,
         "search_method": "deterministic_lexical_fuzzy_topic_section_ranking",
     })
-    if (site_navigation_request or social_conversation_opener or standalone_named_action) and not history_request and not resume_anchor_row:
+    if (
+        site_navigation_request or social_conversation_opener or standalone_named_action
+    ) and not history_request and not resume_anchor_row and not (
+        latest_exchange_link or answer_to_april_question or short_answer_to_open_slot
+    ):
         # Product navigation, plain social openers, and complete imperative
         # requests are independent tasks. Do not restore an older artifact branch
         # solely because a reused noun (for example "Пушкин") matches its topic.
@@ -5125,6 +5163,17 @@ def search_dialogue_context(
             "latest_answer_match": bool(latest_answer_matched),
             "answer_subject_overlap": float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
             "previous_answer_expects_user_input": bool(latest_answer_relation.get("expects_user_input")),
+            "reply_to_open_question": bool(latest_answer_relation.get("reply_to_open_question")),
+            "open_question_kind": _text(latest_answer_relation.get("open_question_kind"))[:40],
+            "answered_question_index": int(latest_answer_relation.get("answered_question_index", -1)),
+            "answered_question_indices": list(latest_answer_relation.get("answered_question_indices") or [])[:4],
+            "reply_clauses": deepcopy(latest_answer_relation.get("reply_clauses") or [])[:4],
+            "reply_clause": _text(latest_answer_relation.get("reply_clause"))[:180],
+            "reply_semantic_vector": dict(latest_answer_relation.get("reply_semantic_vector") or {}),
+            "dialogue_move_vector": dict(latest_answer_relation.get("dialogue_move_vector") or {}),
+            "remainder_request": _text(latest_answer_relation.get("remainder_request"))[:360],
+            "mixed_reply_and_new_request": bool(latest_answer_relation.get("mixed_reply_and_new_request")),
+            "open_question_slots": deepcopy(latest_answer_relation.get("open_question_slots") or [])[:4],
         },
         "history_selection_method": history_selection_method,
         "explicit_render_reference": ({
@@ -5173,6 +5222,10 @@ def search_dialogue_context(
         self_contained_new_information=bool(self_contained_new_information),
         latest_answer_match=bool(latest_answer_matched),
         latest_answer_expects_user_input=bool(latest_answer_relation.get("expects_user_input")),
+        reply_to_open_question=bool(latest_answer_relation.get("reply_to_open_question")),
+        open_question_kind=_text(latest_answer_relation.get("open_question_kind")),
+        answered_question_count=len(latest_answer_relation.get("answered_question_indices") or []),
+        mixed_reply_and_new_request=bool(latest_answer_relation.get("mixed_reply_and_new_request")),
         latest_answer_subject_overlap=float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
         latest_answer_message_key=_apr_diag_ref(latest_answer_relation.get("message_id")),
         hot_branch_candidate=bool(hot_branch_candidate),
