@@ -2633,7 +2633,15 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
     )
     # A branch digest is the compact continuation evidence. Never reduce it to zero
     # pairs: only the full transcript is omitted, not the selected branch ledger.
-    pair_keep_levels = (3, 2, 1) if (is_history and pairs) or has_preserved_source_pair or has_branch_digest else (3, 2, 1, 0)
+    # An explicit HISTORY_REQUEST must preserve several USER↔APRIL exchanges;
+    # dropping to one pair silently changes a history overview into a latest-turn
+    # answer. Shrink each pair's prose before reducing the number of history pairs.
+    if is_history and pairs:
+        pair_keep_levels = tuple(n for n in (5, 4, 3) if n <= len(pairs)) or (len(pairs),)
+    elif has_preserved_source_pair or has_branch_digest:
+        pair_keep_levels = tuple(n for n in (3, 2, 1) if n <= len(pairs)) or (len(pairs),)
+    else:
+        pair_keep_levels = (3, 2, 1, 0)
     for keep_n in pair_keep_levels:
         compact_pairs = []
         for item in pairs[:keep_n]:
@@ -2641,9 +2649,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 continue
             compact_pair = {
                 "turn": item.get("turn"),
-                "user": _semantic_compress(item.get("user"), _scaled_prompt_tokens(55)),
-                "april": _semantic_compress(item.get("april"), _scaled_prompt_tokens(65)),
-                "topic": _semantic_compress(item.get("topic"), _scaled_prompt_tokens(24)),
+                "user": _semantic_compress(item.get("user"), _scaled_prompt_tokens(24 if is_history else 55)),
+                "april": _semantic_compress(item.get("april"), _scaled_prompt_tokens(36 if is_history else 65)),
+                "topic": _semantic_compress(item.get("topic"), _scaled_prompt_tokens(12 if is_history else 24)),
                 "message_id": item.get("message_id"),
                 "topic_id": item.get("topic_id"),
                 "branch_id": item.get("branch_id"),
@@ -2701,6 +2709,13 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card, total = count(system, data)
         if total <= MAX_PROMPT_TOKENS:
             return system, card, total, f"compact_pairs_{keep_n}"
+
+    # The progressively smaller pair sets above are only budget probes. If none
+    # fits, restore the original selected history before constructing the semantic
+    # minimum card; that builder can compress all five exchanges more intelligently
+    # than silently inheriting the last one-pair probe.
+    if is_history:
+        data["CONTINUATION_CONTEXT"] = pairs
 
     # Share remaining request space across all steps. No individual topic/step can
     # exceed the 30% cap; long topics are compressed by clauses, not char slicing.
@@ -3325,7 +3340,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
 
     # Try progressively smaller allocations. Topic requests are always <= 30% of
     # 3600 estimated tokens, and each step remains represented in REQUEST_SEQUENCE.
-    minimum_history_pair = 1 if (
+    minimum_history_pair = min(5, len(original_pairs)) if (
         (is_history and original_pairs)
         or any(isinstance(item, dict) and item.get("preserve_source_text") is True for item in original_pairs)
         # A compact branch digest is the only prompt-side continuation ledger.
@@ -3333,10 +3348,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         # transcript and exact artifacts remain in storage and are not removed.
         or (not is_history and any(isinstance(item, dict) and isinstance(item.get("branch_digest"), dict) for item in original_pairs))
     ) else 0
+    history_pair_limit = min(5, len(original_pairs)) if is_history else 0
     candidates = [
-        (_scaled_prompt_tokens(420), min(_scaled_prompt_tokens(516), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24)), _scaled_prompt_tokens(70), min(2, len(original_pairs))),
-        (_scaled_prompt_tokens(300), _scaled_prompt_tokens(210), _scaled_prompt_tokens(45), min(2, len(original_pairs))),
-        (_scaled_prompt_tokens(220), _scaled_prompt_tokens(130), _scaled_prompt_tokens(28), min(1, len(original_pairs))),
+        (_scaled_prompt_tokens(420), min(_scaled_prompt_tokens(516), MAX_TOPIC_PROMPT_TOKENS - _scaled_prompt_tokens(24)), _scaled_prompt_tokens(70), history_pair_limit if is_history else min(2, len(original_pairs))),
+        (_scaled_prompt_tokens(300), _scaled_prompt_tokens(210), _scaled_prompt_tokens(45), history_pair_limit if is_history else min(2, len(original_pairs))),
+        (_scaled_prompt_tokens(220), _scaled_prompt_tokens(130), _scaled_prompt_tokens(28), history_pair_limit if is_history else min(1, len(original_pairs))),
         (_scaled_prompt_tokens(150), _scaled_prompt_tokens(85), _scaled_prompt_tokens(18), minimum_history_pair),
         (_scaled_prompt_tokens(100), _scaled_prompt_tokens(55), _scaled_prompt_tokens(12), minimum_history_pair),
         (_scaled_prompt_tokens(70), _scaled_prompt_tokens(36), _scaled_prompt_tokens(8), minimum_history_pair),
@@ -3573,13 +3589,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         card, total = count(system, minimal)
 
     if total > MAX_PROMPT_TOKENS and isinstance(minimal.get("CONTINUATION_CONTEXT"), list):
-        # Preserve the strongest selected pair and the exact protected structures;
-        # remove verbose prose/history details from the non-protected context.
+        # Preserve the selected history evidence set (up to five pairs) for an
+        # explicit recall; ordinary continuation keeps only its strongest pair.
+        # Remove verbose prose/history details before dropping any source identity.
         compact_pairs = []
-        for pair in minimal["CONTINUATION_CONTEXT"][:1]:
+        history_pair_limit = 5 if is_history else 1
+        for pair in minimal["CONTINUATION_CONTEXT"][:history_pair_limit]:
             if isinstance(pair, dict):
-                compact_pair = {k: _semantic_compress(pair.get(k), 12 if k in {"user", "april"} else 6)
-                                for k in ("topic", "user", "april") if pair.get(k)}
+                compact_pair = {
+                    k: _semantic_compress(
+                        pair.get(k),
+                        (8 if is_history and k == "topic" else
+                         14 if is_history and k == "user" else
+                         18 if is_history and k == "april" else
+                         12 if k in {"user", "april"} else 6),
+                    )
+                    for k in ("topic", "user", "april") if pair.get(k)
+                }
                 for identity_key in (
                     "message_id", "topic_id", "branch_id", "origin_message_id",
                     "topic_origin_message_id", "same_dialog", "dialogue_state",
@@ -3738,7 +3764,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         raw_pairs = emergency.get("CONTINUATION_CONTEXT")
         if isinstance(raw_pairs, list):
             normalized_pairs = []
-            for pair in raw_pairs[:4]:
+            for pair in raw_pairs[:(5 if emergency.get("HISTORY_REQUEST") else 4)]:
                 if not isinstance(pair, dict):
                     continue
                 record = {
@@ -4317,6 +4343,66 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             ultra["REQUEST_SEQUENCE"] = compact_sequence
 
         continuation_operation = str(minimal.get("DIALOGUE_RELATION") or "NEW").upper() == "CONTINUE"
+        history_operation = bool(minimal.get("HISTORY_REQUEST"))
+        if history_operation:
+            # History lookup is an authorized retrieval mode even though its
+            # dialogue relation is normally NEW. Emergency compaction must not
+            # erase the exact evidence selected by State Manager.
+            for key in (
+                "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
+                "HISTORY_TIME_WINDOW", "DIALOGUE_KNOWN_TOPIC_COUNT",
+            ):
+                if key in minimal:
+                    ultra[key] = minimal[key]
+
+            raw_topics = minimal.get("DIALOGUE_HISTORY_TOPICS")
+            if not isinstance(raw_topics, list) or not raw_topics:
+                raw_topics = minimal.get("DIALOGUE_TOPIC_INDEX")
+            compact_topics = []
+            for index, item in enumerate((raw_topics or [])[:10], start=1):
+                if not isinstance(item, dict):
+                    continue
+                topic = {
+                    "number": item.get("number", item.get("n", index)),
+                    "topic": _clip(item.get("topic") or item.get("t"), 96),
+                    "summary": _clip(item.get("summary") or item.get("s"), 180),
+                    "last_question": _clip(item.get("last_question") or item.get("q"), 120),
+                }
+                for name in ("turns", "topic_id", "origin_message_id", "first_at", "last_at"):
+                    value = item.get(name)
+                    if value not in (None, "", [], {}):
+                        topic[name] = value
+                if topic["topic"] or topic["summary"] or topic["last_question"]:
+                    compact_topics.append(topic)
+            if compact_topics:
+                ultra["DIALOGUE_HISTORY_TOPICS"] = compact_topics
+
+            raw_pairs = minimal.get("CONTINUATION_CONTEXT")
+            compact_pairs = []
+            for index, pair in enumerate((raw_pairs or [])[:5], start=1):
+                if not isinstance(pair, dict):
+                    continue
+                record = {
+                    "turn": pair.get("turn", index),
+                    "topic": _clip(pair.get("topic"), 80),
+                    "user_request": _clip(pair.get("user_request") or pair.get("user"), 180),
+                    "april_answer": _clip(pair.get("april_summary") or pair.get("april") or pair.get("assistant_last_message"), 240),
+                }
+                for name in ("message_id", "topic_id", "branch_id", "origin_message_id"):
+                    value = pair.get(name)
+                    if value not in (None, "", [], {}):
+                        record[name] = value
+                compact_pairs.append({key: value for key, value in record.items() if value not in (None, "", [], {})})
+            if compact_pairs:
+                ultra["CONTINUATION_CONTEXT"] = compact_pairs
+            _log_json("FREE_HISTORY_ULTRA_COMPACTION", {
+                "status": "preserved",
+                "history_topics": len(compact_topics),
+                "history_pairs": len(compact_pairs),
+                "history_request": True,
+                "relation": _text(minimal.get("DIALOGUE_RELATION") or "NEW").upper(),
+            })
+
         if artifact_operation or continuation_operation:
             # Ultra compaction must not sever a legitimate follow-up from the
             # selected answer. Keep one authenticated anchor and one selected
@@ -4382,11 +4468,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "rule": "Use the exact authenticated saved artifact values when present; preserve IDs and provenance."
                 }
 
+        ultra_history_rule = (
+            " HISTORY RETRIEVAL: when HISTORY_REQUEST=true, older authenticated history in "
+            "DIALOGUE_HISTORY_TOPICS and CONTINUATION_CONTEXT is explicitly authorized even if "
+            "DIALOGUE_RELATION=NEW. Use those supplied records to answer the history question; "
+            "for a broad overview summarize the distinct supplied topics, and for a named subject "
+            "prioritize matching records. Never claim the history is empty when records are present. "
+            "NEW means do not continue an unrelated active branch; it does not disable HISTORY_REQUEST."
+            if history_operation else
+            " When DIALOGUE_RELATION is NEW, do not import older answers or artifacts unless a separate "
+            "explicit authorized retrieval source is present."
+        )
         ultra_system = (
             "April: answer the exact CURRENT_REQUEST in RETURN_LANGUAGE. Use only the authenticated identity and "
             "selected dialogue source supplied here. When DIALOGUE_RELATION is CONTINUE, compare with "
-            "DIALOGUE_ANCHOR and use the selected CONTINUATION_CONTEXT branch; when it is NEW, do not import "
-            "older answers or artifacts. Preserve PROTECTED_CURRENT_INPUT and all exact values in "
+            "DIALOGUE_ANCHOR and use the selected CONTINUATION_CONTEXT branch."
+            + ultra_history_rule +
+            " Preserve PROTECTED_CURRENT_INPUT and all exact values in "
             "PROTECTED_STRUCTURED_DATA or PROTECTED_STRUCTURED_DATA_SOURCE. Follow OUTPUT_CONTRACT, "
             "SCENE_CONTRACT and C_ARTIFACT_RENDER_PLAN as one ordered scene: REQUEST_SEQUENCE output types are "
             "mandatory and complementary, not optional alternatives. If ATTACHED_TEXT_FILES says content_available=true, "
@@ -5254,7 +5352,7 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         },
         "CONTINUATION_CONTEXT": _pairs(
             selected_pairs,
-            min(4, requested_topic_count) if history_request else (1 if selected_section else min(8, len(selected_pairs))),
+            min(5, requested_topic_count) if history_request else (1 if selected_section else min(8, len(selected_pairs))),
         ) if (relation == "CONTINUE" or history_request or bool(memory.get("contextual_history_match"))) else [],
         "RECENT_DIALOGUE_EXCHANGE_WINDOW": recent_window_card,
         "RECENT_BRANCH_ANCHOR": recent_branch_card,
@@ -7708,7 +7806,11 @@ async def generate_text(
             compression_stage=input_diagnostics.get("compression_stage"),
             duplicate_field_groups=input_diagnostics.get("duplicate_field_groups_count", 0),
             exact_duplicate_chars_estimate=input_diagnostics.get("exact_duplicate_chars_estimate", 0),
-            selected_context_pairs=len((request.memory or {}).get("selected_pairs") or []) if isinstance(request.memory, dict) else 0)
+            selected_context_pairs=len((request.memory or {}).get("selected_pairs") or []) if isinstance(request.memory, dict) else 0,
+            history_request=bool((request.memory or {}).get("history_request")) if isinstance(request.memory, dict) else False,
+            history_topics_count=len((request.memory or {}).get("history_topics") or []) if isinstance(request.memory, dict) else 0,
+            topic_index_count=len((request.memory or {}).get("topic_index") or []) if isinstance(request.memory, dict) else 0,
+            relation=_text((request.memory or {}).get("relation") or "NEW") if isinstance(request.memory, dict) else "NEW")
         _log_json("REQUEST", {
             "status": "sending",
             "provider_router_version": PROVIDER_ROUTER_VERSION,
