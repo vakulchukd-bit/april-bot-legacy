@@ -704,6 +704,7 @@ def _row_subject_text(row: dict[str, Any]) -> str:
         metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
         memory_record = metadata.get("dialogue_memory_record") if isinstance(metadata.get("dialogue_memory_record"), dict) else {}
     values = (
+        row.get("topic_label"), row.get("title"),
         row.get("user_text"), row.get("user_text_en"),
         request_structure.get("user_goal"), request_structure.get("task_goal"),
         request_intent.get("user_goal"), continuation.get("active_topic"),
@@ -1390,7 +1391,11 @@ def _is_failed_provider_row(row: dict[str, Any]) -> bool:
 
 def _row_modalities(row: dict[str, Any]) -> set[str]:
     """Recover persisted input modalities without storing a second memory copy."""
-    result: set[str] = set()
+    result: set[str] = {
+        str(value).strip().lower()
+        for value in (row.get("row_modalities") or [])
+        if str(value or "").strip()
+    }
     structured = _parse_json(row.get("structured_request"))
     if not structured:
         return result
@@ -1456,6 +1461,7 @@ def _topic_label(row: dict[str, Any]) -> str:
     attachment_index = structured.get("attachment_index") if isinstance(structured.get("attachment_index"), list) else []
     first_attachment = next((x for x in attachment_index if isinstance(x, dict)), {})
     for value in (
+        row.get("topic_label"), row.get("title"),
         memory_record.get("topic"),
         (f"Файл {first_attachment.get('filename')}: {first_attachment.get('summary') or first_attachment.get('content_preview', '')[:90]}" if first_attachment.get("filename") else ""),
         cont.get("active_topic"),
@@ -3578,6 +3584,8 @@ def search_dialogue_context(
     has_file: bool = False,
     has_voice: bool = False,
     query_interpretation: dict[str, Any] | None = None,
+    memory_snapshot: dict[str, Any] | None = None,
+    persist_search_state: bool = True,
 ) -> dict[str, Any]:
     """Find the smallest reliable continuation point in the authenticated 12h memory.
 
@@ -3587,16 +3595,106 @@ def search_dialogue_context(
     """
     search_started = time.perf_counter()
     uid = _uid(user_id)
-    # Stage 1: compare the incoming turn with the latest ten same-dialogue
-    # USER↔APRIL exchanges before considering the wider retained-history index.
-    recent_state = hydrate(uid, limit=10)
+    # Use the same authenticated, bounded history index as the History screen.
+    # The old path hydrated ten full JSONB payloads and then hydrated the full
+    # archive again for semantic search. A single lightweight projection contains
+    # the source text, topic/section manifest and artifact identities; full renderer
+    # payloads are restored later only for selected asset operations.
+    index_started = time.perf_counter()
+    indexed_rows: list[dict[str, Any]] | None = None
+    index_authenticated: bool | None = None
+    # Exact artifact/attachment continuation still needs rich typed payloads for
+    # provenance ranking. Keep that specialized path lossless; ordinary dialogue
+    # and topic retrieval use the small index projection.
+    rich_artifact_search = bool(
+        has_image or has_file
+        or _looks_like_saved_artifact_operation(query)
+        or _explicit_render_reference_kind(query)
+    )
+    initial_semantics = query_interpretation if isinstance(query_interpretation, dict) else {}
+    initial_features = initial_semantics.get("features") if isinstance(initial_semantics.get("features"), dict) else {}
+    explicit_archive_lookup = bool(
+        initial_semantics.get("history_request")
+        or initial_semantics.get("history_inventory_request")
+        or initial_semantics.get("has_explicit_time_window")
+        or _text(initial_semantics.get("search_scope")).upper() in {"ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"}
+        or _text(initial_semantics.get("direction")).upper() == "SEARCH_DIALOGUE_HISTORY"
+        or initial_features.get("history_request")
+        or initial_semantics.get("resume_anchor_requested")
+        or initial_semantics.get("topic_reference_fragment")
+        or initial_features.get("topic_reference_fragment")
+        # A sufficiently long named/semantic reference can point to an older
+        # retained topic even without saying "history" explicitly. Keep the wider
+        # compact window for that request, while short follow-ups stay at 12 rows.
+        or (bool(initial_semantics.get("requires_memory")) and len(_text(query)) >= 45)
+    )
+    # Everyday continuation uses a small recent window; explicit archive/time
+    # retrieval keeps a wider bounded window without loading full render JSONB.
+    memory_row_limit = 64 if explicit_archive_lookup else 12
+    try:
+        # A composite user turn may contain several independently interpreted
+        # clauses. The executor loads/authenticates one bounded index snapshot and
+        # fans out these query-specific rankings against that immutable snapshot.
+        # This avoids N database reads while preserving a distinct result per clause.
+        if isinstance(memory_snapshot, dict) and not rich_artifact_search:
+            index_authenticated = bool(memory_snapshot.get("authenticated"))
+            if index_authenticated:
+                raw_index_rows = memory_snapshot.get("rows")
+                indexed_rows = [dict(row) for row in raw_index_rows if isinstance(row, dict)] if isinstance(raw_index_rows, list) else []
+        elif not rich_artifact_search:
+            from storage import load_dialogue_history_index
+            index_snapshot = load_dialogue_history_index(
+                uid, for_memory_search=True, memory_row_limit=memory_row_limit
+            )
+            if isinstance(index_snapshot, dict):
+                index_authenticated = bool(index_snapshot.get("authenticated"))
+                if index_authenticated:
+                    raw_index_rows = index_snapshot.get("rows")
+                    if isinstance(raw_index_rows, list):
+                        indexed_rows = [dict(row) for row in raw_index_rows if isinstance(row, dict)]
+                    else:
+                        indexed_rows = []
+    except Exception as index_exc:
+        _apr_timing_log(
+            "memory_index_load_fallback", None,
+            user_key=_apr_diag_ref(uid), error_type=type(index_exc).__name__,
+        )
+    _apr_timing_log(
+        "memory_index_loaded", index_started,
+        user_key=_apr_diag_ref(uid),
+        rows_loaded=len(indexed_rows or []),
+        authenticated=index_authenticated,
+        lightweight=bool(indexed_rows is not None),
+        snapshot_reused=bool(isinstance(memory_snapshot, dict) and not rich_artifact_search),
+        rich_artifact_search=rich_artifact_search,
+        memory_row_limit=memory_row_limit,
+        archive_lookup=explicit_archive_lookup,
+    )
+
+    if indexed_rows is not None:
+        # Rows are already chronological and bounded by each record's persisted
+        # 12h/24h retention. Avoid hydrate()/deepcopy() for every request.
+        recent_rows = indexed_rows[-10:]
+        recent_state = {"dialogue_pairs": recent_rows}
+        full_index_state = {"dialogue_pairs": indexed_rows}
+    else:
+        # Compatibility path when the compact index is unavailable. Read one
+        # bounded source window only: the old fallback hydrated ten rows and then
+        # hydrated the complete archive a second time for the same request.
+        from storage import load_dialogue_pairs
+        fallback_limit = 64 if explicit_archive_lookup else 12
+        fallback_rows = load_dialogue_pairs(uid, limit=fallback_limit) or []
+        fallback_rows = [row for row in fallback_rows if isinstance(row, dict)]
+        recent_state = {"dialogue_pairs": fallback_rows[-10:]}
+        recent_rows = list(recent_state["dialogue_pairs"])
+        full_index_state = {"dialogue_pairs": fallback_rows}
+
     # Preserve the pre-context semantic decision. The recent-exchange matcher may
     # discover a related branch, but it must not downgrade an explicit request to
     # search the user's archive into an ordinary latest-branch continuation.
     pre_context_interpretation = deepcopy(query_interpretation or {})
     pre_context_history_request = bool(pre_context_interpretation.get("history_request"))
-    recent_rows = [row for row in (recent_state.get("dialogue_pairs") or [])
-                   if isinstance(row, dict) and not _is_failed_provider_row(row)]
+    recent_rows = [row for row in recent_rows if not _is_failed_provider_row(row)]
     query_interpretation = dict(query_interpretation or {})
     recent_dialog_rows = [row for row in recent_rows if not _row_is_pending_clarification(row) and (
         (dialog_id and _text(row.get("dialog_id")) == _text(dialog_id))
@@ -3719,7 +3817,15 @@ def search_dialogue_context(
             and not site_navigation_preload
             and not query_interpretation.get("explicit_topic_switch"))
     )
-    state = hydrate(uid) if allow_semantic_history_search else recent_state
+    if indexed_rows is not None:
+        # The index already contains the full currently-retained time window. The
+        # same query therefore serves both recent-branch arbitration and explicit
+        # archive search without a second PostgreSQL round trip.
+        state = full_index_state if allow_semantic_history_search else recent_state
+    else:
+        # The fallback's one bounded read already contains the archive window
+        # required by this request. Never issue a second unbounded SELECT here.
+        state = full_index_state if allow_semantic_history_search else recent_state
     all_rows = [row for row in (state.get("dialogue_pairs") or []) if isinstance(row, dict) and not _is_failed_provider_row(row)]
     recent_branch_row = next((row for row in all_rows if (
         recent_branch_link and matched_recent_exchange_id
@@ -5203,10 +5309,12 @@ def search_dialogue_context(
         "pending_clarification": pending_for_next_turn if clarification_needed else {},
         "clarification_resolution": clarification_resolution,
     }
-    with _LOCK:
-        state["last_memory_search"] = deepcopy(result)
-        state["last_relation_state"] = {"relation": relation, "reason": result["reason"], "confidence": result["relation_confidence"], "active_topic": active_topic}
-        state["updated_at"] = time.time()
+    if persist_search_state:
+        persistent_state = get_state(uid)
+        with _LOCK:
+            persistent_state["last_memory_search"] = deepcopy(result)
+            persistent_state["last_relation_state"] = {"relation": relation, "reason": result["reason"], "confidence": result["relation_confidence"], "active_topic": active_topic}
+            persistent_state["updated_at"] = time.time()
     _apr_timing_log("memory_search_total", search_started, user_key=_apr_diag_ref(uid),
         dialog_key=_apr_diag_ref(dialog_id), conversation_key=_apr_diag_ref(conversation_id),
         relation=relation, reason=result["reason"], total_pairs=len(rows), candidates=len(matches),
@@ -5261,6 +5369,8 @@ def prepare_dialogue_context(
     has_file: bool = False,
     has_voice: bool = False,
     query_interpretation: dict[str, Any] | None = None,
+    memory_snapshot: dict[str, Any] | None = None,
+    persist_search_state: bool = True,
 ) -> dict[str, Any]:
     """One processor-facing call: hydrate + search + continuation decision."""
     prepare_started = time.perf_counter()
@@ -5275,6 +5385,8 @@ def prepare_dialogue_context(
         has_file=has_file,
         has_voice=has_voice,
         query_interpretation=query_interpretation,
+        memory_snapshot=memory_snapshot,
+        persist_search_state=persist_search_state,
     )
     result = {
         "window_hours": DIALOGUE_WINDOW_HOURS,
