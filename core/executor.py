@@ -1025,45 +1025,91 @@ def _explicit_prior_asset_reference(value: Any) -> bool:
     return any(marker.replace("ё", "е") in low for marker in markers)
 
 
-def _restore_referenced_table_render(
+def _restore_referenced_scene_render_blocks(
     user_id: str,
     identity: dict[str, Any],
     dialogue_context: dict[str, Any],
     render_blocks: Any,
     requested_outputs: Any,
+    current_request: str = "",
 ) -> list[dict[str, Any]]:
-    """Rehydrate an explicitly referenced saved TableBlock for the XLSX room.
+    """Rehydrate saved typed renderers from only the selected authenticated branch.
 
-    Dialogue indexes intentionally omit heavyweight SceneContract JSON. Once the
-    state manager has selected the exact source message, this second-stage read
-    restores only that authenticated, retained pair and reuses its original rows.
+    Free continuation prompts intentionally carry compact artifact indexes rather
+    than full renderer payloads. On an explicit replay request, load the canonical
+    selected turns and restore concrete renderer blocks into the one current
+    SceneContract. Do not scan the user's whole history or replace an ordinary new
+    generation with a stale artifact.
     """
     blocks = [dict(item) for item in (render_blocks or []) if isinstance(item, dict)]
     requested = {str(item or "").strip().lower() for item in (requested_outputs or []) if str(item or "").strip()}
-    if "file" not in requested:
+    render_kinds = {kind for kind in requested if kind in {"table", "graph", "diagram", "code", "formula", "copy"}}
+    if not render_kinds or not _is_saved_artifact_replay_request(current_request):
         return blocks
 
     reference = dialogue_context.get("explicit_render_reference") if isinstance(dialogue_context.get("explicit_render_reference"), dict) else {}
-    if str(reference.get("kind") or "").lower() != "table":
-        return blocks
+    selected_pairs = dialogue_context.get("selected_pairs") or []
+    aliases = {
+        "table": {"table", "tableblock"},
+        "graph": {"graph", "graphblock", "chart", "chartblock", "plot"},
+        "diagram": {"diagram", "diagramblock", "flowchart", "schematic"},
+        "code": {"code", "codeblock", "script", "scriptblock"},
+        "formula": {"formula", "formulablock", "math", "mathblock"},
+        "copy": {"copy", "copyblock", "textcopyblock"},
+    }
 
+    def _artifact_renderer_kind(value: Any) -> str:
+        name = _text(value).lower().replace("_", "").replace("-", "")
+        for output_kind, names in aliases.items():
+            if name in {item.replace("_", "").replace("-", "") for item in names}:
+                return output_kind
+        return ""
+
+    available_kinds: set[str] = set()
     source_ids: list[str] = []
     for value in (
         reference.get("message_id"),
+        dialogue_context.get("continuation_source_message_id"),
         (dialogue_context.get("anchor") or {}).get("message_id") if isinstance(dialogue_context.get("anchor"), dict) else "",
-        *[
-            pair.get("message_id") for pair in (dialogue_context.get("selected_pairs") or [])
-            if isinstance(pair, dict)
-        ],
+        *[pair.get("message_id") for pair in selected_pairs if isinstance(pair, dict)],
     ):
         message_id = _text(value)
         if message_id and message_id not in source_ids:
             source_ids.append(message_id)
+    anchor_branch_id = _text((dialogue_context.get("anchor") or {}).get("branch_id")) if isinstance(dialogue_context.get("anchor"), dict) else ""
+    for pair in selected_pairs:
+        if not isinstance(pair, dict):
+            continue
+        pair_branch_id = _text(pair.get("branch_id"))
+        for artifact in (pair.get("assistant_artifact_index") or []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_branch_id = _text(artifact.get("branch_id") or artifact.get("source_branch_id"))
+            if anchor_branch_id and artifact_branch_id and artifact_branch_id != anchor_branch_id:
+                continue
+            for field in ("kind", "type", "artifact_type", "output_type", "renderer", "viewer", "representation"):
+                matched = _artifact_renderer_kind(artifact.get(field))
+                if matched:
+                    available_kinds.add(matched)
+            artifact_source_id = _text(artifact.get("source_message_id") or artifact.get("message_id"))
+            if artifact_source_id and artifact_source_id not in source_ids:
+                source_ids.append(artifact_source_id)
+    reference_kind = _artifact_renderer_kind(reference.get("kind"))
+    if reference_kind:
+        available_kinds.add(reference_kind)
+
+    # The compact branch digest can legitimately omit assistant_artifact_index.
+    # The exact matched message row is still authoritative: inspect its persisted
+    # SceneContract payload and restore only renderer kinds requested now.
+    eligible_kinds = (render_kinds & available_kinds) if available_kinds else set(render_kinds)
+    if not eligible_kinds:
+        return blocks
+    source_ids = source_ids[:16]
     if not source_ids:
         return blocks
 
     try:
-        rows = load_dialogue_history_details(user_id, source_ids[:8])
+        rows = load_dialogue_history_details(user_id, source_ids)
     except Exception as exc:
         _apr_timing_log(
             "explicit_render_restore_failed",
@@ -1087,28 +1133,33 @@ def _restore_referenced_table_render(
                 return {}
         return {}
 
-    def table_payload(block: dict[str, Any]) -> dict[str, Any]:
+    def _block_has_payload(kind: str, block: dict[str, Any]) -> bool:
         payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
         merged = dict(block)
         merged.update(payload)
-        headers = merged.get("headers") or merged.get("columns") or merged.get("column_headers")
-        table_rows = merged.get("rows") or merged.get("data") or merged.get("values")
-        if not isinstance(headers, list) or not headers or not isinstance(table_rows, list) or not table_rows:
-            return {}
-        normalized = dict(payload)
-        for key in ("title", "caption", "headers", "columns", "column_headers", "rows", "data", "values", "additional_sheets"):
-            if key in merged and key not in normalized:
-                normalized[key] = merged[key]
-        normalized.setdefault("headers", headers)
-        normalized.setdefault("rows", table_rows)
-        return normalized
+        if kind == "table":
+            headers = merged.get("headers") or merged.get("columns") or merged.get("column_headers")
+            rows_data = merged.get("rows") or merged.get("data") or merged.get("values")
+            return isinstance(headers, list) and bool(headers) and isinstance(rows_data, list) and bool(rows_data)
+        if kind == "code":
+            return bool(_text(merged.get("code") or merged.get("content") or merged.get("source")))
+        if kind == "graph":
+            return bool(merged.get("data") or merged.get("series") or merged.get("points") or merged.get("traces"))
+        if kind == "diagram":
+            return bool(merged.get("nodes") or merged.get("edges") or merged.get("svg") or merged.get("source"))
+        if kind == "formula":
+            return bool(_text(merged.get("latex") or merged.get("formula") or merged.get("expression") or merged.get("content")))
+        if kind == "copy":
+            return bool(_text(merged.get("content") or merged.get("text") or merged.get("value")))
+        return False
 
     row_by_id = {
         _text(row.get("message_id")): row for row in (rows or [])
         if isinstance(row, dict) and _text(row.get("message_id"))
     }
-    # Use the order selected by State Manager, not whichever table happens to be
-    # newest in the full history window.
+    restored: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    restored_kinds: set[str] = set()
     for source_id in source_ids:
         saved_row = row_by_id.get(source_id)
         if not isinstance(saved_row, dict):
@@ -1120,51 +1171,59 @@ def _restore_referenced_table_render(
         scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
         root_blocks = response.get("render_blocks") if isinstance(response.get("render_blocks"), list) else []
         scene_blocks = scene.get("render_blocks") if isinstance(scene.get("render_blocks"), list) else []
-        # Read the root mirror and SceneContract source together. Some earlier
-        # responses stored only one of them, and an empty mirror is not evidence
-        # that the canonical saved table is absent.
-        saved_blocks = list(root_blocks)
-        seen_blocks = {id(item) for item in saved_blocks}
-        saved_blocks.extend(item for item in scene_blocks if id(item) not in seen_blocks)
+        artifact_blocks = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+        saved_blocks = [*root_blocks, *scene_blocks, *artifact_blocks]
         for saved_block in saved_blocks:
             if not isinstance(saved_block, dict):
                 continue
-            block_type = _text(saved_block.get("type") or saved_block.get("artifact_type") or "").lower()
-            renderer = _text(saved_block.get("renderer") or saved_block.get("viewer") or "").lower()
-            if block_type != "table" and renderer != "tableblock":
-                continue
-            payload = table_payload(saved_block)
-            if not payload:
-                continue
-            restored = dict(saved_block)
-            restored["type"] = "table"
-            restored["artifact_type"] = "table"
-            restored["renderer"] = "TableBlock"
-            restored["viewer"] = "TableBlock"
-            restored["payload"] = payload
-            restored["source_message_id"] = source_id
-            restored["source"] = "authenticated_dialogue_history"
-            # The referenced original values win over a model-generated derivative.
-            blocks = [item for item in blocks if _text(item.get("type") or item.get("artifact_type")).lower() != "table"]
-            blocks.append(restored)
-            _apr_timing_log(
-                "explicit_render_restored",
-                user_key=_apr_diag_ref(user_id),
-                source_message_key=_apr_diag_ref(source_id),
-                renderer="TableBlock",
-                header_count=len(payload.get("headers") or payload.get("columns") or []),
-                row_count=len(payload.get("rows") or payload.get("data") or []),
-                delivery="existing_file_delivery_room",
+            fields = (
+                saved_block.get("type"), saved_block.get("artifact_type"),
+                saved_block.get("renderer"), saved_block.get("viewer"),
+                saved_block.get("output_type"),
             )
-            return blocks
+            kind = next((_artifact_renderer_kind(value) for value in fields if _artifact_renderer_kind(value)), "")
+            if kind not in eligible_kinds or not _block_has_payload(kind, saved_block):
+                continue
+            payload = saved_block.get("payload") if isinstance(saved_block.get("payload"), dict) else {}
+            title = _text(saved_block.get("title") or payload.get("title") or saved_block.get("filename"))
+            signature = (source_id, kind, title)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            copied = dict(saved_block)
+            copied.setdefault("source_message_id", source_id)
+            copied.setdefault("source", "authenticated_dialogue_history")
+            restored.append(copied)
+            restored_kinds.add(kind)
 
-    _apr_timing_log(
-        "explicit_render_not_found",
-        user_key=_apr_diag_ref(user_id),
-        source_message_key=_apr_diag_ref(source_ids[0]),
-        renderer="TableBlock",
-        reason="selected_retained_pair_has_no_concrete_table_payload",
-    )
+    if not restored:
+        _apr_timing_log(
+            "explicit_render_not_found",
+            user_key=_apr_diag_ref(user_id),
+            message_key=_apr_diag_ref(source_ids[0]),
+            renderer=sorted(eligible_kinds),
+            reason="selected_retained_pairs_have_no_concrete_requested_payload",
+        )
+        return blocks
+
+    # Existing saved source blocks replace model placeholders only for the
+    # matching renderer. New text and unrelated current renderers stay intact.
+    blocks = [
+        item for item in blocks
+        if _artifact_renderer_kind(item.get("type") or item.get("artifact_type") or item.get("renderer") or item.get("viewer")) not in restored_kinds
+    ]
+    blocks.extend(restored)
+    for item in restored:
+        kind = _artifact_renderer_kind(item.get("type") or item.get("artifact_type") or item.get("renderer") or item.get("viewer"))
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        _apr_timing_log(
+            "explicit_render_restored",
+            user_key=_apr_diag_ref(user_id),
+            source_message_key=_apr_diag_ref(item.get("source_message_id")),
+            renderer=kind,
+            payload_keys=len(payload),
+            delivery="scene_contract_replay",
+        )
     return blocks
 
 
@@ -1185,6 +1244,28 @@ def _image_analysis_reference(value: Any) -> bool:
         "based on this image", "use this image", "edit this image",
     )
     return any(marker.replace("ё", "е") in low for marker in markers)
+
+
+def _is_saved_artifact_replay_request(value: Any) -> bool:
+    """Detect when a selected prior April output must be reattached losslessly."""
+    low = _text(value).lower().replace("ё", "е")
+    if not low:
+        return False
+    artifact_target = bool(re.search(
+        r"(?:\bкод\w*|\bскрипт\w*|таблиц\w*|график\w*|диаграмм\w*|"
+        r"копирован\w*|\bкопи\b|\bcopy\b|четверостиш\w*|стих\w*|"
+        r"файл\w*|документ\w*|\bcode\b|\bgraph\b|\btable\b|\bchart\b)",
+        low,
+    ))
+    replay_action = bool(re.search(
+        r"(?:выдай\w*|вывед\w*|покаж\w*|верни\w*|восстанов\w*|повтор\w*|"
+        r"отдай\w*|предостав\w*|скопир\w*|найди\w*|достань\w*|"
+        r"где\s+(?:остал[ьт]н\w*|оставш\w*|остаточн\w*)|остал[ьт]н\w*|оставш\w*|остаточн\w*|"
+        r"\bshow\b|\breturn\b|\brestore\b|\bretrieve\b|\bprovide\b|"
+        r"\bgive\b|\bcopy\b|\bcontinue\b)",
+        low,
+    ))
+    return artifact_target and replay_action
 
 
 def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool:
@@ -1383,7 +1464,7 @@ def _persist_asset_analysis_summaries(
 def _bounded_text_file_excerpt(value: Any, limit: int) -> tuple[str, bool]:
     """Bound recalled document text while retaining both its opening and ending."""
     source = _text(value)
-    maximum = max(256, int(limit or 0))
+    maximum = max(64, int(limit or 0))
     if len(source) <= maximum:
         return source, False
     marker = "\n\n[… middle omitted to fit this plan's single-request context …]\n\n"
@@ -1414,6 +1495,7 @@ def _restore_selected_assets(
 
     has_current_asset = bool(visual_context or file_inputs or file_contents)
     explicit_prior_reference = _explicit_prior_asset_reference(current_request)
+    saved_artifact_replay = _is_saved_artifact_replay_request(current_request)
     relation = _text(dialogue_context.get("relation")).upper()
     contextual_history_match = bool(dialogue_context.get("contextual_history_match"))
     selected = dialogue_context.get("selected_pairs") or []
@@ -1437,33 +1519,50 @@ def _restore_selected_assets(
     # content rather than saying "photo" or "file" explicitly.
     branch_asset_ids: list[str] = []
     branch_pairs = ([anchor] if isinstance(anchor, dict) and anchor else []) + list(selected)
+    # Re-issuing artifacts must inspect the selected branch's complete output
+    # manifest, not just the first four entries. Ordinary visual continuity keeps
+    # the narrower user-input/output scan to avoid mixing old uploads.
+    manifest_groups = ("april_outputs",) if saved_artifact_replay else ("user_inputs", "april_outputs")
     for pair in reversed(branch_pairs):
         if not _pair_has_assets(pair):
             continue
         manifest = pair.get("dialogue_assets") if isinstance(pair.get("dialogue_assets"), dict) else {}
-        for group in ("user_inputs", "april_outputs"):
-            for asset_ref in (manifest.get(group) or [])[:4]:
+        for group in manifest_groups:
+            for asset_ref in (manifest.get(group) or [])[:16 if saved_artifact_replay else 4]:
                 if isinstance(asset_ref, dict):
                     asset_id = _text(asset_ref.get("message_id") or asset_ref.get("asset_message_id"))
                     if asset_id:
                         branch_asset_ids.append(asset_id)
-    branch_asset_ids = list(dict.fromkeys(branch_asset_ids))[:8]
+    branch_asset_ids = list(dict.fromkeys(branch_asset_ids))[:24 if saved_artifact_replay else 8]
     should_restore_branch_asset = bool(branch_asset_ids and (relation == "CONTINUE" or contextual_history_match))
     visual_followup = _image_analysis_reference(current_request)
-    if not explicit_prior_reference and not visual_followup and not should_restore_branch_asset:
+    if not explicit_prior_reference and not visual_followup and not should_restore_branch_asset and not saved_artifact_replay:
         return visual_context, attachments, file_inputs, file_contents, []
 
     candidate_message_ids: list[str] = list(branch_asset_ids)
+    # The pre-response transition audit can identify the exact active source
+    # pair even when the compact State Manager row no longer carries its asset
+    # manifest. A replay request must query that authenticated message ID
+    # directly; otherwise the model receives a summary but not the source bytes.
+    if saved_artifact_replay:
+        continuation_source_id = _text(dialogue_context.get("continuation_source_message_id"))
+        if continuation_source_id:
+            candidate_message_ids.append(continuation_source_id)
+        if isinstance(anchor, dict) and _text(anchor.get("message_id")):
+            candidate_message_ids.append(_text(anchor.get("message_id")))
+        for item in selected:
+            if isinstance(item, dict) and _text(item.get("message_id")):
+                candidate_message_ids.append(_text(item.get("message_id")))
     if explicit_prior_reference:
         if isinstance(anchor, dict) and _text(anchor.get("message_id")):
             candidate_message_ids.append(_text(anchor.get("message_id")))
         for item in selected:
             if isinstance(item, dict) and _text(item.get("message_id")):
                 candidate_message_ids.append(_text(item.get("message_id")))
-    candidate_message_ids = list(dict.fromkeys(candidate_message_ids))[:8]
+    candidate_message_ids = list(dict.fromkeys(candidate_message_ids))[:24 if saved_artifact_replay else 8]
 
     def _load_one_selected_image(message_id: str) -> list[dict[str, Any]]:
-        """Read up to four assets from one selected pair, never blend topic assets."""
+        """Read a bounded set of assets from one selected authenticated pair."""
         try:
             database_rows = load_dialogue_asset_payloads(uid, [message_id])
         except Exception:
@@ -1478,7 +1577,7 @@ def _restore_selected_assets(
             if not isinstance(payloads, list):
                 continue
             restored: list[dict[str, Any]] = []
-            for payload in payloads[:8]:
+            for payload in payloads[:16 if saved_artifact_replay else 8]:
                 if not isinstance(payload, dict) or _text(payload.get("kind")).lower() not in {"image", "file", "text_file"}:
                     continue
                 encoded = _text(payload.get("content_base64"))
@@ -1517,19 +1616,43 @@ def _restore_selected_assets(
                         "height": int(payload.get("height") or 0),
                     },
                 })
-                if len(restored) >= 4:
+                if len(restored) >= (12 if saved_artifact_replay else 4):
                     break
             if restored:
                 return restored
         return []
 
-    # Anchor first. If it has no valid image, inspect selected ranked pairs one by
-    # one and stop at the first match. Never combine images from multiple turns.
+    # Ordinary visual follow-ups stay anchor-first to avoid mixing uploads. When
+    # the user explicitly asks to replay generated deliverables, collect the
+    # selected branch's APRIL_OUTPUT payloads across its selected turns; otherwise
+    # artifacts created in separate messages would silently disappear.
     rows: list[dict[str, Any]] = []
-    for candidate_message_id in candidate_message_ids:
-        rows = _load_one_selected_image(candidate_message_id)
-        if rows:
-            break
+    if saved_artifact_replay:
+        output_roles = {"april_output", "assistant_output", "generated", "generated_file", "generated_image", "april_generated"}
+        seen_assets: set[tuple[str, str, str]] = set()
+        for candidate_message_id in candidate_message_ids:
+            for asset in _load_one_selected_image(candidate_message_id):
+                role = _text(asset.get("asset_role") or "april_output").lower()
+                if role not in output_roles:
+                    continue
+                signature = (
+                    _text(asset.get("message_id")),
+                    _text(asset.get("filename")),
+                    _text(asset.get("kind")),
+                )
+                if signature in seen_assets:
+                    continue
+                seen_assets.add(signature)
+                rows.append(asset)
+                if len(rows) >= 12:
+                    break
+            if len(rows) >= 12:
+                break
+    else:
+        for candidate_message_id in candidate_message_ids:
+            rows = _load_one_selected_image(candidate_message_id)
+            if rows:
+                break
     restored_meta: list[dict[str, Any]] = []
     for asset in rows:
         raw = bytes(asset.get("content") or b"")
@@ -1550,6 +1673,13 @@ def _restore_selected_assets(
             explicit_prior_reference
             or visual_followup
             or _requires_original_asset(current_request, kind, analysis_summary)
+            # A generated text/code/file output must be restored losslessly when
+            # the user asks to reissue it in another renderer. Its sidecar summary
+            # cannot stand in for the source bytes or original wording.
+            or (saved_artifact_replay and asset_role.lower() in {
+                "april_output", "assistant_output", "generated", "generated_file",
+                "generated_image", "april_generated",
+            })
             # A visually generated/attached image in the active branch is useful
             # evidence for natural follow-ups such as "is this one darker?" even
             # when the user never says "photo". Reattach images only; documents
@@ -1646,7 +1776,7 @@ def _restore_selected_assets(
         # a later follow-up could restore the original 48k-character sidecar and
         # bypass the 1,800-token request budget even though the first upload fit.
         total_budget = 2200
-        per_file_budget = max(256, total_budget // max(1, len(file_contents)))
+        per_file_budget = max(64, total_budget // max(1, len(file_contents)))
         for file_item in file_contents:
             if not isinstance(file_item, dict):
                 continue
@@ -2516,6 +2646,54 @@ async def execute(
             source_preserved=bool(dialogue_context.get("continuation_source_preserved")),
             history_request=explicit_history_request,
         )
+
+        # Assets were initially restored before the transition audit. If that
+        # audit has now selected a different exact source message, hydrate its
+        # files/images once more from that authenticated pair. This closes the
+        # ordering gap where dialogue semantics knew the source but Provider was
+        # handed only a compact summary and zero file_contents.
+        if (
+            transition_source_id
+            and _is_saved_artifact_replay_request(original or current_text)
+            and not any(
+                isinstance(item, dict) and _text(item.get("asset_message_id")) == transition_source_id
+                for item in (restored_assets or [])
+            )
+        ):
+            replay_visual: list[dict[str, Any]] = []
+            replay_attachments: list[dict[str, Any]] = []
+            replay_file_inputs: list[dict[str, Any]] = []
+            replay_file_contents: list[dict[str, Any]] = []
+            replay_context = dict(dialogue_context)
+            replay_context["continuation_source_message_id"] = transition_source_id
+            replay_visual, replay_attachments, replay_file_inputs, replay_file_contents, replay_meta = _restore_selected_assets(
+                uid, identity, replay_context, replay_visual, replay_attachments,
+                replay_file_inputs, replay_file_contents,
+                current_request=original or current_text,
+            )
+            def _merge_recalled(target: list[dict[str, Any]], incoming: list[dict[str, Any]], keys: tuple[str, ...]) -> None:
+                known = {tuple(_text(item.get(key)) for key in keys) for item in target if isinstance(item, dict)}
+                for item in incoming:
+                    if not isinstance(item, dict):
+                        continue
+                    signature = tuple(_text(item.get(key)) for key in keys)
+                    if signature not in known:
+                        target.append(item)
+                        known.add(signature)
+            _merge_recalled(visual_context, replay_visual, ("asset_message_id", "filename"))
+            _merge_recalled(attachments, replay_attachments, ("asset_message_id", "filename", "kind"))
+            _merge_recalled(file_inputs, replay_file_inputs, ("asset_message_id", "filename"))
+            _merge_recalled(file_contents, replay_file_contents, ("asset_message_id", "filename"))
+            _merge_recalled(restored_assets, replay_meta, ("asset_message_id", "filename", "kind"))
+            _apr_timing_log(
+                "post_transition_asset_restore",
+                user_key=_apr_diag_ref(uid),
+                source_message_key=_apr_diag_ref(transition_source_id),
+                restored_assets=len(replay_meta or []),
+                file_contents=len(replay_file_contents or []),
+                file_inputs=len(replay_file_inputs or []),
+                visual_items=len(replay_visual or []),
+            )
 
     pre_response_analysis = transition_analysis.setdefault("pre_response_analysis", {})
     if isinstance(pre_response_analysis, dict):
@@ -3788,8 +3966,9 @@ async def execute(
             and isinstance(context.get("explicit_render_reference"), dict)
             and context.get("explicit_render_reference")
         ), render_reference_context)
-    source_render_blocks = _restore_referenced_table_render(
-        uid, identity, render_reference_context, source_render_blocks, requested_for_delivery
+    source_render_blocks = _restore_referenced_scene_render_blocks(
+        uid, identity, render_reference_context, source_render_blocks, requested_for_delivery,
+        current_request=original or current_text,
     )
     source_render_blocks = attach_copy_block(source_render_blocks, requested_for_delivery, answer)
     delivery_blocks, attached_file_blocks = attach_file_delivery_blocks(
