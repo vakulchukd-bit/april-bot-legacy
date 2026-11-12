@@ -61,7 +61,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "free_provider_router_v11_continuation_scene_contract_8000_output"
+PROVIDER_ROUTER_VERSION = "free_provider_router_v12_lossless_artifact_replay_scene_contract_8000_output"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -3243,6 +3243,21 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             ],
             "INPUT_MODALITIES": data.get("INPUT_MODALITIES") or {},
             "ATTACHMENT_INDEX": assets_min,
+            # The body is transmitted once as an adjacent ATTACHED_TEXT_FILE input
+            # part. Keep a tiny filename/source-id manifest in every prompt size so
+            # ultra/emergency compaction never detaches that body from its identity.
+            "ATTACHED_TEXT_FILES": [
+                {
+                    "filename": _clip(item.get("filename") or "file", 160),
+                    "mime_type": _clip(item.get("mime_type") or "text/plain", 80),
+                    "asset_message_id": _clip(item.get("asset_message_id") or "current", 120),
+                    "asset_role": _clip(item.get("asset_role") or "user_input", 32),
+                    "content_available": bool(item.get("content_available", bool(_text(item.get("content"))))),
+                    "reader_truncated": bool(item.get("reader_truncated", False)),
+                    "source_chars": int(item.get("source_chars") or len(_text(item.get("content")))),
+                }
+                for item in (data.get("ATTACHED_TEXT_FILES") or [])[:8] if isinstance(item, dict)
+            ],
             "ROOM_KNOWLEDGE_CONTEXT": room_context_min,
             "C_ARTIFACT_RENDER_PLAN": [
                 {k: item[k] for k in ("output", "renderer", "viewer", "source_rooms") if k in item}
@@ -3643,7 +3658,9 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                   "PRE-RESPONSE AUDIT: follow DIALOGUE_TRANSITION_ANALYSIS and LAST_TURN_LINK; compare the actual latest April answer first, then selected authenticated history only if it does not match; never attach unrelated history to NEW_TOPIC. "
                   "If RECENT_LIMITATIONS contains prior refusals, continue that dialogue naturally, explain the real limitation and offer a genuinely allowed alternative without bypassing it. Do not expose raw provider wording. "
                   "Use PROTECTED_STRUCTURED_DATA exactly; if PROTECTED_STRUCTURED_DATA_EXTERNAL is present, "
-                  "read PROTECTED_STRUCTURED_DATA_SOURCE as its exact payload. Preserve protected values and "
+                  "read PROTECTED_STRUCTURED_DATA_SOURCE as its exact payload. If ATTACHED_TEXT_FILES lists "
+                  "content_available=true, read the matching ATTACHED_TEXT_FILE input part by filename and source ID "
+                  "as the source, not its sidecar summary. Preserve protected values and "
                   "valid render_blocks/artifacts; do not invent data. Return valid JSON matching OUTPUT_CONTRACT.\n\n"
                   + FREE_RESPONSE_QUALITY_CONTRACT)
         card = _json_card(minimal)
@@ -3660,7 +3677,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "CURRENT_REQUEST", "RETURN_LANGUAGE", "OUTPUT_CONTRACT", "REQUEST_SEQUENCE",
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL", "PROTECTED_STRUCTURED_DATA",
             "INTERPRETATION", "DIALOGUE_BASED_PORTRAIT_PROFILE", "DIALOGUE_COMMUNICATION", "C_ARTIFACT_RENDER_PLAN", "SCENE_CONTRACT", "INPUT_MODALITIES",
-            "ATTACHMENT_INDEX", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
+            "ATTACHMENT_INDEX", "ATTACHED_TEXT_FILES", "ATTACHMENT_COUNTS", "ROOM_KNOWLEDGE_CONTEXT", "DIALOGUE_RELATION",
             "OUTPUT_BUDGET_POLICY", "HISTORY_REQUEST", "HISTORY_TOPIC_COUNT", "HISTORY_TOPIC_MINIMUM",
             "HISTORY_TIME_WINDOW", "CONTINUATION_GUIDANCE", "LAST_TURN_LINK", "DIALOGUE_TRANSITION_ANALYSIS", "DIALOGUE_ANCHOR", "CONTINUATION_CONTEXT",
             "DIALOGUE_HISTORY_TOPICS", "DIALOGUE_TOPIC_INDEX", "DIALOGUE_KNOWN_TOPIC_COUNT",
@@ -4203,7 +4220,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "PROTECTED_CURRENT_INPUT", "PROTECTED_STRUCTURED_DATA_EXTERNAL",
             "PROTECTED_STRUCTURED_DATA", "INTERPRETATION", "DIALOGUE_RELATION",
             "SCENE_CONTRACT", "C_ARTIFACT_RENDER_PLAN", "INPUT_MODALITIES",
-            "ATTACHMENT_COUNTS", "OUTPUT_BUDGET_POLICY",
+            "ATTACHMENT_INDEX", "ATTACHED_TEXT_FILES", "ATTACHMENT_COUNTS", "OUTPUT_BUDGET_POLICY",
         )
         for key in keep_always:
             if key in minimal and minimal[key] not in (None, "", [], {}):
@@ -4240,6 +4257,30 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     "one_clear_explanation_per_renderer",
                 ) if key in scene
             }
+        attachment_index = ultra.get("ATTACHMENT_INDEX")
+        if isinstance(attachment_index, list):
+            ultra["ATTACHMENT_INDEX"] = [
+                {key: item[key] for key in (
+                    "filename", "kind", "mime_type", "asset_role", "asset_message_id",
+                    "source_type", "recalled_from_memory", "requires_original_analysis",
+                    "source_bytes_attached", "sequence_index", "reader_truncated", "source_chars",
+                    "analysis_summary",
+                ) if key in item and item[key] not in (None, "", [], {})}
+                | ({"analysis_summary": _clip(item.get("analysis_summary"), 180)} if item.get("analysis_summary") else {})
+                for item in attachment_index[:12] if isinstance(item, dict)
+            ]
+        text_files = ultra.get("ATTACHED_TEXT_FILES")
+        if isinstance(text_files, list):
+            ultra["ATTACHED_TEXT_FILES"] = [
+                {key: item[key] for key in (
+                    "filename", "mime_type", "size_bytes", "asset_role", "asset_message_id",
+                    "sequence_index", "content_available", "reader_truncated", "source_chars",
+                    "analysis_summary",
+                ) if key in item and item[key] not in (None, "", [], {})}
+                | ({"analysis_summary": _clip(item.get("analysis_summary"), 180)} if item.get("analysis_summary") else {})
+                for item in text_files[:8] if isinstance(item, dict)
+            ]
+
         policy = ultra.get("OUTPUT_BUDGET_POLICY")
         if isinstance(policy, dict):
             ultra["OUTPUT_BUDGET_POLICY"] = {
@@ -4295,7 +4336,18 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         if value.get(name) not in (None, "", [], {})
                     }
                     if isinstance(anchor.get("artifact_index"), list):
-                        anchor["artifact_index"] = anchor["artifact_index"][:16]
+                        compact_artifacts = []
+                        for artifact in anchor["artifact_index"][:12]:
+                            if not isinstance(artifact, dict):
+                                continue
+                            compact_artifacts.append({
+                                name: artifact[name] for name in (
+                                    "id", "asset_id", "artifact_id", "kind", "type", "artifact_type",
+                                    "source_message_id", "message_id", "asset_message_id", "branch_id",
+                                    "title", "renderer", "viewer", "mime_type",
+                                ) if artifact.get(name) not in (None, "", [], {})
+                            })
+                        anchor["artifact_index"] = compact_artifacts
                     ultra[key] = anchor
                 elif key == "CONTINUATION_CONTEXT" and isinstance(value, list):
                     compact_items = []
@@ -4310,8 +4362,12 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                         }
                         if isinstance(pair.get("branch_digest"), dict):
                             compact_pair["branch_digest"] = _compact_free_branch_digest_payload(
-                                pair["branch_digest"], step_limit=2, section_limit=2, artifact_limit=16
+                                pair["branch_digest"], step_limit=2, section_limit=2, artifact_limit=12
                             )
+                            if isinstance(compact_pair.get("branch_digest"), dict):
+                                for artifact in compact_pair["branch_digest"].get("artifact_refs", []):
+                                    if isinstance(artifact, dict):
+                                        artifact.pop("summary", None)
                         compact_items.append(compact_pair)
                     ultra[key] = compact_items
                 elif key == "LAST_TURN_LINK" and isinstance(value, dict):
@@ -4332,8 +4388,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "DIALOGUE_ANCHOR and use the selected CONTINUATION_CONTEXT branch; when it is NEW, do not import "
             "older answers or artifacts. Preserve PROTECTED_CURRENT_INPUT and all exact values in "
             "PROTECTED_STRUCTURED_DATA or PROTECTED_STRUCTURED_DATA_SOURCE. Follow OUTPUT_CONTRACT, "
-            "SCENE_CONTRACT and C_ARTIFACT_RENDER_PLAN. Return concrete ordered render_blocks/artifacts only "
-            "when their payloads exist; never invent or claim a missing file, image, table, graph or code artifact. "
+            "SCENE_CONTRACT and C_ARTIFACT_RENDER_PLAN as one ordered scene: REQUEST_SEQUENCE output types are "
+            "mandatory and complementary, not optional alternatives. If ATTACHED_TEXT_FILES says content_available=true, "
+            "read the matching ATTACHED_TEXT_FILE input part by filename and source_message_id as the exact "
+            "source; do not substitute its sidecar summary. Return every requested renderer in order, with "
+            "concrete payloads only; never invent or claim a missing file, image, table, graph or code artifact. "
             "Return valid JSON."
         )
         ultra_card = _json_card(ultra)
@@ -4357,6 +4416,14 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     ultra.get("PROTECTED_CURRENT_INPUT")
                     or ultra.get("PROTECTED_STRUCTURED_DATA_EXTERNAL")
                     or ultra.get("PROTECTED_STRUCTURED_DATA")
+                    or any(
+                        isinstance(item, dict) and item.get("content_available")
+                        for item in (ultra.get("ATTACHED_TEXT_FILES") or [])
+                    )
+                ),
+                "attached_source_count": sum(
+                    1 for item in (ultra.get("ATTACHED_TEXT_FILES") or [])
+                    if isinstance(item, dict) and item.get("content_available")
                 ),
             })
             return ultra_system, ultra_card, ultra_total, "free_ultra_minimal"
