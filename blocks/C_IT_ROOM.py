@@ -304,7 +304,7 @@ APRIL_UI_FUNCTION_CATALOG = {
         {"id":"settings_display_name", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → значок профиля сверху справа.", "position":"Секция USER в профиле; поле имени и кнопка Edit/Save.", "control":"Edit → поле имени → Save.", "does":"Меняет отображаемое имя пользователя в профиле/сообществах.", "how_to_use":["Откройте /settings.", "В секции USER нажмите Edit.", "Измените имя и нажмите Save.", "Проверьте обновлённое значение после сохранения."], "result":"Новое имя становится отображаемым именем пользователя.", "availability":"После авторизации.", "limits":"Не является заменой April ID или Google-аккаунта."},
         {"id":"settings_copy_ids", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → Profile.", "position":"В верхней части профиля рядом с идентификаторами аккаунта.", "control":"April ID / Premium ID и кнопка Copy.", "does":"Копирует соответствующий идентификатор в буфер обмена.", "how_to_use":["Откройте /settings.", "Найдите строку April ID или Premium ID.", "Нажмите Copy рядом с нужным ID.", "Вставьте его в безопасное место/форму, если это действительно требуется."], "result":"Идентификатор копируется; секреты или пароль кнопка не показывает.", "availability":"April ID для вошедшего пользователя; Premium ID — при наличии Premium.", "limits":"ID — идентификатор, не пароль. Не публикуйте его без необходимости."},
         {"id":"settings_language", "areas":["settings"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → Profile.", "position":"Отдельная языковая секция ниже карточки профиля и текущего тарифа.", "control":"Кнопки языка и More languages.", "does":"Меняет язык интерфейса/предпочтительный язык для конкретного пользователя.", "how_to_use":["Прокрутите /settings до секции языка.", "Выберите один из видимых языков.", "Чтобы открыть дополнительные варианты, нажмите More languages и выберите нужный язык."], "result":"Выбор языка сохраняется как пользовательская настройка.", "availability":"Для вошедшего пользователя.", "limits":"Положение секции может отличаться на узком экране; она не является отдельной страницей."},
-        {"id":"settings_plan_payment", "areas":["settings","plans"], "screen":"Настройки и профиль /settings", "entry":"Основной чат → Profile.", "position":"Карточка CURRENT PLAN в профиле.", "control":"Статус Free/Premium, Time remaining и при выполнении условий кнопки 7 дней · $12 / 28 дней · $25 / 12 часов · $3; в платёжном окне Pay и Cancel.", "does":"Показывает текущий тариф и оставшееся время; доступные кнопки запускают разовую предоплату.", "how_to_use":["Откройте /settings и найдите CURRENT PLAN.", "Проверьте статус и Time remaining.", "Если видна подходящая кнопка пакета, выберите её.", "Создаётся заказ LiqPay и открывается защищённый Checkout; Google Pay/карта доступны только если их показывает сам Checkout для устройства и конфигурации продавца.", "После подтверждения вернитесь в профиль и проверьте обновлённый статус."], "result":"При успешном подтверждении шлюзом тариф активируется/обновляется согласно пакету.", "availability":"Кнопки зависят от статуса тарифа/остатка времени; внешние кнопки скрыты в Google Play distribution.", "limits":"Разовая покупка, без авто-продления. Суммы в архиве: 7 дней — $12; 28 дней — $25; 12 часов — $3. Производственный шлюз может иметь отдельную конфигурацию; нельзя объявлять оплату успешной до gateway confirmation."},
+        {"id":"settings_plan_payment", "areas":["settings","plans"], "screen":"Your profile /settings · CURRENT PLAN", "entry":"На основном экране APRIL нажмите кнопку профиля с именем пользователя в верхней панели справа; откроется Your profile.", "position":"На странице Your profile прокрутите ниже блока USER / Name in chat space. Там расположена карточка CURRENT PLAN; пакеты показаны в нижней части этой карточки, выше блока Delete account.", "control":"CURRENT PLAN со статусом FREE / Free access или активным тарифом; видимые пакеты: 7 days · $12, 28 days · $25, 12 hours · $3. В checkout встречаются Pay и Cancel.", "does":"Показывает действующий уровень доступа и срок; если текущая сборка/состояние аккаунта разрешает покупку, пакет запускает разовую оплату.", "how_to_use":["Откройте основной чат APRIL и нажмите кнопку профиля с вашим именем в верхней панели справа.", "На странице Your profile найдите карточку CURRENT PLAN — она находится ниже USER / Name in chat space.", "Проверьте текущий уровень и время действия, если оно показано.", "Выберите один из пакетов, только если соответствующая кнопка действительно видна: 7 days · $12, 28 days · $25 или 12 hours · $3.", "В появившемся checkout проверьте сумму и условия; Pay подтверждает оплату, Cancel отменяет/закрывает checkout.", "Дождитесь подтверждения платёжного сервиса, вернитесь в Your profile и проверьте обновлённый статус/срок."], "result":"После подтверждения платёжным шлюзом сервер обновляет entitlement и срок действия; статус следует проверить в CURRENT PLAN.", "availability":"Набор пакетов зависит от текущего состояния тарифа и сборки. В Google Play distribution внешние платёжные кнопки скрыты; ориентируйтесь на фактически видимые элементы страницы.", "limits":"Покупки разовые, авто-продление не обещать. Цены в снимке исходников/экрана: 7 days · $12, 28 days · $25, 12 hours · $3. На приложенном экране кнопки Free trial / Start trial нет; тестовый период нельзя утверждать без явного предложения до оплаты. Нельзя объявлять оплату успешной до gateway confirmation."},
         {"id":"history_resume", "areas":["history","settings"], "screen":"История диалогов /history", "entry":"/history напрямую или /settings → CURRENT PLAN → Dialog history, если доступна.", "position":"Основное содержимое страницы — список карточек диалогов.", "control":"Карточка с датой/фрагментом и Continue this dialogue.", "does":"Открывает сохранённый диалог и позволяет продолжить его контекст.", "how_to_use":["Откройте /history.", "Найдите карточку по дате и текстовому фрагменту.", "Нажмите Continue this dialogue."], "result":"Продолжение выбранной беседы.", "availability":"Premium-gated in source snapshot.", "limits":"В просмотренной странице отдельное поисковое поле не найдено; смысловой/временной поиск можно попросить April выполнить из чата."},
         {"id":"community_public_post", "areas":["space"], "screen":"Community /space", "entry":"/settings → CURRENT PLAN → Community или прямой /space.", "position":"Лента сообщества; закреплённая панель публикации внизу. Скрепка Attach a file слева от поля текста, Send справа.", "control":"Ask a question or share a solution… · Attach a file · Send.", "does":"Публикует сообщение и при необходимости один файл в общей ленте, видимые участникам сообщества.", "how_to_use":["Откройте /space и войдите через Google, если требуется.", "В нижней панели нажмите Attach a file слева, если нужно приложить документ/код/архив.", "Выберите поддерживаемый файл до 3 МБ; при необходимости введите текст до 4000 символов.", "Нажмите Send справа. Пост и вложение появятся в общей ленте."], "result":"Публичный пост появляется в общей ленте, а файл становится доступен участникам.", "availability":"Сообщество доступно Free и Premium в исходнике; вход обязателен.", "limits":"Файлы до 3 МБ, активное хранилище вложений до 30 МБ на пользователя; исполняемые типы блокируются, список допустимых расширений ограничен. Публикации и файлы видны сообществу. Не размещайте личные данные, пароли и API-ключи."},
         {"id":"community_invite", "areas":["space"], "screen":"Community /space", "entry":"Откройте /space.", "position":"В верхней части страницы — блок Personal profile и приглашение.", "control":"Invite a friend.", "does":"Формирует ссылку приглашения; передача выполняется через системное меню Share, если браузер его поддерживает, иначе ссылка копируется.", "how_to_use":["Откройте /space.", "Найдите блок профиля/Personal profile и нажмите Invite a friend.", "В системном меню выберите мессенджер/приложение или используйте Copy link."], "result":"Ссылка приглашения передаётся или копируется.", "availability":"После входа.", "limits":"Список мессенджеров зависит от ОС и доступных приложений; сайт не гарантирует конкретный сервис в меню."},
@@ -500,15 +500,15 @@ APRIL_UI_FUNCTION_CATALOG["functions"].extend([
     },
     {
         "id":"settings_premium_packages", "areas":["settings","plans"],
-        "screen":"Настройки /settings — CURRENT PLAN и платёжное окно",
-        "entry":"Откройте /settings и проверьте условия отображения пакетов.",
-        "position":"Внутри карточки CURRENT PLAN; платёжное окно появляется после выбора пакета.",
-        "control":"7 дней · $12; 28 дней · $25; 12 часов · $3; в платёжном окне Pay и Cancel.",
-        "does":"Создаёт разовый платёж выбранного пакета и открывает защищённую платёжную форму, если этот канал оплаты разрешён для сборки.",
-        "how_to_use":["Проверьте активный тариф и условие доступности покупки/продления.","Выберите один из реально отображаемых пакетов.","В платёжном окне проверьте сумму и данные до нажатия Pay.","Для отмены нажмите Cancel.","После оплаты дождитесь подтверждения gateway и затем обновите статус тарифа."],
+        "screen":"Your profile /settings — CURRENT PLAN и платёжное окно",
+        "entry":"На главном экране нажмите кнопку профиля с именем пользователя в верхней панели справа.",
+        "position":"Страница Your profile: карточка CURRENT PLAN ниже USER / Name in chat space. Кнопки пакетов находятся в нижней части CURRENT PLAN; checkout появляется после выбора одного пакета.",
+        "control":"CURRENT PLAN; 7 days · $12; 28 days · $25; 12 hours · $3; в checkout — Pay и Cancel, если платёжный канал доступен.",
+        "does":"Создаёт разовый платёж выбранного пакета и открывает защищённую платёжную форму, если этот канал оплаты разрешён для текущей сборки и состояния аккаунта.",
+        "how_to_use":["Откройте Your profile через кнопку профиля справа сверху на главном экране.","Прокрутите ниже USER / Name in chat space до CURRENT PLAN.","Проверьте статус и выберите один из пакетов, только если его кнопка видна.","В checkout перепроверьте сумму и условия; нажмите Pay для подтверждения или Cancel для отмены.","Дождитесь подтверждения gateway, вернитесь в Your profile и проверьте статус/срок."],
         "result":"После успешного подтверждения платёжного шлюза сервер обновляет тариф и срок действия.",
-        "availability":"Кнопки пакетов скрыты в Google Play distribution; для действующего Premium продление появляется в зависимости от окна продления. Точные условия определяются экраном и сервером.",
-        "limits":"Разовая покупка, не обещать автоматическое списание. Наличие checkout-формы не доказывает успешную оплату. Источники подтверждают этикетки 7d/$12, 28d/$25, 12h/$3."
+        "availability":"Доступность зависит от сборки и текущего entitlement. Кнопки пакетов скрыты в Google Play distribution; для действующего Premium продление может появляться только в заданном окне. Ориентируйтесь на фактически видимый CURRENT PLAN.",
+        "limits":"Разовая покупка, автоматическое списание не обещать. На предоставленном скриншоте нет Free trial / Start trial. Наличие checkout-формы не доказывает успешную оплату; статус изменяется только после подтверждения gateway."
     },
     {
         "id":"settings_support_drawer", "areas":["settings","support"],
@@ -982,9 +982,10 @@ _SITE_UI_OBJECT_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _SITE_UI_ELLIPTICAL_QUESTION_RE = re.compile(
-    r"(?:\b(?:где|куда|как|что|зачем|почему|какой|какая|какие|where|how|what|which)\b"
+    r"(?:не\s+понима\w*.{0,65}\bкуда\b.{0,35}\b(?:пройти|идти|зайти|нажать|перейти)\b|"
+    r"\b(?:где|куда|как|что|зачем|почему|какой|какая|какие|where|how|what|which)\b"
     r".{0,55}\b(?:это|этот|эта|эту|там|туда|она|он|они|ее|её|его|ими|так|"
-    r"работает|делает|нажать|открыть|это\s+делать|it|this|that|there|it\s+works|it\s+does)\b|"
+    r"работает|делает|нажать|открыть|пройти|идти|это\s+делать|it|this|that|there|it\s+works|it\s+does)\b|"
     r"\b(?:а\s+)?(?:это|этот|эта|эту|там|туда|она|он|они|ее|её|его)\s*\?+|"
     r"\b(?:а\s+)?(?:она|он|они|это|этот|эта|эту)\s+(?:что\s+)?(?:делает|значит|такое|работает)\s*\?+|"
     r"\bwhat\s+(?:does\s+it\s+do|is\s+it\s+for|does\s+that\s+do)\s*\?+)",
@@ -1020,6 +1021,43 @@ def _has_current_site_ui_reference(value: Any) -> bool:
     )
 
 
+def _is_help_information_plans_topic_query(value: Any) -> bool:
+    """Distinguish the informational Plans & Payments article from purchasing Premium."""
+    text = str(value or "").strip().lower().replace("ё", "е")
+    has_help_surface = bool(re.search(
+        r"(?:help\s*(?:&|and)\s*information|help\s+center|справк\w*|центр\s+помощи|/aprill)",
+        text, re.I,
+    ))
+    has_plans_article = bool(re.search(
+        r"(?:plans\s*(?:&|and)\s*payments|план\w*\s+и\s+платеж\w*|тариф\w*\s+и\s+платеж\w*)",
+        text, re.I,
+    ))
+    return has_help_surface and has_plans_article
+
+
+def _is_april_premium_navigation_query(value: Any) -> bool:
+    """Recognize a user's navigation request for April's own plan card.
+
+    This deliberately does not classify a generic ChatGPT/third-party subscription
+    question as April UI help. April itself, or an explicit "your app" reference,
+    must be present alongside a plan/subscription term.
+    """
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if not text:
+        return False
+    plan = bool(re.search(
+        r"(?:\bpremium\b|премиум|платн\w*\s+план|тариф\w*|подписк\w*|"
+        r"пробн\w*\s+период|тестов\w*\s+(?:период|доступ)|бесплатн\w*\s+(?:тест|период)|"
+        r"free\s+trial|trial\s+period|plan\s*(?:&|and)?\s*payments)",
+        text, re.I,
+    ))
+    april_app = bool(re.search(
+        r"(?:\bapril\b|април\w*|эйприл\w*|тво[её]м\s+приложени\w*|в\s+приложени\w*\s+april)",
+        text, re.I,
+    ))
+    return plan and april_app
+
+
 def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_ids: Any = None) -> Dict[str, List[str]]:
     """Resolve an already-interpreted UI operation to the source-derived control catalog.
 
@@ -1035,6 +1073,14 @@ def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_i
     goal = _text(semantic.get("user_goal"))
     combined = f"{query} {goal}".lower().replace("ё", "е")
     inferred_areas = list(area_ids) if isinstance(area_ids, (list, tuple, set)) else []
+    if _is_april_premium_navigation_query(combined):
+        return {
+            "function_ids": ["settings_plan_payment", "settings_premium_packages"],
+            "semantic_targets": ["plans.payment", "settings.payment_packages"],
+            # The user buys from the profile's CURRENT PLAN card, not from the
+            # similarly named informational card on Help & Information.
+            "area_ids": ["settings"],
+        }
     for _score, area_id in _semantic_site_area_scores(combined):
         if area_id not in inferred_areas:
             inferred_areas.append(area_id)
@@ -1178,6 +1224,13 @@ def _site_focused_function_candidates(query: str, area_ids: List[str]) -> List[s
                 out.append(value)
 
     # High-specificity current operation resolution, before broad page overlap.
+    # Plans & Payments inside Help & Information is an article card, not checkout.
+    if _is_help_information_plans_topic_query(q):
+        add("help_article_navigation", "help_topic_cards")
+        return out
+    if _is_april_premium_navigation_query(q):
+        add("settings_plan_payment", "settings_premium_packages")
+        return out
     if re.search(r"(?:сменить|изменить|поменять|выбрать).{0,35}(?:язык|language)|(?:язык|language).{0,35}(?:сменить|изменить|выбрать)", q, re.I):
         add("settings_language")
         return out
@@ -1496,6 +1549,172 @@ APRIL_ACCESS_MATRIX = {
     "not_promised": ["Глобальный поиск по всему сайту и поисковое поле на /history: в исходном архиве не найдены; реальный Search friends есть только в Community /space", "Автоматическое списание/авто-продление: в исходнике указаны разовые покупки без recurring charges", "Внешний LiqPay checkout в Google Play-сборке: кнопки внешней оплаты там скрыты", "Отдельная рабочая панель /memory или /tools — эти страницы пустые в исходном архиве", "Административная страница /Admin-profile для обычных пользователей"],
     "source_note": "Матрица восстановлена по текущему Web source snapshot и трём пользовательским изображениям только как контекст для проверки. В репозитории нет полного набора настоящих экранных снимков; боевой домен напрямую не инспектировался. Если текущий экран отличается, приоритет у фактического видимого экрана.",
 }
+
+
+APRIL_UI_SCREEN_EVIDENCE = {
+    "schema": "april.ui_screenshot_evidence.v1",
+    "observed_on": "2026-11-12",
+    "source": "User-supplied April mobile screenshots in this conversation, cross-checked with the uploaded Web source archive.",
+    "limits": (
+        "Screenshots confirm only the visible labels and relative positions in the shown states. "
+        "They do not prove live entitlement, successful checkout, trial availability, or controls hidden by another account/build state. "
+        "Use current visible screen state over archived defaults when they differ."
+    ),
+    "screens": [
+        {
+            "id": "chat_home", "route": "/", "title": "APRIL · основной чат",
+            "aliases": ["главный экран", "основной чат", "чат April", "message April", "скрепка", "микрофон"],
+            "position": "Верхняя панель: логотип APRIL слева, метла ближе к центру, кнопка профиля с именем справа. Нижняя закреплённая панель: скрепка слева, поле Message April и стрелка отправки, микрофон справа.",
+            "visible_labels": ["APRIL", "Message April"],
+            "controls": [
+                {"label": "Кнопка профиля с именем пользователя", "position": "верхняя панель справа", "purpose": "Открывает Your profile /settings"},
+                {"label": "Значок метлы", "position": "верхняя панель, ближе к центру", "purpose": "Очищает видимое рабочее поле чата; не удаляет аккаунт и сохранённую историю"},
+                {"label": "Скрепка", "position": "слева от поля сообщения внизу", "purpose": "Открывает выбор Camera / Images / Files для вложения"},
+                {"label": "Message April + стрелка", "position": "нижняя панель по центру", "purpose": "Ввод и отправка текстового сообщения"},
+                {"label": "Микрофон", "position": "справа от поля сообщения", "purpose": "Голосовой ввод"},
+            ],
+        },
+        {
+            "id": "profile_plan", "route": "/settings", "title": "Your profile · CURRENT PLAN",
+            "aliases": ["профиль", "личный кабинет", "настройки", "премиум", "premium", "подписка", "тариф", "платный план", "пробный период", "free trial", "оплата"],
+            "position": "На странице Your profile карточки идут вертикально. CURRENT PLAN находится ниже карточки USER / Name in chat space и выше Delete account. Пакеты оплаты показаны в нижней части CURRENT PLAN.",
+            "visible_labels": ["Your profile", "Google · Google Account", "APRIL ID", "USER", "Name in chat space", "Edit", "CURRENT PLAN", "FREE", "Free access", "Chat with April", "Dialog history", "Support", "Community", "7 days · $12", "28 days · $25", "12 hours · $3", "Delete account", "LANGUAGE", "English", "Українська", "Français", "Choose another language"],
+            "controls": [
+                {"label": "Кнопка профиля с именем", "position": "верхняя панель основного чата, справа", "purpose": "Переход в Your profile"},
+                {"label": "CURRENT PLAN", "position": "карточка профиля ниже USER", "purpose": "Показывает текущий уровень доступа и доступные действия с тарифом"},
+                {"label": "7 days · $12", "position": "нижняя часть CURRENT PLAN", "purpose": "Пакет на 7 дней; выбирать только если он реально показан"},
+                {"label": "28 days · $25", "position": "нижняя часть CURRENT PLAN", "purpose": "Пакет на 28 дней; выбирать только если он реально показан"},
+                {"label": "12 hours · $3", "position": "нижняя часть CURRENT PLAN", "purpose": "Пакет на 12 часов; выбирать только если он реально показан"},
+                {"label": "Pay / Cancel", "position": "внешнее окно checkout после выбора пакета, если платёжный канал доступен", "purpose": "Pay подтверждает оплату; Cancel закрывает/отменяет checkout"},
+            ],
+            "trial_evidence": "На предоставленном экране нет надписи Free trial / Start trial. Пробный период нельзя обещать, если он не указан отдельным условием до оплаты.",
+        },
+        {
+            "id": "help_information", "route": "/aprill", "title": "Help & Information",
+            "aliases": ["помощь", "справка", "help center", "how to use", "privacy policy", "terms of service", "plans and payments", "удаление аккаунта"],
+            "position": "Заголовок и вводная карточка находятся сверху; ниже идут отдельные тематические карточки вертикальным списком.",
+            "visible_labels": ["Help Center", "How to Use April", "Privacy Policy", "Terms of Service", "Plans & Payments", "Account & Data Deletion", "Contact Support"],
+            "controls": [
+                {"label": "Plans & Payments", "position": "карточка в списке Help & Information", "purpose": "Открывает справочный материал о планах; не является кнопкой покупки"},
+                {"label": "Account & Data Deletion", "position": "карточка в списке Help & Information", "purpose": "Открывает объяснение удаления April-аккаунта"},
+                {"label": "Contact Support", "position": "нижняя часть списка тем", "purpose": "Переход к сведениям/доступному каналу поддержки"},
+            ],
+        },
+        {
+            "id": "community", "route": "/space", "title": "April · Community",
+            "aliases": ["community", "сообщество", "никнейм", "друзья", "пригласить друга", "публикация"],
+            "position": "Заголовок April · Community сверху; Personal profile раскрывается отдельной карточкой; лента расположена ниже; редактор публикации закреплён внизу.",
+            "visible_labels": ["April · Community", "FREE", "Personal profile", "Your community nickname", "Save nickname", "Invite a friend", "Friend requests", "Friends", "Add friend", "Ask a question or share a solution..."],
+            "controls": [
+                {"label": "Personal profile", "position": "карточка сразу под заголовком", "purpose": "Раскрывает профиль сообщества и поле nickname"},
+                {"label": "Save nickname", "position": "под Your community nickname", "purpose": "Сохраняет имя участника сообщества"},
+                {"label": "Invite a friend", "position": "внутри Personal profile", "purpose": "Открывает приглашение друга"},
+                {"label": "Add friend", "position": "на карточке участника в ленте", "purpose": "Отправляет запрос дружбы"},
+                {"label": "Ask a question or share a solution...", "position": "нижняя закреплённая панель", "purpose": "Поле для новой публикации"},
+            ],
+        },
+    ],
+}
+
+
+def _ui_search_terms(value: Any) -> set[str]:
+    text = str(value or "").lower().replace("ё", "е")
+    tokens = set(re.findall(r"[a-zа-яіїє0-9]{3,}", text, re.I))
+    stop = {"как", "куда", "где", "что", "мне", "тебя", "твой", "твое", "твоем", "это", "для", "или", "and", "the", "with", "where", "what", "how", "you", "your", "into", "from"}
+    tokens.difference_update(stop)
+    synonyms = {
+        "премиум": {"premium", "подписка", "тариф", "оплата", "план"},
+        "premium": {"премиум", "подписка", "тариф", "оплата", "план"},
+        "подключить": {"активировать", "оформить", "купить", "оплатить", "premium", "премиум"},
+        "активировать": {"подключить", "оформить", "купить", "оплатить"},
+        "профиль": {"settings", "настройки", "account", "кабинет"},
+        "настройки": {"профиль", "settings", "account"},
+        "сообщество": {"community", "space", "друзья"},
+        "справка": {"help", "information", "support"},
+        "скрепка": {"вложение", "файл", "фото", "attachment"},
+    }
+    expanded = set(tokens)
+    for token in tuple(tokens):
+        expanded.update(synonyms.get(token, set()))
+    return expanded
+
+
+def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
+    """Search real April screens and control records; return a compact UI answer basis.
+
+    This is the IT room's local interface searcher. It searches both screenshot-seen
+    labels/positions and the source-derived function catalogue, never internal room
+    names or unverified API routes as if they were user-facing controls.
+    """
+    q = str(query or "").strip()[:1200]
+    terms = _ui_search_terms(q)
+    plan_query = _is_april_premium_navigation_query(q)
+    screens = APRIL_UI_SCREEN_EVIDENCE.get("screens", [])
+    screen_rows = []
+    for screen in screens:
+        screen_text = " ".join([
+            str(screen.get("id", "")), str(screen.get("title", "")), str(screen.get("route", "")),
+            " ".join(screen.get("aliases", [])), " ".join(screen.get("visible_labels", [])),
+            str(screen.get("position", "")),
+        ])
+        screen_terms = _ui_search_terms(screen_text)
+        score = 3 * len(terms & screen_terms)
+        if plan_query and screen.get("id") == "profile_plan":
+            score += 100
+        if score:
+            screen_rows.append((score, screen))
+    screen_rows.sort(key=lambda row: row[0], reverse=True)
+
+    function_rows = []
+    for item in APRIL_UI_FUNCTION_CATALOG.get("functions", []):
+        if not isinstance(item, dict):
+            continue
+        fields = [item.get(key, "") for key in ("id", "screen", "entry", "position", "control", "does", "availability", "limits")]
+        fields.extend(item.get("how_to_use", []) if isinstance(item.get("how_to_use"), list) else [])
+        item_terms = _ui_search_terms(" ".join(map(str, fields)))
+        score = 2 * len(terms & item_terms)
+        if plan_query and item.get("id") in {"settings_plan_payment", "settings_premium_packages"}:
+            score += 100
+        if score:
+            function_rows.append((score, item))
+    function_rows.sort(key=lambda row: row[0], reverse=True)
+
+    chosen_screens = []
+    for _score, screen in screen_rows[:2]:
+        chosen_screens.append({
+            "id": screen.get("id"), "route": screen.get("route"), "title": screen.get("title"),
+            "position": screen.get("position"), "visible_labels": list(screen.get("visible_labels", [])),
+            "controls": list(screen.get("controls", []))[:8],
+            **({"trial_evidence": screen.get("trial_evidence")} if screen.get("trial_evidence") else {}),
+        })
+    chosen_functions = []
+    seen_ids = set()
+    preferred_ids = ["settings_plan_payment", "settings_premium_packages"] if plan_query else []
+    ordered_functions = [item for _score, item in function_rows]
+    if preferred_ids:
+        ordered_functions.sort(key=lambda item: 0 if item.get("id") in preferred_ids else 1)
+    for item in ordered_functions:
+        item_id = str(item.get("id") or "")
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+        chosen_functions.append({
+            "id": item_id, "screen": item.get("screen"), "entry": item.get("entry"),
+            "position": item.get("position"), "control": item.get("control"),
+            "purpose": item.get("does"), "steps": list(item.get("how_to_use", []))[:7],
+            "result": item.get("result"), "availability": item.get("availability"),
+            "limits": item.get("limits"),
+        })
+        if len(chosen_functions) >= (2 if plan_query else max(1, min(int(limit or 4), 4))):
+            break
+
+    return {
+        "schema": "april.ui_search_result.v1", "query": q,
+        "domain": "april_ui", "focused_intent": "premium_plan_navigation" if plan_query else "screen_and_control_lookup",
+        "screen_matches": chosen_screens, "control_matches": chosen_functions,
+        "evidence_source": APRIL_UI_SCREEN_EVIDENCE.get("source", ""),
+        "evidence_limits": APRIL_UI_SCREEN_EVIDENCE.get("limits", ""),
+    }
 
 
 def _select_user_journeys(query: str) -> list[dict]:
@@ -2119,6 +2338,8 @@ def _site_full_interface_overview_requested(value: Any) -> bool:
 def _site_direct_function_intent(query: str) -> bool:
     """Recognize UI-action semantics that may not contain a page name or button noun."""
     q = str(query or "").lower().replace("ё", "е")
+    if _is_april_premium_navigation_query(q):
+        return True
     patterns = (
         r"(?:сменить|изменить|поменять|выбрать).{0,35}(?:язык|language)|(?:язык|language).{0,35}(?:сменить|изменить|выбрать)",
         r"(?:изменить|поменять|обновить).{0,35}(?:имя|никнейм|display\s*name)|(?:скопировать|copy).{0,30}(?:april\s*id|premium\s*id|идентификатор)",
@@ -2176,7 +2397,7 @@ def is_site_help_query(query: str) -> bool:
         r"(?:купить|оплатить|продлить|обновить).{0,55}(?:premium|премиум)|"
         r"(?:premium|премиум).{0,55}(?:купить|оплатить|продлить|обновить|7\s*дн|28\s*дн|12\s*час)", low, re.I,
     ))
-    if account_entry_help or premium_billing_help or _site_direct_function_intent(low):
+    if account_entry_help or premium_billing_help or _is_april_premium_navigation_query(low) or _site_direct_function_intent(low):
         return True
     # Explanation requests about a specific visible control are UI help even when
     # they do not contain a navigation verb: "what does this button do?".
@@ -2289,11 +2510,18 @@ def _site_should_render_diagram(query: str, requested_outputs: Any = None) -> bo
 
 
 def _requested_outputs_from_machine_request(machine_request: Any) -> List[str]:
-    """Read output preferences from the actual request/interpretation envelope."""
-    root = machine_request if isinstance(machine_request, dict) else getattr(machine_request, "intent", {})
+    """Read output preferences from both the request envelope and interpretation."""
+    sources: List[Dict[str, Any]] = []
+    if isinstance(machine_request, dict):
+        root = machine_request
+    else:
+        explicit = getattr(machine_request, "requested_outputs", None)
+        if isinstance(explicit, (list, tuple, set)) and explicit:
+            sources.append({"requested_outputs": list(explicit)})
+        root = getattr(machine_request, "intent", {})
     if not isinstance(root, dict):
-        return []
-    sources = [root]
+        root = {}
+    sources.append(root)
     nested = root.get("intent")
     if isinstance(nested, dict):
         sources.append(nested)
@@ -2303,15 +2531,24 @@ def _requested_outputs_from_machine_request(machine_request: Any) -> List[str]:
         nested_intent = interpretation.get("intent")
         if isinstance(nested_intent, dict):
             sources.append(nested_intent)
+
+    # Merge rather than returning the first source: MachineRequest keeps the
+    # public output contract alongside the interpretation payload. Some callers
+    # populate one before the other while a diagram is being requested.
+    output: List[str] = []
     for source in sources:
         values = source.get("requested_outputs")
-        if isinstance(values, (list, tuple, set)) and values:
-            return [str(value) for value in values]
-    return []
+        if isinstance(values, (list, tuple, set)):
+            for value in values:
+                item = str(value).strip()
+                if item and item not in output:
+                    output.append(item)
+    return output
 
 
 _ELLIPTICAL_SITE_FOLLOWUP_RE = re.compile(
-    r"(?:где\s+(?:это|там|он|она|они|мне|находится)|куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|идти)|"
+    r"(?:не\s+понима\w*.{0,65}\bкуда\b.{0,35}\b(?:пройти|идти|зайти|нажать|перейти)\b|"
+    r"где\s+(?:это|там|он|она|они|мне|находится)|куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|идти|пройти)|"
     r"покажи\s+(?:мне\s+)?(?:это|где|куда|путь)?|как\s+туда|какую\s+кнопку|"
     r"where\s+is\s+it|where\s+do\s+i\s+go|show\s+me\s+where|how\s+do\s+i\s+get\s+there)",
     re.IGNORECASE,
@@ -2437,6 +2674,10 @@ def _active_site_ui_followup(interpretation: Any, query: str, recent_context: An
     # the active pair's answer, not to every item on that page.
     resolved_ids: List[str] = []
     resolved_targets: List[str] = []
+    # Always initialise the semantic match. When a specific control kind is
+    # selected above (share/feedback), the old code skipped this assignment but
+    # still read matched.get("area_ids") below, raising UnboundLocalError.
+    matched: Dict[str, Any] = {}
     if control_kind == "assistant_response_share":
         resolved_ids = ["assistant_response_share"]
         resolved_targets = ["response.share_to_community"]
@@ -2468,9 +2709,10 @@ def _active_site_ui_followup(interpretation: Any, query: str, recent_context: An
         return {}
 
     prior_user, prior_answer, _pair_text, prior_areas = candidates[0]
-    area_ids = ["response-feedback", "chat", "space"] if "assistant_response_share" in resolved_ids else ["response-feedback", "chat"]
-    if not area_ids:
-        area_ids = prior_areas
+    # Preserve the actual control family selected from the previous active April
+    # UI exchange (plans, profile, Community, attachment picker, etc.). The prior
+    # implementation accidentally labelled every contextual follow-up as feedback.
+    area_ids = list(matched.get("area_ids") or prior_areas or ["chat"])
     relation = _text(recent_context.get("relation") or dialogue.get("relation")).upper()
     return {
         "relation": relation,
@@ -2734,6 +2976,13 @@ def prepare_site_help_interpretation(
     referent_ids: List[str] = _site_contract_target_ids(action_contracts)
     contextual_ui_followup = {}
     semantic_nav = _site_navigation_semantics(interpretation)
+    if not semantic_nav and _is_april_premium_navigation_query(query):
+        semantic_nav = {
+            "domain": "april_ui", "action": "GUIDE_UI_ACTION", "user_goal": query,
+            "target": "plans.payment",
+            "ui_navigation": {"target": "plans.payment", "targets": ["settings.payment_packages"]},
+            "confidence": 1.0, "source": "it_room_local_ui_search",
+        }
     semantic_function_resolution = _site_semantic_function_targets(query, semantic_nav, referent_ids)
     # Do not turn conversational gratitude (including "спасибо за загадки") into
     # a tutorial for a button that happened to be discussed earlier in the chat.
@@ -2860,6 +3109,11 @@ def prepare_site_help_interpretation(
     intent["requested_outputs"] = outputs
     intent["wants_diagram"] = wants_diagram
     intent["site_navigation_help"] = True
+    if semantic_nav:
+        # Persist the normalized April-UI intent so short follow-ups such as
+        # "не понимаю, что и куда пройти" can resume this exact control family.
+        intent["site_navigation_semantics"] = dict(semantic_nav)
+    intent["site_navigation_search_result"] = search_april_ui(query, limit=3)
     intent["site_navigation_contracts"] = action_contracts[:8]
     intent["site_navigation_target_ids"] = list(referent_ids)
     if semantic_function_resolution.get("function_ids"):
@@ -3081,6 +3335,13 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         else {}
     )
     semantic_resolved = _site_semantic_function_targets(query, semantic_navigation or semantic_fallback, selected_ids)
+    if _is_april_premium_navigation_query(query):
+        semantic_resolved = {
+            "function_ids": ["settings_plan_payment", "settings_premium_packages"],
+            "semantic_targets": ["plans.payment", "settings.payment_packages"],
+            "area_ids": ["settings"],
+        }
+        selected_ids = ["settings"]
     for value in semantic_resolved.get("semantic_targets", []):
         if value not in carried_targets:
             carried_targets.append(value)
@@ -3109,12 +3370,19 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         if value not in referent_ids and (not _site_full_interface_overview_requested(query)):
             referent_ids.append(value)
     referent_ids = [value for value in referent_ids if value in {str(area.get("id")) for area in APRIL_SITE_MAP["areas"]}]
+    if _is_april_premium_navigation_query(query):
+        referent_ids = ["settings"]
+        selected_ids = ["settings"]
+        semantic_ui_targets = list(dict.fromkeys([*semantic_ui_targets, "plans.payment", "settings.payment_packages"]))
+        target_function_ids = list(dict.fromkeys([*target_function_ids, "settings_plan_payment", "settings_premium_packages"]))
     if referent_ids:
         selected_ids = referent_ids + [area_id for area_id in selected_ids if area_id not in referent_ids and area_id != "guide"]
     if not selected_ids:
         selected_ids = ["guide", "chat", "settings", "history"]
     # Billing questions need both the real purchase control and its help context.
-    if "plans" in selected_ids and re.search(r"(?:купить|оплатить|продлить|renew|buy|pay|checkout|7\s*(?:дн|days)|28\s*(?:дн|days)|12\s*(?:час|hours))", query, re.I):
+    if _is_april_premium_navigation_query(query):
+        selected_ids = ["settings"]
+    elif "plans" in selected_ids and re.search(r"(?:купить|оплатить|продлить|renew|buy|pay|checkout|7\s*(?:дн|days)|28\s*(?:дн|days)|12\s*(?:час|hours))", query, re.I):
         selected_ids = ["settings", "plans"]
     # A Google sign-in question is about the auth dialog / account entry, not all profile features.
     if re.search(r"(?:войти|авториз|sign\s*in|log\s*in).{0,45}(?:google|аккаунт|april)|(?:google|аккаунт|april).{0,45}(?:войти|авториз|sign\s*in|log\s*in)", query, re.I):
@@ -3289,7 +3557,10 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     # Button help is an in-message interaction, not a tour of profile/help/history.
     # Force a tiny deterministic excerpt after related-route expansion so a word
     # such as "жалоба" cannot drag generic Support or unrelated pages into the map.
-    if "plans.payment" in semantic_ui_targets and not referent_ids:
+    if _is_april_premium_navigation_query(query) or "plans.payment" in semantic_ui_targets or "settings.payment_packages" in semantic_ui_targets:
+        pending = ["settings"]
+        selected_ids = ["settings"]
+    elif "plans.payment" in semantic_ui_targets and not referent_ids:
         pending = ["settings"]
     if feedback_help and not referent_ids:
         pending = ["response-feedback", "chat"]
@@ -3400,6 +3671,16 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
     elif back_to_topics_action:
         pending = ["guide"]
         selected_ids = ["guide"]
+    if _is_help_information_plans_topic_query(query):
+        # The same English label appears as an informational topic on /aprill and
+        # is easily confused with the real purchase controls on /settings. The
+        # explicit Help & Information context must win over generic "pay" tokens.
+        pending = ["guide"]
+        selected_ids = ["guide"]
+        referent_ids = ["guide"]
+        semantic_ui_targets = ["april.help_information"]
+        target_function_ids = ["help_article_navigation", "help_topic_cards"]
+
     chosen = [areas_by_id[area_id] for area_id in pending if area_id in areas_by_id]
     selected_ids_final = [str(area.get("id")) for area in chosen]
     screen_id = _site_screen_for_query(query, selected_ids_final, semantic_ui_targets)
@@ -3440,7 +3721,9 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None, semantic_t
         return "chat-side-panels"
     if "chat.free_media_referral" in semantic:
         return "free-media-referral"
-    if "plans.payment" in semantic:
+    if _is_help_information_plans_topic_query(low):
+        return "help-plans-article"
+    if "plans.payment" in semantic or "settings.payment_packages" in semantic:
         return "plans-payment"
     if "profile.identifiers" in semantic:
         return "profile-identifiers"
@@ -3724,6 +4007,41 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     query_for_routes = effective_route_query.lower().replace("ё", "е")
     target_function_ids = site_map.get("target_function_ids") if isinstance(site_map.get("target_function_ids"), list) else []
     contextual_site_followup = bool(site_map.get("context_followup"))
+    site_semantic_targets = site_map.get("semantic_targets") if isinstance(site_map.get("semantic_targets"), list) else []
+    premium_plan_help = bool(
+        _is_april_premium_navigation_query(query_for_routes)
+        or {"settings_plan_payment", "settings_premium_packages"}.intersection(target_function_ids)
+        or {"plans.payment", "settings.payment_packages"}.intersection(site_semantic_targets)
+    )
+    if premium_plan_help and is_ru_or_uk:
+        answer = (
+            "В April покупку нужно искать **не в Help Center и не в карточке Plans & Payments**. Кнопки пакетов находятся в личном профиле — в карточке **CURRENT PLAN**.\n\n"
+            "1. Вернитесь на главный экран April и нажмите **кнопку профиля с вашим именем в верхней панели справа**. Откроется страница **Your profile**. Можно открыть её напрямую: [Your profile](/settings).\n"
+            "2. На странице профиля прокрутите вниз до карточки **CURRENT PLAN**. В присланном примере она показывает **FREE / Free access**. Карточка расположена ниже блока **USER / Name in chat space** и выше **Delete account**.\n"
+            "3. В нижней части **CURRENT PLAN** выберите **один** пакет, только если его кнопка видна у вас: **7 days · $12**, **28 days · $25** или **12 hours · $3**. Это три разных срока, не три шага.\n"
+            "4. После выбора откроется окно оплаты, если для вашей версии приложения и текущего статуса доступен этот способ. Проверьте сумму и условия. **Pay** подтверждает оплату, **Cancel** закрывает её без покупки.\n"
+            "5. После оплаты дождитесь подтверждения платёжного сервиса, вернитесь в **Your profile** и проверьте обновлённый статус/срок. Само нажатие Pay ещё не доказывает, что Premium активирован.\n\n"
+            "**Пробный период:** на присланном экране нет кнопки **Free trial / Start trial** — видны только платные пакеты. Поэтому я не могу подтвердить бесплатный тестовый период. Он считается доступным только тогда, когда конкретное предложение и его условия явно показаны до оплаты.\n\n"
+            "**Если пакетов у вас нет:** не ищите кнопку в Help & Information → Plans & Payments. Доступность пакетов зависит от сборки и состояния подписки; в Google Play-сборке внешние платёжные кнопки могут быть скрыты. Сверяйтесь с тем, что действительно отображается на вашей странице **CURRENT PLAN**."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif premium_plan_help and not is_ru_or_uk:
+        answer = (
+            "In April, the purchase controls are in your profile's **CURRENT PLAN** card, not in the Help Center's Plans & Payments article.\n\n"
+            "1. From the main April screen, click the profile button with your name at the top right, or open [Your profile](/settings).\n"
+            "2. Scroll to **CURRENT PLAN**, below **USER / Name in chat space**. The supplied example shows **FREE / Free access**.\n"
+            "3. Choose one visible package, if offered: **7 days · $12**, **28 days · $25**, or **12 hours · $3**. These are alternative durations.\n"
+            "4. In checkout, review the amount and terms. **Pay** confirms; **Cancel** exits without purchasing. Wait for payment-provider confirmation.\n"
+            "5. Return to **Your profile** and check the plan status and remaining time. A Pay click alone does not prove activation.\n\n"
+            "The supplied screenshot does not show **Free trial / Start trial**, so a trial cannot be confirmed. Only treat it as available when it is explicitly offered with terms before payment. Package buttons can be hidden by the app build or current subscription state."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
     if "assistant_response_share" in target_function_ids and is_ru_or_uk:
         answer = (
             "Да — зелёная круглая стрелка вверх находится **под каждым ответом April**, рядом с кнопками «Жалоба» и «Спасибо». "
@@ -3888,7 +4206,11 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     missing_links = []
     linked_paths = set(re.findall(r"\]\((/[^)]+)\)", answer))
     seen_missing_paths = set()
-    if product_walkthrough:
+    if premium_plan_help:
+        # The walkthrough already starts from the home screen and links directly
+        # to /settings. Do not append a redundant "Main chat" link afterwards.
+        route_rows_for_links = [row for row in route_rows if row.get("id") == "settings"]
+    elif product_walkthrough:
         walkthrough_route_ids = {"chat", "settings", "space", "history", "guide"}
         route_rows_for_links = [row for row in route_rows if row.get("id") in walkthrough_route_ids]
     else:
@@ -4050,6 +4372,8 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         diagram_route_rows = [row for row in route_rows if row.get("id") in primary_overview_ids]
     elif screen_id == "plans-payment":
         diagram_route_rows = [row for row in route_rows if row.get("id") in {"chat", "settings"}]
+    elif screen_id == "help-plans-article":
+        diagram_route_rows = [row for row in route_rows if row.get("id") == "guide"]
     elif screen_id == "profile":
         if pointer_requested and pointer_target:
             # A pointer request should show only the profile gateway and named
@@ -4120,6 +4444,53 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 edges.append({"from": "april_home", "to": target, "label": "Открыть раздел"})
 
     selected_area_ids = [str(row.get("id") or "") for row in diagram_route_rows]
+    if screen_id == "help-plans-article":
+        nodes = [
+            {"id": "home", "label": "Главный чат APRIL\n/ · логотип APRIL сверху слева", "kind": "start", "href": "/"},
+            {"id": "help_page", "label": "Help & Information\n/aprill", "kind": "page", "href": "/aprill"},
+            {"id": "topics", "label": "Список карточек справки\nвертикальный список", "kind": "step"},
+            {"id": "plans_article", "label": "Plans & Payments\nсправочная карточка, не покупка", "kind": "action"},
+            {"id": "article", "label": "Открытая статья о планах\nна той же странице", "kind": "result"},
+            {"id": "back", "label": "Back to topics\nвернуться к списку карточек", "kind": "action"},
+        ]
+        edges = [
+            {"from": "home", "to": "help_page", "label": "Нажать логотип APRIL"},
+            {"from": "help_page", "to": "topics", "label": "Страница открыта"},
+            {"from": "topics", "to": "plans_article", "label": "Найти карточку в списке"},
+            {"from": "plans_article", "to": "article", "label": "Открыть справочный материал"},
+            {"from": "article", "to": "back", "label": "Вернуться к темам"},
+        ]
+        selected_area_ids = ["guide"]
+    if screen_id == "plans-payment":
+        nodes = [
+            {"id": "chat", "label": "Главный экран APRIL\n/", "kind": "start", "href": "/"},
+            {"id": "profile_button", "label": "Кнопка профиля с вашим именем\nверхняя панель · справа", "kind": "action"},
+            {"id": "profile", "label": "Your profile\n/settings", "kind": "page", "href": "/settings"},
+            {"id": "current_plan", "label": "CURRENT PLAN\nстатус FREE / Free access в примере", "kind": "step"},
+            {"id": "package_7d", "label": "7 days · $12", "kind": "action"},
+            {"id": "package_28d", "label": "28 days · $25", "kind": "action"},
+            {"id": "package_12h", "label": "12 hours · $3", "kind": "action"},
+            {"id": "checkout", "label": "Окно checkout\nпроверить сумму и условия", "kind": "condition"},
+            {"id": "pay", "label": "Pay / Cancel", "kind": "action"},
+            {"id": "confirmed", "label": "Подтверждение платёжного сервиса", "kind": "result"},
+            {"id": "check_status", "label": "Вернуться в Your profile\nпроверить статус и срок", "kind": "result"},
+        ]
+        edges = [
+            {"from": "chat", "to": "profile_button", "label": "Нажать профиль справа сверху"},
+            {"from": "profile_button", "to": "profile", "label": "Открыть профиль"},
+            {"from": "profile", "to": "current_plan", "label": "Прокрутить ниже USER"},
+            {"from": "current_plan", "to": "package_7d", "label": "Выбрать один пакет"},
+            {"from": "current_plan", "to": "package_28d", "label": "Или выбрать этот"},
+            {"from": "current_plan", "to": "package_12h", "label": "Или выбрать этот"},
+            {"from": "package_7d", "to": "checkout", "label": "Открывается, если доступен"},
+            {"from": "package_28d", "to": "checkout", "label": "Открывается, если доступен"},
+            {"from": "package_12h", "to": "checkout", "label": "Открывается, если доступен"},
+            {"from": "checkout", "to": "pay", "label": "Проверить сумму; Pay или Cancel"},
+            {"from": "pay", "to": "confirmed", "label": "Только после ответа gateway"},
+            {"from": "confirmed", "to": "check_status", "label": "Обновить/проверить карточку"},
+        ]
+        node_by_area = {"chat": "chat", "settings": "profile"}
+        selected_area_ids = ["chat", "settings"]
     if screen_id == "community-post":
         nodes = [
             {"id": "space", "label": "Community / Сообщество\n/space", "kind": "start", "href": "/space"},
@@ -4439,7 +4810,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "free-media-referral": "Лимит Free: приглашение и восстановление медиаопераций",
         "response-feedback": "Действия под ответом April: «Спасибо» и «Жалоба»",
         "profile": "Настройки и профиль · Быстрые переходы",
-        "plans-payment": "Оплата Premium · CURRENT PLAN",
+        "plans-payment": "April · Your profile → CURRENT PLAN · пакеты Premium",
         "profile-identifiers": "April ID и Premium ID · Copy",
         "profile-language": "Язык интерфейса · Settings",
         "profile-name": "Имя пользователя · USER / Edit",
@@ -4450,6 +4821,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "history": "Saved dialogues / История диалогов",
         "community": "April · Community / Сообщество",
         "help": "Help & Information / Помощь и информация",
+        "help-plans-article": "Help & Information → Plans & Payments · справка, не покупка",
         "attachments": "Добавить вложение",
         "support": "Contact Support / Поддержка",
         "deletion": "Удаление аккаунта April",
@@ -4464,6 +4836,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         "visual_kind": "SOURCE_DERIVED_NAVIGATION_FLOW",
         "not_a_screenshot": True,
         "source_evidence": [
+            "User-supplied April interface screenshots observed 2026-11-12 (chat, Your profile/CURRENT PLAN, Help & Information, Community)",
             "aprill-web-main/app/page.tsx",
             "aprill-web-main/app/settings/page.tsx",
             "aprill-web-main/app/space/page.tsx",
@@ -4726,6 +5099,8 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         context["site_navigation_map"] = _select_site_map_excerpt(machine_request)
         context["site_function_catalog"] = _select_ui_function_catalog(machine_request, context["site_navigation_map"])
         effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
+        context["site_ui_search"] = search_april_ui(effective_query, limit=4)
+        context["site_ui_screenshot_evidence"] = context["site_ui_search"].get("screen_matches", [])
         query = effective_query.lower().replace("ё", "е")
         full_interface_overview = _site_full_interface_overview_requested(query)
         # Keep the user-facing site walkthrough separate from internal architecture.
@@ -4753,10 +5128,13 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
     ]
     if help_active:
         prompt_fragments.extend([
-            "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map and site_function_catalog to resolve the real visible control. Phrase aliases are fallback only, never a required fixed trigger.",
-            "For every requested function, explain: exact starting page and how to reach it, relative screen position, visible button/field label, what it does, ordered click/input steps, expected result, availability/plan conditions and important limits.",
-            "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person.",
-            "When the user asks to be guided or asks what to click, include the relevant function-catalog entries; do not output only a list of route names.",
+            "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map, site_function_catalog, site_ui_search and site_ui_screenshot_evidence to resolve the real visible control. The local UI searcher indexes screenshot-observed labels and function handlers. Phrase aliases are fallback only, never a required fixed trigger.",
+            "The answer is a user-facing walkthrough of the actual April interface, NOT a directory of rooms, modules, APIs, function IDs or feature lists. Start from the screen the user currently sees; describe the visible page/card, where it sits (top bar, right side, below a named card, bottom composer), the exact label/icon, what that control is for, why the user needs it, what to press in order, and what should appear next.",
+            "Use site_ui_search and site_ui_screenshot_evidence as the first lookup source. The screenshot-observed labels and relative positions take precedence over generic descriptions. Search site_function_catalog for the exact action handler and limitations. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
+            "For every requested function, explain: exact starting page and how to reach it, relative screen position, visible button/field label, what it does, why the user goes there, ordered click/input steps, expected result, availability/plan conditions and important limits.",
+            "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person. Never replace the actual page/button instructions with generic words like 'open settings and find the plan'.",
+            "When the user asks to be guided or asks what to click, answer with the actual visible April interface and the exact path. Do not output a room/function list, a generic inventory, or backend route names in place of controls. For payment questions, the real action is Profile → CURRENT PLAN → a package button that is actually visible; the Plans & Payments Help card is informational and is not the purchase button.",
+            "Do not claim a free trial exists unless the current visible screen or pre-payment terms explicitly show Free trial / Start trial. A screenshot showing only paid packages is not evidence of a trial. Do not infer a live user's plan from an example screenshot.",
             "Respect the current requested_outputs exactly. Text-only explanation stays text-only. Render a diagram only when requested_outputs contains diagram/SVG/flowchart or the current user text explicitly asks for a scheme/visual path. Never infer a diagram from the fact that a UI-help intent exists.",
             "Never invent a base domain or unverified anchor. If a card's exact URL is unknown, link its known parent page and name the card to click.",
             "If a page is marked empty/unimplemented, state that limitation and offer the verified fallback route.",
