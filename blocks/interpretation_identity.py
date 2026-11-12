@@ -3391,6 +3391,55 @@ def interpret_request_across_recent_exchanges(
     result["_recent_exchange_original_semantics"] = dict(base)
     return result
 
+def enforce_history_retrieval_route(
+    dialogue_context: dict[str, Any] | None,
+    semantic_interpretation: dict[str, Any] | None,
+    *,
+    explicit_history_request: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Carry explicit archive retrieval across Executor → Interpretation → Provider."""
+    context = dict(dialogue_context) if isinstance(dialogue_context, dict) else {}
+    semantics = dict(semantic_interpretation) if isinstance(semantic_interpretation, dict) else {}
+    if not explicit_history_request:
+        return context, semantics
+
+    context["history_request"] = True
+    if _text(context.get("relation")).upper() == "CONTINUE":
+        context["relation"] = "NEW"
+    semantics["history_request"] = True
+    semantics["requires_memory"] = True
+    if _text(semantics.get("primary_intent")).upper() not in {
+        "HISTORY_RECALL", "HISTORY_SUMMARY", "PRIOR_DECISION_RECALL"
+    }:
+        semantics["primary_intent"] = "HISTORY_RECALL"
+    if _text(semantics.get("direction")).upper() not in {
+        "SEARCH_DIALOGUE_HISTORY", "SEARCH_AND_SUMMARIZE_HISTORY"
+    }:
+        semantics["direction"] = "SEARCH_DIALOGUE_HISTORY"
+    semantics["search_scope"] = "ALL_DIALOGUE_HISTORY"
+    semantics["relation_hint"] = "HISTORY_LOOKUP"
+    if not context.get("topic_index") and context.get("history_topics"):
+        context["topic_index"] = list(context.get("history_topics") or [])
+    return context, semantics
+
+
+def should_sync_active_dialogue_branch(
+    *,
+    explicit_history_request: bool,
+    explicit_topic_switch: bool,
+    transition_class: str,
+    same_dialog: bool,
+) -> bool:
+    """Keep archive retrieval separate from active-branch continuation."""
+    if explicit_history_request or explicit_topic_switch:
+        return False
+    classification = _text(transition_class).upper()
+    return bool(
+        classification == "TOPIC_CONTINUATION"
+        or (classification == "HISTORICAL_TOPIC_REACTIVATION" and same_dialog)
+    )
+
+
 def analyze_dialogue_transition(
     current_request: Any,
     dialogue_context: dict[str, Any] | None = None,
