@@ -97,7 +97,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v12_last_answer_pre_response_audit"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v15_free_parallel_snapshot_search_cached_bootstrap"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -1940,16 +1940,18 @@ async def execute(
     if not current_text and not visual_context and not file_inputs and not file_contents:
         raise ValueError("EMPTY_REQUEST")
 
-    # Processor owns DB bootstrap; harmless and idempotent after the first call.
+    # Schema migrations/cleanup are process-start work, not per-message work.
+    # Both bootstrap and account verification are blocking DB operations, so keep
+    # them off the ASGI event loop to avoid delaying unrelated Free conversations.
     db_started = time.perf_counter()
-    init_db()
-    _apr_timing_log("db_bootstrap", db_started, user_key=_apr_diag_ref(uid))
-
     require_auth = str(os.getenv("APRIL_REQUIRE_AUTH", "1")).lower() not in {"0", "false", "no"}
-    auth_started = time.perf_counter()
-    if require_auth and not is_authenticated_user(uid):
+    def _bootstrap_and_auth() -> bool:
+        init_db()
+        return (not require_auth) or is_authenticated_user(uid)
+    authenticated = await asyncio.to_thread(_bootstrap_and_auth)
+    _apr_timing_log("db_bootstrap_and_auth", db_started, user_key=_apr_diag_ref(uid), required=require_auth, authenticated=authenticated)
+    if not authenticated:
         raise ValueError("AUTHENTICATED_USER_REQUIRED")
-    _apr_timing_log("auth_check", auth_started, user_key=_apr_diag_ref(uid), required=require_auth)
 
     identity_started = time.perf_counter()
     payload_identity = {
@@ -2019,6 +2021,56 @@ async def execute(
     normalized_sequence = build_question_sequence(
         current_text, parent_interpretation=normalized_semantics
     )
+    # A self-contained April UI route is answered from C_IT_ROOM's verified
+    # screen/control catalogue. It should not wait for dialogue-memory ranking
+    # or a Provider call. Actual user screenshots and files stay on the rich path.
+    has_non_voice_attachment = bool(
+        visual_context or file_inputs or file_contents
+        or any(_text(item.get("kind")).lower() != "voice" for item in attachments)
+    )
+    direct_site_help_turn = False
+    if not has_non_voice_attachment and not _text(resume_message_id):
+        try:
+            from blocks.C_IT_ROOM import is_site_help_query as _is_site_help_query
+            direct_site_help_turn = bool(_is_site_help_query(current_text)) and not bool(
+                semantic_interpretation.get("history_request")
+            )
+        except Exception as _site_detect_error:
+            _apr_timing_log("site_help_fast_path_detection_failed", None, error=type(_site_detect_error).__name__)
+    if direct_site_help_turn:
+        semantic_interpretation.update({
+            "primary_intent": "NEW_INFORMATION",
+            "direction": "ANSWER_NEW_REQUEST",
+            "time_scope": "UNSPECIFIED",
+            "topic_reference": "SITE_NAVIGATION",
+            "requires_memory": False,
+            "history_request": False,
+            "search_scope": "CURRENT_REQUEST",
+            "relation_hint": "NEW",
+            "reason": "self_contained_april_ui_navigation_local_room",
+            "site_navigation_request": True,
+        })
+        semantic_features = semantic_interpretation.get("features")
+        if not isinstance(semantic_features, dict):
+            semantic_features = {}
+        semantic_features["site_navigation_request"] = True
+        semantic_interpretation["features"] = semantic_features
+        normalized_semantics = dict(semantic_interpretation)
+        navigation_task = {
+            "step_index": 1,
+            "request": current_text,
+            "semantic_intent": "NEW_INFORMATION",
+            "search_direction": "ANSWER_NEW_REQUEST",
+            "time_scope": "UNSPECIFIED",
+            "topic_reference": "SITE_NAVIGATION",
+            "requires_memory": False,
+            "history_request": False,
+            "semantic_reason": "self_contained_april_ui_navigation_local_room",
+            "output_types": ["text"],
+            "introduces_current_request_subject": True,
+        }
+        question_sequence = [navigation_task]
+        normalized_sequence = [dict(navigation_task)]
     _apr_timing_log(
         "question_decomposition_result",
         user_key=_apr_diag_ref(uid),
@@ -2049,7 +2101,52 @@ async def execute(
     }
     question_contexts: list[dict[str, Any]] = []
 
-    if len(question_sequence) <= 1:
+    if direct_site_help_turn:
+        dialogue_context = {
+            "window_hours": 12,
+            "relation": "NEW",
+            "relation_confidence": 1.0,
+            "reason": "direct_site_navigation_local_room_no_memory_lookup",
+            "active_topic": current_text[:180],
+            "selected_pairs": [], "candidates": [], "matches": [],
+            "history_topics": [], "topic_index": [], "known_topic_count": 0,
+            "history_request": False, "requested_topic_count": 0,
+            "topic_table_markdown": "", "anchor": {}, "selected_section": {},
+            "explicit_render_reference": {},
+            "clarification_needed": False, "clarification_prompt": "",
+            "pending_clarification": {}, "clarification_resolution": {},
+            "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+            "recent_exchange_window": [], "recent_branch_anchor": {},
+            "last_turn_link": {}, "retrieval_profile": {},
+            "effective_interpretation": dict(semantic_interpretation),
+            "semantic_history_search_allowed": False,
+            "contextual_history_match": False, "history_time_search": {},
+        }
+        navigation_search = _compact_question_search(
+            dialogue_context, current_text, semantic_interpretation
+        )
+        navigation_search.update({
+            "status": "not_required",
+            "reason": "local_site_navigation_no_dialogue_memory",
+            "relation": "NEW",
+            "semantic_intent": "NEW_INFORMATION",
+            "search_direction": "ANSWER_NEW_REQUEST",
+        })
+        question_sequence[0]["dialogue_search"] = navigation_search
+        question_sequence[0]["search_query"] = current_text[:500]
+        question_contexts.append(dialogue_context)
+        _apr_timing_log(
+            "request_question_search", memory_started,
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            step_index=1, query_key=_apr_diag_ref(current_text),
+            semantic_intent="NEW_INFORMATION", search_direction="ANSWER_NEW_REQUEST",
+            history_request=False, relation="NEW", candidates=0, selected_pairs=0,
+            topic_index_count=0, status="not_required",
+            context_source="site_navigation_local_room",
+        )
+    elif len(question_sequence) <= 1:
         single_semantics = {
             "schema": "april_request_semantics_v1",
             "primary_intent": semantic_interpretation.get("primary_intent"),
@@ -2109,203 +2206,344 @@ async def execute(
             status="ok",
         )
     else:
-        current_request_subject_context: dict[str, Any] | None = None
-        turn_level_memory_search_done = False
-        # Use the same original-language clause that was classified. Equal list lengths
-        # do not guarantee that separately split normalized text is aligned item by item.
+        # A complete user message is one memory-index load. Query clauses are then
+        # ranked independently and concurrently against that authenticated snapshot.
+        # This gives each clause its own relation/anchor without serial DB waits.
+        task_plans: list[dict[str, Any]] = []
+        turn_requires_history = bool(
+            semantic_interpretation.get("requires_memory")
+            or semantic_interpretation.get("history_request")
+        )
+        first_explicit_subject = ""
+        requires_snapshot = False
+        parent_features = semantic_interpretation.get("features") if isinstance(semantic_interpretation.get("features"), dict) else {}
+        archive_snapshot = bool(
+            semantic_interpretation.get("history_request")
+            or semantic_interpretation.get("history_inventory_request")
+            or semantic_interpretation.get("has_explicit_time_window")
+            or _text(semantic_interpretation.get("search_scope")).upper() in {
+                "ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"
+            }
+            or _text(semantic_interpretation.get("direction")).upper() == "SEARCH_DIALOGUE_HISTORY"
+            or _text(semantic_interpretation.get("topic_reference")).upper() in {"TOPIC_REFERENCE_FRAGMENT", "TOPIC_FRAGMENT"}
+            or bool(semantic_interpretation.get("topic_reference_fragment"))
+            or bool(parent_features.get("topic_reference_fragment"))
+            or (turn_requires_history and len(current_text) >= 45)
+        )
         for index, question_item in enumerate(question_sequence):
             search_query = _text(question_item.get("request")) or (
                 _text(normalized_sequence[index].get("request"))
                 if index < len(normalized_sequence) else _text(current_text)
             )
-            try:
-                inherits_subject = bool(question_item.get("inherits_current_request_subject"))
-                task_semantics = {
-                    "schema": "april_request_semantics_v1",
-                    "primary_intent": question_item.get("semantic_intent", "NEW_INFORMATION"),
-                    "direction": question_item.get("search_direction", "ANSWER_NEW_REQUEST"),
-                    "time_scope": question_item.get("time_scope", "UNSPECIFIED"),
-                    "topic_reference": question_item.get("topic_reference", "UNSPECIFIED"),
-                    "requires_memory": False if inherits_subject else question_item.get("requires_memory", False),
-                    "history_request": False if inherits_subject else question_item.get("history_request", False),
-                    "search_scope": "CURRENT_REQUEST_SUBJECT" if inherits_subject else ("ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
+            inherits_subject = bool(question_item.get("inherits_current_request_subject"))
+            if question_item.get("introduces_current_request_subject") and not first_explicit_subject:
+                first_explicit_subject = search_query
+            task_semantics = {
+                "schema": "april_request_semantics_v1",
+                "primary_intent": question_item.get("semantic_intent", "NEW_INFORMATION"),
+                "direction": question_item.get("search_direction", "ANSWER_NEW_REQUEST"),
+                "time_scope": question_item.get("time_scope", "UNSPECIFIED"),
+                "topic_reference": question_item.get("topic_reference", "UNSPECIFIED"),
+                "requires_memory": False if inherits_subject else question_item.get("requires_memory", False),
+                "history_request": False if inherits_subject else question_item.get("history_request", False),
+                "topic_reference_fragment": bool(question_item.get("topic_reference_fragment")),
+                "history_inventory_request": bool(question_item.get("history_inventory_request")),
+                "has_explicit_time_window": bool(question_item.get("has_explicit_time_window")),
+                "search_scope": "CURRENT_REQUEST_SUBJECT" if inherits_subject else (
+                    "ALL_DIALOGUE_HISTORY" if question_item.get("history_request") else (
                         "TOPIC_OR_ACTIVE_CONTEXT" if question_item.get("requires_memory") else "CURRENT_DIALOGUE"
-                    )),
-                    "relation_hint": "NEW" if inherits_subject else ("HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"),
-                    "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
-                    "features": {},
-                    "context_signature": question_item.get("context_signature", {}),
-                    "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
-                    "parent_intent": question_item.get("parent_intent", ""),
-                    "inherits_current_request_subject": inherits_subject,
+                    )
+                ),
+                "relation_hint": "NEW" if inherits_subject else (
+                    "HISTORY_LOOKUP" if question_item.get("history_request") else "CONTINUE" if question_item.get("requires_memory") else "NEW"
+                ),
+                "reason": "pronoun_inherits_subject_from_current_request" if inherits_subject else question_item.get("semantic_reason", ""),
+                "features": {},
+                "context_signature": question_item.get("context_signature", {}),
+                "parent_context_dependency": bool(question_item.get("parent_context_dependency")),
+                "parent_intent": question_item.get("parent_intent", ""),
+                "inherits_current_request_subject": inherits_subject,
+                "user_utc_offset_minutes": user_utc_offset_minutes,
+            }
+            task_direction = _text(task_semantics.get("direction")).upper()
+            task_intent = _text(task_semantics.get("primary_intent")).upper()
+            task_topic_reference = _text(task_semantics.get("topic_reference")).upper()
+            prior_subject_available = bool(first_explicit_subject and index > 0)
+            task_requires_history = bool(
+                task_semantics.get("requires_memory")
+                or task_semantics.get("history_request")
+                or task_semantics.get("parent_context_dependency")
+                or task_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_DIALOGUE_HISTORY"}
+                or task_intent in {"TOPIC_CONTINUATION", "HISTORY_RECALL", "CONTEXTUAL_FOLLOWUP"}
+                or task_topic_reference in {"PREVIOUS_ASSISTANT_ANSWER", "DIALOGUE_HISTORY", "ACTIVE_TOPIC"}
+                or (inherits_subject and not prior_subject_available)
+            )
+            # Preserve the existing full-turn probe on the first clause when the
+            # parent classifier is NEW; it catches implicit follow-ups missed by
+            # isolated clause classification. Further historical clauses get their
+            # own query-specific ranking, but all share one DB snapshot.
+            use_turn_level_search = bool(index == 0 and turn_requires_history)
+            use_initial_turn_probe = bool(index == 0 and not turn_requires_history)
+            needs_memory_search = bool(
+                (not inherits_subject or not prior_subject_available)
+                and (task_requires_history or use_turn_level_search or use_initial_turn_probe)
+            )
+            if needs_memory_search:
+                requires_snapshot = True
+            if any(bool(task_semantics.get(k)) for k in (
+                "history_request", "resume_anchor_requested", "history_inventory_request", "has_explicit_time_window"
+            )) or bool(task_semantics.get("topic_reference_fragment")) or _text(task_semantics.get("topic_reference")).upper() in {"TOPIC_REFERENCE_FRAGMENT", "TOPIC_FRAGMENT"} or _text(task_semantics.get("search_scope")).upper() in {
+                "ALL_DIALOGUE_HISTORY", "HISTORY_ONLY", "EXPLICIT_HISTORY"
+            } or (bool(task_semantics.get("requires_memory")) and len(search_query) >= 45):
+                archive_snapshot = True
+            task_plans.append({
+                "index": index,
+                "item": question_item,
+                "query": search_query,
+                "semantics": task_semantics,
+                "inherits_subject": inherits_subject,
+                "prior_subject_available": prior_subject_available,
+                "task_requires_history": task_requires_history,
+                "use_turn_level_search": use_turn_level_search,
+                "use_initial_turn_probe": use_initial_turn_probe,
+                "needs_memory_search": needs_memory_search,
+            })
+
+        memory_snapshot: dict[str, Any] | None = None
+        rich_shared_context: dict[str, Any] | None = None
+        memory_snapshot_error = ""
+        rich_memory_turn = bool(search_kwargs.get("has_image") or search_kwargs.get("has_file"))
+        if requires_snapshot and not rich_memory_turn:
+            try:
+                from blocks.state_manager import (
+                    _looks_like_saved_artifact_operation,
+                    _explicit_render_reference_kind,
+                )
+                rich_memory_turn = any(
+                    _looks_like_saved_artifact_operation(plan["query"])
+                    or bool(_explicit_render_reference_kind(plan["query"]))
+                    for plan in task_plans if plan["needs_memory_search"]
+                )
+            except Exception:
+                # Conservative: if artifact classification is unavailable, preserve
+                # the lossless route by using the rich one-turn retrieval.
+                rich_memory_turn = True
+
+        if requires_snapshot and not direct_site_help_turn:
+            snapshot_started = time.perf_counter()
+            try:
+                if rich_memory_turn:
+                    # Rich artifact/source matching requires the full selected payload
+                    # index. Load it once for the whole utterance, then share that
+                    # authenticated result across its clauses instead of reloading N times.
+                    rich_shared_context = await asyncio.to_thread(
+                        prepare_dialogue_context,
+                        uid, current_text,
+                        query_interpretation=semantic_interpretation,
+                        **search_kwargs,
+                    )
+                else:
+                    from storage import load_dialogue_history_index
+                    memory_snapshot = await asyncio.to_thread(
+                        load_dialogue_history_index,
+                        uid,
+                        for_memory_search=True,
+                        memory_row_limit=64 if archive_snapshot else 12,
+                    )
+                    if not isinstance(memory_snapshot, dict) or not memory_snapshot.get("authenticated"):
+                        memory_snapshot_error = "memory_snapshot_unavailable_or_unauthenticated"
+                        memory_snapshot = None
+            except Exception as snapshot_exc:
+                memory_snapshot_error = type(snapshot_exc).__name__
+                memory_snapshot = None
+                rich_shared_context = None
+            _apr_timing_log(
+                "memory_snapshot_load", snapshot_started,
+                user_key=_apr_diag_ref(uid),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+                rows_loaded=(
+                    int(((rich_shared_context or {}).get("search") or {}).get("total_pairs") or 0)
+                    if rich_shared_context else len((memory_snapshot or {}).get("rows") or [])
+                ),
+                archive_lookup=archive_snapshot,
+                rich_artifact_search=rich_memory_turn,
+                memory_snapshot_available=(memory_snapshot is not None or rich_shared_context is not None),
+                error=memory_snapshot_error,
+            )
+
+        # Each worker does query-specific ranking and compact serialization against
+        # the same read-only rows. A bounded fan-out prevents a long voice utterance
+        # from creating an unbounded thread burst; result order remains input order.
+        parallel_limit = max(1, min(6, len(task_plans) or 1))
+        search_semaphore = asyncio.Semaphore(parallel_limit)
+
+        def _empty_task_context(query_value: str, reason_value: str) -> dict[str, Any]:
+            return {
+                "window_hours": 12,
+                "relation": "NEW",
+                "relation_confidence": 0.0,
+                "reason": reason_value,
+                "active_topic": query_value[:140],
+                "selected_pairs": [], "candidates": [], "matches": [],
+                "history_topics": [], "topic_index": [], "known_topic_count": 0,
+                "history_request": False, "requested_topic_count": 0,
+                "topic_table_markdown": "", "anchor": {}, "selected_section": {},
+                "explicit_render_reference": {},
+                "clarification_needed": False, "clarification_prompt": "",
+                "pending_clarification": {}, "clarification_resolution": {},
+                "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+            }
+
+        def _search_one_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            query_value = plan["query"]
+            semantics = plan["semantics"]
+            # The first probe searches the complete utterance to avoid isolating ASR
+            # fragments such as a misheard product/site name. Other clauses search
+            # their own text, so separate topics can select separate memory branches.
+            search_text = current_text if (plan["use_turn_level_search"] or plan["use_initial_turn_probe"]) else query_value
+            search_semantics = semantics
+            if plan["use_turn_level_search"] or plan["use_initial_turn_probe"]:
+                semantic_source = semantic_interpretation if turn_requires_history else semantics
+                search_semantics = {
+                    "schema": "april_request_semantics_v1",
+                    "primary_intent": semantic_source.get("primary_intent") or semantics.get("primary_intent"),
+                    "direction": semantic_source.get("direction") or semantics.get("direction"),
+                    "time_scope": semantic_source.get("time_scope") or semantics.get("time_scope"),
+                    "topic_reference": semantic_source.get("topic_reference") or semantics.get("topic_reference"),
+                    "requires_memory": bool(turn_requires_history or plan["task_requires_history"]),
+                    "history_request": bool(semantic_source.get("history_request") or semantics.get("history_request")),
+                    "search_scope": semantic_source.get("search_scope") or semantics.get("search_scope"),
+                    "relation_hint": semantic_source.get("relation_hint") or semantics.get("relation_hint"),
+                    "reason": semantic_source.get("reason") or semantics.get("reason"),
+                    "pragmatic_features": semantic_source.get("pragmatic_features") or semantics.get("pragmatic_features", {}),
+                    "features": semantic_source.get("features") or semantics.get("features", {}),
+                    "context_signature": semantic_source.get("context_signature") or semantics.get("context_signature", {}),
                     "user_utc_offset_minutes": user_utc_offset_minutes,
                 }
-                task_direction = _text(task_semantics.get("direction")).upper()
-                task_intent = _text(task_semantics.get("primary_intent")).upper()
-                task_topic_reference = _text(task_semantics.get("topic_reference")).upper()
-                task_requires_history = bool(
-                    task_semantics.get("requires_memory")
-                    or task_semantics.get("history_request")
-                    or task_semantics.get("parent_context_dependency")
-                    or task_direction in {"RESUME_OR_RETRIEVE_ACTIVE_TOPIC", "SEARCH_DIALOGUE_HISTORY"}
-                    or task_intent in {"TOPIC_CONTINUATION", "HISTORY_RECALL", "CONTEXTUAL_FOLLOWUP"}
-                    or task_topic_reference in {"PREVIOUS_ASSISTANT_ANSWER", "DIALOGUE_HISTORY", "ACTIVE_TOPIC"}
-                    or (inherits_subject and current_request_subject_context is None)
-                )
-                turn_requires_history = bool(
-                    semantic_interpretation.get("requires_memory")
-                    or semantic_interpretation.get("history_request")
-                )
-                use_turn_level_search = bool(turn_requires_history and not turn_level_memory_search_done)
-                # For a compound turn whose overall classifier says NEW, retain
-                # one semantic probe on its first explicit clause. The State
-                # Manager may still find a grounded historical topic even when
-                # lexical ranking does not justify CONTINUE. Do this once, not
-                # once per each decomposed subtask.
-                use_initial_turn_probe = bool(
-                    index == 0 and not turn_requires_history and not turn_level_memory_search_done
-                )
+            context = prepare_dialogue_context(
+                uid, search_text,
+                query_interpretation=search_semantics,
+                memory_snapshot=memory_snapshot,
+                persist_search_state=False,
+                **search_kwargs,
+            )
+            compact = _compact_question_search(context, query_value, semantics)
+            return context, compact
 
-                if inherits_subject and current_request_subject_context:
-                    active_subject = _text(current_request_subject_context.get("active_topic") or search_query)[:140]
-                    task_context = {
-                        "window_hours": 12,
-                        "relation": "NEW",
-                        "relation_confidence": 0.0,
-                        "reason": "current_request_subject_inheritance",
-                        "active_topic": active_subject,
-                        "selected_pairs": [],
-                        "candidates": [],
-                        "matches": [],
-                        "history_topics": [],
-                        "topic_index": [],
-                        "known_topic_count": 0,
-                        "history_request": False,
-                        "requested_topic_count": 0,
-                        "topic_table_markdown": "",
-                        "anchor": {},
-                        "selected_section": {},
-                        "clarification_needed": False,
-                        "clarification_prompt": "",
-                        "pending_clarification": {},
-                        "clarification_resolution": {},
-                        "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
+        async def _resolve_one_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            query_value = plan["query"]
+            if plan["inherits_subject"] and plan["prior_subject_available"]:
+                context = _empty_task_context(first_explicit_subject or query_value, "current_request_subject_inheritance")
+                compact = _compact_question_search(context, query_value, plan["semantics"])
+                compact.update({
+                    "inherits_current_request_subject": True,
+                    "status": "not_required",
+                    "reason": "pronoun_inherits_subject_from_current_request",
+                })
+                return context, compact
+            if plan["needs_memory_search"]:
+                if rich_shared_context is not None:
+                    # Preserve the rich artifact source context but create a separate
+                    # compact search contract for each decomposed task. The source
+                    # context is read-only; compact projections can run concurrently.
+                    context = dict(rich_shared_context)
+                    async with search_semaphore:
+                        compact = await asyncio.to_thread(
+                            _compact_question_search, context, query_value, plan["semantics"]
+                        )
+                    compact["shared_rich_turn_context"] = True
+                elif memory_snapshot is None:
+                    context = _empty_task_context(query_value, "single_turn_memory_snapshot_unavailable")
+                    compact = {
+                        "status": "search_error", "relation": "NEW", "confidence": 0.0,
+                        "reason": memory_snapshot_error or "memory_snapshot_unavailable",
+                        "topic": "", "anchor": {}, "selected_section": {}, "selected_pairs": [],
+                        "clarification_needed": False, "clarification_prompt": "", "clarification_options": [],
                     }
-                    task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    task_search["inherits_current_request_subject"] = True
-                    task_search["reason"] = "pronoun_inherits_subject_from_current_request"
-                elif task_requires_history or use_turn_level_search or use_initial_turn_probe:
-                    search_text = current_text if use_turn_level_search and not task_requires_history else search_query
-                    search_semantics = task_semantics
-                    if use_turn_level_search and not task_requires_history:
-                        search_semantics = {
-                            "schema": "april_request_semantics_v1",
-                            "primary_intent": semantic_interpretation.get("primary_intent"),
-                            "direction": semantic_interpretation.get("direction"),
-                            "time_scope": semantic_interpretation.get("time_scope"),
-                            "topic_reference": semantic_interpretation.get("topic_reference"),
-                            "requires_memory": semantic_interpretation.get("requires_memory"),
-                            "history_request": semantic_interpretation.get("history_request"),
-                            "search_scope": semantic_interpretation.get("search_scope"),
-                            "reason": semantic_interpretation.get("reason"),
-                            "pragmatic_features": semantic_interpretation.get("pragmatic_features", {}),
-                            "features": semantic_interpretation.get("features", {}),
-                            "user_utc_offset_minutes": user_utc_offset_minutes,
-                        }
-                        turn_level_memory_search_done = True
-                    elif use_initial_turn_probe:
-                        turn_level_memory_search_done = True
-                    task_context = await asyncio.to_thread(
-                        prepare_dialogue_context,
-                        uid, search_text, query_interpretation=search_semantics, **search_kwargs
-                    )
-                    if question_item.get("introduces_current_request_subject"):
-                        # Bind all anaphoric substeps to the first explicit topic clause.
-                        # When that clause is NEW, its literal request—not the previous
-                        # unrelated turn—owns active_topic. If it is CONTINUE, preserve
-                        # that same-topic anchor, but never search independently per pronoun.
-                        if _text(task_context.get("relation")).upper() == "NEW":
-                            task_context["active_topic"] = search_query[:140]
-                        current_request_subject_context = task_context
-                    task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    if inherits_subject:
-                        task_search["inherits_current_request_subject"] = True
                 else:
-                    # A decomposed request is not 24 independent history lookups.
-                    # Self-contained NEW_INFORMATION steps inherit the current
-                    # request sequence only; they do not hydrate/search PostgreSQL.
-                    task_context = {
-                        "window_hours": 12,
-                        "relation": "NEW",
-                        "relation_confidence": 0.0,
-                        "reason": "self_contained_new_information_no_history_required",
-                        "active_topic": search_query[:140],
-                        "selected_pairs": [],
-                        "candidates": [],
-                        "matches": [],
-                        "history_topics": [],
-                        "topic_index": [],
-                        "known_topic_count": 0,
-                        "history_request": False,
-                        "requested_topic_count": 0,
-                        "topic_table_markdown": "",
-                        "anchor": {},
-                        "selected_section": {},
-                        "explicit_render_reference": {},
-                        "clarification_needed": False,
-                        "clarification_prompt": "",
-                        "pending_clarification": {},
-                        "clarification_resolution": {},
-                        "search": {"relation": "NEW", "total_pairs": 0, "candidate_count": 0},
-                    }
-                    task_search = _compact_question_search(task_context, search_query, task_semantics)
-                    task_search["status"] = "not_required"
-                    task_search["reason"] = "self_contained_new_information_no_history_required"
-                    if question_item.get("introduces_current_request_subject"):
-                        current_request_subject_context = task_context
-            except Exception as exc:
-                # A task-search failure must not discard the whole user request.
-                # Keep order/identity and allow other tasks to proceed independently.
-                task_context = {}
+                    try:
+                        async with search_semaphore:
+                            context, compact = await asyncio.to_thread(_search_one_plan, plan)
+                        compact["parallel_snapshot_search"] = True
+                    except Exception as search_exc:
+                        context = _empty_task_context(query_value, "single_turn_memory_search_failed")
+                        compact = {
+                            "status": "search_error", "relation": "NEW", "confidence": 0.0,
+                            "reason": type(search_exc).__name__, "topic": "", "anchor": {},
+                            "selected_section": {}, "selected_pairs": [],
+                            "clarification_needed": False, "clarification_prompt": "", "clarification_options": [],
+                        }
+            else:
+                context = _empty_task_context(query_value, "self_contained_new_information_no_history_required")
+                compact = _compact_question_search(context, query_value, plan["semantics"])
+                compact.update({
+                    "status": "not_required",
+                    "reason": "self_contained_new_information_no_history_required",
+                })
+            return context, compact
+
+        batch_started = time.perf_counter()
+        task_results = await asyncio.gather(
+            *(_resolve_one_plan(plan) for plan in task_plans),
+            return_exceptions=True,
+        )
+        for plan, resolved in zip(task_plans, task_results):
+            question_item = plan["item"]
+            search_query = plan["query"]
+            task_semantics = plan["semantics"]
+            if isinstance(resolved, BaseException):
+                task_context = _empty_task_context(search_query, "parallel_task_search_failed")
                 task_search = {
-                    "status": "search_error",
-                    "relation": "NEW",
-                    "confidence": 0.0,
-                    "reason": type(exc).__name__,
-                    "topic": "",
-                    "anchor": {},
-                    "selected_section": {},
-                    "selected_pairs": [],
-                    "clarification_needed": False,
-                    "clarification_prompt": "",
-                    "clarification_options": [],
+                    "status": "search_error", "relation": "NEW", "confidence": 0.0,
+                    "reason": type(resolved).__name__, "topic": "", "anchor": {},
+                    "selected_section": {}, "selected_pairs": [],
+                    "clarification_needed": False, "clarification_prompt": "", "clarification_options": [],
                 }
+            else:
+                task_context, task_search = resolved
+            if question_item.get("introduces_current_request_subject") and _text(task_context.get("relation")).upper() == "NEW":
+                task_context["active_topic"] = search_query[:140]
             question_item["dialogue_search"] = task_search
             question_item["search_query"] = search_query[:500]
             question_contexts.append(task_context)
             _apr_timing_log(
-                "request_question_search", memory_started,
+                "request_question_search", batch_started,
                 user_key=_apr_diag_ref(uid),
                 dialog_key=_apr_diag_ref(identity.get("dialog_id")),
                 message_key=_apr_diag_ref(identity.get("message_id")),
                 step_index=question_item.get("step_index"),
                 query_key=_apr_diag_ref(search_query),
                 relation=task_search.get("relation"),
-                candidates=len(task_context.get("candidates") or []) if isinstance(task_context, dict) else 0,
-                selected_pairs=len(task_context.get("selected_pairs") or []) if isinstance(task_context, dict) else 0,
+                candidates=len(task_context.get("candidates") or []),
+                selected_pairs=len(task_context.get("selected_pairs") or []),
                 clarification_needed=bool(task_search.get("clarification_needed")),
                 status=task_search.get("status"),
                 context_source=(
                     "current_request_subject" if question_item.get("inherits_current_request_subject")
-                    else "dialogue_memory" if task_requires_history or use_turn_level_search
-                    else "turn_level_semantic_probe" if use_initial_turn_probe
+                    else "shared_rich_memory_context" if plan["needs_memory_search"] and rich_shared_context is not None
+                    else "parallel_shared_memory_snapshot" if plan["needs_memory_search"] and memory_snapshot is not None
+                    else "memory_snapshot_unavailable" if plan["needs_memory_search"]
                     else "current_request_semantics"
                 ),
                 semantic_intent=task_semantics.get("primary_intent"),
                 search_direction=task_semantics.get("direction"),
-                history_request=bool(task_context.get("history_request")) if isinstance(task_context, dict) else False,
-                topic_index_count=len(task_context.get("topic_index") or []) if isinstance(task_context, dict) else 0,
+                history_request=bool(task_context.get("history_request")),
+                topic_index_count=len(task_context.get("topic_index") or []),
             )
+        _apr_timing_log(
+            "parallel_question_search_batch", batch_started,
+            user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            task_count=len(task_plans),
+            memory_task_count=sum(1 for plan in task_plans if plan["needs_memory_search"]),
+            snapshot_rows=(
+                int(((rich_shared_context or {}).get("search") or {}).get("total_pairs") or 0)
+                if rich_shared_context else len((memory_snapshot or {}).get("rows") or [])
+            ),
+            rich_artifact_search=rich_memory_turn,
+            max_parallel_workers=parallel_limit,
+            elapsed_ms=round((time.perf_counter() - batch_started) * 1000, 1),
+        )
 
         # Preserve the established top-level route contract by using the first
         # ordered task as the legacy turn anchor. All other per-task relation and
@@ -3284,6 +3522,51 @@ async def execute(
             provider_calls=0,
             user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(identity.get("message_id")),
+        )
+    elif bool(request.routing.get("site_help_requested")) and not has_non_voice_attachment:
+        # The verified C_IT_ROOM catalogue already contains the route, positions,
+        # controls, and local SVG contract. Render navigation without another model
+        # request, an output-recovery retry, or a separate diagram-repair request.
+        from blocks.C_IT_ROOM import ensure_site_navigation_response
+        navigation_seed = "Проверяю маршрут по реальному интерфейсу April."
+        local_packet = _local_text_provider_packet(
+            navigation_seed,
+            identity,
+            metadata={
+                "local_site_navigation": True,
+                "site_navigation_source": "C_IT_ROOM",
+                "provider_calls": 0,
+            },
+        )
+        local_machine = ensure_site_navigation_response(local_packet["machine_response"], request)
+        local_answer = _text(local_machine.get("answer") or local_machine.get("content"))
+        local_meta = local_machine.get("metadata") if isinstance(local_machine.get("metadata"), dict) else {}
+        local_meta.update({
+            "local_site_navigation": True,
+            "site_navigation_source": "C_IT_ROOM",
+            "provider_calls": 0,
+            "dialogue_memory_record": {
+                "topic": "Навигация по интерфейсу April",
+                "summary": local_answer[:1200],
+                "sections": [],
+                "entities": ["Your profile", "CURRENT PLAN"] if re.search(r"premium|премиум|тариф|подписк", current_text, re.I) else [],
+                "pending_clarification": {},
+            },
+        })
+        local_machine["metadata"] = local_meta
+        local_machine["answer"] = local_answer
+        local_machine["content"] = local_answer
+        provider_packet = {"machine_response": local_machine}
+        provider_ms = 0.0
+        _apr_timing_log(
+            "site_navigation_local_response", provider_started,
+            navigation_mode=("direct_local" if direct_site_help_turn else "active_branch_local"),
+            provider_calls=0,
+            user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            render_blocks=len(local_machine.get("render_blocks") or []),
+            artifacts=len(local_machine.get("artifacts") or []),
+            answer_chars=len(local_answer),
         )
     elif bool(dialogue_context.get("clarification_needed")):
         # This is a deterministic UI-facing clarification, not a provider fallback.
