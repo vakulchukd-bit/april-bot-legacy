@@ -2801,6 +2801,339 @@ def _is_file_delivery_followup(text: str) -> bool:
 
 
 
+def _assistant_open_question_profile(answer_text: Any) -> dict[str, Any]:
+    """Extract the response slots left open by April's latest answer.
+
+    Questions are treated as discourse slots, not keyword/game triggers. Keep
+    several slots because a natural answer can ask the user more than one thing.
+    The final slot remains the default when the user gives one compact reply.
+    """
+    answer = _text(answer_text)
+    if not answer:
+        return {}
+
+    question_matches = list(re.finditer(r"([^.!?\n]{1,260}[?？])", answer))
+    question_texts = [_text(match.group(1)) for match in question_matches[-4:]]
+    invitation = re.search(
+        r"\b(?:выбери(?:те)?|выбирай|ответь(?:те)?|напиши(?:те)?|пришли(?:те)?|"
+        r"загрузи(?:те)?|покажи(?:те)?|укажи(?:те)?|скажи(?:те)?|назови(?:те)?|"
+        r"опиши(?:те)?|перечисли(?:те)?|подтверди(?:те)?|уточни(?:те)?|"
+        r"choose|pick\s+(?:one|an option)|your\s+turn|your\s+move|send\s+me|"
+        r"specify|describe|name\s+(?:the|a)\b|tell\s+me)\b",
+        answer, re.IGNORECASE,
+    )
+    if not question_texts and not invitation:
+        return {}
+
+    def classify(question: str, fallback_text: str = "") -> dict[str, Any]:
+        low = (question or fallback_text).lower().replace("ё", "е")
+        if re.search(
+            r"\b(?:как\s+(?:у\s+тебя\s+)?дела|как\s+ты|как\s+поживаешь|"
+            r"как\s+сам(?:а)?|как\s+себя\s+чувствуешь|how\s+are\s+you|"
+            r"how(?:'|’)s\s+it\s+going|how\s+are\s+things)\b",
+            low,
+        ):
+            kind = "SOCIAL_STATUS"
+        elif re.search(r"\b(?:что\s+это|кто\s+это|что\s+за\s+\w+|what\s+is\s+it|who\s+is\s+it)\b", low):
+            kind = "IDENTIFICATION"
+        elif re.search(
+            r"\b(?:или\s+нет|правильно\s+ли|верно\s+ли|угадал\s+ли|согласен\s+ли|"
+            r"согласна\s+ли|согласны\s+ли|ты\s+согласен|вы\s+согласны|"
+            r"все\s+(?:понятно|понятно\s+ли)|всё\s+(?:понятно|понятно\s+ли)|"
+            r"тебе\s+(?:понятно|подходит|удобно|нравится)|вам\s+(?:понятно|подходит|удобно)|"
+            r"ты\s+(?:готов|готова|хочешь|согласен|согласна)|вы\s+(?:готовы|хотите|согласны)|"
+            r"do\s+you\s+agree|is\s+that\s+correct|did\s+i\s+get\s+it\s+right|"
+            r"does\s+that\s+work|are\s+you\s+ready|is\s+it\s+okay|would\s+you\s+like)\b",
+            low,
+        ):
+            kind = "CONFIRMATION"
+        elif re.search(r"\b(?:какой|какая|какое|который|какие|что\s+из|which|what\s+option|choose)\b", low):
+            kind = "CHOICE_OR_ATTRIBUTE"
+        elif question:
+            kind = "OPEN_ANSWER"
+        else:
+            kind = "USER_INPUT_REQUEST"
+        # An inspectable discourse vector records what kind of response the
+        # assistant's question is waiting for. It is a structured feature vector,
+        # not a fabricated neural embedding or a confidence score.
+        dimensions = {
+            "status_response": 0.0,
+            "entity_or_concept_answer": 0.0,
+            "yes_no_confirmation": 0.0,
+            "option_selection": 0.0,
+            "free_response": 0.0,
+        }
+        vector_key = {
+            "SOCIAL_STATUS": "status_response",
+            "IDENTIFICATION": "entity_or_concept_answer",
+            "CONFIRMATION": "yes_no_confirmation",
+            "CHOICE_OR_ATTRIBUTE": "option_selection",
+            "OPEN_ANSWER": "free_response",
+            "USER_INPUT_REQUEST": "free_response",
+        }.get(kind, "free_response")
+        dimensions[vector_key] = 1.0
+        return {
+            "kind": kind,
+            "question": question[:280],
+            "expects_user_input": True,
+            "semantic_vector": dimensions,
+        }
+
+    slots = [classify(question) for question in question_texts]
+    if not slots and invitation:
+        slots = [classify("", answer)]
+    if not slots:
+        return {}
+    latest = dict(slots[-1])
+    latest.update({
+        "expects_user_input": True,
+        "questions": slots,
+        "invitation": _text(invitation.group(0))[:80] if invitation else "",
+    })
+    return latest
+
+
+def _reply_to_open_question_profile(user_text: Any, slot: dict[str, Any]) -> dict[str, Any]:
+    """Match one or more user answer clauses to April's pending question slots.
+
+    The matcher follows conversational acts and expected answer shape. It does
+    not require repeated subject words, game vocabulary, or a similarity score.
+    It can preserve several answers plus an appended request/question in one turn.
+    """
+    source = _text(user_text)
+    if not source or not isinstance(slot, dict) or not slot.get("expects_user_input"):
+        return {"matched": False}
+    low = source.lower().replace("ё", "е")
+    if re.search(r"^\s*(?:кто\s+так(?:ой|ая|ое)|что\s+такое|что\s+(?:значит|означает)|what\s+is|who\s+is)\s+\S+", low):
+        return {"matched": False, "reason": "self_contained_definition_question"}
+    slots = slot.get("questions") if isinstance(slot.get("questions"), list) else [slot]
+    slots = [item for item in slots if isinstance(item, dict) and item.get("expects_user_input")]
+    if not slots:
+        slots = [slot]
+
+    def social_status_answer(value: str) -> tuple[bool, str]:
+        match = re.search(
+            r"^\s*(?:(?:ну|да|ага|угу|тоже|у\s+меня|а\s+у\s+меня|я|все|всё)\s+){0,4}"
+            r"(?:все\s+хорошо|всё\s+хорошо|так\s+себе|не\s+плохо|более-менее|"
+            r"хорош\w*|отлич\w*|прекрас\w*|замечательн\w*|норм\w*|неплох\w*|"
+            r"супер|класс\w*|плох\w*|ужас\w*|паршив\w*|тяжел\w*|устал\w*|устала\w*|"
+            r"занят\w*|бодр\w*|нічог\w*|добре|чудов\w*|гарн\w*|нормальн\w*|"
+            r"good|fine|great|well|okay|ok|not\s+bad|bad|tired|busy)\b",
+            value.lower().replace("ё", "е"), re.IGNORECASE,
+        )
+        return bool(match), _text(value[:match.end()]).strip(" ,;—:-") if match else ""
+
+    def yes_no_answer(value: str) -> tuple[bool, str]:
+        match = re.match(
+            r"^\s*(?:да|нет|ага|угу|конечно|верно|точно|правильно|неверно|согласен|согласна|"
+            r"согласны|не\s+согласен|не\s+согласна|yes|no|yeah|nope|correct|right|agree)\b",
+            value.lower().replace("ё", "е"), re.IGNORECASE,
+        )
+        return bool(match), _text(value[:match.end()]).strip(" ,;—:-") if match else ""
+
+    instruction_start = re.compile(
+        r"^\s*(?:привет|здравствуй|доброе\s+утро|добрый\s+день|добрый\s+вечер|hello|hi|"
+        r"почему|зачем|как\s+ты|а\s+ты|а\s+вы|что\s+думаешь|как\s+думаешь|"
+        r"давай(?:те)?|(?:а\s+)?хочу|(?:а\s+)?можешь|(?:а\s+)?можно|(?:а\s+)?нужно|"
+        r"помоги(?:те)?|пообщаемся|поговорим|обсудим|"
+        r"расскажи|объясни|создай|сделай|найди|проверь|покажи|сравни|подготовь|"
+        r"перечисли|напиши|построй|вычисли|сгенерируй|измени|исправь|"
+        r"давай\s+(?:создадим|сделаем|найдем|найдём)|why|how\s+are\s+you|"
+        r"tell\s+me|explain|create|make|find|check|show|compare|prepare|write|build|generate)\b",
+        re.IGNORECASE,
+    )
+    imperative_start = re.compile(
+        r"^\s*(?:расскажи|объясни|создай|сделай|найди|проверь|покажи|сравни|подготовь|"
+        r"перечисли|напиши|построй|вычисли|сгенерируй|измени|исправь|"
+        r"давай\s+(?:создадим|сделаем|найдем|найдём)|create|make|tell|explain|show|"
+        r"find|check|compare|prepare|write|build|generate|edit)\b",
+        re.IGNORECASE,
+    )
+    topic_switch_start = re.compile(
+        r"^\s*(?:новая\s+тема|другая\s+тема|другую\s+тему|другой\s+вопрос|"
+        r"перейдем\s+к|перейдём\s+к|switch\s+topics|new\s+topic)\b",
+        re.IGNORECASE,
+    )
+    topic_switch_any = re.compile(
+        r"\b(?:новая\s+тема|другая\s+тема|другую\s+тему|другой\s+вопрос|"
+        r"перейдем\s+к|перейдём\s+к|switch\s+topics|new\s+topic)\b",
+        re.IGNORECASE,
+    )
+    filler_only = re.compile(r"^\s*(?:ответ|ответь|вот|например|ну|то\s+есть|answer|for\s+example)\s*$", re.IGNORECASE)
+
+    # Preserve segment order. Punctuation and an appended imperative can divide
+    # answers from one another without requiring the user to write a new message.
+    split_pattern = re.compile(
+        r"[,;—:]|[?？]|(?<!\d)\.(?!\d)(?=\s|$)|"
+        r"(?=\b(?:а\s+теперь|давай(?:те)?|теперь|и\s+еще|и\s+ещё|"
+        r"а\s+(?:ты|вы|что|как|почему|зачем|если|когда|где|можно|можешь|хочу)|"
+        r"и\s+(?:что|как|почему|зачем|где|когда)|"
+        r"новая\s+тема|другая\s+тема|другую\s+тему|другой\s+вопрос|switch\s+topics|new\s+topic|"
+        r"and\s+now|now|also)\b)|"
+        r"(?=\b(?:хочу|можешь|можно|нужно|помоги(?:те)?|пообщаемся|поговорим|обсудим)\b)|"
+        r"(?=\b(?:создай(?:те)?|сделай(?:те)?|расскажи(?:те)?|объясни(?:те)?|"
+        r"покажи(?:те)?|найди(?:те)?|проверь(?:те)?|сравни(?:те)?|перечисли(?:те)?|"
+        r"подготовь(?:те)?|напиши(?:те)?|построй(?:те)?|вычисли(?:те)?|сгенерируй(?:те)?|"
+        r"измени(?:те)?|исправь(?:те)?|create|make|tell|explain|show|find|check|compare|"
+        r"prepare|write|build|generate|edit)\b)",
+        re.IGNORECASE,
+    )
+    chunks: list[str] = []
+    cursor = 0
+    for boundary in split_pattern.finditer(source):
+        part = _text(source[cursor:boundary.start()]).strip(" ,;—:-")
+        if part:
+            chunks.append(part)
+        cursor = boundary.end()
+    final_part = _text(source[cursor:]).strip(" ,;—:-")
+    if final_part:
+        chunks.append(final_part)
+    if not chunks:
+        chunks = [source.strip()]
+
+    answered_indices: set[int] = set()
+    answer_records: list[dict[str, Any]] = []
+    remainder_parts: list[str] = []
+
+    for chunk in chunks:
+        if not chunk or filler_only.fullmatch(chunk):
+            continue
+        if topic_switch_start.match(chunk):
+            remainder_parts.append(chunk)
+            continue
+        if instruction_start.match(chunk):
+            remainder_parts.append(chunk)
+            continue
+        social_match, social_clause = social_status_answer(chunk)
+        yes_match, yes_clause = yes_no_answer(chunk)
+        selected_index = -1
+        selected_kind = ""
+        selected_clause = ""
+
+        # Typed replies are mapped by their discourse act, even if another
+        # question appeared later in April's answer.
+        if social_match:
+            selected_index = next((i for i, item in enumerate(slots)
+                                   if i not in answered_indices and _text(item.get("kind")) == "SOCIAL_STATUS"), -1)
+            selected_kind = "SOCIAL_STATUS"
+            selected_clause = social_clause
+        elif yes_match:
+            selected_index = next((i for i, item in enumerate(slots)
+                                   if i not in answered_indices and _text(item.get("kind")) == "CONFIRMATION"), -1)
+            selected_kind = "CONFIRMATION"
+            selected_clause = yes_clause
+        else:
+            # A question/request is a second conversational move, not an answer.
+            if instruction_start.match(chunk) or re.match(
+                r"^\s*(?:(?:и|а)\s+)?(?:что|кто|как|почему|зачем|где|когда|what|who|how|why|where|when)\b",
+                chunk.lower().replace("ё", "е"), re.IGNORECASE,
+            ):
+                remainder_parts.append(chunk)
+                continue
+            # General entity, option or open-answer clauses are matched to the
+            # earliest still-unanswered compatible slot. This lets a turn answer
+            # both "How are you?" and a second independent open question.
+            selected_index = next((i for i, item in enumerate(slots)
+                                   if i not in answered_indices and _text(item.get("kind")) in {
+                                       "IDENTIFICATION", "CHOICE_OR_ATTRIBUTE", "OPEN_ANSWER", "USER_INPUT_REQUEST"
+                                   }), -1)
+            if selected_index >= 0:
+                selected_kind = _text(slots[selected_index].get("kind")) or "OPEN_ANSWER"
+                selected_clause = chunk
+
+        if selected_index >= 0 and selected_clause:
+            answered_indices.add(selected_index)
+            answer_records.append({
+                "question_index": selected_index,
+                "kind": selected_kind,
+                "question": _text(slots[selected_index].get("question"))[:220],
+                "reply_clause": selected_clause[:180],
+            })
+        else:
+            remainder_parts.append(chunk)
+
+    if not answer_records:
+        return {"matched": False, "reason": "reply_not_aligned_to_open_slot"}
+
+    # Remove conversational filler from the appended text; keep every substantive
+    # new move for April to answer after acknowledging the response(s).
+    remainder = " ".join(part for part in remainder_parts if part and not filler_only.fullmatch(part)).strip()
+    remainder_terms = set(_semantic_normalize(remainder)[1])
+    remainder_is_question = bool(re.search(
+        r"[?？]|\b(?:а\s+(?:ты|вы|что|как|почему|зачем)|и\s+(?:что|как|почему|зачем)|что\s+думаешь|как\s+думаешь|"
+        r"why|how\s+about|what\s+do\s+you)\b", remainder, re.IGNORECASE,
+    ))
+    # The splitter consumes '?' as a clause boundary. Restore it on a retained
+    # question so the Provider sees the user's actual interrogative move, not
+    # merely the words that happened to follow the answer.
+    if remainder_is_question and remainder and not re.search(r"[?？]\s*$", remainder):
+        remainder = remainder.rstrip(" .!…") + "?"
+    remainder_is_imperative = bool(imperative_start.match(remainder))
+    remainder_is_topic_switch = bool(topic_switch_any.search(remainder))
+    remainder_is_request = bool(
+        remainder_is_imperative
+        or re.search(
+            r"\b(?:давай(?:те)?|хочу|можешь|можно|нужно|помоги|помогите|пообщаемся|поговорим|обсудим|"
+            r"придумай|предложи|составь|подготовь|сделай|создай|найди|покажи|"
+            r"расскажи|объясни|проверь|сравни|build|create|help|could\s+you|can\s+you)\b",
+            remainder, re.IGNORECASE,
+        )
+    )
+    meaningful_remainder = bool(remainder_terms or remainder_is_question or remainder_is_request or remainder_is_topic_switch)
+    mixed = bool(remainder and meaningful_remainder)
+    reciprocal_question = bool(re.search(
+        r"\b(?:а\s+ты|а\s+вы|ты\s+как\s+думаешь|вы\s+как\s+думаете|"
+        r"что\s+ты\s+думаешь|what\s+do\s+you\s+think|and\s+you)\b",
+        remainder, re.IGNORECASE,
+    ))
+    reply_vector = {
+        "status_response": 0.0,
+        "entity_or_concept_answer": 0.0,
+        "yes_no_confirmation": 0.0,
+        "option_selection": 0.0,
+        "free_response": 0.0,
+        "reciprocal_question": 1.0 if reciprocal_question else 0.0,
+        "followup_question": 1.0 if remainder_is_question else 0.0,
+        "new_request": 1.0 if mixed and remainder_is_request else 0.0,
+    }
+    kind_dimensions = {
+        "SOCIAL_STATUS": "status_response",
+        "IDENTIFICATION": "entity_or_concept_answer",
+        "CONFIRMATION": "yes_no_confirmation",
+        "CHOICE_OR_ATTRIBUTE": "option_selection",
+        "OPEN_ANSWER": "free_response",
+        "USER_INPUT_REQUEST": "free_response",
+    }
+    for record in answer_records:
+        dimension = kind_dimensions.get(record["kind"], "free_response")
+        reply_vector[dimension] = 1.0
+    move_vector = {
+        "answer_to_april_question": 1.0,
+        "new_request": 1.0 if mixed and remainder_is_request else 0.0,
+        "reciprocal_question": 1.0 if reciprocal_question else 0.0,
+        "followup_question": 1.0 if remainder_is_question else 0.0,
+        "topic_switch": 1.0 if remainder_is_topic_switch else 0.0,
+    }
+    reply_clauses = [record["reply_clause"] for record in answer_records]
+    answer_kinds = list(dict.fromkeys(record["kind"] for record in answer_records))
+    combined_kind = answer_kinds[0] if len(answer_kinds) == 1 else "MULTIPLE_RESPONSE"
+    return {
+        "matched": True,
+        "kind": combined_kind,
+        "question_index": answer_records[-1]["question_index"],
+        "answered_question_indices": [record["question_index"] for record in answer_records],
+        "reply_clause": "; ".join(reply_clauses)[:240],
+        "reply_clauses": answer_records[:4],
+        "reply_semantic_vector": reply_vector,
+        "dialogue_move_vector": move_vector,
+        "remainder_request": remainder[:420] if mixed else "",
+        "mixed_reply_and_new_request": mixed,
+        "explicit_topic_switch_after_answer": remainder_is_topic_switch,
+        "reason": "multiple_open_questions_answered" if len(answer_records) > 1 else (
+            "answer_clause_followed_by_new_request" if mixed else "answer_to_open_question"
+        ),
+    }
+
 def interpret_request_in_context(
     text: Any,
     latest_exchange: dict[str, Any] | None,
@@ -2855,6 +3188,26 @@ def interpret_request_in_context(
             "reason": "no_latest_exchange_or_empty_request",
         })
         return profile
+
+    # Read the question April actually left open before judging the new user turn.
+    # This catches answers such as a one-word guess and mixed social reply + request.
+    open_question = _assistant_open_question_profile(previous_answer)
+    open_question_reply = _reply_to_open_question_profile(source, open_question)
+    reply_to_open_question = bool(open_question_reply.get("matched"))
+    secondary_topic_switch = bool(
+        reply_to_open_question and open_question_reply.get("explicit_topic_switch_after_answer")
+    )
+    if secondary_topic_switch:
+        profile["explicit_topic_switch"] = False
+        profile["explicit_topic_introduction"] = False
+        profile["secondary_topic_switch"] = True
+        feature_map = dict(profile.get("features") or {})
+        feature_map["explicit_topic_switch"] = False
+        feature_map["secondary_topic_switch_after_answer"] = True
+        profile["features"] = feature_map
+        pragmatic_map = dict(profile.get("pragmatic_features") or {})
+        pragmatic_map["secondary_topic_switch_after_answer"] = True
+        profile["pragmatic_features"] = pragmatic_map
 
     low, current_tokens_list = _semantic_normalize(source)
     previous_user_tokens = set(_semantic_normalize(previous_user)[1])
@@ -3047,6 +3400,7 @@ def interpret_request_in_context(
         and (
             short_social_only
             or short_continuation_action
+            or reply_to_open_question
             or assistant_repetition_feedback
             or linked_by_user_turn
             or linked_by_answer
@@ -3066,6 +3420,7 @@ def interpret_request_in_context(
         "route": "LATEST_EXCHANGE_FIRST" if latest_exchange_link else "CHECK_FOR_PRIOR_BRANCH_OR_NEW_TOPIC",
         "reason": (
             "assistant_response_feedback" if assistant_repetition_feedback else
+            _text(open_question_reply.get("reason")) if reply_to_open_question else
             "social_or_pragmatic_reaction" if short_social_only else
             "short_continuation_action" if short_continuation_action else
             "semantic_link_to_previous_user_turn" if linked_by_user_turn else
@@ -3080,6 +3435,35 @@ def interpret_request_in_context(
         "answer_shared_terms": answer_common,
         "social_act": bool(gratitude or positive or acknowledgement or disagreement or dissatisfaction),
         "has_independent_payload": has_independent_payload,
+        "reply_to_open_question": reply_to_open_question,
+        "open_question_kind": _text(
+            open_question_reply.get("kind") if reply_to_open_question else open_question.get("kind")
+        ),
+        "open_question_text": _text(
+            (open_question.get("questions") or [])[int(open_question_reply.get("question_index") or 0)].get("question")
+            if reply_to_open_question and isinstance(open_question.get("questions"), list)
+            and open_question.get("questions") and 0 <= int(open_question_reply.get("question_index") or 0) < len(open_question.get("questions"))
+            else open_question.get("question")
+        )[:220],
+        "answered_question_index": int(open_question_reply.get("question_index", -1)) if reply_to_open_question else -1,
+        "answered_question_indices": list(open_question_reply.get("answered_question_indices") or [])[:4],
+        "reply_clauses": list(open_question_reply.get("reply_clauses") or [])[:4],
+        "open_question_slots": [
+            {
+                "kind": _text(item.get("kind"))[:40],
+                "question": _text(item.get("question"))[:220],
+                "expects_user_input": bool(item.get("expects_user_input")),
+                "semantic_vector": dict(item.get("semantic_vector") or {}),
+            }
+            for item in (open_question.get("questions") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "reply_clause": _text(open_question_reply.get("reply_clause"))[:180],
+        "reply_semantic_vector": dict(open_question_reply.get("reply_semantic_vector") or {}),
+        "dialogue_move_vector": dict(open_question_reply.get("dialogue_move_vector") or {}),
+        "remainder_request": _text(open_question_reply.get("remainder_request"))[:360],
+        "mixed_reply_and_new_request": bool(open_question_reply.get("mixed_reply_and_new_request")),
+        "secondary_topic_switch": secondary_topic_switch,
     }
     profile["latest_exchange_analysis"] = analysis
 
@@ -3099,20 +3483,27 @@ def interpret_request_in_context(
         features.update({
             "latest_exchange_link": True,
             "previous_answer_reference": True,
-            "context_dependent_reaction": bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback),
-            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
+            "context_dependent_reaction": bool(short_social_only or short_continuation_action or reply_to_open_question or contextual_reaction or assistant_repetition_feedback),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer or reply_to_open_question),
+            "reply_to_open_question": reply_to_open_question,
+            "mixed_reply_and_new_request": bool(open_question_reply.get("mixed_reply_and_new_request")),
             "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
         })
         profile["features"] = features
         signals.update({
             "latest_exchange_link": True,
             "previous_answer_reference": True,
-            "context_dependent_reaction": bool(short_social_only or contextual_reaction or assistant_repetition_feedback),
-            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
+            "context_dependent_reaction": bool(short_social_only or reply_to_open_question or contextual_reaction or assistant_repetition_feedback),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer or reply_to_open_question),
+            "reply_to_open_question": reply_to_open_question,
+            "mixed_reply_and_new_request": bool(open_question_reply.get("mixed_reply_and_new_request")),
             "active_branch_repair": bool(assistant_repetition_feedback or disagreement or dissatisfaction),
         })
         profile["pragmatic_features"] = signals
-        profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback)
+        profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or reply_to_open_question or contextual_reaction or assistant_repetition_feedback)
+        profile["reply_to_open_question"] = reply_to_open_question
+        profile["open_question_reply"] = dict(open_question_reply)
+        profile["open_question_profile"] = dict(open_question)
         profile["previous_answer_reference"] = True
         profile["active_branch_repair"] = bool(assistant_repetition_feedback or disagreement or dissatisfaction or profile.get("active_branch_repair"))
         profile["dialogue_act"] = profile.get("dialogue_act") or profile.get("speech_act") or "REFERENTIAL_CONTINUATION"
@@ -3208,9 +3599,14 @@ def interpret_request_across_recent_exchanges(
             "actual_latest_exchange_id": _text(latest_row.get("message_id"))[:120],
         }
         latest_profile["latest_exchange_analysis"] = latest_analysis
+    # An explicit topic-change phrase appended AFTER a matched answer is a
+    # second move, not a reason to discard the answer to April's pending question.
+    secondary_topic_switch = bool(latest_analysis.get("secondary_topic_switch"))
     explicit_switch = bool(
-        base.get("explicit_topic_switch") or base.get("explicit_topic_introduction")
-        or latest_profile.get("explicit_topic_switch")
+        not secondary_topic_switch and (
+            base.get("explicit_topic_switch") or base.get("explicit_topic_introduction")
+            or latest_profile.get("explicit_topic_switch")
+        )
     )
     explicit_conversation_repair = bool(re.search(
         r"\bя\s+(?:же\s+)?(?:спросил|спрашивал)\s*(?:[,;:—-]\s*)?"
