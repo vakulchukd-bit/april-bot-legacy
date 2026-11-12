@@ -46,6 +46,8 @@ build_interpretation = _interpretation_identity.build_interpretation
 build_question_sequence = _interpretation_identity.build_question_sequence
 interpret_request_semantics = _interpretation_identity.interpret_request_semantics
 analyze_dialogue_transition = _interpretation_identity.analyze_dialogue_transition
+should_sync_active_dialogue_branch = _interpretation_identity.should_sync_active_dialogue_branch
+enforce_history_retrieval_route = _interpretation_identity.enforce_history_retrieval_route
 
 
 def build_interpretation_identity(**kwargs):
@@ -2413,6 +2415,8 @@ async def execute(
         total_pairs=search_result.get("total_pairs"), candidates=search_result.get("candidate_count", len(dialogue_context.get("candidates") or [])),
         selected_pairs=len(selected_pairs), selected_message_keys=[_apr_diag_ref(x.get("message_id")) for x in selected_pairs if isinstance(x, dict) and x.get("message_id")],
         anchor_message_key=_apr_diag_ref(anchor.get("message_id")), topic_index_count=len(dialogue_context.get("topic_index") or []),
+        history_request=bool(dialogue_context.get("history_request")),
+        history_topics_count=len(dialogue_context.get("history_topics") or []),
     )
 
     # A follow-up may refer to an image/file from earlier in this conversation.
@@ -2472,12 +2476,18 @@ async def execute(
     explicit_history_request = bool(
         semantic_interpretation.get("history_request") or dialogue_context.get("history_request")
     )
-    sync_active_branch = (
-        not transition_explicit_switch
-        and (
-            transition_class == "TOPIC_CONTINUATION"
-            or (transition_class == "HISTORICAL_TOPIC_REACTIVATION" and transition_same_dialog)
-        )
+    # An explicit history request is an archive-search task, not a request to
+    # reactivate the latest branch.  The transition classifier may still find
+    # a same-dialog anchor (for example "what were we talking about?"), but
+    # routing that request through CONTINUE collapses the history inventory
+    # to one active pair and changes the provider's history-retrieval contract.
+    # Keep history requests on the historical-search route; selected historical
+    # pairs and topic indexes are passed separately as grounded evidence.
+    sync_active_branch = should_sync_active_dialogue_branch(
+        explicit_history_request=explicit_history_request,
+        explicit_topic_switch=transition_explicit_switch,
+        transition_class=transition_class,
+        same_dialog=transition_same_dialog,
     )
     transition_source_pair: dict[str, Any] = {}
 
@@ -2694,6 +2704,28 @@ async def execute(
                 file_inputs=len(replay_file_inputs or []),
                 visual_items=len(replay_visual or []),
             )
+
+    # Carry the historical-search decision as an explicit cross-layer contract.
+    # It must survive even when the transition classifier independently finds a
+    # related same-dialog anchor; archive retrieval is not active-branch replay.
+    dialogue_context, semantic_interpretation = enforce_history_retrieval_route(
+        dialogue_context, semantic_interpretation,
+        explicit_history_request=explicit_history_request,
+    )
+    if explicit_history_request:
+        _apr_timing_log(
+            "history_route_contract",
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(identity.get("dialog_id")),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+            relation=dialogue_context.get("relation"),
+            history_request=bool(dialogue_context.get("history_request")),
+            selected_pairs=len(dialogue_context.get("selected_pairs") or []),
+            history_topics_count=len(dialogue_context.get("history_topics") or []),
+            topic_index_count=len(dialogue_context.get("topic_index") or []),
+            semantic_intent=semantic_interpretation.get("primary_intent"),
+            search_scope=semantic_interpretation.get("search_scope"),
+        )
 
     pre_response_analysis = transition_analysis.setdefault("pre_response_analysis", {})
     if isinstance(pre_response_analysis, dict):
