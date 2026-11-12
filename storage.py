@@ -324,10 +324,30 @@ def _schema_cleanup(cur) -> None:
     cur.execute("DROP TABLE IF EXISTS dialogue_assets")
 
 
+_INIT_DB_LOCK = threading.Lock()
+_INIT_DB_COMPLETED = False
+
 def init_db() -> None:
+    """Run schema/bootstrap work once per worker process, not once per chat turn.
+
+    The migration routine is intentionally serialized across concurrent first
+    requests. A failed initialization is not cached, so a later request can retry.
+    """
+    global _INIT_DB_COMPLETED
+    if _INIT_DB_COMPLETED or not os.getenv("DATABASE_URL"):
+        return
+    with _INIT_DB_LOCK:
+        if _INIT_DB_COMPLETED:
+            return
+        initialized = _init_db_once()
+        # Do not poison the process-wide cache if DATABASE_URL is present but
+        # the database is temporarily unreachable. A later request/startup can retry.
+        _INIT_DB_COMPLETED = bool(initialized)
+
+def _init_db_once() -> bool:
     conn = get_conn()
     if not conn:
-        return
+        return False
 
     try:
         with conn:
@@ -958,6 +978,7 @@ def init_db() -> None:
     # Existing installations may predate the authenticated April ID columns.
     backfill_april_ids()
     _start_cleanup_worker()
+    return True
 
 
 def _start_cleanup_worker() -> None:
@@ -1330,7 +1351,7 @@ def load_dialogue_pairs(user_id: Any, *, limit: int = 0, timestamp: float | int 
                     # for discourse processing. This avoids fetching the entire 12h
                     # Free archive just to inspect the latest answer.
                     query += " ORDER BY created_at DESC, turn_index DESC, id DESC LIMIT %s"
-                    params = (owner_ids, current, current, max(1, min(32, int(limit))))
+                    params = (owner_ids, current, current, max(1, min(64, int(limit))))
                 else:
                     query += " ORDER BY created_at ASC, turn_index ASC, id ASC"
                 cur.execute(query, params)
@@ -1356,13 +1377,17 @@ def load_dialogue_history_index(
     user_id: Any,
     *,
     timestamp: float | int | datetime | None = None,
+    for_memory_search: bool = False,
+    memory_row_limit: int = 12,
 ) -> dict[str, Any] | None:
     """Load the small history-list index without fetching large structured payloads.
 
     The full ``structured_request`` / ``structured_response`` JSON can contain
     expensive scene, table, graph and image metadata. The history screen only
-    needs short labels and message identity, so this query intentionally selects
-    only list fields and bounds the index scan to the maximum 24-hour retention.
+    needs short labels and message identity. Memory search can request a separate
+    bounded projection: enough text/topic/section/artifact identity to rank a turn,
+    without transferring its complete render payload. Full source data is fetched
+    later only for the selected message IDs via load_dialogue_history_details().
 
     Returns None when storage is unavailable, ``authenticated=False`` for an
     unknown/unverified account, or the active plan and lightweight rows.
@@ -1398,7 +1423,18 @@ def load_dialogue_history_index(
                     return {"authenticated": False}
 
                 uid = str(account.get("user_id") or raw_uid).strip()
-                owner_ids = _dialogue_owner_ids_cursor(cur, uid)
+                # The authenticated account row is already in hand. Reuse it to
+                # derive the canonical/public memory keys instead of issuing the
+                # same users lookup again through _dialogue_owner_ids_cursor().
+                owner_ids = [uid] if uid else []
+                public_id = str(account.get("april_id") or "").strip()
+                if public_id and public_id != uid:
+                    cur.execute(
+                        "SELECT 1 FROM users WHERE user_id = %s AND user_id <> %s LIMIT 1",
+                        (public_id, uid),
+                    )
+                    if not cur.fetchone():
+                        owner_ids.append(public_id)
                 if not owner_ids:
                     return {"authenticated": False}
                 is_superadmin = _is_superadmin_user_row(account)
@@ -1434,8 +1470,173 @@ def load_dialogue_history_index(
                 # The explicit 24-hour lower bound allows the existing
                 # (user_id, created_at DESC) index to limit work before checking
                 # each row's saved 12/24-hour expiry.
-                cur.execute(
+                memory_select = ""
+                memory_text_limits = (1200, 1000, 1200, 1000)
+                try:
+                    bounded_memory_limit = max(10, min(64, int(memory_row_limit or 12)))
+                except (TypeError, ValueError, OverflowError):
+                    bounded_memory_limit = 12
+                if for_memory_search:
+                    # This is deliberately a search projection, not a duplicate
+                    # memory store. Do not select the full render_blocks/artifacts
+                    # JSONB: one ten-turn Free window can otherwise transfer many
+                    # megabytes of diagrams/tables that ranking does not need.
+                    memory_text_limits = (1800, 5200, 1800, 5200)
+                    memory_select = """
+                        , LEFT(COALESCE(user_text_en, ''), 1800) AS user_text_en
+                        , LEFT(COALESCE(april_text_en, ''), 5200) AS april_text_en
+                        , jsonb_build_object(
+                            'request_structure', jsonb_strip_nulls(jsonb_build_object(
+                                'user_goal', COALESCE(
+                                    NULLIF(structured_request #>> '{request_structure,user_goal}', ''),
+                                    NULLIF(structured_request #>> '{goal}', '')
+                                ),
+                                'task_goal', NULLIF(structured_request #>> '{request_structure,task_goal}', '')
+                            )),
+                            'intent', jsonb_build_object(
+                                'user_goal', COALESCE(
+                                    NULLIF(structured_request #>> '{intent,user_goal}', ''),
+                                    NULLIF(structured_request #>> '{intent,goal}', '')
+                                ),
+                                'input', jsonb_build_object(
+                                    'modalities', COALESCE(structured_request #> '{intent,input,modalities}', '[]'::jsonb),
+                                    'has_image', COALESCE(structured_request #> '{intent,input,has_image}', 'false'::jsonb),
+                                    'has_file', COALESCE(structured_request #> '{intent,input,has_file}', 'false'::jsonb),
+                                    'has_voice', COALESCE(structured_request #> '{intent,input,has_voice}', 'false'::jsonb)
+                                )
+                            ),
+                            'dialogue', jsonb_build_object(
+                                'continuation_context', jsonb_build_object(
+                                    'active_topic', COALESCE(
+                                        NULLIF(structured_request #>> '{dialogue,continuation_context,active_topic}', ''),
+                                        NULLIF(structured_request #>> '{request_structure,user_goal}', '')
+                                    )
+                                )
+                            )
+                        ) AS structured_request
+                        , jsonb_build_object(
+                            'summary', LEFT(COALESCE(structured_response->>'summary', ''), 800),
+                            'answer', LEFT(COALESCE(structured_response->>'answer', april_text, ''), 5200),
+                            'content', LEFT(COALESCE(structured_response->>'content', ''), 5200),
+                            'dialogue_memory_record', jsonb_strip_nulls(jsonb_build_object(
+                                'topic', COALESCE(
+                                    NULLIF(structured_response #>> '{dialogue_memory_record,topic}', ''),
+                                    NULLIF(structured_response #>> '{metadata,dialogue_memory_record,topic}', '')
+                                ),
+                                'summary', LEFT(COALESCE(
+                                    structured_response #>> '{dialogue_memory_record,summary}',
+                                    structured_response #>> '{metadata,dialogue_memory_record,summary}',
+                                    structured_response->>'summary', ''
+                                ), 1000),
+                                'sections', COALESCE((
+                                    SELECT jsonb_agg(
+                                        jsonb_strip_nulls(jsonb_build_object(
+                                            'heading', LEFT(COALESCE(sec.value->>'heading', sec.value->>'title', ''), 90),
+                                            'summary', LEFT(COALESCE(sec.value->>'summary', ''), 140),
+                                            'order', sec.ordinality,
+                                            'message_id', COALESCE(NULLIF(sec.value->>'message_id', ''), dialogue_memory.message_id)
+                                        )) ORDER BY sec.ordinality
+                                    )
+                                    FROM jsonb_array_elements(
+                                        CASE
+                                            WHEN jsonb_typeof(COALESCE(
+                                                structured_response #> '{dialogue_memory_record,sections}',
+                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
+                                                '[]'::jsonb
+                                            )) = 'array'
+                                            THEN COALESCE(
+                                                structured_response #> '{dialogue_memory_record,sections}',
+                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
+                                                '[]'::jsonb
+                                            )
+                                            ELSE '[]'::jsonb
+                                        END
+                                    ) WITH ORDINALITY AS sec(value, ordinality)
+                                    WHERE sec.ordinality <= 4
+                                ), '[]'::jsonb),
+                                'pending_clarification', COALESCE(
+                                    structured_response #> '{dialogue_memory_record,pending_clarification}',
+                                    structured_response #> '{metadata,dialogue_memory_record,pending_clarification}'
+                                )
+                            )),
+                            'metadata', jsonb_build_object(
+                                'dialogue_memory_record', jsonb_strip_nulls(jsonb_build_object(
+                                    'topic', COALESCE(
+                                        NULLIF(structured_response #>> '{dialogue_memory_record,topic}', ''),
+                                        NULLIF(structured_response #>> '{metadata,dialogue_memory_record,topic}', '')
+                                    ),
+                                    'summary', LEFT(COALESCE(
+                                        structured_response #>> '{dialogue_memory_record,summary}',
+                                        structured_response #>> '{metadata,dialogue_memory_record,summary}',
+                                        structured_response->>'summary', ''
+                                    ), 1000),
+                                    'sections', COALESCE((
+                                    SELECT jsonb_agg(
+                                        jsonb_strip_nulls(jsonb_build_object(
+                                            'heading', LEFT(COALESCE(sec.value->>'heading', sec.value->>'title', ''), 90),
+                                            'summary', LEFT(COALESCE(sec.value->>'summary', ''), 140),
+                                            'order', sec.ordinality,
+                                            'message_id', COALESCE(NULLIF(sec.value->>'message_id', ''), dialogue_memory.message_id)
+                                        )) ORDER BY sec.ordinality
+                                    )
+                                    FROM jsonb_array_elements(
+                                        CASE
+                                            WHEN jsonb_typeof(COALESCE(
+                                                structured_response #> '{dialogue_memory_record,sections}',
+                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
+                                                '[]'::jsonb
+                                            )) = 'array'
+                                            THEN COALESCE(
+                                                structured_response #> '{dialogue_memory_record,sections}',
+                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
+                                                '[]'::jsonb
+                                            )
+                                            ELSE '[]'::jsonb
+                                        END
+                                    ) WITH ORDINALITY AS sec(value, ordinality)
+                                    WHERE sec.ordinality <= 4
+                                ), '[]'::jsonb),
+                                    'pending_clarification', COALESCE(
+                                        structured_response #> '{dialogue_memory_record,pending_clarification}',
+                                        structured_response #> '{metadata,dialogue_memory_record,pending_clarification}'
+                                    )
+                                ))
+                            ),
+                            'scene_contract', jsonb_build_object(
+                                'metadata', jsonb_build_object(
+                                    'dialogue_state', jsonb_strip_nulls(jsonb_build_object(
+                                        'schema', structured_response #>> '{scene_contract,metadata,dialogue_state,schema}',
+                                        'relation', structured_response #>> '{scene_contract,metadata,dialogue_state,relation}',
+                                        'classification', structured_response #>> '{scene_contract,metadata,dialogue_state,classification}',
+                                        'strategy', structured_response #>> '{scene_contract,metadata,dialogue_state,strategy}',
+                                        'topic_id', structured_response #>> '{scene_contract,metadata,dialogue_state,topic_id}',
+                                        'branch_id', structured_response #>> '{scene_contract,metadata,dialogue_state,branch_id}',
+                                        'topic', structured_response #>> '{scene_contract,metadata,dialogue_state,topic}',
+                                        'topic_origin_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,topic_origin_message_id}',
+                                        'branch_root_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,branch_root_message_id}',
+                                        'source_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,source_message_id}',
+                                        'last_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,last_message_id}',
+                                        'source_artifact_index', '[]'::jsonb
+                                    ))
+                                )
+                            )
+                        ) AS structured_response
+                        , ARRAY_REMOVE(ARRAY[
+                            CASE WHEN structured_request #>> '{intent,input,has_image}' = 'true'
+                                      OR structured_request #>> '{visual_context,has_input_images}' = 'true'
+                                 THEN 'image' END,
+                            CASE WHEN structured_request #>> '{intent,input,has_file}' = 'true'
+                                      OR (jsonb_typeof(structured_request->'file_contents') = 'array'
+                                          AND jsonb_array_length(structured_request->'file_contents') > 0)
+                                      OR (jsonb_typeof(structured_request->'attachments') = 'array'
+                                          AND jsonb_array_length(structured_request->'attachments') > 0)
+                                 THEN 'file' END,
+                            CASE WHEN structured_request #>> '{intent,input,has_voice}' = 'true'
+                                 THEN 'voice' END
+                        ], NULL) AS row_modalities
                     """
+                cur.execute(
+                    f"""
                     SELECT
                         id,
                         COALESCE(NULLIF(BTRIM(message_id), ''), 'legacy-memory-' || id::text) AS message_id,
@@ -1443,34 +1644,40 @@ def load_dialogue_history_index(
                         dialog_id,
                         conversation_id,
                         COALESCE(
-                            NULLIF(BTRIM(structured_request #>> '{goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{intent,user_goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{intent,goal}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{goal}}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{intent,user_goal}}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{intent,goal}}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{request_structure,user_goal}}'), ''),
                             NULLIF(LEFT(BTRIM(user_text), 140), ''),
                             'Сохранённый диалог'
                         ) AS title,
                         COALESCE(
-                            NULLIF(BTRIM(structured_response #>> '{dialogue_memory_record,topic}'), ''),
-                            NULLIF(BTRIM(structured_response #>> '{metadata,dialogue_memory_record,topic}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{dialogue,continuation_context,active_topic}'), ''),
-                            NULLIF(BTRIM(structured_request #>> '{request_structure,user_goal}'), ''),
+                            NULLIF(BTRIM(structured_response #>> '{{dialogue_memory_record,topic}}'), ''),
+                            NULLIF(BTRIM(structured_response #>> '{{metadata,dialogue_memory_record,topic}}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{dialogue,continuation_context,active_topic}}'), ''),
+                            NULLIF(BTRIM(structured_request #>> '{{request_structure,user_goal}}'), ''),
                             NULLIF(LEFT(BTRIM(user_text), 140), ''),
                             'Сохранённый диалог'
                         ) AS topic_label,
                         relation,
-                        LEFT(COALESCE(user_text, ''), 1200) AS user_text,
-                        LEFT(COALESCE(april_text, ''), 1000) AS april_text,
+                        LEFT(COALESCE(user_text, ''), {memory_text_limits[0]}) AS user_text,
+                        LEFT(COALESCE(april_text, ''), {memory_text_limits[1]}) AS april_text,
                         EXTRACT(EPOCH FROM created_at) AS created_at,
                         turn_index
-                    FROM dialogue_memory
-                    WHERE user_id = ANY(%s)
-                      AND created_at <= %s
-                      AND created_at > %s - INTERVAL '24 hours'
-                      AND created_at + (
-                          GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
-                          * INTERVAL '1 hour'
-                      ) > %s
+                        {memory_select}
+                    FROM (
+                        SELECT *
+                        FROM dialogue_memory
+                        WHERE user_id = ANY(%s)
+                          AND created_at <= %s
+                          AND created_at > %s - INTERVAL '24 hours'
+                          AND created_at + (
+                              GREATEST(12, LEAST(24, COALESCE(retention_hours, 12)))
+                              * INTERVAL '1 hour'
+                          ) > %s
+                        ORDER BY created_at DESC, turn_index DESC, id DESC
+                        LIMIT {bounded_memory_limit if for_memory_search else 2147483647}
+                    ) AS dialogue_memory
                     ORDER BY created_at ASC, turn_index ASC, id ASC
                     """,
                     (owner_ids, current, current, current),
@@ -1488,6 +1695,17 @@ def load_dialogue_history_index(
                     row["relation"] = str(row.get("relation") or "")
                     row["user_text"] = str(row.get("user_text") or "")
                     row["april_text"] = str(row.get("april_text") or "")
+                    if for_memory_search:
+                        row["user_text_en"] = str(row.get("user_text_en") or row.get("user_text") or "")
+                        row["april_text_en"] = str(row.get("april_text_en") or row.get("april_text") or "")
+                        row["row_modalities"] = [str(value).lower() for value in (row.get("row_modalities") or []) if value]
+                        # Psycopg returns JSONB as native dicts; keep them compact and
+                        # never replace them with untrusted client-supplied values.
+                        if not isinstance(row.get("structured_request"), dict):
+                            row["structured_request"] = {}
+                        if not isinstance(row.get("structured_response"), dict):
+                            row["structured_response"] = {}
+                        row["topic"] = str(row.get("topic_label") or row.get("title") or "")
                     row["created_at"] = float(row.get("created_at") or 0.0)
                     row["turn_index"] = int(row.get("turn_index") or 0)
                     rows.append(row)
