@@ -926,17 +926,24 @@ def _handle_payload(
     if not conversation_id and not dialog_id:
         return _error("conversation_id or dialog_id required", 400)
 
-    # Plan is server-authoritative: derive the execution branch only from the
-    # authenticated account's active entitlement in PostgreSQL, never from JSON.
-    plan_started = time.perf_counter()
-    active_plan = _text(get_user_plan(uid)).lower() or "free"
+    # One indexed, authenticated account/profile lookup supplies entitlement,
+    # language and display name. The previous path repeated users-table lookups
+    # for plan, profile canonicalization and profile authentication.
+    preflight_started = time.perf_counter()
+    profile_result = get_community_profile(uid)
+    profile_authenticated = bool(
+        isinstance(profile_result, dict) and profile_result.get("success") is True
+    )
+    active_plan = _text(profile_result.get("plan") if profile_authenticated else "free").lower() or "free"
     is_premium = active_plan == "premium"
     _apr_timing_log(
         "plan_entitlement_resolved",
-        plan_started,
+        preflight_started,
         user_key=_apr_diag_ref(uid),
         active_plan=active_plan,
         processor="premium" if is_premium else "free",
+        preflight_source="authenticated_profile_snapshot",
+        authenticated=profile_authenticated,
     )
     # The language selected in the current April Web Settings is sent with every
     # chat request. Prefer that explicit client preference; fall back to the saved
@@ -944,7 +951,7 @@ def _handle_payload(
     # Resolve it before quota early-returns so limit/edit notices use the same locale.
     account_language = (
         _normalize_language_code(data.get("language") or data.get("display_language"))
-        or get_user_language(uid)
+        or _normalize_language_code(profile_result.get("language") if profile_authenticated else "")
         or "en"
     )
 
@@ -1165,9 +1172,8 @@ def _handle_payload(
         # Never trust a browser-supplied display name to override the DB value.
         # The Google-authenticated name is only a fallback for accounts whose
         # profile row cannot be read yet.
-        profile_started = time.perf_counter()
-        profile_result = get_community_profile(uid)
-        profile_payload = profile_result.get("profile") if isinstance(profile_result, dict) else None
+        profile_started = preflight_started
+        profile_payload = profile_result.get("profile") if profile_authenticated else None
         stored_display_name = _text(
             profile_payload.get("display_name") if isinstance(profile_payload, dict) else ""
         )[:80]
@@ -1179,6 +1185,7 @@ def _handle_payload(
             user_key=_apr_diag_ref(uid),
             name_available=bool(user_display_name),
             name_source="community_profiles" if stored_display_name else "authenticated_fallback" if user_display_name else "unavailable",
+            profile_snapshot_reused=True,
         )
 
         executor_started = time.perf_counter()
@@ -1704,6 +1711,7 @@ def _history_payload(
     *,
     single_turn: bool = False,
     current_dialog_only: bool = False,
+    history_snapshot: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Restore a selected topic, one exact recovery turn, or a bounded active thread.
 
@@ -1718,7 +1726,11 @@ def _history_payload(
 
     try:
         index_started = time.perf_counter()
-        snapshot = load_dialogue_history_index(user_id)
+        # latest_chat_restore already loaded and authenticated this exact bounded
+        # index in the route dispatcher. Reuse it instead of performing the same
+        # account+history query a second time before loading the selected full rows.
+        reused_snapshot = isinstance(history_snapshot, dict)
+        snapshot = history_snapshot if reused_snapshot else load_dialogue_history_index(user_id)
         if snapshot is None:
             return 503, {"success": False, "error": "HISTORY_UNAVAILABLE"}
         if not snapshot.get("authenticated"):
@@ -1747,6 +1759,7 @@ def _history_payload(
             plan=active_plan,
             count=len(light_rows),
             payload_mode="lightweight_topic_match",
+            snapshot_reused=reused_snapshot,
         )
 
         target_position = next((index for index, row in enumerate(light_rows) if _text(row.get("message_id")) == message_id), None)
@@ -2782,6 +2795,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                                 latest_message_id,
                                 single_turn=False,
                                 current_dialog_only=not is_premium_restore,
+                                history_snapshot=snapshot,
                             )
                             payload["restore_reason"] = (
                                 "latest_active_dialog" if not is_premium_restore else "latest_saved_topic"
