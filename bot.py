@@ -22,6 +22,7 @@ import socket
 import traceback
 import time
 import threading
+from functools import wraps
 import uuid
 from datetime import datetime, timezone
 from email.parser import BytesParser
@@ -93,6 +94,49 @@ PREMIUM_PROVIDER_TEXT_FILE_CHARS = 6_000
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v2_message_language"
 INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v3_language_resolution"
+
+# The history restore endpoint must distinguish a request that is actively
+# executing in this Bot process from a message that was never accepted or whose
+# worker already stopped. A durable-pair check alone cannot make that distinction.
+_ACTIVE_CHAT_TURNS: dict[tuple[str, str], int] = {}
+_ACTIVE_CHAT_TURNS_LOCK = threading.Lock()
+
+
+def _active_chat_turn_key(data: Any) -> tuple[str, str] | None:
+    if not isinstance(data, dict):
+        return None
+    user_id = _text(data.get("user_id") or data.get("april_id"))
+    message_id = _text(data.get("message_id"))
+    return (user_id, message_id) if user_id and message_id else None
+
+
+def _is_chat_turn_active(user_id: Any, message_id: Any) -> bool:
+    key = (_text(user_id), _text(message_id))
+    if not all(key):
+        return False
+    with _ACTIVE_CHAT_TURNS_LOCK:
+        return _ACTIVE_CHAT_TURNS.get(key, 0) > 0
+
+
+def _track_active_chat_turn(function: Any) -> Any:
+    """Reference-count active turn work across nested voice/provider handlers."""
+    @wraps(function)
+    def wrapped(data: Any, *args: Any, **kwargs: Any) -> Any:
+        key = _active_chat_turn_key(data)
+        if key is None:
+            return function(data, *args, **kwargs)
+        with _ACTIVE_CHAT_TURNS_LOCK:
+            _ACTIVE_CHAT_TURNS[key] = _ACTIVE_CHAT_TURNS.get(key, 0) + 1
+        try:
+            return function(data, *args, **kwargs)
+        finally:
+            with _ACTIVE_CHAT_TURNS_LOCK:
+                remaining = _ACTIVE_CHAT_TURNS.get(key, 1) - 1
+                if remaining > 0:
+                    _ACTIVE_CHAT_TURNS[key] = remaining
+                else:
+                    _ACTIVE_CHAT_TURNS.pop(key, None)
+    return wrapped
 
 
 def _apr_timing_log(event_name: str | None = None, started: float | None = None, **fields: Any) -> None:
@@ -898,6 +942,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@_track_active_chat_turn
 def _handle_payload(
     data: dict[str, Any],
     attachments: list[Any] | None = None,
@@ -1390,6 +1435,7 @@ def _canonical_identity(data: dict[str, Any]) -> dict[str, str]:
     }
 
 
+@_track_active_chat_turn
 def _handle_voice_stream(
     data: dict[str, Any],
     attachments: list[Any],
@@ -2729,10 +2775,12 @@ class AprilHandler(BaseHTTPRequestHandler):
                     user_id = canonical_user_id or resolve_user_id(supplied_user_id) or ""
                     user_key = user_id or supplied_user_id
                     completed = bool(user_id and dialogue_message_saved(user_id, message_id))
+                    in_flight = bool(user_id and _is_chat_turn_active(user_id, message_id))
                     status, payload = 200, {
                         "success": True,
                         "message_id": message_id,
                         "completed": completed,
+                        "in_flight": in_flight,
                         "canonical_route": CANONICAL_CHAT_ROUTE,
                     }
                 elif message_id:
@@ -3895,9 +3943,13 @@ class AprilHandler(BaseHTTPRequestHandler):
             return
         supplied_april_id = _text(self.headers.get("X-April-User-Id"))
         if not supplied_april_id:
+            # The request body has not been consumed. Close the connection so
+            # unread JSON/multipart bytes cannot be parsed as the next HTTP request.
+            self.close_connection = True
             self._send_json(401, {"success": False, "error": "AUTHENTICATION_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         if not is_authenticated_user(supplied_april_id):
+            self.close_connection = True
             self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         # `april_id` is the public account identifier; dialogue, plan and payment
@@ -3905,6 +3957,7 @@ class AprilHandler(BaseHTTPRequestHandler):
         # ingress so the Free/Premium router and all linked stores share one key.
         canonical_user_id = resolve_user_id(supplied_april_id)
         if not canonical_user_id:
+            self.close_connection = True
             self._send_json(503, {"success": False, "error": "USER_ID_RESOLUTION_FAILED", "canonical_route": CANONICAL_CHAT_ROUTE})
             return
         # Existing chat traffic is the lightweight activity signal; no new route or table is required.
@@ -3914,11 +3967,30 @@ class AprilHandler(BaseHTTPRequestHandler):
             pass
         http_started = time.perf_counter()
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length < 0 or length > MAX_BODY_BYTES:
-                self._send_json(413, {"success": False, "error": "REQUEST_BODY_TOO_LARGE", "canonical_route": CANONICAL_CHAT_ROUTE})
+            # Read the canonical chat body with the same bounded HTTP framing
+            # parser already used by multipart endpoints. Next.js/Undici can
+            # forward rebuilt FormData as chunked transfer encoding without a
+            # Content-Length header; reading Content-Length alone silently
+            # produced an empty body and broke images, documents and voice.
+            raw, body_error = self._read_bounded_request_body(MAX_BODY_BYTES)
+            if body_error:
+                status_code = 413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400
+                print(
+                    "[APRIL_HTTP] " + json.dumps({
+                        "stage": "chat_request_body_rejected",
+                        "reason": body_error,
+                        "content_length_present": self.headers.get("Content-Length") is not None,
+                        "transfer_encoding": _text(self.headers.get("Transfer-Encoding")).lower()[:40],
+                    }, separators=(",", ":")),
+                    flush=True,
+                )
+                self._send_json(status_code, {"success": False, "error": body_error, "canonical_route": CANONICAL_CHAT_ROUTE})
                 return
-            raw = self.rfile.read(length)
+            raw = raw or b""
+            length = len(raw)
+            if not raw:
+                self._send_json(400, {"success": False, "error": "EMPTY_REQUEST_BODY", "canonical_route": CANONICAL_CHAT_ROUTE})
+                return
             content_type = self.headers.get("Content-Type", "application/json")
             parse_started = time.perf_counter()
             if content_type.lower().startswith("multipart/form-data"):
