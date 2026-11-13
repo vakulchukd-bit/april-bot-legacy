@@ -4076,6 +4076,7 @@ def build_interpretation(
     restrict_image_edits: bool = True,
     identity: dict[str, str] | None = None,
     semantic_interpretation: dict[str, Any] | None = None,
+    question_sequence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create the structured request that the Provider is allowed to answer."""
     interpretation_started = time.perf_counter()
@@ -4470,7 +4471,11 @@ def build_interpretation(
             "clarification_resolution": dict(memory.get("clarification_resolution") or {}),
             "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
-            "question_sequence": _build_question_sequence(original or text),
+            "question_sequence": (
+                [dict(item) for item in question_sequence if isinstance(item, dict)]
+                if isinstance(question_sequence, list)
+                else _build_question_sequence(original or text)
+            ),
             "answer_sequence_in_order": True,
             "presentation_contract": {
                 "mcdowell_required": True,
