@@ -983,11 +983,31 @@ def _build_scene(
         },
     )
     contract = build_scene_contract(scene)
-    contract.authenticated_scope = {
-        "user_id": identity["user_id"],
-        "conversation_id": identity["conversation_id"],
-        "dialogue_sequence_id": identity["dialog_id"],
+    # The canonical builder already creates authenticated_scope. Validate the
+    # finished contract (not only the provider response metadata) before it can be
+    # serialized or persisted. Missing IDs are failures, not silently accepted.
+    contract_payload = contract.__dict__
+    assert_identity_match(identity, contract_payload)
+    contract_scope = contract_payload.get("authenticated_scope")
+    if not isinstance(contract_scope, dict):
+        raise ValueError("SCENE_AUTHENTICATED_SCOPE_MISSING")
+    expected_scope = {
+        "user_id": str(identity.get("user_id") or ""),
+        "conversation_id": str(identity.get("conversation_id") or ""),
+        "dialogue_sequence_id": str(identity.get("dialog_id") or ""),
     }
+    for scope_key, expected_value in expected_scope.items():
+        if not expected_value or str(contract_scope.get(scope_key) or "") != expected_value:
+            raise ValueError(f"SCENE_AUTHENTICATED_SCOPE_MISMATCH:{scope_key}")
+    metadata = contract_payload.get("metadata") if isinstance(contract_payload.get("metadata"), dict) else {}
+    scene_identity = metadata.get("identity") if isinstance(metadata.get("identity"), dict) else None
+    assert_identity_match(identity, scene_identity)
+    if not isinstance(scene_identity, dict) or any(
+        str(scene_identity.get(key) or "") != str(identity.get(key) or "")
+        for key in ("user_id", "conversation_id", "dialog_id", "message_id", "flow_id", "interpretation_id")
+        if identity.get(key)
+    ):
+        raise ValueError("SCENE_METADATA_IDENTITY_MISMATCH")
     return {
         "answer": response.answer,
         "content": response.content or response.answer,
@@ -2015,12 +2035,37 @@ async def execute(
     question_sequence = build_question_sequence(
         original or current_text, parent_interpretation=semantic_interpretation
     )
-    normalized_semantics = interpret_request_semantics(current_text)
-    if user_utc_offset_minutes is not None:
-        normalized_semantics["user_utc_offset_minutes"] = user_utc_offset_minutes
-    normalized_sequence = build_question_sequence(
-        current_text, parent_interpretation=normalized_semantics
-    )
+    # CURRENT_REQUEST and the original source are often identical. Re-running
+    # the deterministic classifier and splitter over the same text adds work and
+    # can create two subtly different task lists. Reuse the canonical result when
+    # there was no normalization/translation; retain the second pass only when the
+    # internal text genuinely differs from the user's original source.
+    semantic_source_text = original or current_text
+    if current_text == semantic_source_text:
+        normalized_semantics = semantic_interpretation
+        normalized_sequence = question_sequence
+        _apr_timing_log(
+            "semantic_sequence_reused", None,
+            reason="original_equals_current_request",
+            semantic_passes=1,
+            sequence_builds=1,
+            question_count=len(question_sequence),
+        )
+    else:
+        normalized_semantics = interpret_request_semantics(current_text)
+        if user_utc_offset_minutes is not None:
+            normalized_semantics["user_utc_offset_minutes"] = user_utc_offset_minutes
+        normalized_sequence = build_question_sequence(
+            current_text, parent_interpretation=normalized_semantics
+        )
+        _apr_timing_log(
+            "semantic_sequence_normalized", None,
+            reason="normalized_text_differs_from_original",
+            semantic_passes=2,
+            sequence_builds=2,
+            question_count=len(question_sequence),
+            normalized_question_count=len(normalized_sequence),
+        )
     # A self-contained April UI route is answered from C_IT_ROOM's verified
     # screen/control catalogue. It should not wait for dialogue-memory ranking
     # or a Provider call. Actual user screenshots and files stay on the rich path.
@@ -3020,6 +3065,7 @@ async def execute(
         restrict_image_edits=enforce_free_image_edit_policy,
         identity=identity,
         semantic_interpretation=semantic_interpretation,
+        question_sequence=question_sequence,
     )
     # C_IT_ROOM is the deterministic source for April's own interface map. Do not
     # make navigation depend on the LLM's semantic classifier: force text + diagram
