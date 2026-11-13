@@ -1559,49 +1559,6 @@ def load_dialogue_history_index(
                                     structured_response #> '{metadata,dialogue_memory_record,pending_clarification}'
                                 )
                             )),
-                            'metadata', jsonb_build_object(
-                                'dialogue_memory_record', jsonb_strip_nulls(jsonb_build_object(
-                                    'topic', COALESCE(
-                                        NULLIF(structured_response #>> '{dialogue_memory_record,topic}', ''),
-                                        NULLIF(structured_response #>> '{metadata,dialogue_memory_record,topic}', '')
-                                    ),
-                                    'summary', LEFT(COALESCE(
-                                        structured_response #>> '{dialogue_memory_record,summary}',
-                                        structured_response #>> '{metadata,dialogue_memory_record,summary}',
-                                        structured_response->>'summary', ''
-                                    ), 1000),
-                                    'sections', COALESCE((
-                                    SELECT jsonb_agg(
-                                        jsonb_strip_nulls(jsonb_build_object(
-                                            'heading', LEFT(COALESCE(sec.value->>'heading', sec.value->>'title', ''), 90),
-                                            'summary', LEFT(COALESCE(sec.value->>'summary', ''), 140),
-                                            'order', sec.ordinality,
-                                            'message_id', COALESCE(NULLIF(sec.value->>'message_id', ''), dialogue_memory.message_id)
-                                        )) ORDER BY sec.ordinality
-                                    )
-                                    FROM jsonb_array_elements(
-                                        CASE
-                                            WHEN jsonb_typeof(COALESCE(
-                                                structured_response #> '{dialogue_memory_record,sections}',
-                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
-                                                '[]'::jsonb
-                                            )) = 'array'
-                                            THEN COALESCE(
-                                                structured_response #> '{dialogue_memory_record,sections}',
-                                                structured_response #> '{metadata,dialogue_memory_record,sections}',
-                                                '[]'::jsonb
-                                            )
-                                            ELSE '[]'::jsonb
-                                        END
-                                    ) WITH ORDINALITY AS sec(value, ordinality)
-                                    WHERE sec.ordinality <= 4
-                                ), '[]'::jsonb),
-                                    'pending_clarification', COALESCE(
-                                        structured_response #> '{dialogue_memory_record,pending_clarification}',
-                                        structured_response #> '{metadata,dialogue_memory_record,pending_clarification}'
-                                    )
-                                ))
-                            ),
                             'scene_contract', jsonb_build_object(
                                 'metadata', jsonb_build_object(
                                     'dialogue_state', jsonb_strip_nulls(jsonb_build_object(
@@ -1616,6 +1573,7 @@ def load_dialogue_history_index(
                                         'branch_root_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,branch_root_message_id}',
                                         'source_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,source_message_id}',
                                         'last_message_id', structured_response #>> '{scene_contract,metadata,dialogue_state,last_message_id}',
+                                        'history_request', structured_response #> '{scene_contract,metadata,dialogue_state,history_request}',
                                         'source_artifact_index', '[]'::jsonb
                                     ))
                                 )
@@ -5664,9 +5622,15 @@ def get_community_snapshot(user_id: Any, *, limit: int = COMMUNITY_HISTORY_MAX_M
 
 
 def get_community_profile(user_id: Any) -> dict[str, Any]:
-    """Read the authenticated user's canonical display name from PostgreSQL."""
-    uid = _community_canonical_user(user_id)
-    if not uid:
+    """Return an authenticated user's profile, plan and language in one DB read.
+
+    The previous implementation resolved the account ID, checked authentication,
+    then opened another connection to read the profile. Bot.ru separately queried
+    the plan and, on older clients, the saved language. A single indexed JOIN now
+    supplies all four values while preserving the same email/provider auth rule.
+    """
+    raw = str(user_id or "").strip()
+    if not raw:
         return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
     conn = get_conn()
     if not conn:
@@ -5675,28 +5639,52 @@ def get_community_profile(user_id: Any) -> dict[str, Any]:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT u.name, u.april_id, p.display_name, p.is_custom
+                    """SELECT u.user_id, u.email, u.provider, u.name, u.april_id,
+                              u.plan, u.subscription_until, u.premium_id, u.language,
+                              p.display_name, p.is_custom
                        FROM users u
                        LEFT JOIN community_profiles p ON p.user_id = u.user_id
-                       WHERE u.user_id = %s LIMIT 1""",
-                    (uid,),
+                       WHERE u.user_id = %s OR u.april_id = %s
+                       ORDER BY CASE WHEN u.user_id = %s THEN 0 ELSE 1 END
+                       LIMIT 1""",
+                    (raw, raw, raw),
                 )
                 row = dict(cur.fetchone() or {})
-                if not row:
+                if not _is_authenticated_row(row):
                     return {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"}
+
+                canonical_uid = str(row.get("user_id") or "").strip()
+                is_superadmin = _is_superadmin_user_row(row)
+                if is_superadmin:
+                    row = _ensure_superadmin_premium(cur, row)
+                raw_plan = str(row.get("plan") or "free").strip().lower()
+                expiry = float(row.get("subscription_until") or 0)
+                active_plan = "premium" if is_superadmin else (
+                    raw_plan if raw_plan in {"lite", "premium"} and expiry > now().timestamp() else "free"
+                )
+                if not is_superadmin and raw_plan in {"lite", "premium"} and active_plan == "free":
+                    cur.execute(
+                        "UPDATE users SET plan = 'free' WHERE user_id = %s AND plan = %s",
+                        (canonical_uid, raw_plan),
+                    )
+
                 default_name = str(row.get("name") or "").strip()
                 if not default_name:
-                    default_name = f"Участник {str(row.get('april_id') or uid)[-4:]}"
+                    default_name = f"Участник {str(row.get('april_id') or canonical_uid)[-4:]}"
                 display_name = str(row.get("display_name") or default_name).strip()[:32]
                 if not row.get("display_name"):
                     cur.execute(
                         """INSERT INTO community_profiles(user_id, display_name, is_custom, updated_at)
                            VALUES (%s, %s, FALSE, CURRENT_TIMESTAMP)
                            ON CONFLICT (user_id) DO NOTHING""",
-                        (uid, display_name),
+                        (canonical_uid, display_name),
                     )
                 return {
                     "success": True,
+                    "user_id": canonical_uid,
+                    "april_id": str(row.get("april_id") or "").strip(),
+                    "plan": active_plan,
+                    "language": str(row.get("language") or "").strip(),
                     "profile": {
                         "display_name": display_name,
                         "is_custom": bool(row.get("is_custom")),
