@@ -1360,6 +1360,54 @@ def _parse_json(value: Any) -> dict[str, Any]:
 
 
 
+def _row_is_history_recap(row: dict[str, Any] | None) -> bool:
+    """Return True when the saved assistant turn is an explicit history overview.
+
+    The flag is stored in the canonical SceneContract dialogue_state manifest and
+    is included in the lightweight memory-index projection. A recap may mention
+    many older subjects, but it is not itself the source branch for those subjects.
+    """
+    if not isinstance(row, dict):
+        return False
+    response = _parse_json(row.get("structured_response"))
+    scene = response.get("scene_contract") if isinstance(response.get("scene_contract"), dict) else {}
+    metadata = scene.get("metadata") if isinstance(scene.get("metadata"), dict) else {}
+    dialogue_state = metadata.get("dialogue_state") if isinstance(metadata.get("dialogue_state"), dict) else {}
+    return bool(dialogue_state.get("history_request"))
+
+
+def _is_history_recap_topic_reentry(
+    query: str,
+    row: dict[str, Any] | None,
+    *,
+    history_request: bool = False,
+    new_topic_request: bool = False,
+) -> bool:
+    """Identify a named topic being reopened from a just-produced history recap."""
+    if history_request or new_topic_request or not _row_is_history_recap(row):
+        return False
+    query_subjects = _subject_tokens(query)
+    if not query_subjects:
+        return False
+    answer_text = _text(
+        (row or {}).get("april_text") or (row or {}).get("april_text_en")
+        or (row or {}).get("april") or (row or {}).get("assistant_last_message")
+    )[:5200]
+    answer_subjects = _subject_tokens(answer_text)
+    if _subject_overlap(query_subjects, answer_subjects) < 0.30:
+        return False
+    # A summary can name several topics; the user must actually ask to resume,
+    # expand, explain or discuss one of them rather than merely acknowledge it.
+    return bool(re.search(
+        r"(?:\b(?:подробн|детальн|расскаж|объясн|поясн|разбер|раскро|продолж|вернем|вернём|обсуд|поговор)"
+        r"\w*\b|\bдавай(?:те)?\s+(?:про|обсуд|поговор)|"
+        r"\bвернись\s+к\b|\bвернемся\s+к\b|\bвернёмся\s+к\b|"
+        r"\bрасскажи\s+(?:мне\s+)?про\b|\bобъясни\s+(?:мне\s+)?про\b|"
+        r"\b(?:in\s+detail|tell\s+me\s+more|continue\s+with|let(?:'|’)s\s+discuss)\b)",
+        _text(query).lower().replace("ё", "е"),
+    ))
+
+
 def _is_failed_provider_row(row: dict[str, Any]) -> bool:
     """A timeout/error bubble is not a completed assistant answer for continuity."""
     response = _parse_json(row.get("structured_response"))
@@ -3756,6 +3804,43 @@ def search_dialogue_context(
             query_interpretation["retrieval_profile"] = merged_profile
 
     latest_exchange_analysis = query_interpretation.get("latest_exchange_analysis") if isinstance(query_interpretation.get("latest_exchange_analysis"), dict) else {}
+    history_recap_topic_reentry = _is_history_recap_topic_reentry(
+        query, latest_exchange_row,
+        history_request=bool(pre_context_history_request or query_interpretation.get("history_request")),
+        new_topic_request=bool(query_interpretation.get("explicit_topic_switch") or query_interpretation.get("explicit_topic_introduction")),
+    )
+    if history_recap_topic_reentry:
+        # Do not let noun overlap with a multi-topic history recap masquerade as
+        # an answer-level continuation. Re-open the named historical branch using
+        # the existing retained index, without turning the request into a new
+        # broad-history inventory or adding another database read.
+        latest_exchange_analysis = dict(latest_exchange_analysis)
+        latest_exchange_analysis.update({
+            "linked": False,
+            "matched_older_exchange": False,
+            "reply_to_open_question": False,
+            "has_independent_payload": False,
+            "history_recap_topic_reentry": True,
+        })
+        query_interpretation = dict(query_interpretation)
+        query_interpretation["latest_exchange_analysis"] = latest_exchange_analysis
+        query_interpretation.update({
+            "requires_memory": True,
+            "primary_intent": "TOPIC_CONTINUATION",
+            "direction": "RESUME_OR_RETRIEVE_ACTIVE_TOPIC",
+            "topic_reference": "PREVIOUS_OR_ACTIVE_TOPIC",
+            "reason": "named_topic_reentry_after_history_recap",
+        })
+        _apr_timing_log(
+            "history_recap_topic_reentry_detected",
+            user_key=_apr_diag_ref(uid),
+            dialog_key=_apr_diag_ref(dialog_id),
+            source_message_key=_apr_diag_ref(latest_exchange_row.get("message_id") if isinstance(latest_exchange_row, dict) else ""),
+            query_key=_apr_diag_ref(query),
+            subject_overlap=round(_subject_overlap(_subject_tokens(query), _subject_tokens(
+                (latest_exchange_row or {}).get("april_text") or (latest_exchange_row or {}).get("april_text_en")
+            )), 4),
+        )
     matched_recent_exchange_id = _text(
         latest_exchange_analysis.get("matched_recent_exchange_id")
         or latest_exchange_analysis.get("message_id")
@@ -3843,7 +3928,7 @@ def search_dialogue_context(
     pragmatic_features = query_interpretation.get("pragmatic_features") if isinstance(query_interpretation.get("pragmatic_features"), dict) else {}
     correction_turn = bool(_looks_like_topic_correction(query) or pragmatic_features.get("correction"))
     retrieval_query = _clarification_target_text(query) if correction_turn else _text(query)
-    reference_followup = _looks_like_referential_followup(query) or correction_turn
+    reference_followup = _looks_like_referential_followup(query) or correction_turn or history_recap_topic_reentry
     history_request = bool(query_interpretation.get("history_request") or pre_context_history_request)
     new_topic_request = bool(
         (query_interpretation.get("explicit_topic_switch") or query_interpretation.get("explicit_topic_introduction"))
@@ -4067,6 +4152,22 @@ def search_dialogue_context(
             "message_id": _text(latest_dialog_row.get("message_id")),
         })
         reference_followup = True
+    if history_recap_topic_reentry:
+        # The lexical subject match is to a recap paragraph containing multiple
+        # topics, not to the original assistant answer for the named subject.
+        # Force the second-stage historical topic resolver to choose the source
+        # pair instead of pinning the recap row as the live anchor.
+        latest_answer_relation.update({
+            "matched": False,
+            "reply_to_open_question": False,
+            "expects_user_input": False,
+            "answer_subject_conflict": False,
+            "history_recap_topic_reentry": True,
+            "anchor_role": "HISTORY_RECAP_NOT_TOPIC_SOURCE",
+        })
+        latest_exchange_link = False
+        recent_branch_link = False
+        reference_followup = True
     best = matches[0] if matches else None
     active_subjects = set(latest_same_dialog.get("subject_terms") or []) if latest_same_dialog else set()
     active_subject_conflict = _subject_conflicts(query_subjects, active_subjects)
@@ -4199,6 +4300,7 @@ def search_dialogue_context(
         and latest_answer_subjects
         and query_named_overlap >= 0.50
         and asks_to_expand_named_item
+        and not history_recap_topic_reentry
         and not new_topic_request
         and not history_request
         and not has_new_user_asset
@@ -4264,7 +4366,8 @@ def search_dialogue_context(
     # branch. They outrank a lexical subject-conflict signal produced by words
     # such as "Conference" / "Williams" that April itself just introduced.
     if (correction_turn or answer_to_april_question or recent_named_topic_reentry
-            or short_answer_to_open_slot or latest_answer_relation.get("matched") or recent_branch_link):
+            or history_recap_topic_reentry or short_answer_to_open_slot
+            or latest_answer_relation.get("matched") or recent_branch_link):
         semantic_subject_switch = False
     continuation = False
     has_new_attachment = has_new_user_asset
@@ -4296,6 +4399,8 @@ def search_dialogue_context(
     ):
         continuation = True
     elif correction_turn and explicit_topic_hits:
+        continuation = True
+    elif history_recap_topic_reentry and not semantic_subject_switch:
         continuation = True
     elif recent_named_topic_reentry and not semantic_subject_switch:
         continuation = True
@@ -4523,7 +4628,28 @@ def search_dialogue_context(
         # globally, or handed back to normal dialogue. It must not create another
         # local clarification from the old options.
     elif relation == "CONTINUE" and rows:
-        if latest_same_dialog and (short_answer_to_open_slot or latest_answer_relation.get("matched")):
+        if history_recap_topic_reentry:
+            # The recap is a map of prior topics, not the source of the selected
+            # topic. Prefer the strongest non-recap USER↔APRIL pair with an actual
+            # subject/entity match; if none exists, leave the anchor unresolved
+            # rather than feeding the recap back as if it were the original branch.
+            recap_message_id = _text((latest_dialog_row or {}).get("message_id"))
+            source_candidates = [
+                item for item in matches
+                if _text(item.get("message_id")) != recap_message_id
+                and not item.get("subject_mismatch")
+                and (
+                    float(item.get("subject_overlap") or 0.0) >= 0.30
+                    or float(item.get("entity_overlap") or 0.0) >= 0.25
+                )
+            ]
+            if source_candidates:
+                anchor = max(source_candidates, key=lambda item: (
+                    float(item.get("score") or 0.0),
+                    float(item.get("created_at") or 0.0),
+                    int(item.get("turn_index") or 0),
+                ))
+        elif latest_same_dialog and (short_answer_to_open_slot or latest_answer_relation.get("matched")):
             # The user's turn is tied to the answer April just gave; do not jump
             # to a semantically similar older pair from another branch.
             anchor = latest_same_dialog
@@ -5231,6 +5357,7 @@ def search_dialogue_context(
             else "clarification_researched" if clarification_resolution
             else "clarification_pending" if clarification_needed
             else "history_request" if history_request
+            else "named_topic_reentry_after_history_recap" if history_recap_topic_reentry
             else "named_topic_vector_match" if history_selection_method == "named_topic_section_vector"
             else "answer_to_april_question" if relation == "CONTINUE" and (answer_to_april_question or short_answer_to_open_slot or latest_answer_relation.get("matched"))
             else "semantic_history_match" if contextual_history_match
@@ -5248,6 +5375,7 @@ def search_dialogue_context(
         "continuation_marker": marker,
         "referential_followup": reference_followup,
         "history_request": history_request,
+        "history_recap_topic_reentry": bool(history_recap_topic_reentry),
         "contextual_history_match": contextual_history_match,
         "latest_assistant_anchor": _compact_pair(latest_same_dialog) if latest_same_dialog else {},
         "latest_answer_relation": dict(latest_answer_relation),
@@ -5267,6 +5395,7 @@ def search_dialogue_context(
             "anchor_topic_id": _text((anchor or {}).get("topic_id") or (anchor or {}).get("selected_topic_id"))[:120] if relation == "CONTINUE" else "",
             "anchor_branch_id": _text((anchor or {}).get("branch_id") or (anchor or {}).get("active_branch_id"))[:120] if relation == "CONTINUE" else "",
             "latest_answer_match": bool(latest_answer_matched),
+            "history_recap_topic_reentry": bool(history_recap_topic_reentry),
             "answer_subject_overlap": float(latest_answer_relation.get("answer_subject_overlap") or 0.0),
             "previous_answer_expects_user_input": bool(latest_answer_relation.get("expects_user_input")),
             "reply_to_open_question": bool(latest_answer_relation.get("reply_to_open_question")),
