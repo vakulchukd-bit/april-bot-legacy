@@ -759,7 +759,7 @@ ROOM_REGISTRY: Dict[str, RoomRegistration] = {
         class_name="CVideoRoom",
         artifact_type="video",
         room_type="multimodal_video",
-        role="canonical Premium video analysis, generation, editing and rendering room",
+        role="canonical plan-independent video analysis, generation, editing and rendering room",
         capabilities=("video", "video_analysis", "video_generation", "video_editing", "video_render", "timeline_editing", "media_processing", "download", "share"),
         is_engine=True,
     ),
