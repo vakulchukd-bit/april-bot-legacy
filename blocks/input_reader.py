@@ -28,6 +28,7 @@ _TEXT_EXTENSIONS = {
     ".jsx", ".tsx", ".html", ".htm", ".css", ".xml", ".yaml", ".yml",
     ".toml", ".ini", ".cfg", ".log", ".sql", ".sh", ".bat", ".ps1",
 }
+_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi"}
 _READABLE_FILE_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".rtf", ".odt", ".ods", ".odp",
@@ -78,6 +79,27 @@ def normalize_attachment(att: Attachment) -> Attachment:
     filename = att.filename or "file"
     ext = os.path.splitext(filename.lower())[1]
     mime = _mime_type(filename, att.content_type)
+
+    # Video extensions such as .mp4 and .webm also appear in the legacy audio
+    # allowlist. Resolve an explicit video upload before generic voice detection;
+    # an explicitly named audio field or audio/* MIME remains a voice attachment.
+    explicit_audio_field = _text(att.field_name).lower() in {"audio", "voice", "audio_file", "voice_file"}
+    is_video_upload = (mime.startswith("video/") or ext in _VIDEO_EXTENSIONS) and not (
+        explicit_audio_field or mime.startswith("audio/")
+    )
+    if is_video_upload:
+        att.kind = "video"
+        att.metadata = {
+            "filename": filename,
+            "mime_type": mime if mime.startswith("video/") else "video/mp4",
+            "size_bytes": len(att.data),
+            "source_type": "video",
+            "reader": "C_VIDEO",
+            "provider_readable": False,
+            "data_uri": _build_data_uri(att.data, mime if mime.startswith("video/") else "video/mp4"),
+        }
+        # Frame extraction is deferred until bot.py has verified the Premium plan.
+        return att
 
     if is_voice_field(
         field_name=att.field_name,
