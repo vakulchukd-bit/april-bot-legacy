@@ -68,6 +68,7 @@ from blocks.C_VIDEO import (
     extract_video_frames as _extract_video_frames,
     execute_video_operation as _execute_c_video_operation,
     build_video_render_block as _build_c_video_render_block,
+    magic_hour_video_ready as _magic_hour_video_ready,
 )
 from blocks.Premium_state_manager import (
     init_db,
@@ -7416,17 +7417,10 @@ async def execute(
     # Video analysis alone uses sampled frames in the normal Premium model call.
     video_action = _text(video_plan.get("action") or "none").lower()
     video_generation_requested = video_action in {"generate", "edit"}
-    try:
-        _magic_hour_unit_cost = float(os.getenv("APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS", "").strip())
-        _magic_hour_cost_valid = 0.01 <= _magic_hour_unit_cost <= 100.0
-    except (TypeError, ValueError, OverflowError):
-        _magic_hour_cost_valid = False
-    _magic_hour_ready = bool(
-        os.getenv("MAGIC_HOUR_API_KEY", "").strip()
-        and os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() in {"1", "true", "yes", "on"}
-        and os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-        and _magic_hour_cost_valid
-    )
+    # Test accounts may use the provider's trial credits only when the
+    # server-side test flag and the per-account allow-list both match.
+    # Commercial users still require the explicit rights flag and verified cost.
+    _magic_hour_ready = _magic_hour_video_ready(uid)
     # An edit may run locally through FFmpeg; generation always needs Magic Hour.
     video_provider_configured = _magic_hour_ready if video_action == "generate" else True
     video_pending = bool(video_generation_requested and video_provider_configured)
@@ -8121,6 +8115,16 @@ async def execute(
                     "ru": "Платная генерация временно выключена: на сервере ещё не подтверждены коммерческие права видеопровайдера.",
                     "uk": "Платну генерацію тимчасово вимкнено: на сервері ще не підтверджено комерційні права відеопровайдера.",
                     "en": "Paid video generation is disabled until the provider's commercial-use rights are confirmed on the server.",
+                },
+                "MAGIC_HOUR_TEST_ACCOUNT_NOT_ALLOWED": {
+                    "ru": "Тестовый режим видео включён, но этот аккаунт не внесён в список разрешённых тестовых аккаунтов April.",
+                    "uk": "Тестовий режим відео ввімкнено, але цей акаунт не внесено до списку дозволених тестових акаунтів April.",
+                    "en": "Video test mode is enabled, but this April account is not on the allowed test-account list.",
+                },
+                "APRIL_VIDEO_TEST_COST_NOT_CONFIGURED": {
+                    "ru": "Не задана тестовая расчётная ставка видеокредитов. Укажите APRIL_VIDEO_TEST_USD_PER_1000_CREDITS.",
+                    "uk": "Не задано тестову розрахункову ставку відеокредитів. Вкажіть APRIL_VIDEO_TEST_USD_PER_1000_CREDITS.",
+                    "en": "The test video-credit accounting rate is missing. Set APRIL_VIDEO_TEST_USD_PER_1000_CREDITS.",
                 },
                 "MAGIC_HOUR_API_KEY_NOT_CONFIGURED": {
                     "ru": "На сервере не настроен ключ Magic Hour.",
