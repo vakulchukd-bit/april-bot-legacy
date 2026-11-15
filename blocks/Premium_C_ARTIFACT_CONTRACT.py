@@ -668,7 +668,7 @@ WEB_RENDERER_REGISTRY = {
     "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description", "links", "markdown", "preview", "domain", "icon", "preview_image"]},
     "file": {"renderer": "FileDeliveryBlock", "viewer": "FileDeliveryBlock", "fallback_renderer": "", "payload_keys": ["filename", "name", "mime_type", "size_bytes", "asset_ref", "export_payload", "content", "text", "code", "file_url", "download_url"]},
     "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
-    "video": {"renderer": "VideoBlock", "viewer": "VideoBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["filename", "mime_type", "size_bytes", "asset_ref", "duration_seconds", "fps", "resolution", "ratio", "description", "provider", "model", "operation", "edit_operations", "analysis_summary", "source_filename", "insert_mode", "audio", "prompt_language", "task_id"]},
+    "video": {"renderer": "VideoBlock", "viewer": "VideoBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["filename", "mime_type", "size_bytes", "asset_ref", "duration_seconds", "duration_was_default", "requested_duration_seconds", "duration_limit_seconds", "fps", "resolution", "ratio", "description", "provider", "model", "operation", "edit_operations", "analysis_summary", "source_filename", "insert_mode", "audio", "prompt_language", "task_id"]},
     "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
     "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
     # C rooms may emit function/domain artifacts. They remain in the same SceneContract
@@ -2579,6 +2579,53 @@ def _render_requested_outputs(values: Any) -> set[str]:
     }
     return {aliases.get(str(value or "").strip().lower().replace("-", "_"), str(value or "").strip().lower().replace("-", "_")) for value in values if str(value or "").strip()}
 
+
+
+def _video_scene_is_exclusive(requested_outputs: Any, current_request: Any = "") -> bool:
+    """True only for a video deliverable without a separately requested renderer."""
+    requested = _render_requested_outputs(requested_outputs)
+    if "video" not in requested:
+        return False
+    request_text = str(current_request or "").strip()
+    if request_text:
+        try:
+            from blocks.C_VIDEO import explicit_video_companion_outputs
+            return not bool(explicit_video_companion_outputs(request_text))
+        except Exception:
+            pass
+    # Legacy scenes without source request preserve any additional typed outputs.
+    return not bool(requested - {"text", "video"})
+
+
+def _filter_video_only_scene_blocks(
+    blocks: Any,
+    requested_outputs: Any,
+    current_request: Any = "",
+) -> list[dict[str, Any]]:
+    """Drop accidental renderers from an exclusive video scene, never video/text."""
+    items = [dict(item) for item in (blocks or []) if isinstance(item, dict)]
+    if not _video_scene_is_exclusive(requested_outputs, current_request):
+        return items
+    removed_ids = {
+        str(item.get("block_id") or item.get("id") or "").strip()
+        for item in items
+        if _scene_block_type(item) not in {"text", "markdown", "message", "message_text", "video"}
+        and str(item.get("block_id") or item.get("id") or "").strip()
+    }
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        block_type = _scene_block_type(item)
+        if block_type in {"text", "markdown", "message", "message_text", "video"}:
+            linked = str(item.get("explanation_for_block_id") or item.get("explanation_for") or "").strip()
+            related = item.get("related_block_ids") if isinstance(item.get("related_block_ids"), list) else []
+            if linked and linked in removed_ids:
+                continue
+            if related and any(str(value or "").strip() in removed_ids for value in related):
+                # A generated explanation for an excluded renderer is not narrative.
+                if item.get("explanation_for_block_id") or item.get("explanation_for"):
+                    continue
+            filtered.append(item)
+    return filtered
 
 def _split_markdown_table_row(line: str) -> List[str]:
     text = str(line or "").strip()
@@ -5458,7 +5505,7 @@ def prepare_render_blocks_for_room_dispatch(
         render_aliases.get(str(item.get("type") or item.get("artifact_type") or "").strip().lower(), str(item.get("type") or item.get("artifact_type") or "").strip().lower())
         for item in result if isinstance(item, dict)
     }
-    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "copy", "file"}))
+    requested_visual = sorted(requested.intersection({"image", "gallery", "table", "graph", "diagram", "formula", "link", "code", "copy", "file", "video"}))
     present_visual = sorted(set(requested_visual).intersection(rendered_types))
     missing_visual = sorted(set(requested_visual) - set(present_visual))
     coverage = round(len(present_visual) / max(1, len(requested_visual)), 3) if requested_visual else 1.0
@@ -5485,7 +5532,7 @@ def _scene_payload_has_content(block_type: str, payload: Dict[str, Any], block: 
 
 
 _PREMIUM_EXPLAINED_RENDER_TYPES = {
-    "formula", "graph", "table", "diagram", "image", "gallery", "code", "copy", "link", "file", "audio", "video"
+    "formula", "graph", "table", "diagram", "image", "gallery", "code", "copy", "link", "file", "audio"
 }
 
 
@@ -6672,6 +6719,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         graph_policy=active_task.get("graph_policy"),
         current_request=current_request,
     )
+    blocks = _filter_video_only_scene_blocks(blocks, active_task.get("requested_outputs"), current_request)
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
     requested_outputs = _render_requested_outputs(active_task.get("requested_outputs"))
     suppress_unrequested_table = "graph" in requested_outputs and "table" not in requested_outputs and any(
@@ -6757,6 +6805,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     # Run after the canonical-answer fallback so an explanation block cannot be
     # mistaken for the primary user-facing answer when the source list had no text.
     blocks = _ensure_premium_render_explanations(blocks, source_answer or answer, language_hint)
+    blocks = _filter_video_only_scene_blocks(blocks, active_task.get("requested_outputs"), current_request)
 
     order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
     order_pos = {value: idx for idx, value in enumerate(order)}
