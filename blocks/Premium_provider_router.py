@@ -72,6 +72,9 @@ NATURAL CONVERSATION AND USER INTENT:
 APRIL SITE NAVIGATION CONTEXT:
 When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Add a DiagramRenderer block only when the user explicitly asks for a diagram/visual route map or when the route relationships genuinely clarify the next action. A diagram must add navigation structure (for example, route-to-route transitions), not copy the prose steps or repeat the answer's headings. When a diagram does not add new information, return the text and links only. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.
 
+VIDEO GENERATION AND SCENE CONTRACT:
+- When INTERPRETATION.task=generate_video, wants_video=true, or ROOM_KNOWLEDGE_CONTEXT contains an active C_VIDEO generation action, C_VIDEO is the real plan-independent execution owner. A Free user may use it through the separate prepaid C_VIDEO.video_wallet; Premium is not a prerequisite. Do not claim April cannot create video, replace the requested operation with a prompt-only suggestion, or invent a completed video. Preserve the full scene, motion, duration, style and audio requirements. The executor generates the MP4, persists its exact bytes and SHA-256 under the authenticated message, and then attaches the canonical VideoBlock through SceneContract. A failed generation or failed persistence must not be represented as a completed video artifact. Provider-authored empty/fake VideoBlock payloads are not valid substitutes.
+
 IMAGE / MULTIMEDIA SEPARATION:
 The text answer is still the main answer. When image generation is explicitly requested, put only the requested visual subject/scene into the image-generation spec. Do not turn the whole explanation, tutorial, answer, code, table, diagram, or ordered steps into an image. Keep each requested explanatory or structured output in its own text/render block; put words inside the picture only when the user explicitly requests text within the image.
 - Answer like a careful domain expert: give the useful conclusion first, then explain the relevant why/how, implications, trade-offs and concrete next step when useful. Match depth to the question; completeness is required, padding is not.
@@ -2415,6 +2418,23 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         for room_key, room_value in raw_room_context.items():
             if not isinstance(room_value, dict):
                 continue
+            # Keep C_VIDEO execution ownership visible even in emergency
+            # compaction. Dropping this room context made the Provider say that
+            # April could not create a video while the executor still ran C_VIDEO.
+            if str(room_key).strip().upper() == "C_VIDEO":
+                raw_video_contract = room_value.get("video_scene_contract") if isinstance(room_value.get("video_scene_contract"), dict) else {}
+                room_context_min["C_VIDEO"] = {
+                    "action": _text(room_value.get("action"))[:24],
+                    "execution_owner": "C_VIDEO",
+                    "required_renderer": _text(room_value.get("required_renderer"))[:48],
+                    "generation_guidance": _text(room_value.get("generation_guidance"))[:560],
+                    "video_scene_contract": {
+                        key: raw_video_contract.get(key)
+                        for key in ("version", "room", "action", "execution_owner", "required_renderer", "render_contract", "billing_owner")
+                        if raw_video_contract.get(key) not in (None, "", [], {})
+                    },
+                }
+                continue
             raw_site_map = room_value.get("site_navigation_map")
             if not isinstance(raw_site_map, dict) or not room_value.get("site_help_requested"):
                 continue
@@ -2582,7 +2602,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
         identity_min = {k: v for k, v in (data.get("AUTHENTICATED_IDENTITY") or {}).items() if v}
         intent_min = data.get("INTERPRETATION") if isinstance(data.get("INTERPRETATION"), dict) else {}
         keep_intent = {k: v for k, v in intent_min.items() if k in {
-            "schema", "task", "requested_outputs", "wants_image", "adaptive_visual_policy", "ambiguity_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
+            "schema", "task", "requested_outputs", "wants_image", "wants_video", "video_action",
+            "video_execution_owner", "video_plan", "adaptive_visual_policy", "ambiguity_policy", "wants_file", "wants_copy", "file_delivery_mode", "wants_code", "wants_links", "wants_graph", "graph_policy", "explicit_generation_request", "dialogue_profile_request"
         }}
         dialogue_anchor = data.get("DIALOGUE_ANCHOR") if isinstance(data.get("DIALOGUE_ANCHOR"), dict) else {}
         anchor_min = {
@@ -3390,6 +3411,7 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "Room IDs and room knowledge are domain/provenance metadata, never renderer triggers. "
             "Preserve every REQUEST_SEQUENCE step and all protected source values. "
             + emergency_task_guidance + " "
+            + "VIDEO EXECUTION: when INTERPRETATION.task=generate_video or wants_video=true, C_VIDEO is the real plan-independent execution room. Use ROOM_KNOWLEDGE_CONTEXT.C_VIDEO as the operative contract; do not claim video is unsupported, return only a prompt, or fabricate completion. The executor attaches VideoBlock only after a real MP4 is generated and persisted. "
             + "When SELECTED_SOURCE_ARTIFACT exists, apply CURRENT_REQUEST to that exact selected artifact and return a concrete renderer of the same family; never substitute another topic's artifact or claim a prose-only revision is complete. Preserve source/topic/branch/revision IDs. "
             + "Use Markdown headings and short nested subsections for substantive multi-part answers. Preserve every materially plausible interpretation as a separate complete section; never silently collapse ambiguity into one subject. "
             + "When distinct visual interpretations are requested, return a separate image_specs item for each; never merge unrelated subjects into one image. "
@@ -4478,6 +4500,9 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
         "source": "authenticated_settings_profile",
     } if authenticated_identity.get("display_name") else {}
 
+    request_structure_card = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else {}
+    video_scene_contract_card = request_structure_card.get("video_scene_contract") if isinstance(request_structure_card.get("video_scene_contract"), dict) else {}
+
     structured = {
         "AUTHENTICATED_IDENTITY": authenticated_identity,
         "CURRENT_USER_PROFILE": current_user_profile,
@@ -4493,6 +4518,11 @@ def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = N
             "task": structured_intent.get("task", "answer_request"),
             "requested_outputs": structured_intent.get("requested_outputs") or ["text"],
             "wants_image": bool(structured_intent.get("wants_image")),
+            "wants_video": bool(structured_intent.get("wants_video")),
+            "video_action": _text(structured_intent.get("video_action"))[:24],
+            "video_execution_owner": _text(structured_intent.get("video_execution_owner"))[:40],
+            "video_plan": dict(structured_intent.get("video_plan") or {}),
+            "video_scene_contract": dict(video_scene_contract_card),
             "adaptive_visual_policy": bool(structured_intent.get("adaptive_visual_policy")),
             "wants_file": bool(structured_intent.get("wants_file")),
             "wants_copy": bool(structured_intent.get("wants_copy")),
