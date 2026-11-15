@@ -592,11 +592,31 @@ def _is_feedback_control_help_request(text: Any) -> bool:
     return feedback_target and interaction_question and not explicit_artifact_creation
 
 
+def _explicit_video_output_intent(
+    text: Any, attachments: Any = None, *, allow_edit: bool = False,
+) -> tuple[bool, list[str]]:
+    """Resolve a C_VIDEO output using the same source-aware room classifier."""
+    try:
+        from blocks.C_VIDEO import classify_video_request, explicit_video_companion_outputs
+        plan = classify_video_request(_text(text), attachments or [])
+        action = _text(plan.get("action")).lower()
+        if action == "generate" or (allow_edit and action == "edit"):
+            return True, explicit_video_companion_outputs(text)
+    except Exception:
+        # Interpreter import failures must not make the request unanswerable.
+        # The executor's shared C_VIDEO plan remains the final execution gate.
+        return False, []
+    return False, []
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
     if is_april_identity_question(low):
         return ["text"]
+    video_requested, video_companions = _explicit_video_output_intent(low)
+    if video_requested:
+        return list(dict.fromkeys(["text", "video", *video_companions]))
     if _is_feedback_control_help_request(low):
         # A route diagram is useful for "where do I click?"; photo/graph/code
         # words in the same sentence are examples of earlier answers, not deliverables.
@@ -730,6 +750,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     low = _text(text).lower().replace("ё", "е")
     if is_april_identity_question(low) or is_current_user_name_question(low) or is_bare_visual_command(low):
         return ["text"]
+    video_requested, video_companions = _explicit_video_output_intent(low)
+    if video_requested:
+        return list(dict.fromkeys(["text", "video", *video_companions]))
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     explicit_image_request = _detect_image_generation_request(low)
 
@@ -4151,6 +4174,14 @@ def build_interpretation(
     request_text = original or text
     detected_outputs = _detect_requested_outputs(request_text)
     requested_outputs = _enhance_requested_outputs(request_text, detected_outputs)
+    video_output_requested, video_companions = _explicit_video_output_intent(
+        request_text, attachments, allow_edit=False,
+    )
+    if video_output_requested:
+        # The source-aware pass is important for Premium edits: an uploaded
+        # video plus a direct edit command is an output task, while a how-to
+        # question remains non-billable and does not select C_VIDEO.
+        requested_outputs = list(dict.fromkeys(["text", "video", *video_companions]))
     # A correction such as "I asked you to send it as a file" is elliptical.
     # Recover the code output only from the matched active branch selected by
     # State Manager; never scan unrelated history or infer a new code task.
@@ -4379,6 +4410,7 @@ def build_interpretation(
         "intent": {
             "task": task,
             "requested_outputs": requested_outputs,
+            "wants_video": "video" in requested_outputs,
             "wants_image": wants_image,
             "explicit_generation_request": wants_image,
             "image_edit_restricted": image_edit_restricted,
