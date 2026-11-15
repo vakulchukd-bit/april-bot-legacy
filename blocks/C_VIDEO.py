@@ -1364,7 +1364,13 @@ async def execute_video_operation(
             "use natural motion and intentional camera movement, preserve the requested sequence and style, "
             "avoid captions/text unless explicitly requested. Direction: " + _text(request_text)[:12000]
         )
-        duration_match = re.search(r"(?iu)(60|[1-5]?\d)\s*(?:секунд|сек|seconds?|s)\b", _text(request_text))
+        # Russian numerals commonly arrive with inflected units ("2 секунды",
+        # "10 секунд", "1 секунду"). Match the complete word before applying
+        # the configured default; otherwise a two-second request silently became 5s.
+        duration_match = re.search(
+            r"(?iu)(?<!\d)(60|[1-5]?\d)\s*(?:секунд(?:а|ы|у|е|ой)?|сек\.?|seconds?|secs?|s)(?=\s|[,.!?;:]|$)",
+            _text(request_text),
+        )
         duration = int(duration_match.group(1)) if duration_match else int(os.getenv("APRIL_VIDEO_DEFAULT_DURATION", "5") or 5)
         ratio = "9:16" if re.search(r"(?iu)(?:вертикальн|портретн|сторис|reel|тик.?ток|vertical|portrait)", request_text) else (
             "1:1" if re.search(r"(?iu)(?:квадратн|square)", request_text) else "16:9"
