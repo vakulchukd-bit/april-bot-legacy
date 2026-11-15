@@ -561,16 +561,40 @@ def _magic_hour_json(path: str, *, api_key: str, method: str = "GET", body: dict
         detail = ""
         try:
             payload = json.loads(exc.read(64 * 1024).decode("utf-8", errors="replace"))
-            detail = _text(payload.get("message") or payload.get("code"))
+            nested_error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            detail = _text(
+                payload.get("message") or payload.get("code") or payload.get("detail")
+                or nested_error.get("message") or nested_error.get("code")
+            )
         except Exception:
             pass
+        # Preserve Magic Hour's structured reason. A 402 can mean insufficient
+        # credits, a subscription gate, or a model/plan restriction; collapsing
+        # every case into INSUFFICIENT_CREDITS sends users toward needless top-ups.
         if exc.code == 402:
-            raise CVideoError("MAGIC_HOUR_PROVIDER_INSUFFICIENT_CREDITS") from exc
+            raise CVideoError(f"MAGIC_HOUR_HTTP_402: {detail or 'provider billing or plan restriction'}") from exc
         raise CVideoError(f"MAGIC_HOUR_HTTP_{exc.code}: {detail or 'request rejected'}") from exc
     except urllib.error.URLError as exc:
         raise CVideoError(f"MAGIC_HOUR_CONNECTION_FAILED: {exc.reason}") from exc
     except (TimeoutError, json.JSONDecodeError) as exc:
         raise CVideoError(f"MAGIC_HOUR_RESPONSE_FAILED: {type(exc).__name__}") from exc
+
+
+def _magic_hour_account_credits(*, api_key: str) -> int:
+    """Read the balance for the exact API key configured on April (no charge).
+
+    This prevents confusing a funded browser session with a different or stale
+    API key deployed on the bot. GET /v1/account is a read-only provider call.
+    """
+    account = _magic_hour_json("/v1/account", api_key=api_key, method="GET", timeout=30)
+    raw_credits = account.get("credits")
+    try:
+        credits = int(raw_credits)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CVideoError("MAGIC_HOUR_API_ACCOUNT_BALANCE_UNREADABLE") from exc
+    if credits < 0:
+        raise CVideoError("MAGIC_HOUR_API_ACCOUNT_BALANCE_UNREADABLE")
+    return credits
 
 
 def _magic_hour_upload(data: bytes, *, api_key: str, kind: str, extension: str) -> str:
@@ -722,11 +746,11 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
 
     explicit_create = bool(re.search(
         r"(?iu)(?:созда\w*|сгенерир\w*|сними\w*|ожив\w*|анимир\w*|створ\w*|згенер\w*|generate|create|animate)"
-        r".{0,100}(?:видео|ролик|клип|відео|video|clip)|"
+        r".{0,100}(?:виде\w*|ролик|клип|відео|video|clip)|"
         r"(?:video|clip).{0,70}(?:generate|create|animate)", low
     ))
     generic_create = bool(re.search(
-        r"(?iu)(?:сдела\w*|зроб\w*|make).{0,100}(?:видео|ролик|клип|відео|video|clip)", low
+        r"(?iu)(?:сдела\w*|зроб\w*|make).{0,100}(?:виде\w*|ролик|клип|відео|video|clip)", low
     ))
     edit_words = bool(re.search(
         r"(?iu)(?:обреж\w*|обрез\w*|выреж\w*|укорот\w*|нареж\w*|склей\w*|соедин\w*|встав\w*|налож\w*|добав\w*.{0,24}(?:клип|фрагмент|видео)|"
@@ -901,6 +925,16 @@ async def generate_video(
     rate = _magic_hour_rates(model, resolution)
     ratio = ratio if ratio in {"16:9", "9:16", "1:1", "3:2", "2:3", "4:3"} else "16:9"
     estimate_credits = int(duration * rate)
+
+    # Verify the account behind MAGIC_HOUR_API_KEY before reserving the user's
+    # April wallet or submitting a billable job. Browser balance and deployed
+    # API-key balance can differ when another key/account is configured.
+    provider_credits = await asyncio.to_thread(_magic_hour_account_credits, api_key=api_key)
+    if provider_credits < estimate_credits:
+        raise CVideoError(
+            f"MAGIC_HOUR_API_ACCOUNT_CREDITS_LOW: available={provider_credits} required={estimate_credits}"
+        )
+
     reservation = _reserve_video_charge(user_id, operation_ref, "generate", estimate_credits)
     project_id = ""
     try:
