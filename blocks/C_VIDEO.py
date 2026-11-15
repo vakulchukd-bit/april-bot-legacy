@@ -28,6 +28,8 @@ from typing import Any, Callable
 MAX_VIDEO_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_INPUT_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_FRAMES = 8
+VIDEO_DEFAULT_DURATION_SECONDS = 3
+VIDEO_MAX_DURATION_SECONDS = 60
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi"}
 
 
@@ -731,6 +733,154 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+_VIDEO_NUMBER_WORDS = {
+    "одну": 1, "одной": 1, "одного": 1, "один": 1, "одна": 1,
+    "две": 2, "дві": 2, "два": 2, "три": 3, "четыре": 4, "чотири": 4,
+    "пять": 5, "п'ять": 5, "шесть": 6, "шість": 6,
+    "семь": 7, "сім": 7, "восемь": 8, "вісім": 8, "девять": 9, "дев'ять": 9,
+    "десять": 10, "одиннадцать": 11, "двенадцать": 12,
+    "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16,
+    "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50, "шестьдесят": 60,
+    "одинадцять": 11, "дванадцять": 12, "тринадцять": 13, "чотирнадцять": 14,
+    "п'ятнадцять": 15, "шістнадцять": 16, "сімнадцять": 17, "вісімнадцять": 18,
+    "дев'ятнадцять": 19, "двадцять": 20, "тридцять": 30, "сорок": 40,
+    "п'ятдесят": 50, "шістдесят": 60,
+    "eleven": 11, "twelve": 12, "one": 1, "two": 2, "three": 3,
+    "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30,
+    "forty": 40, "fifty": 50, "sixty": 60,
+}
+_VIDEO_TENS_WORDS = {
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50, "шестьдесят": 60,
+    "двадцять": 20, "тридцять": 30, "сорок": 40, "п'ятдесят": 50, "шістдесят": 60,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+}
+
+
+def _active_video_model_resolution(model: Any = None, resolution: Any = None) -> tuple[str, str]:
+    model = _text(model or os.getenv("APRIL_MAGIC_HOUR_VIDEO_MODEL") or "ltx-2.5").lower()
+    resolution = _text(resolution or os.getenv("APRIL_VIDEO_RESOLUTION") or "480p").lower()
+    return model or "ltx-2.5", resolution or "480p"
+
+
+def get_video_capability_profile(model: Any = None, resolution: Any = None) -> dict[str, Any]:
+    """Return the supported single-clip duration for the effective provider model and resolution."""
+    model, resolution = _active_video_model_resolution(model, resolution)
+    if model == "ltx-2.5":
+        maximum = 30 if resolution == "1080p" else 60 if resolution in {"480p", "720p"} else 0
+    elif model == "minimax-h3":
+        maximum = 30 if resolution in {"480p", "720p", "1080p"} else 0
+    else:
+        maximum = 0
+    return {
+        "provider": "Magic Hour",
+        "model": model,
+        "resolution": resolution,
+        "minimum_duration_seconds": 1 if maximum else None,
+        "maximum_duration_seconds": maximum or None,
+        "default_duration_seconds": VIDEO_DEFAULT_DURATION_SECONDS,
+        "supported": bool(maximum),
+        "duration_rule": (
+            "LTX 2.5: 1–60 seconds at 480p/720p; up to 30 seconds at 1080p."
+            if model == "ltx-2.5" else
+            "MiniMax H3: 1–30 seconds at supported resolutions."
+            if model == "minimax-h3" else
+            "The configured model is not supported by April's current C_VIDEO rate table."
+        ),
+    }
+
+
+def _parse_requested_video_duration(request_text: str) -> int | None:
+    """Parse an explicitly stated clip length; None means no duration was stated."""
+    value = _text(request_text).lower().replace("ё", "е")
+    if not value:
+        return None
+
+    # Timecode is accepted only when it is clearly marked as a duration.
+    timecode = re.search(
+        r"(?iu)(?:длительност\w*|длин\w*|хронометраж\w*|duration|length|на протяжении|в течение)\s*[:=]?\s*(\d{1,2}):(\d{2})\b",
+        value,
+    )
+    if timecode:
+        minutes, seconds = int(timecode.group(1)), int(timecode.group(2))
+        if f"{minutes}:{seconds}" not in {"9:16", "16:9", "1:1", "3:2", "2:3", "4:3"}:
+            return minutes * 60 + seconds
+
+    if re.search(r"(?iu)\b(?:полминут\w*|половин\w*\s+минут\w*|пів\s*хвилин\w*|half\s+a\s+minute)\b", value):
+        return 30
+    if re.search(r"(?iu)\b(?:полторы\s+минут\w*|півтори\s+хвилин\w*)\b", value):
+        return 90
+    if re.search(r"(?iu)\b(?:на\s+)?(?:минуту|одну\s+минуту|одну\s+хвилину|хвилину|one\s+minute)\b", value):
+        return 60
+
+    all_words = set(_VIDEO_NUMBER_WORDS)
+    tens = set(_VIDEO_TENS_WORDS)
+    word_alt = "|".join(sorted(map(re.escape, all_words), key=len, reverse=True))
+    tens_alt = "|".join(sorted(map(re.escape, tens), key=len, reverse=True))
+    number_pattern = r"(?P<number>\d{1,3}|(?:" + tens_alt + r")(?:[\s-]+(?:" + word_alt + r"))?|(?:" + word_alt + r"))"
+    unit_pattern = r"(?P<unit>секунд\w*|сек\.?|с|seconds?|secs?|s|минут\w*|мин\.?|minutes?|mins?|хвилин\w*|хв\.?|m)"
+    match = re.search(number_pattern + r"[\s-]*" + unit_pattern + r"\b", value, re.I)
+    if not match:
+        return None
+
+    before = value[max(0, match.start() - 28):match.start()]
+    if re.search(r"(?iu)(?:через|спустя|after|in\s+the\s+next)\s*$", before):
+        return None
+
+    number_raw = match.group("number").lower().replace("ё", "е")
+    if number_raw.isdigit():
+        amount = int(number_raw)
+    else:
+        tokens = re.split(r"[\s-]+", number_raw)
+        if len(tokens) == 1:
+            amount = _VIDEO_NUMBER_WORDS[tokens[0]]
+        elif len(tokens) == 2 and tokens[0] in _VIDEO_TENS_WORDS and tokens[1] in _VIDEO_NUMBER_WORDS:
+            amount = _VIDEO_TENS_WORDS[tokens[0]] + _VIDEO_NUMBER_WORDS[tokens[1]]
+        else:
+            return None
+    unit = match.group("unit").lower()
+    return amount * 60 if unit.startswith(("мин", "min", "хв", "m")) else amount
+
+
+def resolve_video_duration(request_text: str) -> dict[str, Any]:
+    """Resolve requested/default duration and reject values outside active model limits."""
+    profile = get_video_capability_profile()
+    raw_request = _text(request_text)
+    duration_omitted_explicitly = bool(re.search(
+        r"(?iu)(?:без\s+(?:указани\w*\s+)?(?:времени|длительност\w*)|"
+        r"длительност\w*\s+(?:не\s+указан\w*|не\s+задан\w*|не\s+определен\w*)|"
+        r"(?:no|without)\s+(?:specified\s+)?duration|duration\s+(?:not\s+specified|not\s+set))",
+        raw_request,
+    ))
+    requested = None if duration_omitted_explicitly else _parse_requested_video_duration(request_text)
+    duration_expression_present = not duration_omitted_explicitly and (
+        bool(re.search(r"(?iu)\d+\s*(?:секунд|сек\.?|seconds?|secs?|минут|мин\.?|minutes?|mins?|хвилин|хв\.?)", raw_request))
+        or bool(re.search(r"(?iu)(?:длительност\w*|хронометраж|duration|length)\s*[:=]?\s*\S+", raw_request))
+        or bool(re.search(r"(?iu)(?:полторы\s+минут|півтори\s+хвилин|полминут|пів\s*хвилин)", raw_request))
+    )
+    unsupported_duration_expression = requested is None and duration_expression_present
+    defaulted = requested is None and not unsupported_duration_expression
+    duration = VIDEO_DEFAULT_DURATION_SECONDS if requested is None else int(requested)
+    maximum = profile.get("maximum_duration_seconds")
+    error = ""
+    if unsupported_duration_expression:
+        error = "VIDEO_DURATION_EXPRESSION_UNSUPPORTED"
+    elif not profile.get("supported"):
+        error = "APRIL_VIDEO_MODEL_OR_RESOLUTION_UNSUPPORTED"
+    elif duration < int(profile.get("minimum_duration_seconds") or 1) or duration > int(maximum or 0):
+        error = f"VIDEO_DURATION_LIMIT_EXCEEDED:requested={duration}:max={maximum}"
+    return {
+        "duration_seconds": duration,
+        "requested_duration_seconds": requested,
+        "duration_was_default": defaulted,
+        "duration_limit_seconds": maximum,
+        "duration_resolution": profile.get("resolution"),
+        "duration_model": profile.get("model"),
+        "duration_error": error,
+    }
+
+
 def _build_data_uri(data: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64," + base64.b64encode(data).decode("ascii")
 
@@ -749,6 +899,65 @@ def decode_video_data_uri(value: Any) -> tuple[bytes, str] | None:
         return None
     return data, match.group(1).lower()
 
+
+
+def explicit_video_companion_outputs(request_text: Any) -> list[str]:
+    """Return independently requested outputs explicitly conjoined with a video task.
+
+    A visual noun inside the video's scene description ("video of a diagram") is
+    not a second renderer request. A separate output is retained only when the
+    user joins it to the video with "and/и" or gives it its own output action.
+    """
+    text = _text(request_text).lower().replace("ё", "е")
+    if not text:
+        return []
+    video_noun = r"(?:виде\w*|ролик\w*|клип\w*|відео|video|clip)"
+    separator = r"(?:\bи\b|\band\b|\balso\b|\bplus\b|\bа\s+также\b|\bа\s+затем\b|\bзатем\b|\bпотом\b|\bthen\b|\bnext\b)"
+    action = r"(?:созда\w*|сгенерир\w*|постро\w*|нарис\w*|сдела\w*|слела\w*|слел\w*|зроб\w*|створ\w*|покаж\w*|подготов\w*|напиш\w*|выдай\w*|create|generate|build|draw|make|show|prepare|write|export)"
+    patterns = {
+        "image": r"(?:картинк\w*|изображени\w*|фото\w*|иллюстраци\w*|\bimage\b|\bphoto\b|\bpicture\b|\billustration\b)",
+        "diagram": r"(?:диаграмм\w*|схем\w*|черт[её]ж\w*|блок[- ]схем\w*|\bdiagram\b|\bschematic\b|\bflowchart\b|\bblueprint\b)",
+        "graph": r"(?:график\w*|гистограмм\w*|\bgraph\b|\bchart\b|\bplot\b)",
+        "table": r"(?:таблиц\w*|\btable\b)",
+        "formula": r"(?:формул\w*|уравнен\w*|\bformula\b|\bequation\b)",
+        "code": r"(?:код\w*|скрипт\w*|\bcode\b|\bscript\b)",
+        "file": r"(?:файл\w*|\bfile\b|\bpdf\b|\bcsv\b|\bxlsx\b|\bdocx\b)",
+        "link": r"(?:ссылк\w*|\blink\w*|\burl\b)",
+        "audio": r"(?:аудио\w*|звук\w*|озвучк\w*|\baudio\b|\bsound\b|\bvoiceover\b)",
+    }
+    found: list[str] = []
+    video_first = re.search(video_noun, text, re.I)
+    video_last = list(re.finditer(video_noun, text, re.I))
+    if not video_first or not video_last:
+        return found
+    first_video_start = video_first.start()
+    for output, noun in patterns.items():
+        independent = False
+        # "video and [create/draw] a diagram" or "video and diagram" (shared verb).
+        if re.search(
+            video_noun + r"[\s,;:–—-]{0,8}" + separator + r".{0,24}(?:" + action + r".{0,28})?" + noun,
+            text, re.I | re.S,
+        ):
+            independent = True
+        # "create a diagram and a video" / "draw a graph, then make a video".
+        if not independent and re.search(
+            r"(?<![\w])" + action + r".{0,35}" + noun + r"[\s,;:–—-]{0,8}" + separator + r".{0,24}" + video_noun,
+            text, re.I | re.S,
+        ):
+            independent = True
+        # If the second action explicitly places that visual inside the video,
+        # it is scene content, not a second billable output.
+        embedded_visual = bool(re.search(
+            r"(?:добав\w*|помест\w*|встав\w*|покаж\w*|размест\w*|put|place|add|insert|show|include)"
+            + r".{0,28}" + noun + r".{0,30}(?:в\s+(?:сам\w*\s+)?(?:виде\w*|ролик\w*|клип\w*)|"
+            + r"inside\s+(?:the\s+)?(?:video|clip)|in\s+(?:the\s+)?(?:video|clip)|into\s+(?:the\s+)?(?:video|clip))",
+            text, re.I | re.S,
+        ))
+        if embedded_visual:
+            independent = False
+        if independent:
+            found.append(output)
+    return found
 
 
 def normalize_video_question_sequence(
@@ -777,7 +986,7 @@ def normalize_video_question_sequence(
     first.update({
         "step_index": 1,
         "request": source,
-        "output_types": ["text", "video"],
+        "output_types": list(dict.fromkeys(["text", "video", *explicit_video_companion_outputs(source)])),
         "final_output": True,
         "video_task": True,
         "video_action": action,
@@ -807,11 +1016,65 @@ def apply_video_intent_contract(
         return [dict(item) for item in (question_sequence or []) if isinstance(item, dict)]
     plan = video_plan if isinstance(video_plan, dict) else {}
     action = _text(plan.get("action")).lower()
+    has_final_interpretation_intent = isinstance(interpretation.get("intent"), dict)
+    intent = interpretation.get("intent") if has_final_interpretation_intent else {}
+    if action in {"generate", "edit"} and has_final_interpretation_intent:
+        interpreted_outputs = intent.get("requested_outputs") if isinstance(intent.get("requested_outputs"), list) else []
+        # The deterministic room plan is not sufficient authorization to spend.
+        # The Interpretation layer must independently request the video renderer.
+        interpreted_video = bool(
+            plan.get("explicit_user_action") is True
+            and intent.get("wants_video") is True
+            and "video" in {
+                _text(value).lower() for value in interpreted_outputs if _text(value)
+            }
+        )
+        if not interpreted_video:
+            plan.update({
+                "action": "none", "requires_video_provider": False,
+                "requires_ffmpeg": False, "artifact_type": "text",
+                "explicit_user_action": False,
+            })
+            sequence = [dict(item) for item in (question_sequence or []) if isinstance(item, dict)]
+            for item in sequence:
+                item["output_types"] = [
+                    _text(value).lower() for value in (item.get("output_types") or [])
+                    if _text(value).lower() != "video"
+                ] or ["text"]
+                item.pop("video_task", None)
+                item.pop("video_action", None)
+            intent["wants_video"] = False
+            intent["video_generation_authorized"] = False
+            intent["requested_outputs"] = [
+                _text(value).lower() for value in interpreted_outputs
+                if _text(value).lower() != "video"
+            ] or ["text"]
+            # Keep the provider-facing request envelope synchronized with the
+            # final interpreter decision. Otherwise an earlier generic output
+            # guess can survive in request_structure.output_plan and trigger a
+            # diagram repair even though the billable C_VIDEO action was denied.
+            structure = interpretation.get("request_structure")
+            if isinstance(structure, dict):
+                structure["output_plan"] = list(intent["requested_outputs"])
+                structure["question_sequence"] = sequence
+                structure["question_search_count"] = len(sequence)
+                presentation = structure.get("presentation_contract")
+                if isinstance(presentation, dict):
+                    presentation["requested_renderers"] = list(intent["requested_outputs"])
+                    presentation["video_generation_authorized"] = False
+            try:
+                print("[APRIL_VIDEO_INTENT_GATE] " + json.dumps({
+                    "decision": "blocked_no_interpreted_video_output",
+                    "action": action,
+                    "requested_outputs": intent["requested_outputs"],
+                }, ensure_ascii=False, separators=(",", ":")), flush=True)
+            except Exception:
+                pass
+            return sequence
     sequence = normalize_video_question_sequence(question_sequence, plan, request_text)
     if action == "none" or not action:
         return sequence
 
-    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
     intent["wants_video"] = True
     intent["video_action"] = action
     intent["video_plan"] = dict(plan)
@@ -822,13 +1085,21 @@ def apply_video_intent_contract(
         intent["task"] = "generate_video" if action == "generate" else "edit_video"
         intent["wants_image"] = False
         intent["image_operation"] = "none"
-        outputs = intent.get("requested_outputs")
-        outputs = outputs if isinstance(outputs, list) else ["text"]
-        outputs = [_text(value).lower() for value in outputs if _text(value)]
-        intent["requested_outputs"] = list(dict.fromkeys([
-            *[value for value in outputs if value not in {"image", "gallery"}],
-            "text", "video",
-        ]))
+        # Do not inherit incidental renderers added by generic visual inference or
+        # a previous dialogue branch. Preserve only separately co-requested outputs.
+        companions = explicit_video_companion_outputs(request_text)
+        intent["requested_outputs"] = list(dict.fromkeys(["text", "video", *companions]))
+        intent["wants_video"] = True
+        intent["video_generation_authorized"] = action in {"generate", "edit"} and plan.get("explicit_user_action") is True
+        for flag, output in (
+            ("wants_image", "image"), ("wants_diagram", "diagram"),
+            ("wants_graph", "graph"), ("wants_table", "table"),
+            ("wants_formula", "formula"), ("wants_code", "code"),
+            ("wants_file", "file"), ("wants_copy", "copy"),
+            ("wants_links", "link"),
+        ):
+            intent[flag] = output in companions
+        intent["image_operation"] = "none"
     elif action == "analyze":
         intent["task"] = "analyze_video"
         intent["wants_image"] = False
@@ -842,6 +1113,30 @@ def apply_video_intent_contract(
     structure = interpretation.setdefault("request_structure", {})
     structure["question_sequence"] = sequence
     structure["question_search_count"] = len(sequence)
+    # Intent, decomposition, output plan and presentation policy are one
+    # contract. Synchronize all provider-facing copies so an incidental
+    # diagram/image guess cannot request another renderer or a repair call.
+    canonical_outputs = list(intent.get("requested_outputs") or ["text", "video"])
+    structure["output_plan"] = canonical_outputs
+    structure["requested_outputs"] = canonical_outputs
+    presentation = structure.get("presentation_contract")
+    if not isinstance(presentation, dict):
+        presentation = {}
+        structure["presentation_contract"] = presentation
+    presentation["requested_renderers"] = canonical_outputs
+    presentation["video_generation_authorized"] = bool(intent.get("video_generation_authorized"))
+    presentation["billable_renderer_owner"] = "C_VIDEO" if intent.get("video_generation_authorized") else "none"
+    rendering_guidance = structure.get("rendering_guidance")
+    if isinstance(rendering_guidance, list):
+        video_policy = (
+            "For this explicit C_VIDEO request, render only the requested video output and any separately co-requested renderers in requested_renderers. "
+            "Do not create a diagram, graph, image, gallery, table, formula, code or explanatory renderer from the video's subject, setting, motion, style, duration, soundtrack or scene description. "
+            "The MP4 description belongs inside the VideoBlock payload; do not emit a separate diagram or video-description block."
+        )
+        structure["rendering_guidance"] = [video_policy, *[
+            _text(item) for item in rendering_guidance
+            if _text(item) and "For this explicit C_VIDEO request" not in _text(item)
+        ]]
     structure["video_scene_contract"] = {
         "version": "april_video_scene_contract_v1",
         "room": "C_VIDEO",
@@ -854,7 +1149,14 @@ def apply_video_intent_contract(
         "requires_ffmpeg": bool(plan.get("requires_ffmpeg")),
         "required_renderer": "VideoBlock" if action in {"generate", "edit"} else "MessageTextBlock",
         "render_contract": f"{contract_name} -> VideoBlock -> SceneContract",
-        "billing_owner": "C_VIDEO.video_wallet" if action in {"generate", "edit"} else "none",
+        "billing_owner": "C_VIDEO.video_wallet" if intent.get("video_generation_authorized") is True else "none",
+        "requested_renderers": canonical_outputs,
+        "video_generation_authorized": bool(intent.get("video_generation_authorized")),
+        "duration_seconds": plan.get("duration_seconds"),
+        "requested_duration_seconds": plan.get("requested_duration_seconds"),
+        "duration_was_default": bool(plan.get("duration_was_default")),
+        "duration_limit_seconds": plan.get("duration_limit_seconds"),
+        "duration_error": _text(plan.get("duration_error")),
         "user_request_preserved_verbatim": bool(_text(request_text)),
     }
     return sequence
@@ -867,38 +1169,91 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
     videos = [item for item in items if _text(item.get("kind")).lower() == "video"]
     images = [item for item in items if _text(item.get("kind")).lower() == "image"]
 
-    explicit_create = bool(re.search(
-        r"(?iu)(?:созда\w*|сгенерир\w*|сними\w*|ожив\w*|анимир\w*|створ\w*|згенер\w*|generate|create|animate)"
-        r".{0,100}(?:виде\w*|ролик|клип|відео|video|clip)|"
-        r"(?:video|clip).{0,70}(?:generate|create|animate)", low
+    # Video generation is billable. Require an explicit creation verb directed
+    # at a video/clip object; do not infer generation from a diagram "about video".
+    create_verb = (
+        r"(?:создай(?:те)?|создавай(?:те)?|создать|создавать|сгенерируй(?:те)?|генерируй(?:те)?|сгенерировать|генерировать|"
+        r"сними(?:те)?|оживи(?:те)?|анимируй(?:те)?|створи(?:те)?|створіть|створити|"
+        r"згенеруй(?:те)?|згенерувати|сделай(?:те)?|сделаем|сделаю|сделать|делать|зроби(?:те)?|зробіть|зробити|"
+        r"слелай(?:те)?|generate|create|animate|make)"
+    )
+    video_noun = r"(?:виде\w*|ролик\w*|клип\w*|відео|video|clip)"
+    advice_or_howto_request = bool(re.search(
+        r"(?:^|[.!?;]\s*)(?:(?:объясни|расскажи|подскажи|покажи|explain|teach|tell\s+me|show\s+me)\b.{0,35})?"
+        r"(?:как\s+(?:мне\s+)?|how\s+(?:to|do\s+i|can\s+i)\s+)"
+        r"(?:создай|создать|создавать|сделай|сделать|сгенерируй|сгенерировать|генерировать|"
+        r"анимируй|анимировать|обрежи|обрезать|вырежи|вырезать|смонтируй|смонтировать|"
+        r"отредактируй|редактировать|улучши|улучшить|trim|crop|cut|edit|create|make|generate|animate)\b.{0,70}" + video_noun,
+        low, re.I | re.S,
+    ) or re.search(
+        r"\b(?:tutorial|guide|instructions?|обучение|инструкци\w*|руководств\w*)\b.{0,90}"
+        r"(?:create|make|generate|animate|созда\w*|сдела\w*|сгенерир\w*).{0,70}" + video_noun,
+        low, re.I | re.S,
     ))
-    generic_create = bool(re.search(
-        r"(?iu)(?:сдела\w*|зроб\w*|make).{0,100}(?:виде\w*|ролик|клип|відео|video|clip)", low
+    capability_question = bool(re.search(
+        r"(?iu)^(?:можешь\s+ли|можете\s+ли|могу\s+ли|можно\s+ли|умеешь\s+ли|умеете\s+ли|"
+        r"поддерживаешь\s+ли|поддерживаете\s+ли|can\s+you|can\s+i|could\s+you|is\s+it\s+possible|"
+        r"можешь|можете|умеешь|умеете)\b.{0,100}" + video_noun, low.strip(), re.I | re.S,
     ))
-    edit_words = bool(re.search(
-        r"(?iu)(?:обреж\w*|обрез\w*|выреж\w*|укорот\w*|нареж\w*|склей\w*|соедин\w*|встав\w*|налож\w*|добав\w*.{0,24}(?:клип|фрагмент|видео)|"
-        r"улучш\w*|лучше|ярче|повыс\w*.{0,24}кач\w*|стабилиз\w*|шум\w*|цветокоррек\w*|кадрир\w*|формат\w*|перемонтаж\w*|смонтир\w*|измен\w*|редактир\w*|передел\w*|"
-        r"trim|crop|cut|splice|insert|overlay|enhance|improve|better|sharpen|denoise|stabili[sz]e|edit|montage)", low
+    advice_or_howto_request = advice_or_howto_request or capability_question
+    explicit_create = not advice_or_howto_request and bool(re.search(
+        r"(?<![\w])" + create_verb
+        + r"(?:(?!\b(?:о|об|про|для|с|со|about|with|containing|including|featuring|of|на\s+тему|по\s+теме)\b).){0,80}?"
+        + video_noun,
+        low, re.I | re.S,
+    ) or (not advice_or_howto_request and re.search(
+        r"(?<![\w])" + video_noun + r".{0,55}(?:generate|create|animate)\b",
+        low, re.I | re.S,
+    )))
+    generic_create = explicit_create
+    # Editing also consumes paid provider credits for remote AI edits. Require
+    # an actual editing instruction, not a noun/topic such as "format" or a
+    # how-to question such as "how do I trim a video?".
+    edit_command = bool(re.search(
+        r"(?iu)\b(?:обрежи(?:те)?|обрежь(?:те)?|вырежи(?:те)?|вырежь(?:те)?|укороти(?:те)?|нарежь(?:те)?|склей(?:те)?|"
+        r"соедини(?:те)?|вставь(?:те)?|наложи(?:те)?|улучши(?:те)?|стабилизируй(?:те)?|"
+        r"кадрируй(?:те)?|смонтируй(?:те)?|перемонтируй(?:те)?|отредактируй(?:те)?|редактируй(?:те)?|"
+        r"trim|crop|cut|splice|insert|overlay|enhance|improve|sharpen|denoise|stabili[sz]e|edit|montage)\b",
+        low,
     ))
+    quality_edit_request = bool(re.search(
+        r"(?:\b(?:сделай|сделайте)\b.{0,35}\b(?:видео|ролик|клип)\b.{0,30}\bлучше\b|"
+        r"\bmake\b.{0,30}\b(?:video|clip)\b.{0,30}\bbetter\b)",
+        low, re.I | re.S,
+    ))
+    edit_words = edit_command or quality_edit_request
     analyze_words = bool(re.search(
         r"(?iu)(?:анализир\w*|проанализир\w*|разбер\w*|опиш\w*|что\s+(?:происходит|на\s+видео)|содерж\w*|определи\w*|"
         r"analy[sz]e|describe|summari[sz]e|what\s+happens|inspect)", low
     ))
 
-    # A source video plus an editing verb means EDIT, even when the user says
-    # "сделай видео лучше". Explicit "создай/сгенерируй" still starts a new render.
-    if explicit_create:
+    image_animation_request = bool(
+        images and re.search(
+            r"(?iu)(?:оживи(?:те)?|анимируй(?:те)?|сделай(?:те)?\s+(?:из\s+)?(?:эт\w*\s+)?(?:фото|фотографи\w*|картинк\w*|изображени\w*)\s+(?:коротк\w*\s+)?(?:видео|ролик)|"
+            r"animate\s+(?:this\s+)?(?:photo|picture|image)|turn\s+(?:this\s+)?image\s+into\s+(?:a\s+)?video)", low, re.I,
+        )
+    )
+    # Explicit creation starts a new render. An uploaded source plus a direct
+    # editing command starts an edit. Advice/capability questions never start a paid
+    # operation; they remain ordinary text questions even when media is attached.
+    if advice_or_howto_request:
+        action = "none"
+    elif image_animation_request:
         action = "generate"
-    elif videos and edit_words:
+    elif videos and edit_words and not re.search(r"(?iu)\b(?:создай|создайте|сгенерируй|сгенерируйте|generate|create)\b", low):
         action = "edit"
+    elif explicit_create:
+        action = "generate"
     elif generic_create and not videos:
         action = "generate"
-    elif videos or analyze_words:
+    elif videos:
+        # Never send a plain photo-description request into video analysis.
+        # Existing-video analysis requires an actual video attachment.
         action = "analyze"
     else:
         action = "none"
 
-    return {
+    plan = {
         "room": "C_VIDEO",
         "action": action,
         "has_video_input": bool(videos),
@@ -909,7 +1264,11 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
         "requires_ffmpeg": action == "edit" or action == "analyze",
         "analysis_method": "sampled_ordered_frames" if action == "analyze" else "not_applicable",
         "artifact_type": "video" if action in {"generate", "edit"} else "text",
+        "explicit_user_action": action in {"generate", "edit"},
     }
+    if action == "generate":
+        plan.update(resolve_video_duration(value))
+    return plan
 
 
 def extract_video_frames(
@@ -1008,7 +1367,7 @@ async def generate_video(
     prompt: str,
     *,
     first_frame_data_uri: str = "",
-    duration: int = 5,
+    duration: int = VIDEO_DEFAULT_DURATION_SECONDS,
     resolution: str = "480p",
     ratio: str = "16:9",
     audio: bool = True,
@@ -1031,6 +1390,19 @@ async def generate_video(
     clean_prompt = _text(prompt)[:18000]
     if not clean_prompt:
         raise CVideoError("VIDEO_PROMPT_EMPTY")
+    model = _text(os.getenv("APRIL_MAGIC_HOUR_VIDEO_MODEL") or "ltx-2.5").lower()
+    resolution = _text(os.getenv("APRIL_VIDEO_RESOLUTION") or resolution or "480p").lower()
+    profile = get_video_capability_profile(model, resolution)
+    maximum_duration = int(profile.get("maximum_duration_seconds") or 0)
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CVideoError("VIDEO_DURATION_VALUE_INVALID") from exc
+    if not maximum_duration:
+        raise CVideoError("APRIL_VIDEO_MODEL_OR_RESOLUTION_UNSUPPORTED")
+    if duration < 1 or duration > maximum_duration:
+        raise CVideoError(f"VIDEO_DURATION_LIMIT_EXCEEDED:requested={duration}:max={maximum_duration}")
+    # Validate duration before optional prompt translation or provider calls.
     source_language = _text(source_language).lower().replace("_", "-").split("-", 1)[0]
     prompt_language = source_language or "en"
     warning = ""
@@ -1042,9 +1414,6 @@ async def generate_video(
         except Exception as exc:
             warning = f"Prompt translation unavailable: {type(exc).__name__}"
 
-    duration = max(1, min(60, int(duration or 5)))
-    model = os.getenv("APRIL_MAGIC_HOUR_VIDEO_MODEL", "ltx-2.5").strip().lower() or "ltx-2.5"
-    resolution = _text(os.getenv("APRIL_VIDEO_RESOLUTION", resolution or "480p")).lower()
     rate = _magic_hour_rates(model, resolution)
     ratio = ratio if ratio in {"16:9", "9:16", "1:1", "3:2", "2:3", "4:3"} else "16:9"
     estimate_credits = int(duration * rate)
@@ -1643,25 +2012,35 @@ async def execute_video_operation(
             "use natural motion and intentional camera movement, preserve the requested sequence and style, "
             "avoid captions/text unless explicitly requested. Direction: " + _text(request_text)[:12000]
         )
-        # Russian numerals commonly arrive with inflected units ("2 секунды",
-        # "10 секунд", "1 секунду"). Match the complete word before applying
-        # the configured default; otherwise a two-second request silently became 5s.
-        duration_match = re.search(
-            r"(?iu)(?<!\d)(60|[1-5]?\d)\s*(?:секунд(?:а|ы|у|е|ой)?|сек\.?|seconds?|secs?|s)(?=\s|[,.!?;:]|$)",
-            _text(request_text),
-        )
-        duration = int(duration_match.group(1)) if duration_match else int(os.getenv("APRIL_VIDEO_DEFAULT_DURATION", "5") or 5)
+        duration_info = {
+            key: plan.get(key) for key in (
+                "duration_seconds", "requested_duration_seconds", "duration_was_default",
+                "duration_limit_seconds", "duration_resolution", "duration_model", "duration_error",
+            ) if key in plan
+        }
+        if not duration_info:
+            duration_info = resolve_video_duration(request_text)
+        duration_error = _text(duration_info.get("duration_error"))
+        if duration_error:
+            raise CVideoError(duration_error)
+        duration = int(duration_info.get("duration_seconds") or VIDEO_DEFAULT_DURATION_SECONDS)
         ratio = "9:16" if re.search(r"(?iu)(?:вертикальн|портретн|сторис|reel|тик.?ток|vertical|portrait)", request_text) else (
             "1:1" if re.search(r"(?iu)(?:квадратн|square)", request_text) else "16:9"
         )
         audio = not bool(re.search(r"(?iu)(?:без\s+звука|без\s+аудио|mute|no\s+audio|silent)", request_text))
-        return await generate_video(
+        result = await generate_video(
             prompt, first_frame_data_uri=first_frame, duration=duration,
             resolution=os.getenv("APRIL_VIDEO_RESOLUTION", "480p"), ratio=ratio,
             audio=audio, progress_callback=progress_callback,
             timeout_seconds=timeout_seconds, source_language=source_language,
             user_id=user_id, operation_ref=operation_ref,
         )
+        result.update({
+            "duration_was_default": bool(duration_info.get("duration_was_default")),
+            "requested_duration_seconds": duration_info.get("requested_duration_seconds"),
+            "duration_limit_seconds": duration_info.get("duration_limit_seconds"),
+        })
+        return result
     if action == "edit":
         if _requires_remote_ai_edit(request_text):
             return await edit_video_with_magic_hour(
@@ -1735,8 +2114,10 @@ class CVideoRoom:
 
 __all__ = [
     "CVideoError", "CVideoRoom", "MAX_VIDEO_BYTES", "MAX_VIDEO_FRAMES",
+    "VIDEO_DEFAULT_DURATION_SECONDS", "VIDEO_MAX_DURATION_SECONDS",
     "VIDEO_EXTENSIONS", "build_video_render_block", "classify_video_request",
     "decode_video_data_uri", "edit_video", "edit_video_with_magic_hour", "execute_video_operation",
+    "explicit_video_companion_outputs", "get_video_capability_profile", "resolve_video_duration",
     "extract_video_frames", "generate_video", "enable_video_wallet", "get_video_wallet_status",
     "is_video_test_account", "magic_hour_video_ready",
     "create_video_wallet_topup_order", "get_video_wallet_order_status",
