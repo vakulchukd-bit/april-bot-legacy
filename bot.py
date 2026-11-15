@@ -1029,9 +1029,9 @@ def _handle_payload(
             "success": False,
             "error_code": "PREMIUM_VIDEO_REQUIRED",
             "answer": (
-                "Анализ видео и создание видео доступны в Premium. Переключите аккаунт на Premium, чтобы продолжить."
+                "Анализ и монтаж загруженных видео доступны в Premium. Создание нового видео доступно на любом тарифе через отдельный видеобаланс — без покупки Premium."
                 if account_language in {"ru", "uk", "ua"} else
-                "Video analysis and video generation are available in Premium. Upgrade to Premium to continue."
+                "Analysis and editing of uploaded videos require Premium. Creating a new video is available on any plan through the separate Video Wallet; Premium is not required."
             ),
             "policy_language": account_language,
             "canonical_route": CANONICAL_CHAT_ROUTE,
