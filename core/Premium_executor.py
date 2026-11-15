@@ -83,7 +83,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v13_recent_branch_10_exchange_continuity"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v14_cvideo_pending_and_resolution_fallback"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -7425,6 +7425,22 @@ async def execute(
     video_provider_configured = _magic_hour_ready if video_action == "generate" else True
     video_pending = bool(video_generation_requested and video_provider_configured)
 
+    # Do not stream model-authored capability refusals while C_VIDEO is actively
+    # rendering. The final response is written only after the provider result is
+    # known (success or a specific failure), but the early scene must be truthful.
+    if video_pending:
+        _video_language = str(display_language or "en").lower().split("-")[0]
+        _video_pending_copy = {
+            "ru": "Генерирую видео. Подготавливаю MP4 — это может занять несколько минут.",
+            "uk": "Генерую відео. Готую MP4 — це може тривати кілька хвилин.",
+            "en": "Generating your video. Preparing the MP4; this may take a few minutes.",
+        }
+        answer = _video_pending_copy.get(_video_language, _video_pending_copy["en"])
+        _sync_packaged_answer(packaged, answer)
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = answer[:180]
+
     # First publish all text and non-image typed renderers. The Web replaces this
     # provisional SceneContract with the final one, while the image generator keeps
     # running and the existing visual typing indicator remains active.
@@ -8052,7 +8068,10 @@ async def execute(
                     "uk": "Відео створено. April зберігає MP4 в артефактах цього діалогу.",
                     "en": "The video has been generated and is being saved as an MP4 artifact in this conversation.",
                 }
-            answer = _merge_image_status(answer, success_copy.get(language_key, success_copy["en"]))
+            success_message = success_copy.get(language_key, success_copy["en"])
+            # The earlier streamed text is only a neutral pending indicator; do
+            # not append it to the completed message or preserve model refusals.
+            answer = success_message if video_pending else _merge_image_status(answer, success_message)
             _sync_packaged_answer(packaged, answer)
             video_payload = {
                 "filename": _text(video_result.get("filename") or "april-video.mp4"),
@@ -8150,6 +8169,13 @@ async def execute(
             matched_code = next((code for code in localized_errors if code in error_code), "")
             if matched_code:
                 failure = localized_errors[matched_code].get(language_key, localized_errors[matched_code]["en"])
+            elif "MAGIC_HOUR_HTTP_402" in error_code:
+                provider_restriction_copy = {
+                    "ru": "Magic Hour отклонил запрос по ограничению тарифа или доступности выбранных параметров. Списание за неуспешную генерацию не производится; проверьте настройки модели и разрешения.",
+                    "uk": "Magic Hour відхилив запит через обмеження тарифу або доступності вибраних параметрів. Списання за невдалу генерацію не виконується; перевірте налаштування моделі та роздільної здатності.",
+                    "en": "Magic Hour rejected the request because of a plan or parameter restriction. Failed generation is not charged; check the model and resolution settings.",
+                }
+                failure = provider_restriction_copy.get(language_key, provider_restriction_copy["en"])
             elif "MAGIC_HOUR_TASK_PENDING" in error_code:
                 pending_copy = {
                     "ru": "Задача ещё обрабатывается у провайдера. Сумма остаётся в резерве; не отправляйте повторный запрос, чтобы не создать дубликат.",
