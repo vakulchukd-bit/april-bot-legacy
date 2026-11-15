@@ -63,6 +63,12 @@ from blocks.Premium_interpretation_identity import (
 from blocks.Premium_provider_router import generate_text
 from blocks.text_module import package_provider_response
 from blocks.premium_asset_store import save_asset as _save_premium_asset, load_message_assets as _load_premium_assets, decode_data_uri as _decode_asset_data_uri
+from blocks.C_VIDEO import (
+    classify_video_request as _classify_video_request,
+    extract_video_frames as _extract_video_frames,
+    execute_video_operation as _execute_c_video_operation,
+    build_video_render_block as _build_c_video_render_block,
+)
 from blocks.Premium_state_manager import (
     init_db,
     is_authenticated_user,
@@ -1900,6 +1906,8 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
         required_capabilities.extend(["table", "structured_data", "tabular"])
     if intent.get("wants_graph"):
         required_capabilities.extend(["graph", "series", "data_visualization"])
+    if intent.get("wants_video"):
+        required_capabilities.extend(["video", "video_analysis", "video_generation", "video_editing", "video_render", "timeline_editing"])
 
     # Domain hints from the current request are additive, never authoritative over
     # the Interpretation decision.
@@ -1940,6 +1948,11 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
             for room in list_registered_rooms(include_engines=False)
             if room.room_id in {"it", "WEB_ROOM"}
         ][:1]
+
+    # A C_VIDEO action is the single room authority for all Premium video work.
+    if intent.get("wants_video"):
+        preferred_video = [item for item in selected if item.get("room") == "C_VIDEO"]
+        selected = preferred_video + [item for item in selected if item not in preferred_video]
 
     # For image generation, keep the generator first and gallery renderer second.
     if intent.get("wants_image"):
@@ -4219,6 +4232,12 @@ def _requires_original_asset(value: Any, kind: str, cached_summary: str) -> bool
         or (_detect_contextual_image_edit(text) and not _detect_image_modification(text))
     ):
         return True
+    is_video_asset = str(kind or "").lower() in {"video", "video/mp4", "video/quicktime", "video/webm", "video/x-msvideo"}
+    if is_video_asset and re.search(
+        r"(?iu)(?:обреж|обрез|выреж|укорот|нареж|склей|соедин|встав|добав|налож|улучш|лучше|ярче|качество|красив|почист|стабилиз|кадрир|перемонтаж|смонтир|измен|редакт|передел|анализ|проанализ|посмотр|опиш|содерж|что\s+на\s+видео|trim|cut|splice|insert|overlay|enhance|improve|better|sharpen|denoise|stabili[sz]e|crop|edit|analy[sz]e|video|clip)",
+        text,
+    ):
+        return True
     if not cached_summary or _explicit_prior_asset_reference(text):
         return True
 
@@ -4305,7 +4324,7 @@ def _persist_asset_analysis_summaries(
             continue
         role = _text(item.get("asset_role") or "user_input")
         kind = _text(item.get("kind")).lower()
-        if role != "user_input" or kind not in {"image", "text_file", "file"}:
+        if role != "user_input" or kind not in {"image", "text_file", "file", "video"}:
             continue
         if not bool(item.get("source_bytes_attached", True)):
             continue
@@ -4630,7 +4649,7 @@ def _restore_selected_assets(
         if not isinstance(payloads, list):
             continue
         for payload in payloads:
-            if not isinstance(payload, dict) or _text(payload.get("kind")).lower() not in {"image", "text_file", "file"}:
+            if not isinstance(payload, dict) or _text(payload.get("kind")).lower() not in {"image", "text_file", "file", "video"}:
                 continue
             encoded = _text(payload.get("content_base64"))
             if not encoded:
@@ -4648,19 +4667,21 @@ def _restore_selected_assets(
                 continue
             existing_asset_keys.add(asset_key)
             durable_kind = _text(payload.get("kind")).lower()
-            durable_mime = _text(payload.get("mime_type") or ("image/png" if durable_kind == "image" else "text/plain"))
+            durable_mime = _text(payload.get("mime_type") or ("image/png" if durable_kind == "image" else "video/mp4" if durable_kind == "video" else "text/plain"))
             rows.append({
                 "message_id": message_key,
-                "filename": _text(payload.get("filename") or ("april-generated-image.png" if durable_kind == "image" else "april-generated-file.txt")),
+                "filename": _text(payload.get("filename") or ("april-generated-image.png" if durable_kind == "image" else "april-generated-video.mp4" if durable_kind == "video" else "april-generated-file.txt")),
                 "kind": durable_kind,
                 "mime_type": durable_mime,
                 "content": content,
                 "size_bytes": len(content),
                 "asset_role": _text(payload.get("asset_role") or "april_output"),
                 "metadata": {
-                    "source_type": "april_generated",
+                    "source_type": _text(payload.get("source_type") or "april_generated"),
                     "asset_role": _text(payload.get("asset_role") or "april_output"),
-                    "output_type": _text(payload.get("output_type") or ("image" if durable_kind == "image" else "file")),
+                    "output_type": _text(payload.get("output_type") or ("image" if durable_kind == "image" else "video" if durable_kind == "video" else "file")),
+                    "sequence_index": int(payload.get("sequence_index") or 9999),
+                    "video_frame_count": int(payload.get("video_frame_count") or 0),
                     "language": _text(payload.get("language")),
                     "prompt": _text(payload.get("prompt"))[:1200],
                     "caption": _text(payload.get("caption"))[:600],
@@ -4730,6 +4751,8 @@ def _restore_selected_assets(
             "analysis_key_details": analysis_key_details,
             "requires_original_analysis": restore_original,
         }
+        if kind == "video" and restore_original:
+            common["video_data_uri"] = _mime_data_uri(raw, mime_type if mime_type.startswith("video/") else "video/mp4")
         metadata_item = {k: common[k] for k in ("filename", "mime_type", "kind", "sequence_index", "asset_role", "output_type", "asset_message_id", "analysis_summary", "analysis_key_details")}
         metadata_item.update({
             "prompt": _text(asset_metadata.get("prompt"))[:1200],
@@ -4790,6 +4813,12 @@ def _restore_selected_assets(
         attachments.append(common)
         restored_meta.append(metadata_item)
 
+        # An April-generated video is normally an output artifact, not model input.
+        # Reattach its original bytes only after this request explicitly asks C_VIDEO
+        # to inspect or edit that selected artifact; ordinary replies remain metadata-only.
+        if kind == "video" and asset_role.lower() in {"april_output", "assistant_output", "generated"} and not restore_original:
+            continue
+
         # Recalled assets with a valid sidecar normally enter the dialogue as
         # semantic context only. Reattach the original bytes for precise reads,
         # explicit references, modifications, or when no sidecar exists yet.
@@ -4813,6 +4842,38 @@ def _restore_selected_assets(
                 "analysis_key_details": analysis_key_details,
                 "requires_original_analysis": True,
             })
+        elif kind == "video":
+            # Recreate the same sampled-frame visual context used for a current
+            # upload. Never ask the language model to infer video content from a
+            # filename or an opaque binary attachment.
+            try:
+                restored_frames = _extract_video_frames(raw, filename=filename, max_frames=6)
+                restored_video_error = ""
+            except Exception as video_restore_error:
+                restored_frames, restored_video_error = [], type(video_restore_error).__name__
+            if restored_frames:
+                for frame_index, frame in enumerate(restored_frames):
+                    visual_context.append({
+                        "type": "input_image",
+                        "image_url": frame.get("image_url") or frame.get("data_uri"),
+                        "filename": f"{filename}-frame-{frame_index + 1:02d}.jpg",
+                        "source_type": "recalled_video_frame",
+                        "mime_type": "image/jpeg",
+                        "sequence_index": sequence_index + frame_index,
+                        "recalled_from_memory": True,
+                        "asset_message_id": common["asset_message_id"],
+                        "asset_role": asset_role,
+                        "output_type": common["output_type"],
+                        "analysis_summary": analysis_summary,
+                        "analysis_key_details": analysis_key_details,
+                        "requires_original_analysis": True,
+                    })
+            else:
+                print(
+                    "STATE: RECALLED VIDEO FRAME EXTRACTION FAILED "
+                    + json.dumps({"message_id": common["asset_message_id"], "error": _text(restored_video_error)[:120]}, ensure_ascii=False),
+                    flush=True,
+                )
         elif kind == "text_file":
             # Re-decode the preserved original bytes instead of trusting the
             # text_content sidecar: older versions stored only the first 18k
@@ -5076,6 +5137,25 @@ async def execute(
         except Exception:
             # A disconnected client must not interrupt image editing or persistence.
             pass
+
+    def _emit_video_workflow_stage(stage: str) -> None:
+        """Publish progress for Premium video analysis/generation on this same turn."""
+        if not progress_sink:
+            return
+        try:
+            progress_sink({
+                "type": "workflow_stage",
+                "stage": stage,
+                "render_type": "video",
+                "message_id": identity["message_id"],
+                "flow_id": identity["flow_id"],
+            })
+        except Exception:
+            # A disconnected Web client must not interrupt analysis or persistence.
+            pass
+
+    if any(_text(item.get("kind")).lower() == "video" for item in attachments):
+        _emit_video_workflow_stage("analyzing")
 
     # First infer the overall semantic direction, intent, time scope and memory
     # need; only then split the request into ordered questions. The classifier is
@@ -6093,6 +6173,31 @@ async def execute(
         site_navigation_diagram=bool((interpretation.get("intent") or {}).get("wants_diagram")),
     )
 
+    # C_VIDEO is selected by Interpretation and then follows the same Premium
+    # SceneContract as every other artifact. A video attachment means ANALYZE by
+    # default; paid generation/editing requires an explicit operation in the request.
+    video_plan = _classify_video_request(original or current_text, attachments)
+    if video_plan.get("action") != "none":
+        _video_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+        _video_intent["wants_video"] = True
+        _video_intent["video_action"] = video_plan.get("action")
+        _video_intent["video_plan"] = dict(video_plan)
+        if video_plan.get("action") in {"generate", "edit"}:
+            _video_outputs = _video_intent.get("requested_outputs") if isinstance(_video_intent.get("requested_outputs"), list) else ["text"]
+            _video_intent["requested_outputs"] = list(dict.fromkeys([*[_text(x).lower() for x in _video_outputs if _text(x)], "video"]))
+        interpretation["intent"] = _video_intent
+        _video_structure = interpretation.setdefault("request_structure", {})
+        _video_structure["video_scene_contract"] = {
+            "room": "C_VIDEO",
+            "action": video_plan.get("action"),
+            "analysis_method": video_plan.get("analysis_method"),
+            "video_input_count": int(video_plan.get("video_input_count") or 0),
+            "image_input_count": int(video_plan.get("image_input_count") or 0),
+            "requires_video_provider": bool(video_plan.get("requires_video_provider")),
+            "requires_ffmpeg": bool(video_plan.get("requires_ffmpeg")),
+            "editing_capabilities": ["trim", "crop", "enhance", "timeline_splice", "picture_in_picture"],
+            "render_contract": "Premium_C_ARTIFACT_CONTRACT -> VideoBlock -> SceneContract",
+        }
     selected_rooms = _select_rooms(interpretation)
     render_plan = _renderer_plan(interpretation, selected_rooms)
 
@@ -6309,6 +6414,31 @@ async def execute(
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
 
+    if video_plan.get("action") != "none":
+        _room_context = request.routing.get("room_knowledge_context") if isinstance(request.routing.get("room_knowledge_context"), dict) else {}
+        _room_context["C_VIDEO"] = {
+            "action": video_plan.get("action"),
+            "required_renderer": "VideoBlock" if video_plan.get("action") in {"generate", "edit"} else "text",
+            "analysis_guidance": (
+                "Analyze attached video frames in chronological order. Treat frame indices and timestamps as a sampled timeline, "
+                "describe only visible evidence, distinguish observed events from inference, identify scene changes and camera movement "
+                "only when supported, quote on-screen text only when legible, and explicitly state that audio was not analyzed. "
+                "Never infer unseen intervals, dialogue, sounds, identities, or actions. If no frame was extracted, ask for a re-upload "
+                "or a supported MP4 conversion instead of guessing."
+            ) if video_plan.get("action") == "analyze" else "",
+            "edit_guidance": (
+                "Perform the requested MP4 operations on the referenced original source. C_VIDEO supports precise trim, centered crop "
+                "to 9:16/16:9/1:1, denoise/sharpen/color enhancement, insertion of a second clip into the timeline, or explicit "
+                "picture-in-picture overlay. Preserve the main audio track when possible and report any audio limitations accurately. "
+                "Never claim an operation was completed unless a valid MP4 was produced and persisted."
+            ) if video_plan.get("action") == "edit" else "",
+            "generation_guidance": (
+                "Generate only because the current user request explicitly requested a new video. Follow the full scene/action/style/timing direction."
+            ) if video_plan.get("action") == "generate" else "",
+            "video_frame_count": sum(1 for item in (visual_context or []) if isinstance(item, dict) and _text(item.get("source_type")).lower() in {"video_frame", "recalled_video_frame"}),
+        }
+        request.routing["room_knowledge_context"] = _room_context
+
     _apr_timing_log("machine_request_build", request_build_started,
         relation=dialogue_context.get("relation"), selected_pairs=len(dialogue_context.get("selected_pairs") or []),
         candidates=len(dialogue_context.get("candidates") or []), input_chars=len(current_text),
@@ -6327,6 +6457,8 @@ async def execute(
             "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
             "kind": _text(item.get("kind") or "file"),
             "mime_type": _text(item.get("mime_type") or item.get("content_type"))[:100],
+            "video_frame_count": int(item.get("video_frame_count") or 0),
+            "video_analysis_warning": _text(item.get("video_analysis_warning"))[:240],
             "asset_role": _text(item.get("asset_role") or "user_input"),
             "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
             "source_type": _text(item.get("source_type"))[:100],
@@ -6337,7 +6469,7 @@ async def execute(
             "source_bytes_attached": (
                 bool(item.get("requires_original_analysis"))
                 if item.get("recalled_from_memory")
-                else (_text(item.get("kind")).lower() in {"image", "text_file"} or bool(item.get("provider_readable", True)))
+                else (_text(item.get("kind")).lower() in {"image", "text_file"} or bool(item.get("provider_readable", True)) or (_text(item.get("kind")).lower() == "video" and int(item.get("video_frame_count") or 0) > 0))
             ),
         })
     for item in (file_contents or []):
@@ -7258,6 +7390,17 @@ async def execute(
         and not bool(_early_image_intent.get("reuse_saved_image"))
         and (not bool(provider_metadata.get("provider_fallback")) or _early_image_operation == "edit")
     )
+    # The same C_VIDEO interpretation plan controls generation and editing.
+    # Video analysis alone uses sampled frames in the normal Premium model call.
+    video_action = _text(video_plan.get("action") or "none").lower()
+    video_generation_requested = video_action in {"generate", "edit"}
+    video_provider_configured = (
+        True if video_action == "edit" else bool(
+            os.getenv("DASHSCOPE_API_KEY", "").strip()
+            and os.getenv("DASHSCOPE_WORKSPACE_ID", "").strip()
+        )
+    )
+    video_pending = bool(video_generation_requested and video_provider_configured)
 
     # First publish all text and non-image typed renderers. The Web replaces this
     # provisional SceneContract with the final one, while the image generator keeps
@@ -7282,7 +7425,7 @@ async def execute(
                 "content": answer,
                 "render_blocks": progressive_blocks,
                 "partial": True,
-                "status": "rendering" if image_pending else "text_ready",
+                "status": "rendering" if (image_pending or video_pending) else "text_ready",
             }
             progress_sink({
                 "type": "partial_answer",
@@ -7307,19 +7450,20 @@ async def execute(
                 scene_id=stable_scene_id,
                 render_blocks=len(progressive_blocks),
                 text_blocks=sum(1 for block in progressive_blocks if str(block.get("type") or "").lower() in {"text", "message", "answer", "markdown", "message_text"}),
-                image_pending=image_pending,
+                image_pending=image_pending, video_pending=video_pending,
             )
-            if image_pending:
-                image_step = next((item for item in presentation_sequence if item.get("final_output") and "image" in (item.get("output_types") or [])), None)
-                if image_step is None:
-                    image_steps = [item for item in presentation_sequence if "image" in (item.get("output_types") or [])]
-                    image_step = image_steps[-1] if image_steps else None
+            if image_pending or video_pending:
+                pending_kind = "video" if video_pending else "image"
+                pending_step = next((item for item in presentation_sequence if item.get("final_output") and pending_kind in (item.get("output_types") or [])), None)
+                if pending_step is None:
+                    pending_steps = [item for item in presentation_sequence if pending_kind in (item.get("output_types") or [])]
+                    pending_step = pending_steps[-1] if pending_steps else None
                 progress_sink({
                     "type": "render_pending",
                     "stage": "rendering",
-                    "render_type": "image",
-                    "step_index": int((image_step or {}).get("step_index") or 1),
-                    "title": _text((image_step or {}).get("title") or "Image generation"),
+                    "render_type": pending_kind,
+                    "step_index": int((pending_step or {}).get("step_index") or 1),
+                    "title": _text((pending_step or {}).get("title") or ("Video generation" if video_pending else "Image generation")),
                     "message_id": identity["message_id"],
                     "flow_id": identity["flow_id"],
                     "scene_id": stable_scene_id,
@@ -7837,365 +7981,114 @@ async def execute(
         _sync_packaged_answer(packaged, answer)
         packaged["artifacts"] = [item for item in (packaged.get("artifacts") or []) if _text(item.get("type") or item.get("artifact_type")).lower() not in {"image", "generated_image"}]
 
-    # Use the reconciled answer (not stale Provider prose) for all persistence
-    # aliases, so the next turn sees the same successful/failed state as the UI.
-    answer = _text(packaged.get("answer") or answer)
-    if answer:
-        packaged["content"] = _text(packaged.get("content") or answer)
-        packaged["summary"] = _text(packaged.get("summary") or answer[:180])
-        if image_operation_succeeded or image_generation_failed:
-            # The persisted dialogue pair must reflect the complete visible answer,
-            # not a shorter stale Provider alias that changes what happened.
-            raw["answer"] = answer
-            raw["content"] = packaged["content"]
-            raw["summary"] = packaged["summary"]
-            if image_operation_succeeded:
-                raw["internal_answer_en"] = (
-                    "Done — the requested image edit has been applied. The updated image is below."
-                    if is_completed_edit else
-                    "Done — the image has been created. The result is below."
-                )
-    normalized_blocks = _apply_presentation_sequence(
-        packaged["render_blocks"] or [], answer, presentation_sequence
-    )
-    # Preserve stable model ordering within each request step while ensuring that
-    # a generated image is placed beside its matching explanation, not appended to
-    # the end of a multi-question scene regardless of its semantic step.
-    def _safe_block_step_index(block: Any) -> int:
-        try:
-            return max(1, int(block.get("step_index") or 1)) if isinstance(block, dict) else 1
-        except (TypeError, ValueError, OverflowError):
-            return 1
-
-    indexed_blocks = list(enumerate(normalized_blocks))
-    # _apply_presentation_sequence already emits the canonical inline order and
-    # stamps sequence_index after weaving anchored renderers into prose. Sorting
-    # those blocks by step here would undo that weave (for example text → graph →
-    # continuation text). Retain the canonical sequence whenever it is complete;
-    # keep the legacy step-based fallback only for older/unindexed blocks.
-    def _has_finite_sequence_index(block: Any) -> bool:
-        if not isinstance(block, dict) or block.get("sequence_index") is None:
-            return False
-        try:
-            return math.isfinite(float(block.get("sequence_index")))
-        except (TypeError, ValueError, OverflowError):
-            return False
-
-    has_final_sequence = bool(indexed_blocks) and all(
-        _has_finite_sequence_index(block) for _, block in indexed_blocks
-    )
-    if has_final_sequence:
-        indexed_blocks.sort(key=lambda pair: (float(pair[1].get("sequence_index")), pair[0]))
-    else:
-        indexed_blocks.sort(key=lambda pair: (_safe_block_step_index(pair[1]), pair[0]))
-    normalized_blocks = [block for _, block in indexed_blocks]
-    for scene_index, block in enumerate(normalized_blocks):
-        if isinstance(block, dict):
-            block.setdefault("step_index", 1)
-            block["sequence_index"] = scene_index
-    if not normalized_blocks:
-        normalized_blocks = [
-            {
-                "type": "text",
-                "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
-                "content": packaged["answer"],
-            }
-        ]
-
-    response = MachineResponse(
-        answer=packaged["answer"],
-        content=packaged["content"],
-        summary=packaged["summary"],
-        render_blocks=normalized_blocks,
-        artifacts=list(packaged["artifacts"]),
-        metadata={
-            "provider_ms": provider_ms,
-            "identity": identity,
-            "interpretation": interpretation,
-            "selected_rooms": selected_rooms,
-            "render_plan": render_plan,
-            "image_generated": bool(image_result and not image_result.get("reused")),
-            "image_reused": bool(image_result and image_result.get("reused")),
-            "local_clarification": bool(provider_metadata.get("local_clarification")),
-            "dialogue_memory_record": (
-                raw.get("metadata", {}).get("dialogue_memory_record", {})
-                if isinstance(raw.get("metadata"), dict) else {}
-            ),
-            "provider_fallback": bool(provider_metadata.get("provider_fallback")),
-            "provider_error_code": _text(provider_metadata.get("provider_error_code")),
-            "provider_retries": int(provider_metadata.get("provider_retries") or 0),
-            "provider_output_limit": provider_metadata.get("provider_output_limit") or 12000,
-        },
-    )
-
-    # Provider responses do not get to change the authenticated identity.
-    response_identity = {
-        **identity,
-        **dict(response.metadata.get("identity") or {}),
-    }
-    assert_identity_match(identity, response_identity)
-
-    rows_for_turn = dialogue_context.get("candidates") or []
-    turn_index = (
-        max(
-            [int(item.get("turn_index") or 0) for item in rows_for_turn],
-            default=-1,
-        )
-        + 1
-    )
-    if _text(dialogue_context.get("relation")).upper() == "NEW":
-        turn_index = 0
-
-    scene_started = time.perf_counter()
-    result = _build_scene(
-        response,
-        identity,
-        interpretation,
-        turn_index,
-        {
-            "canonical_route": CANONICAL_ROUTE,
-            "processor_version": PROCESSOR_VERSION,
-            "stages": [
-                "bot.ru",
-                "input_reader",
-                "premium_state_manager_search",
-                "premium_interpretation_identity",
-                "Premium_C_ARTIFACT_CONTRACT",
-                "provider_luna",
-                "C_APRIL_IMAGES_GENERATOR" if image_result and not image_result.get("reused") else "",
-                "SceneContract",
-                "RenderMessage",
-                "bot.ru",
-                "Web",
-            ],
-        },
-    )
-    _apr_timing_log("scene_contract_build", scene_started,
-        render_blocks=len(response.render_blocks or []), answer_chars=len(response.answer or ""))
-
-    # Persist the complete structured turn after Provider/SceneContract.
-    # PostgreSQL remains storage only; State Manager will search these fields
-    # on the next request.
-    safe_visual_context = dict(request.visual_context)
-    safe_visual_items: list[dict[str, Any]] = []
-    for item in (request.visual_context.get("items") or []) if isinstance(request.visual_context, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        safe_visual_items.append({
-            "type": _text(item.get("type") or "input_image"),
-            "filename": _text(item.get("filename") or "image"),
-            "source_type": _text(item.get("source_type") or "image"),
-            "mime_type": _text(item.get("mime_type") or "image/*"),
-            "sequence_index": int(item.get("sequence_index", 9999) or 0),
-            "asset_role": _text(item.get("asset_role") or "user_input"),
-            "asset_message_id": _text(item.get("asset_message_id") or identity["message_id"]),
-            "output_type": _text(item.get("output_type")),
-        })
-    safe_visual_context["items"] = safe_visual_items
-    safe_visual_context["has_input_images"] = bool(safe_visual_items)
-
-    # Save original user inputs under the exact turn where they were uploaded.
-    # The file bytes stay on disk; only small references enter dialogue_memory.
-    durable_asset_payloads: list[dict[str, Any]] = []
-    persisted_input_refs: list[dict[str, Any]] = []
-    seen_input_keys: set[tuple[str, str, str]] = set()
-
-    def _append_durable_asset(kind: str, filename: str, mime_type: str, raw_bytes: bytes,
-                              asset_role: str, output_type: str, **metadata: Any) -> None:
-        # Match premium_asset_store's 25 MiB per-asset limit. The selected-turn
-        # loader reads these JSONB bytes only on artifact continuation, never on
-        # ordinary history hydration, so binary payloads do not bloat every search.
-        if not raw_bytes or len(raw_bytes) > 25 * 1024 * 1024:
-            return
-        durable_asset_payloads.append({
-            "kind": kind, "mime_type": mime_type or "application/octet-stream",
-            "asset_role": asset_role, "output_type": output_type, "filename": filename,
-            "message_id": identity["message_id"], "size_bytes": len(raw_bytes),
-            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "content_base64": base64.b64encode(raw_bytes).decode("ascii"),
-            **{key: value for key, value in metadata.items() if value not in (None, "", [], {})},
-        })
-    for item in (visual_context or []):
-        if not isinstance(item, dict) or item.get("recalled_from_memory"):
-            continue
-        decoded = _decode_asset_data_uri(item.get("image_url") or item.get("data_uri"))
-        if not decoded:
-            continue
-        raw_bytes, mime = decoded
-        filename = _text(item.get("filename") or f"uploaded-image-{identity['message_id'][-8:]}.png")
-        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
-        if dedupe in seen_input_keys:
-            continue
-        seen_input_keys.add(dedupe)
-        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
-            mime_type=_text(item.get("mime_type") or mime), kind="image", asset_role="user_input",
-            metadata={"source_type": _text(item.get("source_type") or "user_upload"),
-                      "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
-                      "analysis_summary": _text(item.get("analysis_summary"))[:1200],
-                      "analysis_key_details": item.get("analysis_key_details") if isinstance(item.get("analysis_key_details"), list) else []})
-        if ref:
-            persisted_input_refs.append(ref)
-        _append_durable_asset("image", filename, _text(item.get("mime_type") or mime), raw_bytes,
-                              "user_input", "image", source_type=_text(item.get("source_type") or "user_upload"),
-                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
-    for item in (file_inputs or []):
-        if not isinstance(item, dict) or item.get("recalled_from_memory"):
-            continue
-        decoded = _decode_asset_data_uri(item.get("file_data") or item.get("data_uri"))
-        if not decoded:
-            continue
-        raw_bytes, mime = decoded
-        filename = _text(item.get("filename") or f"uploaded-file-{identity['message_id'][-8:]}.bin")
-        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
-        if dedupe in seen_input_keys:
-            continue
-        seen_input_keys.add(dedupe)
-        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
-            mime_type=_text(item.get("mime_type") or mime), kind="file", asset_role="user_input",
-            metadata={"source_type": "user_upload", "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999), "analysis_summary": _text(item.get("analysis_summary"))[:1200]})
-        if ref:
-            persisted_input_refs.append(ref)
-        _append_durable_asset("file", filename, _text(item.get("mime_type") or mime), raw_bytes,
-                              "user_input", "file", source_type="user_upload",
-                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
-    for item in (file_contents or []):
-        if not isinstance(item, dict) or item.get("recalled_from_memory"):
-            continue
-        body_value = item.get("persistence_content") or item.get("content")
-        body = body_value if isinstance(body_value, str) else _text(body_value)
-        if not body.strip():
-            continue
-        filename = _text(item.get("filename") or f"uploaded-text-{identity['message_id'][-8:]}.txt")
-        raw_bytes = body.encode("utf-8")
-        dedupe = (filename, hashlib.sha256(raw_bytes).hexdigest(), "user_input")
-        if dedupe in seen_input_keys:
-            continue
-        seen_input_keys.add(dedupe)
-        ref = _save_premium_asset(uid, identity["message_id"], filename=filename, content=raw_bytes,
-            mime_type=_text(item.get("mime_type") or "text/plain"), kind="text_file", asset_role="user_input",
-            metadata={"source_type": "user_upload_text", "sequence_index": int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999),
-                      "analysis_summary": _text(item.get("analysis_summary"))[:1200],
-                      "reader_truncated": bool(item.get("reader_truncated")), "source_chars": int(item.get("source_chars") or len(body))})
-        if ref:
-            persisted_input_refs.append(ref)
-        _append_durable_asset("text_file", filename, _text(item.get("mime_type") or "text/plain"), raw_bytes,
-                              "user_input", "text_file", source_type="user_upload_text",
-                              sequence_index=int(item.get("sequence_index", 9999) if item.get("sequence_index") is not None else 9999))
-    for ref in persisted_input_refs:
-        attachment_refs.append({key: ref.get(key) for key in ("asset_id", "filename", "kind", "mime_type", "asset_role", "output_type", "message_id", "storage_key", "size_bytes", "sha256", "metadata") if ref.get(key) is not None})
-
-    output_asset_persist_started = time.perf_counter()
-    generated_asset_saved = False
-    output_asset_refs: list[dict[str, Any]] = []
-    for output_index, output_result in enumerate(image_results or ([image_result] if image_result else []), start=1):
-        if not isinstance(output_result, dict):
-            continue
-        # Persist every validated image separately under its own durable asset ref.
-        direct_image_bytes = output_result.get("image_bytes")
-        direct_mime = _text(output_result.get("mime_type") or "image/png")
-        if isinstance(direct_image_bytes, (bytes, bytearray)) and direct_image_bytes:
-            generated_image = (bytes(direct_image_bytes), direct_mime)
-        else:
-            generated_image = _image_payload_bytes(output_result.get("artifact") or output_result)
-        if generated_image:
-            generated_bytes, generated_mime = generated_image
-            generated_width = int(output_result.get("width") or 0)
-            generated_height = int(output_result.get("height") or 0)
-            if len(generated_bytes) >= 24 and generated_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-                import struct as _struct
-                generated_width = generated_width or int(_struct.unpack(">I", generated_bytes[16:20])[0])
-                generated_height = generated_height or int(_struct.unpack(">I", generated_bytes[20:24])[0])
-            generated_filename = f"april-generated-{identity['message_id'][-10:]}-{output_index:02d}.png"
-            if len(generated_bytes) <= 25 * 1024 * 1024:
-                durable_asset_payloads.append({
-                    "kind": "image",
-                    "mime_type": generated_mime or "image/png",
-                    "asset_role": "april_output",
-                    "output_type": "image",
-                    "filename": generated_filename,
-                    "message_id": identity["message_id"],
-                    "size_bytes": len(generated_bytes),
-                    "sha256": hashlib.sha256(generated_bytes).hexdigest(),
-                    "width": generated_width,
-                    "height": generated_height,
-                    "prompt": _text(output_result.get("prompt"))[:1200],
-                    "caption": _text(output_result.get("caption") or output_result.get("description") or answer)[:600],
-                    "alt": _text(output_result.get("alt") or output_result.get("caption") or output_result.get("prompt") or answer)[:240],
-                    "analysis_summary": _text(output_result.get("analysis_summary") or output_result.get("caption") or output_result.get("description") or output_result.get("prompt") or answer)[:1200],
-                    "user_request": _text(original or current_text)[:1000],
-                    "april_response": _text(answer)[:600],
-                    "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
-                    "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
-                    "source_asset_role": _text(output_result.get("source_asset_role")),
-                    "content_base64": base64.b64encode(generated_bytes).decode("ascii"),
+    video_result: dict[str, Any] | None = None
+    video_generation_error = ""
+    if video_generation_requested:
+        def _emit_video_stage(stage: str) -> None:
+            if not progress_sink:
+                return
+            try:
+                progress_sink({
+                    "type": "workflow_stage", "stage": stage, "render_type": "video",
+                    "message_id": identity["message_id"], "flow_id": identity["flow_id"],
+                    "scene_id": _stable_scene_id(identity),
                 })
-            generated_ref = _save_premium_asset(
-                uid, identity["message_id"],
-                filename=generated_filename,
-                content=generated_bytes, mime_type=generated_mime, kind="image",
-                asset_role="april_output", output_type="image",
-                metadata={
-                    "source_type": "april_generated", "asset_role": "april_output", "output_type": "image",
-                    "width": generated_width, "height": generated_height,
-                    "prompt": _text(output_result.get("prompt"))[:1200],
-                    "caption": _text(output_result.get("caption") or output_result.get("description") or answer)[:600],
-                    "alt": _text(output_result.get("alt") or output_result.get("caption") or output_result.get("prompt") or answer)[:240],
-                    "analysis_summary": _text(output_result.get("analysis_summary") or output_result.get("caption") or output_result.get("description") or output_result.get("prompt") or answer)[:1200],
-                    "user_request": _text(original or current_text)[:1000],
-                    "april_response": _text(answer)[:600],
-                    "operation": _text(output_result.get("operation") or image_intent.get("image_operation") or "generate"),
-                    "derived_from_message_id": _text(output_result.get("source_asset_message_id")),
-                    "source_asset_role": _text(output_result.get("source_asset_role")),
-                    "variant_index": int(output_result.get("variant_index") or output_index),
-                },
-            )
-            if generated_ref:
-                generated_asset_saved = True
-                output_asset_refs.append(generated_ref)
+            except Exception:
+                pass
 
-    # Some renderers carry the actual image in a typed render block without an
-    # image_generator result (for example, screenshot/gallery edit or a provider
-    # image payload). Persist these block payloads too, so the image is not lost
-    # when dialogue memory strips inline binary fields. Deduplicate against the
-    # image generator above and retain the source type for later restoration.
-    persisted_image_hashes = {
-        str(item.get("sha256")) for item in durable_asset_payloads
-        if isinstance(item, dict) and str(item.get("kind") or "").lower() == "image" and item.get("sha256")
-    }
-    image_block_types = {"image", "screenshot", "image_gallery", "gallery", "photo", "picture"}
-    for block_index, block in enumerate(normalized_blocks, 1):
-        if not isinstance(block, dict):
-            continue
-        block_type = _text(block.get("type") or block.get("artifact_type") or block.get("kind")).lower()
-        if block_type not in image_block_types:
-            continue
-        extracted_image = _image_payload_bytes(block)
-        if not extracted_image:
-            continue
-        image_bytes, image_mime = extracted_image
-        image_hash = hashlib.sha256(image_bytes).hexdigest()
-        if image_hash in persisted_image_hashes:
-            continue
-        persisted_image_hashes.add(image_hash)
-        image_name = _text(block.get("filename") or block.get("name") or block.get("title") or f"april-render-image-{identity['message_id'][-10:]}-{block_index}.bin")
-        image_role = _text(block.get("asset_role") or block.get("role") or "april_output")
-        image_ref = _save_premium_asset(
-            uid, identity["message_id"], filename=image_name, content=image_bytes,
-            mime_type=image_mime, kind="image", asset_role=image_role, output_type=block_type,
-            metadata={"source_type": "render_message_payload", "render_type": block_type,
-                      "title": _text(block.get("title") or block.get("name"))[:300]},
-        )
-        if image_ref:
-            output_asset_refs.append(image_ref)
-        if len(image_bytes) <= 25 * 1024 * 1024:
-            durable_asset_payloads.append({
-                "kind": "image", "mime_type": image_mime, "asset_role": image_role,
-                "output_type": block_type, "filename": image_name,
-                "message_id": identity["message_id"], "size_bytes": len(image_bytes),
-                "sha256": image_hash, "source_type": "render_message_payload",
-                "render_type": block_type, "content_base64": base64.b64encode(image_bytes).decode("ascii"),
+        _emit_video_stage("analyzing")
+        try:
+            video_result = await _execute_c_video_operation(
+                video_plan, original or current_text, attachments or [], visual_context or [],
+                progress_callback=_emit_video_stage,
+                source_language=_text((translation or {}).get("source_language")),
+                timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "270") or 270),
+            )
+        except Exception as exc:
+            video_generation_error = str(exc)[:600]
+            video_result = None
+            _apr_timing_log(
+                "c_video_operation_failed", None, action=video_action,
+                error_type=type(exc).__name__, message=video_generation_error[:200],
+            )
+        if video_result and video_result.get("video_bytes"):
+            _emit_video_stage("saving")
+            language_key = str(display_language or "en").lower().split("-")[0]
+            operation = _text(video_result.get("operation") or video_action)
+            if operation == "edit":
+                success_copy = {
+                    "ru": "Видео обработано: операции выполнены, MP4 подготовлен и передан в хранилище артефактов April.",
+                    "uk": "Відео оброблено: операції виконано, MP4 підготовлено та передано до сховища артефактів April.",
+                    "en": "The video edit is rendered as an MP4 and is being saved to April's artifact storage.",
+                }
+            else:
+                success_copy = {
+                    "ru": "Видео создано. April сохраняет MP4 в артефактах этого диалога.",
+                    "uk": "Відео створено. April зберігає MP4 в артефактах цього діалогу.",
+                    "en": "The video has been generated and is being saved as an MP4 artifact in this conversation.",
+                }
+            answer = _merge_image_status(answer, success_copy.get(language_key, success_copy["en"]))
+            _sync_packaged_answer(packaged, answer)
+            video_payload = {
+                "filename": _text(video_result.get("filename") or "april-video.mp4"),
+                "mime_type": "video/mp4",
+                "description": _text(original or current_text)[:600],
+                "provider": _text(video_result.get("provider")),
+                "model": _text(video_result.get("model")),
+                "prompt_language": _text(video_result.get("prompt_language")),
+                "prompt_translation_warning": _text(video_result.get("prompt_translation_warning"))[:240],
+                "duration_seconds": video_result.get("duration_seconds"),
+                "fps": video_result.get("fps"),
+                "resolution": _text(video_result.get("resolution")),
+                "ratio": _text(video_result.get("ratio")),
+                "audio": bool(video_result.get("audio")),
+                "task_id": _text(video_result.get("task_id")),
+                "operation": operation,
+                "edit_operations": video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
+                "source_filename": next((_text(item.get("filename")) for item in (attachments or []) if isinstance(item, dict) and _text(item.get("kind")).lower() == "video"), ""),
+                "insert_mode": next((
+                    _text(item.get("mode")) for item in (video_result.get("edit_operations") or [])
+                    if isinstance(item, dict) and _text(item.get("operation")) in {"insert_overlay", "insert_clip"}
+                ), _text(video_result.get("insert_mode"))),
+            }
+            # C_VIDEO creates the artifact; the Premium C-ARTIFACT contract
+            # converts it to the exact canonical VideoBlock inside SceneContract.
+            video_block = _build_c_video_render_block(video_payload)
+            packaged.setdefault("render_blocks", []).append(video_block)
+            packaged.setdefault("artifacts", []).append({
+                "type": "video", "artifact_type": "video", "filename": video_payload["filename"],
+                "mime_type": "video/mp4", "provider": video_payload["provider"],
+                "model": video_payload["model"], "duration_seconds": video_payload["duration_seconds"],
+                "operation": operation, "source_room": "C_VIDEO",
             })
+            raw["answer"] = answer
+            raw["content"] = _text(packaged.get("content") or answer)
+            raw["summary"] = _text(packaged.get("summary") or answer[:180])
+            raw["internal_answer_en"] = "C_VIDEO completed the requested video operation; durable artifact storage is pending."
+        else:
+            language_key = str(display_language or "en").lower().split("-")[0]
+            failure_copy = {
+                "ru": "Не удалось выполнить операцию с видео. Готового MP4-артефакта нет; April не будет показывать фиктивную карточку. Проверьте исходный файл или подключение видеогенератора и повторите запрос.",
+                "uk": "Не вдалося виконати операцію з відео. Готового MP4-артефакту немає; April не показуватиме фіктивну картку. Перевірте вихідний файл або підключення відеогенератора та повторіть запит.",
+                "en": "The video operation failed. No MP4 artifact was produced, so April will not show a placeholder download card. Check the source file or video provider and retry.",
+            }
+            failure = failure_copy.get(language_key, failure_copy["en"])
+            if video_generation_error:
+                failure += " " + video_generation_error[:240]
+            answer = _merge_image_status(answer, failure, operation_succeeded=False)
+            _sync_packaged_answer(packaged, answer)
+            packaged["render_blocks"] = [
+                block for block in (packaged.get("render_blocks") or [])
+                if str(block.get("type") or block.get("artifact_type") or "").lower() != "video"
+            ]
+            packaged["artifacts"] = [
+                artifact for artifact in (packaged.get("artifacts") or [])
+                if str(artifact.get("type") or artifact.get("artifact_type") or "").lower() != "video"
+            ]
+            raw["answer"] = answer
+            raw["content"] = _text(packaged.get("content") or answer)
+            raw["summary"] = answer[:180]
+            raw["internal_answer_en"] = "C_VIDEO did not produce a video artifact."
 
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
@@ -8207,6 +8100,54 @@ async def execute(
         if isinstance(block, dict) and str(block.get("type") or block.get("artifact_type") or "").lower()
         in {"file", "document", "text_file", "code_file", "pdf", "spreadsheet", "presentation"}
     ]
+    video_asset_ref: dict[str, Any] | None = None
+    video_asset_persist_failed = False
+    if isinstance(video_result, dict) and isinstance(video_result.get("video_bytes"), (bytes, bytearray)):
+        generated_video_bytes = bytes(video_result.get("video_bytes") or b"")
+        if generated_video_bytes and len(generated_video_bytes) <= 25 * 1024 * 1024:
+            generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")
+            generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
+            video_asset_ref = _save_premium_asset(
+                uid, identity["message_id"], filename=generated_video_name, content=generated_video_bytes,
+                mime_type="video/mp4", kind="video", asset_role="april_output", output_type="video",
+                metadata={
+                    "source_type": "premium_c_video_" + _text(video_result.get("operation") or video_action),
+                    "operation": _text(video_result.get("operation") or video_action),
+                    "edit_operations": video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
+                    "provider": _text(video_result.get("provider")),
+                    "model": _text(video_result.get("model")),
+                    "duration_seconds": video_result.get("duration_seconds"),
+                    "fps": video_result.get("fps"),
+                    "resolution": _text(video_result.get("resolution")),
+                    "ratio": _text(video_result.get("ratio")),
+                    "task_id": _text(video_result.get("task_id")),
+                },
+            )
+            if video_asset_ref:
+                output_asset_refs.append(video_asset_ref)
+                generated_asset_saved = True
+                _append_durable_asset(
+                    "video", generated_video_name, "video/mp4", generated_video_bytes,
+                    "april_output", "video",
+                    source_type="premium_c_video_" + _text(video_result.get("operation") or video_action),
+                    operation=_text(video_result.get("operation") or video_action),
+                    edit_operations=video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
+                    provider=_text(video_result.get("provider")),
+                    model=_text(video_result.get("model")),
+                    prompt_language=_text(video_result.get("prompt_language")),
+                    prompt_translation_warning=_text(video_result.get("prompt_translation_warning"))[:240],
+                    duration_seconds=video_result.get("duration_seconds"),
+                    fps=video_result.get("fps"),
+                    resolution=_text(video_result.get("resolution")),
+                    ratio=_text(video_result.get("ratio")),
+                    prompt=_text(video_result.get("prompt"))[:1200],
+                    task_id=_text(video_result.get("task_id")),
+                )
+            else:
+                video_result = None
+                video_asset_persist_failed = True
+                video_generation_error = "Premium video asset store could not persist the MP4."
+
     should_persist_code = bool(
         (interpretation.get("intent") or {}).get("wants_code")
         or (interpretation.get("intent") or {}).get("wants_file")
@@ -8408,6 +8349,69 @@ async def execute(
     if plan_intent.get("wants_file") and "file" not in requested_for_delivery:
         requested_for_delivery.append("file")
     source_render_blocks = scene_contract.get("render_blocks") or result.get("render_blocks") or response.render_blocks or []
+    if isinstance(video_asset_ref, dict) and video_asset_ref.get("sha256"):
+        video_block_found = False
+        for candidate_block in source_render_blocks:
+            if not isinstance(candidate_block, dict):
+                continue
+            if str(candidate_block.get("type") or candidate_block.get("artifact_type") or "").lower() != "video":
+                continue
+            video_payload = candidate_block.get("payload") if isinstance(candidate_block.get("payload"), dict) else {}
+            video_payload["asset_ref"] = {
+                key: video_asset_ref.get(key)
+                for key in ("message_id", "sha256", "filename", "mime_type", "size_bytes", "output_type")
+                if video_asset_ref.get(key) is not None
+            }
+            video_payload["size_bytes"] = video_asset_ref.get("size_bytes")
+            candidate_block["payload"] = video_payload
+            candidate_block["filename"] = video_asset_ref.get("filename")
+            candidate_block["mime_type"] = "video/mp4"
+            video_block_found = True
+        if not video_block_found:
+            source_render_blocks = list(source_render_blocks) + [_build_c_video_render_block({
+                "filename": video_asset_ref.get("filename"),
+                "mime_type": "video/mp4",
+                "size_bytes": video_asset_ref.get("size_bytes"),
+                "asset_ref": {
+                    key: video_asset_ref.get(key)
+                    for key in ("message_id", "sha256", "filename", "mime_type", "size_bytes", "output_type")
+                    if video_asset_ref.get(key) is not None
+                },
+                "duration_seconds": video_result.get("duration_seconds") if isinstance(video_result, dict) else None,
+                "operation": video_result.get("operation") if isinstance(video_result, dict) else "generate",
+                "edit_operations": video_result.get("edit_operations", []) if isinstance(video_result, dict) else [],
+                "description": _text(interpretation.get("current_request") or original or current_text)[:600],
+            })]
+    elif video_generation_requested:
+        source_render_blocks = [
+            block for block in source_render_blocks
+            if str(block.get("type") or block.get("artifact_type") or "").lower() != "video"
+        ]
+    if video_asset_persist_failed:
+        # A provider result is not a user-visible success until the MP4 has a
+        # durable, owner-bound artifact reference. Keep the chat and memory honest.
+        language_key = str(display_language or "en").lower().split("-")[0]
+        persist_failure_copy = {
+            "ru": "C_VIDEO подготовил MP4, но April не смогла сохранить его в хранилище артефактов. Поэтому файл не прикреплён к сообщению. Проверьте доступность базы данных и хранилища, затем повторите запрос.",
+            "uk": "C_VIDEO підготував MP4, але April не змогла зберегти його у сховищі артефактів. Тому файл не прикріплено до повідомлення. Перевірте доступність бази даних і сховища, потім повторіть запит.",
+            "en": "C_VIDEO produced an MP4, but April could not persist it in artifact storage. The file is therefore not attached to this message. Check database and asset-store availability, then retry.",
+        }
+        answer = persist_failure_copy.get(language_key, persist_failure_copy["en"])
+        response.answer = answer
+        response.content = answer
+        response.summary = answer[:180]
+        response.response = answer
+        response.artifacts = [
+            item for item in (response.artifacts or [])
+            if str(item.get("type") or item.get("artifact_type") or "").lower() != "video"
+        ]
+        result["answer"] = answer
+        result["content"] = answer
+        result["summary"] = answer[:180]
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = answer[:180]
+        raw["internal_answer_en"] = "The video was generated but could not be saved as a durable Premium artifact."
     source_render_blocks = attach_copy_block(source_render_blocks, requested_for_delivery, answer)
     delivery_blocks, attached_file_blocks = attach_file_delivery_blocks(
         source_render_blocks,
@@ -8761,6 +8765,54 @@ async def execute(
         structured_response_fields=len(structured_response), render_blocks=len(response.render_blocks or []),
         artifacts=len(response.artifacts or []), durable_asset_payloads=len(durable_asset_payloads))
 
+    video_database_persist_failed = bool(video_asset_ref and not saved)
+    if video_database_persist_failed:
+        # Retrieval is database-authorized and owner-bound. A sidecar file alone
+        # is not enough to publish a playable artifact when its dialogue row was
+        # not committed successfully.
+        language_key = str(display_language or "en").lower().split("-")[0]
+        persist_failure_copy = {
+            "ru": "MP4 был создан, но база данных не подтвердила сохранение артефакта. April не прикрепляет недоступную ссылку. Проверьте подключение PostgreSQL и повторите генерацию.",
+            "uk": "MP4 було створено, але база даних не підтвердила збереження артефакту. April не додає недоступне посилання. Перевірте підключення PostgreSQL і повторіть генерацію.",
+            "en": "The MP4 was generated, but the database did not confirm artifact persistence. April will not attach an inaccessible link. Check PostgreSQL connectivity and retry the generation.",
+        }
+        answer = persist_failure_copy.get(language_key, persist_failure_copy["en"])
+        response.answer = answer
+        response.content = answer
+        response.summary = answer[:180]
+        response.response = answer
+        response.artifacts = [
+            item for item in (response.artifacts or [])
+            if str(item.get("type") or item.get("artifact_type") or "").lower() != "video"
+        ]
+        delivery_blocks = [
+            block for block in (delivery_blocks or [])
+            if str(block.get("type") or block.get("artifact_type") or "").lower() != "video"
+        ]
+        scene_contract["render_blocks"] = delivery_blocks
+        scene_contract["content"] = answer
+        scene_contract["answer"] = answer
+        result["render_blocks"] = delivery_blocks
+        result["scene_contract"] = scene_contract
+        result["answer"] = answer
+        result["content"] = answer
+        result["summary"] = answer[:180]
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = answer[:180]
+        raw["internal_answer_en"] = "The MP4 was generated but the database did not confirm the durable artifact record."
+        response.render_blocks = delivery_blocks
+        video_asset_ref = None
+        output_asset_refs = [
+            ref for ref in output_asset_refs
+            if str(ref.get("output_type") or "").lower() != "video"
+        ]
+        attachment_refs = list(attachment_refs or [])
+        if isinstance(scene_contract.get("metadata"), dict):
+            dialogue_assets = scene_contract["metadata"].get("dialogue_assets")
+            if isinstance(dialogue_assets, dict):
+                dialogue_assets["april_outputs"] = output_asset_refs
+
     result.update(
         {
             "april_id": uid,
@@ -8783,6 +8835,8 @@ async def execute(
                 for item in restored_assets if isinstance(item, dict)
             ],
             "generated_asset_saved": generated_asset_saved,
+            "video_generated": bool(video_asset_ref and video_asset_ref.get("sha256") and saved),
+            "video_asset_ref": ({key: video_asset_ref.get(key) for key in ("message_id", "sha256", "filename", "mime_type", "size_bytes", "output_type") if video_asset_ref.get(key) is not None} if video_asset_ref else None),
             "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
             "interpretation": interpretation,
             "route": result.get("scene_contract", {}).get("metadata", {}).get("route", {}),
