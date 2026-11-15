@@ -65,6 +65,7 @@ from blocks.text_module import package_provider_response
 from blocks.premium_asset_store import save_asset as _save_premium_asset, load_message_assets as _load_premium_assets, decode_data_uri as _decode_asset_data_uri
 from blocks.C_VIDEO import (
     classify_video_request as _classify_video_request,
+    apply_video_intent_contract as _apply_video_intent_contract,
     extract_video_frames as _extract_video_frames,
     execute_video_operation as _execute_c_video_operation,
     build_video_render_block as _build_c_video_render_block,
@@ -83,7 +84,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v14_cvideo_pending_and_resolution_fallback"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v15_shared_cvideo_scene_wallet"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -5186,6 +5187,14 @@ async def execute(
     normalized_sequence = build_question_sequence(
         current_text, parent_interpretation=normalized_semantics
     )
+    # Normalize video generation before task decomposition is logged or searched.
+    # A duration/style clause belongs to the same C_VIDEO render operation.
+    video_plan = _classify_video_request(original or current_text, attachments)
+    if _text(video_plan.get("action")).lower() in {"generate", "edit"}:
+        question_sequence = _apply_video_intent_contract(
+            {}, video_plan, question_sequence, original or current_text,
+        )
+        normalized_sequence = question_sequence
     _apr_timing_log(
         "question_decomposition_result",
         user_key=_apr_diag_ref(uid),
@@ -6148,6 +6157,14 @@ async def execute(
             interpretation_started,
             error=type(_site_help_prepare_error).__name__,
         )
+    # Reconcile the final interpreted task with the same C_VIDEO contract used by
+    # Free. This is deliberately after artifact-lineage adjustments above so a new
+    # video request cannot be overwritten as a generic text revision. Apply it
+    # before the final Interpretation log, room selection and request construction.
+    question_sequence = _apply_video_intent_contract(
+        interpretation, video_plan, question_sequence, original or current_text,
+        contract_name="Premium_C_ARTIFACT_CONTRACT",
+    )
     request_structure["site_navigation_help"] = bool(_site_help_prepared)
     request_structure["question_relations"] = [
         {
@@ -6174,40 +6191,6 @@ async def execute(
         site_navigation_diagram=bool((interpretation.get("intent") or {}).get("wants_diagram")),
     )
 
-    # C_VIDEO is selected by Interpretation and then follows the same Premium
-    # SceneContract as every other artifact. A video attachment means ANALYZE by
-    # default; paid generation/editing requires an explicit operation in the request.
-    video_plan = _classify_video_request(original or current_text, attachments)
-    if video_plan.get("action") != "none":
-        _video_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-        _video_intent["wants_video"] = True
-        _video_intent["video_action"] = video_plan.get("action")
-        _video_intent["video_plan"] = dict(video_plan)
-        if video_plan.get("action") in {"generate", "edit"}:
-            # A source photo is an input frame for C_VIDEO, not an image-generation
-            # request. Give the task an explicit video identity before Provider runs
-            # so the image room cannot claim or replace the requested operation.
-            _video_intent["task"] = "generate_video" if video_plan.get("action") == "generate" else "edit_video"
-            _video_intent["wants_image"] = False
-            _video_intent["image_operation"] = "none"
-            _video_outputs = _video_intent.get("requested_outputs") if isinstance(_video_intent.get("requested_outputs"), list) else ["text"]
-            _video_intent["requested_outputs"] = list(dict.fromkeys([*[_text(x).lower() for x in _video_outputs if _text(x) and _text(x).lower() != "image"], "video"]))
-        elif video_plan.get("action") == "analyze":
-            _video_intent["task"] = "analyze_video"
-            _video_intent["wants_image"] = False
-        interpretation["intent"] = _video_intent
-        _video_structure = interpretation.setdefault("request_structure", {})
-        _video_structure["video_scene_contract"] = {
-            "room": "C_VIDEO",
-            "action": video_plan.get("action"),
-            "analysis_method": video_plan.get("analysis_method"),
-            "video_input_count": int(video_plan.get("video_input_count") or 0),
-            "image_input_count": int(video_plan.get("image_input_count") or 0),
-            "requires_video_provider": bool(video_plan.get("requires_video_provider")),
-            "requires_ffmpeg": bool(video_plan.get("requires_ffmpeg")),
-            "editing_capabilities": ["trim", "crop", "enhance", "timeline_splice", "picture_in_picture"],
-            "render_contract": "Premium_C_ARTIFACT_CONTRACT -> VideoBlock -> SceneContract",
-        }
     selected_rooms = _select_rooms(interpretation)
     render_plan = _renderer_plan(interpretation, selected_rooms)
 
@@ -6443,7 +6426,9 @@ async def execute(
                 "Never claim an operation was completed unless a valid MP4 was produced and persisted."
             ) if video_plan.get("action") == "edit" else "",
             "generation_guidance": (
-                "Generate only because the current user request explicitly requested a new video. Follow the full scene/action/style/timing direction."
+                "C_VIDEO is the real execution room for this request. The executor will invoke it and attach the actual MP4. "
+                "Do not claim that April cannot create video, do not replace execution with a prompt-only suggestion, "
+                "and do not invent a completed result before C_VIDEO returns a valid MP4. Preserve the full scene/action/style/timing direction."
             ) if video_plan.get("action") == "generate" else "",
             "video_frame_count": sum(1 for item in (visual_context or []) if isinstance(item, dict) and _text(item.get("source_type")).lower() in {"video_frame", "recalled_video_frame"}),
         }
@@ -8073,9 +8058,24 @@ async def execute(
             # not append it to the completed message or preserve model refusals.
             answer = success_message if video_pending else _merge_image_status(answer, success_message)
             _sync_packaged_answer(packaged, answer)
-            video_payload = {
-                "filename": _text(video_result.get("filename") or "april-video.mp4"),
+            generated_video_bytes = bytes(video_result.get("video_bytes") or b"")
+            generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")[:240]
+            generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
+            video_asset_pointer = {
+                "message_id": identity["message_id"],
+                "sha256": generated_video_hash,
+                "filename": generated_video_name,
                 "mime_type": "video/mp4",
+                "size_bytes": len(generated_video_bytes),
+                "output_type": "video",
+            }
+            video_payload = {
+                "filename": generated_video_name,
+                "mime_type": "video/mp4",
+                "size_bytes": len(generated_video_bytes),
+                # Keep the shared VideoBlock valid through the initial
+                # SceneContract pass; persistence below verifies this pointer.
+                "asset_ref": dict(video_asset_pointer),
                 "description": _text(original or current_text)[:600],
                 "provider": _text(video_result.get("provider")),
                 "model": _text(video_result.get("model")),
