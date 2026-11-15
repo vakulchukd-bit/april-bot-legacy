@@ -620,7 +620,7 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.5"
+WEB_RENDERER_REGISTRY_VERSION = "3.6"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
@@ -646,7 +646,7 @@ WEB_RENDERER_REGISTRY = {
     "link": {"renderer": "LinkCard", "viewer": "LinkCard", "fallback_renderer": "", "payload_keys": ["url", "href", "title", "description", "links", "markdown", "preview", "domain", "icon", "preview_image"]},
     "file": {"renderer": "FileDeliveryBlock", "viewer": "FileDeliveryBlock", "fallback_renderer": "", "payload_keys": ["filename", "name", "mime_type", "size_bytes", "asset_ref", "export_payload", "content", "text", "code", "file_url", "download_url"]},
     "audio": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
-    "video": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["url", "src", "path", "content"]},
+    "video": {"renderer": "VideoBlock", "viewer": "VideoBlock", "fallback_renderer": "MessageTextBlock", "payload_keys": ["filename", "mime_type", "size_bytes", "asset_ref", "duration_seconds", "fps", "resolution", "ratio", "description", "provider", "model", "operation", "edit_operations", "analysis_summary", "source_filename", "insert_mode", "audio", "prompt_language", "task_id"]},
     "action": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["action", "target", "parameters", "content"]},
     "memory": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "summary", "memory"]},
     # C rooms may emit function/domain artifacts. They remain in the same SceneContract
@@ -673,7 +673,7 @@ SUPPORTED_RENDERERS = {
     "MessageTextBlock", "GraphBlock", "TableBlock", "GalleryBlock",
     "CodeBlock", "CopyBlock", "FileDeliveryBlock", "LinkCard", "FunctionBlock", "FormulaBlock", "FormulaRenderer",
     "DiagramRenderer",
-    "SvgBlock", "ArithmeticDiagram",
+    "SvgBlock", "ArithmeticDiagram", "VideoBlock",
 }
 
 # Data-driven renderer aliases. They refine a produced representation; they do
@@ -715,7 +715,7 @@ ARTIFACT_RENDERER_ALIASES = {
 # Infrastructure components such as bot.ru, Exkrutor and the 12h memory
 # subsystem are NOT rooms and therefore are intentionally not registered here.
 
-ROOM_REGISTRY_VERSION = "1.0"
+ROOM_REGISTRY_VERSION = "1.1"
 
 @dataclass(frozen=True)
 class RoomRegistration:
@@ -731,6 +731,16 @@ class RoomRegistration:
 
 
 ROOM_REGISTRY: Dict[str, RoomRegistration] = {
+    "C_VIDEO": RoomRegistration(
+        room_id="C_VIDEO",
+        module="blocks.C_VIDEO",
+        class_name="CVideoRoom",
+        artifact_type="video",
+        room_type="video_processor",
+        role="canonical plan-independent video generation, analysis and editing",
+        capabilities=("video", "video_analysis", "video_generation", "video_editing", "video_render", "timeline_editing", "media_processing", "download", "share"),
+        is_engine=True,
+    ),
     "C_APRIL_IMAGES_GENERATOR": RoomRegistration(
         room_id="APRIL_IMAGES_GENERATION",
         module="blocks.C_APRIL_IMAGES_GENERATOR",
