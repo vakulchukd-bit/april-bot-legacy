@@ -20,6 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable
@@ -713,6 +714,19 @@ def _magic_hour_rates(model: str, resolution: str) -> int:
 
 
 
+def _next_resolution_for_tier_error(resolution: str, error: Any) -> str:
+    """Return one lower supported resolution only for an explicit tier restriction."""
+    message = _text(error).lower()
+    if not (
+        "magic_hour_http_402" in message
+        and "resolution" in message
+        and "not available" in message
+        and "subscription tier" in message
+    ):
+        return ""
+    return {"1080p": "720p", "720p": "480p"}.get(_text(resolution).lower(), "")
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -964,11 +978,57 @@ async def generate_video(
             endpoint = "/v1/image-to-video"
         if progress_callback:
             progress_callback("generating")
-        content, job = await _magic_hour_run_video_job(
-            api_key=api_key, endpoint=endpoint, body=body,
-            timeout_seconds=timeout_seconds, progress_callback=progress_callback,
-            user_id=user_id, reservation=reservation,
-        )
+        # Retry once per tier step only when Magic Hour explicitly rejects the
+        # selected resolution for this subscription. The Playground test proved
+        # 480p works on the current account. Do not retry unrelated 402 responses.
+        while True:
+            try:
+                content, job = await _magic_hour_run_video_job(
+                    api_key=api_key, endpoint=endpoint, body=body,
+                    timeout_seconds=timeout_seconds, progress_callback=progress_callback,
+                    user_id=user_id, reservation=reservation,
+                )
+                break
+            except CVideoError as provider_error:
+                fallback_resolution = _next_resolution_for_tier_error(resolution, provider_error)
+                if not fallback_resolution:
+                    raise
+
+                fallback_credits = int(duration * _magic_hour_rates(model, fallback_resolution))
+                available_credits = await asyncio.to_thread(
+                    _magic_hour_account_credits, api_key=api_key
+                )
+                if available_credits < fallback_credits:
+                    raise CVideoError(
+                        "MAGIC_HOUR_API_ACCOUNT_CREDITS_LOW: "
+                        f"available={available_credits} required={fallback_credits} "
+                        f"for fallback_resolution={fallback_resolution}"
+                    ) from provider_error
+
+                # The rejected request returned no project id and cannot be billed.
+                # Release the original April reserve before reserving the lower tier.
+                if reservation:
+                    _update_video_charge(
+                        user_id, reservation, actual_credits=0, refund=True
+                    )
+                    reservation = None
+
+                fallback_ref = (
+                    f"{_text(operation_ref) or uuid.uuid4().hex}"
+                    f":fallback:{fallback_resolution}"
+                )
+                reservation = _reserve_video_charge(
+                    user_id, fallback_ref, "generate", fallback_credits
+                )
+                resolution = fallback_resolution
+                estimate_credits = fallback_credits
+                body["resolution"] = fallback_resolution
+                print(
+                    "[APRIL_C_VIDEO] subscription_tier_resolution_fallback "
+                    f"model={model} resolution={fallback_resolution} "
+                    f"provider_credits_required={fallback_credits}"
+                )
+
         project_id = _text(job.get("task_id"))
         billing = job.get("billing") if isinstance(job.get("billing"), dict) else {}
         return {
@@ -986,7 +1046,7 @@ async def generate_video(
         # A reservation without a provider job means no external generation was
         # submitted and must be refunded. Once a job id exists, keep it reserved
         # because the provider may still complete and charge it after a timeout.
-        if not project_id:
+        if not project_id and reservation:
             try:
                 conn = _wallet_connection()
                 try:
