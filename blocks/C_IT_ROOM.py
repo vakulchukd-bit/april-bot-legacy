@@ -2371,12 +2371,88 @@ def _site_direct_function_intent(query: str) -> bool:
     return any(re.search(pattern, q, re.I | re.S) for pattern in patterns)
 
 
+def _is_video_help_query(query: str) -> bool:
+    """Identify questions about April's video workflow without treating them as generation commands."""
+    low = _text(query).lower().replace("ё", "е")
+    if not low or not re.search(r"(?iu)(?:виде\w*|ролик\w*|клип\w*|відео|video|clip|фото|фотографи\w*|картинк\w*|изображени\w*|image|photo)", low):
+        return False
+    # A direct imperative belongs to C_VIDEO, not to the help knowledge route.
+    direct_generation = bool(re.search(
+        r"(?iu)^\s*(?:создай(?:те)?|сгенерируй(?:те)?|сними(?:те)?|оживи(?:те)?|анимируй(?:те)?|"
+        r"створи(?:те)?|згенеруй(?:те)?|сделай(?:те)?|зроби(?:те)?|generate|create|animate|make)\b.{0,100}"
+        r"(?:виде\w*|ролик\w*|клип\w*|відео|video|clip)\b", low,
+    ))
+    if direct_generation:
+        return False
+    question_or_help = bool(re.search(
+        r"(?iu)(?:как\b|каким\s+образом|объясни|расскажи|подскажи|можно\s+ли|могу\s+ли|"
+        r"можешь\s+ли|можете\s+ли|умеешь\s+ли|умеете\s+ли|поддерживаешь\s+ли|"
+        r"можно\b|можешь\b|можете\b|умеешь\b|умеете\b|могу\b|смогу\b|"
+        r"сколько\b|какой\b|какая\b|какое\b|максимум|максимальн\w*|сам\w*\s+длинн\w*|"
+        r"длительност\w*|хронометраж\w*|по\s+умолчанию|умеет\s+ли|what\b|how\b|can\s+you|can\s+i|"
+        r"maximum|longest|duration|length|support(?:ed)?|help|guide|instructions?)", low,
+    ))
+    return question_or_help
+
+
+def _video_usage_guide_payload() -> dict[str, Any]:
+    """Build source-grounded help using the server's actual model and resolution limits."""
+    try:
+        from blocks.C_VIDEO import get_video_capability_profile, VIDEO_DEFAULT_DURATION_SECONDS
+        profile = get_video_capability_profile()
+    except Exception:
+        profile = {
+            "model": None, "resolution": None,
+            "minimum_duration_seconds": None, "maximum_duration_seconds": None,
+            "default_duration_seconds": 3, "supported": False,
+            "duration_rule": "Не удалось подтвердить текущую модель и разрешение; не обещать максимальную длительность.",
+        }
+    return {
+        "entry_point": "Основной чат April (/), нижнее поле сообщения и значок скрепки слева от него.",
+        "default_duration_seconds": int(profile.get("default_duration_seconds") or 3),
+        "minimum_duration_seconds": profile.get("minimum_duration_seconds") or 1,
+        "maximum_duration_seconds": profile.get("maximum_duration_seconds"),
+        "model": profile.get("model"),
+        "resolution": profile.get("resolution"),
+        "provider_supported": bool(profile.get("supported")),
+        "duration_rule": profile.get("duration_rule") or "Текущая модель/разрешение не подтверждают доступную длительность.",
+        "plan_policy": {
+            "video_generation": "Free и Premium; отдельный предварительно пополненный Video Wallet; подписка Premium для новой генерации не нужна.",
+            "uploaded_video_analysis_and_editing": "По текущему bot.py загрузка видео для анализа/монтажа ограничена Premium; Free получает PREMIUM_VIDEO_REQUIRED.",
+            "image_to_video": "Новая генерация из прикреплённого изображения проходит через тот же C_VIDEO и отдельный Video Wallet; Premium для этого не требуется, если изображение принято чатом.",
+        },
+        "workflows": {
+            "text_to_video": "Напишите ясный текстовый запрос: кто/что в кадре, действие, окружение, движение камеры, стиль, формат кадра, звук и длительность. Если длительность не указана, April создаёт реальный ролик на 3 секунды; это не бесплатная проба.",
+            "image_description": "Чтобы получить описание обычной фотографии, прикрепите её и напишите: «Опиши, что изображено, перечисли заметные детали». Это анализ изображения, а не генерация видео; он сам по себе не запускает Video Wallet.",
+            "image_to_video": "Чтобы сделать видео из фото, прикрепите изображение и в том же сообщении прямо попросите его оживить: укажите, что должно двигаться, как должна двигаться камера, стиль и длительность. Изображение передаётся как исходный кадр; отдельная генерация картинки не должна запускаться.",
+            "video_analysis": "Premium: прикрепите существующее видео и попросите описать или проанализировать видимые сцены. Анализ опирается на извлечённые выборочные кадры (до 8); текущий путь не анализирует аудиодорожку как полную расшифровку и не должен приписывать ролику неразборчивый звук или события вне показанных кадров.",
+            "video_editing": "Premium: прикрепите видео и сформулируйте конкретную команду монтажа. В локальном FFmpeg пути поддерживаются обрезка, кадрирование, улучшение изображения и вставка/overlay второго клипа; замена/удаление/добавление объектов и другие AI-правки требуют удалённого провайдера и отдельного видеобаланса.",
+        },
+        "billing_and_safety": [
+            "Три секунды по умолчанию — это реальный сгенерированный ролик, а не бесплатный тестовый просмотр. Длительность 3 с применяется только когда пользователь действительно не указал время.",
+            "Расход видеобаланса зависит от длительности, модели и разрешения; до отправки задачи нельзя обещать фиксированную стоимость без актуального расчёта провайдера.",
+            "Максимум из профиля — это предел текущей конфигурации сервера, а не гарантия доступа для любого аккаунта: тариф/права провайдера могут дополнительно ограничивать модель и разрешение. В таком случае сообщить о реальном ограничении, не утверждать, что генерация гарантированно доступна.",
+            "Если запрошенная длительность превышает предел активной модели/разрешения, остановить операцию до отправки провайдеру; не сокращать её молча и не списывать баланс.",
+            "Не запускать платную генерацию из вопроса «как создать», «можешь ли», «какой максимум» или просьбы объяснить возможности. Нужна явная команда создать/сгенерировать/оживить видео.",
+        ],
+        "examples": [
+            "Создай кинематографичное видео: красный автомобиль едет по ночному городу, камера плавно следует сбоку, длительность 12 секунд, формат 16:9.",
+            "Опиши прикреплённое фото: что изображено, какие детали заметны и что нельзя определить точно.",
+            "Оживи прикреплённое фото: человек слегка улыбается и поворачивает голову, камера неподвижна, 5 секунд.",
+            "Прикрепляю видео. Проанализируй видимые сцены по порядку и отдельно укажи, что нельзя достоверно определить.",
+            "Прикрепляю видео. Обрежь начало до 4-й секунды и оставь кадр 9:16.",
+        ],
+    }
+
+
 def is_site_help_query(query: str) -> bool:
     """Detect positive April self-help/navigation requests, excluding rejected routes."""
     effective_query, _removed_negative_clause = _effective_site_help_query(query)
     low = effective_query.strip().lower().replace("ё", "е")
     if not low:
         return False
+    if _is_video_help_query(low):
+        return True
     if _is_external_community_topic(low):
         return False
     if _is_attachment_instruction_query(low):
@@ -5132,6 +5208,8 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         context["site_ui_search"] = search_april_ui(effective_query, limit=4)
         context["site_ui_screenshot_evidence"] = context["site_ui_search"].get("screen_matches", [])
         query = effective_query.lower().replace("ё", "е")
+        if _is_video_help_query(query):
+            context["video_usage_guide"] = _video_usage_guide_payload()
         full_interface_overview = _site_full_interface_overview_requested(query)
         # Keep the user-facing site walkthrough separate from internal architecture.
         # A full tour of buttons/pages does not implicitly request room internals or API routes.
@@ -5175,6 +5253,17 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             "When asked who created April, report only what the repository confirms: the policy/terms archive lists a contact email but explicitly says the legal operator name is still missing. Do not invent an individual or company.",
             "Use the query catalogue to resolve colloquial/inflected phrasing, but do not expose the thousands-case catalogue to the model or claim every route was verified in production.",
         ])
+        if context.get("video_usage_guide"):
+            prompt_fragments.extend([
+                "For questions about April video creation, durations, image-to-video, uploaded-video analysis or editing, use video_usage_guide as the authoritative current capability source. Answer in the user's language and explain the exact chat workflow: attach media with the paperclip in the main chat, add a concrete instruction, then send.",
+                "State the active model, resolution, default duration and maximum duration from video_usage_guide exactly. If provider_supported is false or maximum_duration_seconds is absent, say that April cannot currently confirm the available limit; do not substitute a guessed number. The default is a real 3-second generated clip when no duration is specified; after successful generation explain this in the final message. Do not call it a free preview and do not imply it avoids Video Wallet charging.",
+            "For a successful generated clip, keep the completion note brief and natural: say that the requested duration was omitted, so April generated 3 seconds by default; invite the user to include a duration next time. Use compact units such as '3 с', '15 с', '60 с' to avoid incorrect number inflection.",
+            "The current video workflow is in the main chat: attach a source image/video with the paperclip and send the instruction in the same chat. Do not invent a separate video-generator page or button unless site UI evidence explicitly identifies one.",
+                "Clearly distinguish Free and Premium: both can generate new videos and animate an attached image using the separate Video Wallet; uploaded existing-video analysis/editing is Premium-only in the current bot route. Do not claim Free can upload a video for analysis or editing.",
+                "Explain text-to-video, image-to-video, Premium video analysis and Premium editing separately. Do not promise that audio/dialogue was analyzed when only sampled video frames were read. Do not claim that arbitrary AI video edits are local/free.",
+                "A video-how-to, price, limit or capability question is text-only and must never start paid generation. Do not create a diagram or image unless the user explicitly asks for one. Actual paid generation requires a direct user command to create/generate/animate the clip.",
+                "If the requested duration exceeds the active model/resolution maximum, state the exact limit and ask for a shorter duration. Never silently shorten the requested clip or submit an over-limit provider job. The profile limit is not a guarantee of account entitlement: provider plan/rights can impose an additional restriction, which must be reported honestly.",
+            ])
         if context.get("room_directory"):
             prompt_fragments.append("For room/function inventory, use the supplied room_directory. Label internal rooms as internal implementation details, not visible user buttons.")
         if context.get("api_architecture"):
