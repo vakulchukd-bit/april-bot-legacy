@@ -1506,6 +1506,21 @@ def _is_feedback_control_help_request(text: Any) -> bool:
     return feedback_target and interaction_question and not explicit_artifact_creation
 
 
+def _explicit_video_output_intent(
+    text: Any, attachments: Any = None, *, allow_edit: bool = True,
+) -> tuple[bool, list[str]]:
+    """Resolve a C_VIDEO output using the same source-aware room classifier."""
+    try:
+        from blocks.C_VIDEO import classify_video_request, explicit_video_companion_outputs
+        plan = classify_video_request(_text(text), attachments or [])
+        action = _text(plan.get("action")).lower()
+        if action == "generate" or (allow_edit and action == "edit"):
+            return True, explicit_video_companion_outputs(text)
+    except Exception:
+        return False, []
+    return False, []
+
+
 def _detect_requested_outputs(text: str) -> list[str]:
     result: list[str] = []
     low = _text(text).lower()
@@ -1521,6 +1536,9 @@ def _detect_requested_outputs(text: str) -> list[str]:
         return merged
     if _is_standalone_assistant_self_question(low):
         return ["text"]
+    video_requested, video_companions = _explicit_video_output_intent(low)
+    if video_requested:
+        return list(dict.fromkeys(["text", "video", *video_companions]))
     if _is_feedback_control_help_request(low):
         # A route diagram is useful for "where do I click?"; photo/graph/code
         # words in the same sentence are examples of earlier answers, not deliverables.
@@ -1735,6 +1753,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         return merged
     if _is_standalone_assistant_self_question(low) or is_bare_visual_command(low):
         return ["text"]
+    video_requested, video_companions = _explicit_video_output_intent(low)
+    if video_requested:
+        return list(dict.fromkeys(["text", "video", *video_companions]))
     outputs = list(dict.fromkeys(explicit_outputs or ["text"]))
     incidental_nonvisual_followup = bool(
         _has_independent_nonvisual_artifact_request(low)
@@ -7532,6 +7553,9 @@ def build_interpretation(
         }]
     detected_outputs = _detect_requested_outputs(original or text)
     requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
+    video_output_requested, video_companions = _explicit_video_output_intent(original or text, attachments)
+    if video_output_requested:
+        requested_outputs = list(dict.fromkeys(["text", "video", *video_companions]))
     for sequence_item in question_sequence:
         if not isinstance(sequence_item, dict):
             continue
@@ -8050,6 +8074,7 @@ def build_interpretation(
         "intent": {
             "task": task,
             "requested_outputs": requested_outputs,
+            "wants_video": "video" in requested_outputs,
             "wants_image": wants_image,
             "image_generation_blocked": bool(image_generation_blocked),
             "image_operation": "edit" if (image_edit_requested and source_image_available) else ("request_source" if image_edit_requested else ("reuse" if reuse_saved_image else ("generate" if wants_image else "none"))),
