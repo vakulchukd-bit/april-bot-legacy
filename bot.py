@@ -34,6 +34,7 @@ from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
+from blocks.C_VIDEO import extract_video_frames
 from blocks.voice_reader import transcribe_voice_bytes
 from blocks.premium_asset_store import load_message_assets as _load_premium_history_assets
 from core.executor import execute as execute_free
@@ -558,7 +559,24 @@ def _prepare_attachments(
             "asset_role": "user_input",
             "provider_readable": bool(item.get("provider_readable", kind in {"image", "text_file", "voice"})),
             "sequence_index": sequence_index,
+            **({"video_data_uri": _text(item.get("data_uri")), "video_frame_count": 0} if kind == "video" and is_premium else {}),
         })
+
+        if kind == "video":
+            if is_premium:
+                raw_video = getattr(att, "data", b"") or b""
+                try:
+                    extracted_frames = extract_video_frames(raw_video, filename)
+                    for frame in extracted_frames:
+                        frame["sequence_index"] = sequence_index * 10 + int(frame.get("frame_index") or 0)
+                        frame["parent_filename"] = filename
+                        visual.append(frame)
+                    meta[-1]["video_frame_count"] = len(extracted_frames)
+                    if not extracted_frames:
+                        meta[-1]["video_analysis_warning"] = "No frames could be extracted from this video."
+                except Exception as exc:
+                    meta[-1]["video_analysis_warning"] = str(exc)[:240]
+            continue
 
         if kind == "voice":
             raw_voice = getattr(att, "data", b"") or item.get("data") or b""
@@ -1002,11 +1020,43 @@ def _handle_payload(
     free_media_units = 0
     free_media_limit_reached = False
     free_media_attachments_skipped = False
+    if not is_premium and any(_text(getattr(item, "kind", "")).lower() == "video" for item in attachments):
+        return 403, {
+            "success": False,
+            "error_code": "PREMIUM_VIDEO_REQUIRED",
+            "answer": (
+                "Анализ видео и создание видео доступны в Premium. Переключите аккаунт на Premium, чтобы продолжить."
+                if account_language in {"ru", "uk", "ua"} else
+                "Video analysis and video generation are available in Premium. Upgrade to Premium to continue."
+            ),
+            "policy_language": account_language,
+            "canonical_route": CANONICAL_CHAT_ROUTE,
+        }
     input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
             data, attachments, voice_transcript=voice_transcript, is_premium=is_premium
         )
+        videos_without_frames = [
+            item for item in (attachment_meta or [])
+            if isinstance(item, dict)
+            and _text(item.get("kind")).lower() == "video"
+            and int(item.get("video_frame_count") or 0) <= 0
+        ]
+        if videos_without_frames:
+            warning = _text(videos_without_frames[0].get("video_analysis_warning"))
+            if account_language in {"ru", "uk", "ua"}:
+                message = "Не удалось прочитать видео и извлечь кадры. Проверьте формат и размер файла (до 20 МБ), затем загрузите его снова. Для чтения видео в окружении бота должны быть установлены imageio-ffmpeg и Pillow."
+            else:
+                message = "April could not read the video or extract frames. Check the file format and size (up to 10 MB per video), then upload it again. The bot runtime must have imageio-ffmpeg and Pillow installed."
+            return 422, {
+                "success": False,
+                "error_code": "VIDEO_FRAME_EXTRACTION_FAILED",
+                "answer": message,
+                "details": warning[:240],
+                "policy_language": account_language,
+                "canonical_route": CANONICAL_CHAT_ROUTE,
+            }
         if text_file_contents:
             _apr_timing_log(
                 "text_file_context_bounded",
@@ -1141,8 +1191,21 @@ def _handle_payload(
                     pass
             kinds = {str(item.get("kind") or "").lower() for item in attachment_meta}
             has_image = "image" in kinds
+            has_video = "video" in kinds
             has_file = bool(kinds & {"file", "text_file"})
-            if has_image and has_file:
+            if has_video and has_image:
+                defaults = {
+                    "ru": "Проанализируй видео и прикреплённые изображения: опиши сцену, действия и последовательность событий по доступным кадрам.",
+                    "uk": "Проаналізуй відео й додані зображення: опиши сцену, дії та послідовність подій за доступними кадрами.",
+                    "en": "Analyze the video and attached images: describe the scene, actions, and event sequence from the available frames.",
+                }
+            elif has_video:
+                defaults = {
+                    "ru": "Проанализируй прикреплённое видео по извлечённым кадрам: опиши сцену, действия, последовательность событий и видимые детали.",
+                    "uk": "Проаналізуй прикріплене відео за витягнутими кадрами: опиши сцену, дії, послідовність подій і видимі деталі.",
+                    "en": "Analyze the attached video from its sampled frames: describe the scene, actions, event sequence, and visible details.",
+                }
+            elif has_image and has_file:
                 defaults = {
                     "ru": (
                         "Разбери все вложения как одну задачу: кратко опиши каждое фото и файл отдельно, "
@@ -2710,7 +2773,7 @@ class AprilHandler(BaseHTTPRequestHandler):
                             continue
                         if _text(item.get("asset_role") or "april_output") != "april_output":
                             continue
-                        if _text(item.get("output_type")).lower() not in {"code", "file"}:
+                        if _text(item.get("output_type")).lower() not in {"code", "file", "video"}:
                             continue
                         if _text(item.get("sha256")).lower() != expected_hash:
                             continue
@@ -2735,14 +2798,47 @@ class AprilHandler(BaseHTTPRequestHandler):
                 mime = _text(item.get("mime_type") or "application/octet-stream")
                 if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", mime.split(";", 1)[0].lower()):
                     mime = "application/octet-stream"
-                self.send_response(200)
+                # Native HTML video playback uses byte ranges for metadata and
+                # seeking. Preserve the authenticated SHA-256 check above, then
+                # serve the exact verified byte interval without materializing a
+                # second asset or exposing the provider's temporary URL.
+                range_header = _text(self.headers.get("Range"))
+                start, end = 0, len(content) - 1
+                response_status = 200
+                if range_header:
+                    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+                    if not match:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{len(content)}")
+                        self.end_headers()
+                        return
+                    left, right = match.groups()
+                    if left:
+                        start = int(left)
+                        end = int(right) if right else len(content) - 1
+                    elif right:
+                        suffix = int(right)
+                        start = max(0, len(content) - suffix)
+                    if start >= len(content) or end < start:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{len(content)}")
+                        self.end_headers()
+                        return
+                    end = min(end, len(content) - 1)
+                    response_status = 206
+                chunk = content[start:end + 1]
+                self.send_response(response_status)
                 self.send_header("Content-Type", mime)
-                self.send_header("Content-Length", str(len(content)))
-                self.send_header("Content-Disposition", f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}")
+                self.send_header("Content-Length", str(len(chunk)))
+                if response_status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{len(content)}")
+                self.send_header("Accept-Ranges", "bytes")
+                disposition = "inline" if mime.startswith("video/") else "attachment"
+                self.send_header("Content-Disposition", f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", "private, no-store, max-age=0")
                 self.end_headers()
-                self.wfile.write(content)
+                self.wfile.write(chunk)
                 return
             if mode == "history":
                 # Both layers authenticate: Web verifies NextAuth, Bot verifies
