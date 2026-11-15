@@ -8002,7 +8002,9 @@ async def execute(
                 video_plan, original or current_text, attachments or [], visual_context or [],
                 progress_callback=_emit_video_stage,
                 source_language=_text((translation or {}).get("source_language")),
-                timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "270") or 270),
+                timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "420") or 420),
+                user_id=uid,
+                operation_ref=_text(identity.get("message_id") or identity.get("flow_id")),
             )
         except Exception as exc:
             video_generation_error = str(exc)[:600]
@@ -8044,6 +8046,7 @@ async def execute(
                 "audio": bool(video_result.get("audio")),
                 "task_id": _text(video_result.get("task_id")),
                 "operation": operation,
+                "billing": video_result.get("billing") if isinstance(video_result.get("billing"), dict) else {},
                 "edit_operations": video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
                 "source_filename": next((_text(item.get("filename")) for item in (attachments or []) if isinstance(item, dict) and _text(item.get("kind")).lower() == "video"), ""),
                 "insert_mode": next((
@@ -8073,8 +8076,61 @@ async def execute(
                 "en": "The video operation failed. No MP4 artifact was produced, so April will not show a placeholder download card. Check the source file or video provider and retry.",
             }
             failure = failure_copy.get(language_key, failure_copy["en"])
-            if video_generation_error:
-                failure += " " + video_generation_error[:240]
+            error_code = video_generation_error.upper()
+            localized_errors = {
+                "VIDEO_WALLET_INSUFFICIENT_FUNDS": {
+                    "ru": "Недостаточно средств на отдельном видеобалансе. Пополните его в личном кабинете и повторите запрос.",
+                    "uk": "Недостатньо коштів на окремому відеобалансі. Поповніть його в особистому кабінеті та повторіть запит.",
+                    "en": "The separate video balance is too low. Top it up in your profile and retry.",
+                },
+                "VIDEO_WALLET_NOT_ENABLED": {
+                    "ru": "Сначала подключите отдельный видеобаланс в личном кабинете.",
+                    "uk": "Спочатку підключіть окремий відеобаланс в особистому кабінеті.",
+                    "en": "Connect the separate video balance in your profile first.",
+                },
+                "MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED": {
+                    "ru": "Платная генерация временно выключена: на сервере ещё не подтверждены коммерческие права видеопровайдера.",
+                    "uk": "Платну генерацію тимчасово вимкнено: на сервері ще не підтверджено комерційні права відеопровайдера.",
+                    "en": "Paid video generation is disabled until the provider's commercial-use rights are confirmed on the server.",
+                },
+                "MAGIC_HOUR_API_KEY_NOT_CONFIGURED": {
+                    "ru": "На сервере не настроен ключ Magic Hour.",
+                    "uk": "На сервері не налаштовано ключ Magic Hour.",
+                    "en": "The Magic Hour API key is not configured on the server.",
+                },
+                "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED": {
+                    "ru": "На сервере не задана фактическая стоимость кредитов Magic Hour. Генерация остановлена, чтобы не списать неверную сумму.",
+                    "uk": "На сервері не задано фактичну вартість кредитів Magic Hour. Генерацію зупинено, щоб не списати неправильну суму.",
+                    "en": "The server has no verified Magic Hour credit cost. Generation is blocked to avoid charging the wrong amount.",
+                },
+                "MAGIC_HOUR_PROVIDER_INSUFFICIENT_CREDITS": {
+                    "ru": "На балансе Magic Hour недостаточно кредитов. Пользовательский видеобаланс не будет списан за неуспешную задачу.",
+                    "uk": "На балансі Magic Hour недостатньо кредитів. Користувацький відеобаланс не буде списано за невдале завдання.",
+                    "en": "The Magic Hour provider balance is too low. The user's video balance is not charged for a failed job.",
+                },
+                "VIDEO_WALLET_AUTH_REQUIRED": {
+                    "ru": "Для платной видеоперации требуется авторизованный аккаунт April.",
+                    "uk": "Для платної відеооперації потрібен авторизований акаунт April.",
+                    "en": "An authenticated April account is required for paid video operations.",
+                },
+            }
+            matched_code = next((code for code in localized_errors if code in error_code), "")
+            if matched_code:
+                failure = localized_errors[matched_code].get(language_key, localized_errors[matched_code]["en"])
+            elif "MAGIC_HOUR_TASK_PENDING" in error_code:
+                pending_copy = {
+                    "ru": "Задача ещё обрабатывается у провайдера. Сумма остаётся в резерве; не отправляйте повторный запрос, чтобы не создать дубликат.",
+                    "uk": "Завдання ще обробляється у провайдера. Сума залишається в резерві; не надсилайте повторний запит, щоб не створити дублікат.",
+                    "en": "The provider is still processing the job. The amount remains reserved; do not submit it again, or you may create a duplicate.",
+                }
+                failure = pending_copy.get(language_key, pending_copy["en"])
+            elif "APRIL_VIDEO_GENERATION_DISABLED" in error_code:
+                disabled_copy = {
+                    "ru": "Генерация видео сейчас отключена в настройках сервера.",
+                    "uk": "Генерацію відео зараз вимкнено в налаштуваннях сервера.",
+                    "en": "Video generation is currently disabled in the server configuration.",
+                }
+                failure = disabled_copy.get(language_key, disabled_copy["en"])
             answer = _merge_image_status(answer, failure, operation_succeeded=False)
             _sync_packaged_answer(packaged, answer)
             packaged["render_blocks"] = [
@@ -8121,6 +8177,7 @@ async def execute(
                     "resolution": _text(video_result.get("resolution")),
                     "ratio": _text(video_result.get("ratio")),
                     "task_id": _text(video_result.get("task_id")),
+                    "billing": video_result.get("billing") if isinstance(video_result.get("billing"), dict) else {},
                 },
             )
             if video_asset_ref:
