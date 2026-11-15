@@ -35,7 +35,7 @@ from urllib.error import HTTPError, URLError
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
 from blocks.C_VIDEO import (
-    extract_video_frames, enable_video_wallet, get_video_wallet_status,
+    classify_video_request, extract_video_frames, enable_video_wallet, get_video_wallet_status,
     create_video_wallet_topup_order, get_video_wallet_order_status,
     set_video_wallet_order_status, settle_video_wallet_topup,
 )
@@ -1339,31 +1339,49 @@ def _handle_payload(
                     release_free_media_reservation(uid, message_id, "attachment")
                 except Exception:
                     pass
-            # A provider/image-edit exception must never leave the Web client with
-            # an indefinitely pending/blank assistant bubble. Keep Free's legacy
+            # A provider/artifact-operation exception must never leave the Web client
+            # with an indefinitely pending/blank assistant bubble. Keep Free's legacy
             # failure behavior unchanged; Premium gets one localized text result
             # and a best-effort durable dialogue pair, without fabricating an image.
             if not is_premium:
                 raise
             result = _apr_backend_failure_payload(data, exc)
-            image_related = bool(visual_context) or bool(re.search(
-                r"(?iu)(?:фот|картин|изображен|монет|банкнот|купюр|евро|image|photo|picture|edit|редакт|измен|добавь на не[её])",
-                original,
-            ))
-            if image_related:
+            video_plan_on_failure = classify_video_request(original, attachment_meta or [])
+            video_related = _text(video_plan_on_failure.get("action")).lower() in {"generate", "edit"}
+            image_related = (not video_related) and (
+                bool(visual_context) or bool(re.search(
+                    r"(?iu)(?:фот|картин|изображен|монет|банкнот|купюр|евро|image|photo|picture|edit|редакт|измен|добавь на не[её])",
+                    original,
+                ))
+            )
+            if video_related:
+                if language in {"ru", "uk", "ua"}:
+                    message = "Не удалось завершить видеозадачу. MP4 не создан и исходное фото сохранено без изменений. Проверьте ошибку C_VIDEO в логах и настройки Magic Hour, затем повторите запрос."
+                else:
+                    message = "The video operation could not be completed. No MP4 was created and the source photo remains unchanged. Check the C_VIDEO error and Magic Hour configuration, then retry."
+                result.update({"answer": message, "content": message, "summary": message})
+                result["render_blocks"] = [{
+                    "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+                    "text": message, "content": message,
+                }]
+                result["artifacts"] = []
+            elif image_related:
                 if language in {"ru", "uk", "ua"}:
                     message = "Не удалось завершить обработку изображения. Исходная фотография не заменена другой картинкой. Повтори запрос — продолжим с нужного изображения из этой беседы."
                 else:
                     message = "The image operation could not be completed. The source photo was not replaced by another image. Please retry and we will continue with the intended image from this conversation."
                 result.update({"answer": message, "content": message, "summary": message})
                 result["render_blocks"] = [{
-                    "type": "text", "renderer": "TextRenderer", "viewer": "MessageTextBlock",
+                    "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
                     "text": message, "content": message,
                 }]
+                result["artifacts"] = []
             _apr_timing_log(
                 "premium_executor_exception_recovered", executor_started,
                 user_key=_apr_diag_ref(uid), message_key=_apr_diag_ref(message_id),
-                error_type=type(exc).__name__, image_related=image_related,
+                error_type=type(exc).__name__, error_message=_text(exc)[:240],
+                video_related=video_related, image_related=image_related,
+                traceback=traceback.format_exc(limit=10)[-3500:],
             )
             persisted = False
             try:
