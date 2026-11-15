@@ -1,15 +1,9 @@
-"""C_VIDEO: the single Premium room for video understanding and production.
+"""C_VIDEO: one canonical room for April video analysis, generation and editing.
 
-Responsibilities kept in one room:
-- classify video analysis / generation / editing requests;
-- sample real frames for the normal multimodal April analyzer;
-- generate MP4 through the asynchronous Alibaba Wan API;
-- edit existing clips locally with ffmpeg (trim, crop, enhance, clip insert);
-- emit the canonical VideoBlock via Premium_C_ARTIFACT_CONTRACT.
-
-Binary output is intentionally returned to Premium_executor. The executor owns
-user identity, message identity, Premium asset storage, PostgreSQL JSONB memory,
-and the only API route. Temporary provider URLs never leave this module.
+Provider integration, prepaid Video Wallet pricing, reservation and settlement
+stay together in this module. Local FFmpeg edits remain free. Binary output is
+returned to Premium_executor for authenticated artifact persistence and rendering.
+Temporary provider URLs never leave this module.
 """
 from __future__ import annotations
 
@@ -24,10 +18,10 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable
 
-API_PATH = "/api/v1/services/aigc/video-generation/video-synthesis"
 MAX_VIDEO_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_INPUT_BYTES = 10 * 1024 * 1024
 MAX_VIDEO_FRAMES = 8
@@ -36,6 +30,585 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi"}
 
 class CVideoError(RuntimeError):
     """Expected, safe-to-report video operation failure."""
+
+# ---------------------------------------------------------------------------
+# Authenticated Video Wallet. All video billing data/logic stays inside C_VIDEO.
+# Amounts are stored as USD cents; provider credits and the 2x markup are kept
+# separately for an auditable, idempotent settlement trail.
+# ---------------------------------------------------------------------------
+
+def _wallet_identity(user_id: Any) -> str:
+    from storage import resolve_user_id, is_authenticated_user
+    canonical = resolve_user_id(user_id)
+    if not canonical or not is_authenticated_user(canonical):
+        raise CVideoError("VIDEO_WALLET_AUTH_REQUIRED")
+    return canonical
+
+
+def _wallet_connection():
+    from storage import get_conn
+    conn = get_conn()
+    if conn is None:
+        raise CVideoError("VIDEO_WALLET_DATABASE_UNAVAILABLE")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS april_video_wallets (
+                    user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                    balance_minor BIGINT NOT NULL DEFAULT 0,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS april_video_wallet_transactions (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    reference TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    delta_minor BIGINT NOT NULL DEFAULT 0,
+                    provider_cost_minor BIGINT NOT NULL DEFAULT 0,
+                    provider_credits BIGINT NOT NULL DEFAULT 0,
+                    markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2,
+                    operation TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS april_video_wallet_orders (
+                    order_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    amount_minor BIGINT NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    payment_status TEXT NOT NULL DEFAULT 'pending',
+                    payment_source TEXT NOT NULL DEFAULT 'liqpay_google_pay',
+                    provider_payment_id TEXT UNIQUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    paid_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_tx_user_created ON april_video_wallet_transactions(user_id, created_at DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_orders_user_created ON april_video_wallet_orders(user_id, created_at DESC)")
+        conn.commit()
+        return conn
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+
+def enable_video_wallet(user_id: Any) -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO april_video_wallets(user_id, enabled)
+                VALUES (%s, TRUE)
+                ON CONFLICT(user_id) DO UPDATE SET enabled=TRUE, updated_at=NOW()
+                RETURNING balance_minor, enabled, currency
+            """, (canonical,))
+            row = dict(cur.fetchone() or {})
+        conn.commit()
+        return {"success": True, "enabled": bool(row.get("enabled")), "balance_minor": int(row.get("balance_minor") or 0), "currency": row.get("currency") or "USD"}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT balance_minor, enabled, currency FROM april_video_wallets WHERE user_id=%s", (canonical,))
+            wallet = cur.fetchone() or {}
+            cur.execute("""
+                SELECT id, reference, kind, status, delta_minor, provider_cost_minor,
+                       provider_credits, markup_multiplier, operation, description, created_at
+                FROM april_video_wallet_transactions
+                WHERE user_id=%s
+                ORDER BY created_at DESC, id DESC LIMIT %s
+            """, (canonical, max(1, min(30, int(limit or 8)))))
+            transactions = []
+            for row in cur.fetchall() or []:
+                item = dict(row)
+                created = item.get("created_at")
+                item["created_at"] = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
+                item["delta_minor"] = int(item.get("delta_minor") or 0)
+                item["provider_cost_minor"] = int(item.get("provider_cost_minor") or 0)
+                item["provider_credits"] = int(item.get("provider_credits") or 0)
+                item["markup_multiplier"] = float(item.get("markup_multiplier") or 2)
+                transactions.append(item)
+        conn.commit()
+        return {
+            "success": True,
+            "enabled": bool(wallet.get("enabled")) if wallet else False,
+            "balance_minor": int(wallet.get("balance_minor") or 0) if wallet else 0,
+            "currency": _text(wallet.get("currency") if wallet else "USD") or "USD",
+            "markup_multiplier": _video_markup_multiplier(),
+            "transactions": transactions,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    try:
+        amount = int(amount_usd)
+    except (TypeError, ValueError):
+        raise CVideoError("VIDEO_WALLET_TOPUP_AMOUNT_INVALID")
+    if amount not in {5, 10, 20, 50}:
+        raise CVideoError("VIDEO_WALLET_TOPUP_AMOUNT_INVALID")
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT enabled FROM april_video_wallets WHERE user_id=%s FOR UPDATE", (canonical,))
+            wallet = cur.fetchone()
+            if not wallet or not wallet.get("enabled"):
+                raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
+            order_id = "APRIL-" + __import__("uuid").uuid4().hex[:24].upper()
+            amount_minor = amount * 100
+            cur.execute("""
+                INSERT INTO april_video_wallet_orders(order_id, user_id, amount_minor, currency)
+                VALUES (%s, %s, %s, 'USD')
+            """, (order_id, canonical, amount_minor))
+        conn.commit()
+        return {"success": True, "order_id": order_id, "amount": amount, "amount_minor": amount_minor, "currency": "USD", "payment_status": "pending", "description": f"April Video Wallet top-up ${amount}."}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    order_key = _text(order_id)
+    if not re.fullmatch(r"APRIL-[A-F0-9]{24}", order_key):
+        return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT order_id, amount_minor, currency, payment_status, created_at, paid_at
+                FROM april_video_wallet_orders WHERE order_id=%s AND user_id=%s
+            """, (order_key, canonical))
+            row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
+        return {
+            "success": True, "order_id": row["order_id"],
+            "amount": round(int(row["amount_minor"]) / 100, 2),
+            "amount_minor": int(row["amount_minor"]), "currency": row["currency"],
+            "payment_status": row["payment_status"],
+            "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
+            "paid_at": row["paid_at"].isoformat() if row.get("paid_at") else "",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def set_video_wallet_order_status(order_id: Any, status: str) -> dict[str, Any]:
+    order_key = _text(order_id)
+    target = _text(status).lower()
+    if target not in {"failed", "cancelled", "reversed"}:
+        return {"success": False, "error": "VIDEO_WALLET_ORDER_STATUS_INVALID"}
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM april_video_wallet_orders WHERE order_id=%s FOR UPDATE", (order_key,))
+            order = cur.fetchone()
+            if not order:
+                conn.rollback()
+                return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
+            current = _text(order.get("payment_status")).lower()
+            if current == target:
+                conn.commit()
+                return {"success": True, "order_id": order_key, "payment_status": target, "already_settled": True}
+            if target == "reversed" and current == "paid":
+                reversal_reference = "reversal:" + order_key
+                cur.execute("""
+                    INSERT INTO april_video_wallet_transactions
+                        (user_id, reference, kind, status, delta_minor, operation, description, metadata)
+                    VALUES (%s, %s, 'reversal', 'completed', %s, 'reversal', 'Video Wallet payment reversed', %s::jsonb)
+                    ON CONFLICT(reference) DO NOTHING
+                    RETURNING id
+                """, (order["user_id"], reversal_reference, -int(order["amount_minor"]), json.dumps({"order_id": order_key, "provider_payment_id": order.get("provider_payment_id")})))
+                inserted = cur.fetchone()
+                if inserted:
+                    cur.execute("""
+                        UPDATE april_video_wallets
+                        SET balance_minor=balance_minor-%s, updated_at=NOW()
+                        WHERE user_id=%s
+                    """, (int(order["amount_minor"]), order["user_id"]))
+            elif current != "pending":
+                conn.rollback()
+                return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_PENDING"}
+            cur.execute("""
+                UPDATE april_video_wallet_orders SET payment_status=%s
+                WHERE order_id=%s
+            """, (target, order_key))
+        conn.commit()
+        return {"success": True, "order_id": order_key, "payment_status": target}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_minor: int, currency: str) -> dict[str, Any]:
+    order_key = _text(order_id)
+    payment_key = _text(provider_payment_id)
+    if not order_key or not payment_key:
+        return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM april_video_wallet_orders WHERE order_id=%s FOR UPDATE", (order_key,))
+            order = cur.fetchone()
+            if not order:
+                conn.rollback()
+                return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
+            if _text(order.get("payment_status")).lower() == "paid":
+                return {
+                    "success": True, "already_settled": True,
+                    "order_id": order_key, "payment_status": "paid",
+                    "user_id": order["user_id"],
+                    "order_amount_minor": int(order["amount_minor"]),
+                    "order_currency": order["currency"],
+                }
+            if _text(order.get("payment_status")).lower() != "pending":
+                conn.rollback()
+                return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_PENDING"}
+            if int(order["amount_minor"]) != int(amount_minor) or _text(order["currency"]).upper() != _text(currency).upper() or _text(currency).upper() != "USD":
+                conn.rollback()
+                return {"success": False, "error": "VIDEO_WALLET_PAYMENT_AMOUNT_MISMATCH"}
+            cur.execute("""
+                INSERT INTO april_video_wallets(user_id, enabled, balance_minor)
+                VALUES (%s, TRUE, %s)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    enabled=TRUE, balance_minor=april_video_wallets.balance_minor + EXCLUDED.balance_minor,
+                    updated_at=NOW()
+            """, (order["user_id"], amount_minor))
+            cur.execute("""
+                INSERT INTO april_video_wallet_transactions
+                    (user_id, reference, kind, status, delta_minor, operation, description, metadata)
+                VALUES (%s, %s, 'topup', 'completed', %s, 'topup', 'Video Wallet top-up', %s::jsonb)
+                ON CONFLICT(reference) DO NOTHING
+            """, (order["user_id"], "topup:" + order_key, amount_minor, json.dumps({"order_id": order_key, "provider_payment_id": payment_key})))
+            cur.execute("""
+                UPDATE april_video_wallet_orders
+                SET payment_status='paid', provider_payment_id=%s, paid_at=NOW()
+                WHERE order_id=%s
+            """, (payment_key, order_key))
+        conn.commit()
+        return {
+            "success": True, "order_id": order_key, "payment_status": "paid",
+            "user_id": order["user_id"], "order_amount_minor": int(amount_minor),
+            "order_currency": "USD",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _video_markup_multiplier() -> float:
+    # The agreed customer price is exactly 2x the provider's effective cost.
+    return 2.0
+
+
+def _video_cost_per_1000_credits() -> float:
+    raw = os.getenv("APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS", "").strip()
+    if not raw:
+        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED") from exc
+    if not 0.01 <= value <= 100.0:
+        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED")
+    return value
+
+
+def _video_price_for_credits(credits: int) -> tuple[int, int]:
+    from decimal import Decimal, ROUND_CEILING
+    credits = max(0, int(credits or 0))
+    provider_cost = (Decimal(credits) * Decimal(str(_video_cost_per_1000_credits())) / Decimal(1000) * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
+    provider_minor = int(provider_cost)
+    customer_minor = int((Decimal(provider_minor) * Decimal(str(_video_markup_multiplier()))).quantize(Decimal("1"), rounding=ROUND_CEILING))
+    return provider_minor, customer_minor
+
+
+def _reserve_video_charge(user_id: Any, operation_ref: Any, operation: str, estimate_credits: int) -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    reference = re.sub(r"[^A-Za-z0-9._:-]", "", _text(operation_ref))[:120] or __import__("uuid").uuid4().hex
+    reference = "video:" + reference
+    provider_minor, charge_minor = _video_price_for_credits(estimate_credits)
+    # Keep a 15% reserve for provider FPS/credit corrections. Only the final
+    # provider-reported charge is kept; the unused reserve is returned atomically.
+    reserve_minor = int((charge_minor * 1.15) + 0.999999)
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT balance_minor, enabled FROM april_video_wallets WHERE user_id=%s FOR UPDATE", (canonical,))
+            wallet = cur.fetchone()
+            if not wallet or not wallet.get("enabled"):
+                raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
+            if int(wallet.get("balance_minor") or 0) < reserve_minor:
+                raise CVideoError("VIDEO_WALLET_INSUFFICIENT_FUNDS")
+            cur.execute("""
+                UPDATE april_video_wallets SET balance_minor=balance_minor-%s, updated_at=NOW()
+                WHERE user_id=%s
+            """, (reserve_minor, canonical))
+            cur.execute("""
+                INSERT INTO april_video_wallet_transactions
+                    (user_id, reference, kind, status, delta_minor, provider_cost_minor,
+                     provider_credits, markup_multiplier, operation, description, metadata)
+                VALUES (%s, %s, 'video_debit', 'processing', %s, %s, %s, %s, %s, %s, '{}'::jsonb)
+                ON CONFLICT(reference) DO NOTHING
+                RETURNING id
+            """, (canonical, reference, -reserve_minor, provider_minor, int(estimate_credits), _video_markup_multiplier(), operation, "Video generation" if operation == "generate" else "AI video editing"))
+            if not cur.fetchone():
+                raise CVideoError("VIDEO_OPERATION_ALREADY_PROCESSED")
+        conn.commit()
+        return {"reference": reference, "reserve_minor": reserve_minor, "provider_cost_minor": provider_minor, "estimate_credits": int(estimate_credits), "markup_multiplier": _video_markup_multiplier()}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_credits: int, status: str = "completed", refund: bool = False, provider_job_id: str = "") -> dict[str, Any]:
+    canonical = _wallet_identity(user_id)
+    reference = _text(reservation.get("reference"))
+    actual_credits = max(0, int(actual_credits or 0))
+    provider_minor, actual_minor = _video_price_for_credits(actual_credits)
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT delta_minor, metadata FROM april_video_wallet_transactions
+                WHERE user_id=%s AND reference=%s FOR UPDATE
+            """, (canonical, reference))
+            tx = cur.fetchone()
+            if not tx:
+                raise CVideoError("VIDEO_WALLET_RESERVATION_NOT_FOUND")
+            old_delta = int(tx.get("delta_minor") or 0)
+            old_reserved = abs(old_delta)
+            actual_delta = 0 if refund else -actual_minor
+            balance_adjustment = old_reserved - actual_minor if not refund else old_reserved
+            cur.execute("""
+                UPDATE april_video_wallets SET balance_minor=balance_minor+%s, updated_at=NOW()
+                WHERE user_id=%s
+            """, (balance_adjustment, canonical))
+            meta = tx.get("metadata") if isinstance(tx.get("metadata"), dict) else {}
+            if provider_job_id:
+                meta["provider_job_id"] = provider_job_id
+            meta["actual_credits"] = actual_credits
+            cur.execute("""
+                UPDATE april_video_wallet_transactions
+                SET delta_minor=%s, provider_cost_minor=%s, provider_credits=%s,
+                    status=%s, metadata=%s::jsonb, updated_at=NOW()
+                WHERE user_id=%s AND reference=%s
+            """, (actual_delta, provider_minor, actual_credits, "refunded" if refund else status, json.dumps(meta), canonical, reference))
+        conn.commit()
+        return {"success": True, "charged_minor": actual_minor if not refund else 0, "provider_cost_minor": provider_minor, "provider_credits": actual_credits, "markup_multiplier": _video_markup_multiplier(), "status": "refunded" if refund else status}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _record_local_video_edit(user_id: Any, operation_ref: Any, description: str) -> None:
+    try:
+        canonical = _wallet_identity(user_id)
+        conn = _wallet_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT enabled FROM april_video_wallets WHERE user_id=%s", (canonical,))
+                wallet = cur.fetchone()
+                if wallet and wallet.get("enabled"):
+                    reference = "local-edit:" + (re.sub(r"[^A-Za-z0-9._:-]", "", _text(operation_ref))[:100] or __import__("uuid").uuid4().hex)
+                    cur.execute("""
+                        INSERT INTO april_video_wallet_transactions
+                            (user_id, reference, kind, status, delta_minor, operation, description)
+                        VALUES (%s, %s, 'local_edit', 'completed', 0, 'edit', %s)
+                        ON CONFLICT(reference) DO NOTHING
+                    """, (canonical, reference, _text(description)[:180] or "Local FFmpeg edit — no provider charge"))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        # A failed audit log must not break local FFmpeg editing, which has no
+        # provider cost and therefore must never be blocked by wallet outages.
+        return
+
+
+def _magic_hour_json(path: str, *, api_key: str, method: str = "GET", body: dict[str, Any] | None = None, timeout: int = 45) -> dict[str, Any]:
+    url = "https://api.magichour.ai" + path
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            parsed = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise CVideoError("MAGIC_HOUR_INVALID_RESPONSE")
+            return parsed
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            payload = json.loads(exc.read(64 * 1024).decode("utf-8", errors="replace"))
+            detail = _text(payload.get("message") or payload.get("code"))
+        except Exception:
+            pass
+        if exc.code == 402:
+            raise CVideoError("MAGIC_HOUR_PROVIDER_INSUFFICIENT_CREDITS") from exc
+        raise CVideoError(f"MAGIC_HOUR_HTTP_{exc.code}: {detail or 'request rejected'}") from exc
+    except urllib.error.URLError as exc:
+        raise CVideoError(f"MAGIC_HOUR_CONNECTION_FAILED: {exc.reason}") from exc
+    except (TimeoutError, json.JSONDecodeError) as exc:
+        raise CVideoError(f"MAGIC_HOUR_RESPONSE_FAILED: {type(exc).__name__}") from exc
+
+
+def _magic_hour_upload(data: bytes, *, api_key: str, kind: str, extension: str) -> str:
+    created = _magic_hour_json("/v1/files/upload-urls", api_key=api_key, method="POST", body={"items": [{"type": kind, "extension": extension}]})
+    items = created.get("items") if isinstance(created.get("items"), list) else []
+    target = items[0] if items and isinstance(items[0], dict) else {}
+    upload_url = _text(target.get("upload_url"))
+    file_path = _text(target.get("file_path"))
+    if not upload_url.startswith("https://") or not file_path:
+        raise CVideoError("MAGIC_HOUR_UPLOAD_URL_INVALID")
+    request = urllib.request.Request(upload_url, data=data, headers={"Content-Type": "application/octet-stream"}, method="PUT")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            if response.status not in {200, 201, 204}:
+                raise CVideoError("MAGIC_HOUR_ASSET_UPLOAD_FAILED")
+    except urllib.error.URLError as exc:
+        raise CVideoError(f"MAGIC_HOUR_ASSET_UPLOAD_FAILED: {exc.reason}") from exc
+    return file_path
+
+
+def _magic_hour_download(url: str) -> bytes:
+    if not url.startswith("https://"):
+        raise CVideoError("MAGIC_HOUR_DOWNLOAD_URL_INVALID")
+    request = urllib.request.Request(url, headers={"User-Agent": "April-C-VIDEO/2.0"})
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            mime = (response.headers.get("Content-Type") or "video/mp4").split(";", 1)[0].lower()
+            if mime not in {"video/mp4", "application/octet-stream", "video/quicktime"}:
+                raise CVideoError(f"MAGIC_HOUR_UNSUPPORTED_VIDEO_TYPE: {mime}")
+            declared = response.headers.get("Content-Length")
+            if declared and int(declared) > MAX_VIDEO_BYTES:
+                raise CVideoError("Generated MP4 exceeds April's 25 MiB artifact limit.")
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_VIDEO_BYTES:
+                    raise CVideoError("Generated MP4 exceeds April's 25 MiB artifact limit.")
+                chunks.append(chunk)
+    except urllib.error.URLError as exc:
+        raise CVideoError(f"MAGIC_HOUR_DOWNLOAD_FAILED: {exc.reason}") from exc
+    content = b"".join(chunks)
+    if len(content) < 12 or b"ftyp" not in content[:64]:
+        raise CVideoError("Magic Hour result is not a valid MP4 file.")
+    return content
+
+
+async def _magic_hour_run_video_job(
+    *, api_key: str, endpoint: str, body: dict[str, Any], timeout_seconds: int,
+    progress_callback: Callable[[str], Any] | None, user_id: Any,
+    reservation: dict[str, Any],
+) -> tuple[bytes, dict[str, Any]]:
+    created = await asyncio.to_thread(_magic_hour_json, endpoint, api_key=api_key, method="POST", body=body, timeout=60)
+    project_id = _text(created.get("id"))
+    if not project_id:
+        raise CVideoError(_text(created.get("message") or created.get("code")) or "MAGIC_HOUR_PROJECT_ID_MISSING")
+    # Save the provider id immediately; if polling times out, the reserved debit
+    # remains visible as processing and can be reconciled rather than refunded
+    # while the provider may still be charging.
+    conn = _wallet_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE april_video_wallet_transactions
+                SET metadata=COALESCE(metadata, '{}'::jsonb) || %s::jsonb, updated_at=NOW()
+                WHERE reference=%s
+            """, (json.dumps({"provider_job_id": project_id}), reservation["reference"]))
+        conn.commit()
+    finally:
+        conn.close()
+    started = time.monotonic()
+    last_status = "queued"
+    while time.monotonic() - started < max(45, int(timeout_seconds or 285)):
+        await asyncio.sleep(10)
+        details = await asyncio.to_thread(_magic_hour_json, f"/v1/video-projects/{quote(project_id, safe='')}", api_key=api_key, method="GET", timeout=45)
+        last_status = _text(details.get("status")).lower()
+        if last_status == "complete":
+            downloads = details.get("downloads") if isinstance(details.get("downloads"), list) else []
+            download = downloads[0] if downloads and isinstance(downloads[0], dict) else {}
+            video_url = _text(download.get("url"))
+            actual_credits = int(details.get("credits_charged") or created.get("credits_charged") or reservation.get("estimate_credits") or 0)
+            if not video_url:
+                raise CVideoError("MAGIC_HOUR_COMPLETED_WITHOUT_DOWNLOAD")
+            if progress_callback:
+                progress_callback("saving")
+            try:
+                content = await asyncio.to_thread(_magic_hour_download, video_url)
+            except Exception:
+                _update_video_charge(user_id, reservation, actual_credits=0, refund=True, provider_job_id=project_id)
+                raise
+            billing = _update_video_charge(user_id, reservation, actual_credits=actual_credits, provider_job_id=project_id)
+            return content, {"task_id": project_id, "actual_credits": actual_credits, "billing": billing, "details": details}
+        if last_status in {"error", "canceled", "cancelled"}:
+            _update_video_charge(user_id, reservation, actual_credits=0, refund=True, provider_job_id=project_id)
+            error = details.get("error") if isinstance(details.get("error"), dict) else {}
+            raise CVideoError(_text(error.get("message") or details.get("error") or last_status)[:300])
+        if progress_callback:
+            progress_callback("generating")
+    raise CVideoError(f"MAGIC_HOUR_TASK_PENDING: {project_id} ({last_status})")
+
+
+def _magic_hour_rates(model: str, resolution: str) -> int:
+    model = _text(model).lower()
+    resolution = _text(resolution).lower()
+    table = {
+        "ltx-2.5": {"480p": 24, "720p": 48, "1080p": 72},
+        "minimax-h3": {"480p": 24, "720p": 48, "1080p": 72},
+    }
+    try:
+        return table[model][resolution]
+    except KeyError as exc:
+        raise CVideoError("APRIL_VIDEO_MODEL_OR_RESOLUTION_UNSUPPORTED") from exc
+
 
 
 def _text(value: Any) -> str:
@@ -178,7 +751,7 @@ def extract_video_frames(
 
 
 def _translate_prompt_to_english(prompt: str) -> str:
-    """Use the configured Premium provider to translate Wan's prompt only."""
+    """Use the configured Premium provider to translate the prompt only."""
     try:
         from blocks.Premium_provider_router import MODEL, _client_get
     except Exception:
@@ -206,101 +779,34 @@ def _translate_prompt_to_english(prompt: str) -> str:
     return translated[:18000]
 
 
-def _region_host(workspace_id: str, region: str) -> str:
-    workspace = re.sub(r"[^A-Za-z0-9-]", "", workspace_id.strip())
-    region = re.sub(r"[^A-Za-z0-9-]", "", region.strip())
-    if not workspace or not region:
-        raise CVideoError("Wan API configuration needs workspace ID and region.")
-    return f"https://{workspace}.{region}.maas.aliyuncs.com"
-
-
-def _request_json(
-    url: str,
-    *,
-    method: str,
-    api_key: str,
-    body: dict[str, Any] | None = None,
-    timeout: int = 45,
-) -> dict[str, Any]:
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
-    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
-    if body is not None:
-        headers.update({"Content-Type": "application/json", "X-DashScope-Async": "enable"})
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            parsed = json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
-            if not isinstance(parsed, dict):
-                raise CVideoError("Wan returned an invalid JSON response.")
-            return parsed
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            payload = json.loads(exc.read(64 * 1024).decode("utf-8", errors="replace"))
-            detail = _text(payload.get("message") or payload.get("code"))
-        except Exception:
-            pass
-        raise CVideoError(f"Wan API HTTP {exc.code}: {detail or 'request rejected'}") from exc
-    except urllib.error.URLError as exc:
-        raise CVideoError(f"Wan API connection failed: {exc.reason}") from exc
-    except (TimeoutError, json.JSONDecodeError) as exc:
-        raise CVideoError(f"Wan API response failed: {type(exc).__name__}") from exc
-
-
-def _download_video(url: str, *, max_bytes: int = MAX_VIDEO_BYTES) -> bytes:
-    if not url.startswith("https://"):
-        raise CVideoError("Wan returned a non-HTTPS video URL.")
-    request = urllib.request.Request(url, headers={"User-Agent": "April-C-VIDEO/1.0"})
-    chunks: list[bytes] = []
-    total = 0
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            mime = (response.headers.get("Content-Type") or "video/mp4").split(";", 1)[0].lower()
-            if mime not in {"video/mp4", "application/octet-stream", "video/quicktime"}:
-                raise CVideoError(f"Wan returned unsupported video type: {mime}")
-            declared = response.headers.get("Content-Length")
-            if declared and int(declared) > max_bytes:
-                raise CVideoError("Generated MP4 exceeds April's 25 MiB artifact limit.")
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise CVideoError("Generated MP4 exceeds April's 25 MiB artifact limit.")
-                chunks.append(chunk)
-    except urllib.error.URLError as exc:
-        raise CVideoError(f"Could not download generated MP4: {exc.reason}") from exc
-    content = b"".join(chunks)
-    if len(content) < 12 or b"ftyp" not in content[:64]:
-        raise CVideoError("Wan result is not a valid MP4 file.")
-    return content
-
-
 async def generate_video(
     prompt: str,
     *,
     first_frame_data_uri: str = "",
     duration: int = 5,
-    resolution: str = "720P",
-    ratio: str = "adaptive",
+    resolution: str = "480p",
+    ratio: str = "16:9",
     audio: bool = True,
     progress_callback: Callable[[str], Any] | None = None,
-    timeout_seconds: int = 285,
+    timeout_seconds: int = 420,
     source_language: str = "",
+    user_id: Any = None,
+    operation_ref: Any = "",
 ) -> dict[str, Any]:
-    """Create a video through Wan 3.0 async API and return persistable MP4 bytes."""
-    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    workspace_id = os.getenv("DASHSCOPE_WORKSPACE_ID", "").strip()
-    region = os.getenv("DASHSCOPE_REGION", "ap-southeast-1").strip()
-    model = os.getenv("APRIL_PREMIUM_VIDEO_MODEL", "wan3.0-video").strip()
-    if not api_key or not workspace_id:
-        raise CVideoError("Видеогенератор не подключён: настройте DASHSCOPE_API_KEY и DASHSCOPE_WORKSPACE_ID.")
-    if model not in {"wan3.0-video", "wan3.0-video-prime"}:
-        raise CVideoError("APRIL_PREMIUM_VIDEO_MODEL must be wan3.0-video or wan3.0-video-prime.")
+    """Create a Magic Hour MP4 and settle the authenticated user's Video Wallet."""
+    api_key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
+    if not api_key:
+        raise CVideoError("MAGIC_HOUR_API_KEY_NOT_CONFIGURED")
+    if os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise CVideoError("MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED")
+    if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        raise CVideoError("APRIL_VIDEO_GENERATION_DISABLED")
+    if not user_id:
+        raise CVideoError("VIDEO_WALLET_AUTH_REQUIRED")
+
     clean_prompt = _text(prompt)[:18000]
     if not clean_prompt:
-        raise CVideoError("Video prompt is empty.")
+        raise CVideoError("VIDEO_PROMPT_EMPTY")
     source_language = _text(source_language).lower().replace("_", "-").split("-", 1)[0]
     prompt_language = source_language or "en"
     warning = ""
@@ -311,67 +817,184 @@ async def generate_video(
             prompt_language = "en"
         except Exception as exc:
             warning = f"Prompt translation unavailable: {type(exc).__name__}"
-    duration = max(2, min(30, int(duration or 5)))
-    resolution = resolution if resolution in {"480P", "720P", "1080P"} else "720P"
-    ratio = ratio if ratio in {"adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"} else "adaptive"
 
-    api_base = _region_host(workspace_id, region)
-    input_payload: dict[str, Any] = {"prompt": clean_prompt}
-    if first_frame_data_uri:
-        if not first_frame_data_uri.startswith("data:image/") or ";base64," not in first_frame_data_uri:
-            raise CVideoError("Image-to-video source must be a base64 image data URI.")
-        input_payload["media"] = [{"type": "first_frame", "url": first_frame_data_uri}]
-    request_body = {
-        "model": model,
-        "input": input_payload,
-        "parameters": {
-            "resolution": resolution, "ratio": ratio, "duration": duration,
-            "audio": bool(audio), "prompt_extend": True, "watermark": False,
-        },
-    }
-    if progress_callback:
-        progress_callback("generating")
-    created = await asyncio.to_thread(
-        _request_json, api_base + API_PATH, method="POST", api_key=api_key, body=request_body,
-    )
-    output = created.get("output") if isinstance(created.get("output"), dict) else {}
-    task_id = _text(output.get("task_id"))
-    if not task_id:
-        raise CVideoError(_text(created.get("message") or created.get("code")) or "Wan did not return task_id.")
-
-    started = time.monotonic()
-    status = "PENDING"
-    task_url = api_base + "/api/v1/tasks/" + task_id
-    while time.monotonic() - started < max(30, int(timeout_seconds or 285)):
-        await asyncio.sleep(15)
-        result = await asyncio.to_thread(_request_json, task_url, method="GET", api_key=api_key)
-        task_output = result.get("output") if isinstance(result.get("output"), dict) else {}
-        status = _text(task_output.get("task_status") or "UNKNOWN").upper()
-        if status == "SUCCEEDED":
-            video_url = _text(task_output.get("video_url"))
-            if not video_url:
-                raise CVideoError("Wan task succeeded but did not return video_url.")
-            if progress_callback:
-                progress_callback("saving")
-            content = await asyncio.to_thread(_download_video, video_url)
-            usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-            return {
-                "success": True, "operation": "generate", "edit_operations": [],
-                "video_bytes": content, "mime_type": "video/mp4",
-                "filename": f"april-video-{task_id[:8]}.mp4",
-                "provider": "Alibaba Cloud Model Studio", "model": model, "task_id": task_id,
-                "prompt": clean_prompt, "prompt_language": prompt_language,
-                "prompt_translation_warning": warning,
-                "duration_seconds": float(usage.get("output_video_duration") or usage.get("duration") or duration),
-                "fps": int(usage.get("fps") or 30),
-                "resolution": f"{usage.get('SR')}P" if usage.get("SR") else resolution,
-                "ratio": _text(usage.get("ratio") or ratio), "audio": bool(audio),
-            }
-        if status in {"FAILED", "CANCELED", "UNKNOWN"}:
-            raise CVideoError(_text(task_output.get("message") or task_output.get("code")) or f"Wan task {status.lower()}.")
+    duration = max(1, min(60, int(duration or 5)))
+    model = os.getenv("APRIL_MAGIC_HOUR_VIDEO_MODEL", "ltx-2.5").strip().lower() or "ltx-2.5"
+    resolution = _text(os.getenv("APRIL_VIDEO_RESOLUTION", resolution or "480p")).lower()
+    rate = _magic_hour_rates(model, resolution)
+    ratio = ratio if ratio in {"16:9", "9:16", "1:1", "3:2", "2:3", "4:3"} else "16:9"
+    estimate_credits = int(duration * rate)
+    reservation = _reserve_video_charge(user_id, operation_ref, "generate", estimate_credits)
+    project_id = ""
+    try:
+        body: dict[str, Any] = {
+            "name": f"April video {int(time.time())}",
+            "end_seconds": duration,
+            "model": model,
+            "resolution": resolution,
+            "audio": bool(audio),
+            "style": {"prompt": clean_prompt},
+            "aspect_ratio": ratio,
+        }
+        endpoint = "/v1/text-to-video"
+        if first_frame_data_uri:
+            match = re.match(r"^data:(image/[a-z0-9.+-]+);base64,(.+)$", first_frame_data_uri, re.I | re.S)
+            if not match:
+                raise CVideoError("IMAGE_TO_VIDEO_SOURCE_INVALID")
+            try:
+                image_bytes = base64.b64decode(re.sub(r"\s+", "", match.group(2)), validate=True)
+            except Exception as exc:
+                raise CVideoError("IMAGE_TO_VIDEO_SOURCE_INVALID") from exc
+            if not image_bytes or len(image_bytes) > MAX_VIDEO_INPUT_BYTES:
+                raise CVideoError("IMAGE_TO_VIDEO_SOURCE_TOO_LARGE")
+            extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(match.group(1).lower(), "png")
+            file_path = await asyncio.to_thread(_magic_hour_upload, image_bytes, api_key=api_key, kind="image", extension=extension)
+            body["assets"] = {"image_file_path": file_path}
+            endpoint = "/v1/image-to-video"
         if progress_callback:
             progress_callback("generating")
-    raise CVideoError(f"Wan video task timed out after {timeout_seconds} seconds (task {task_id}).")
+        content, job = await _magic_hour_run_video_job(
+            api_key=api_key, endpoint=endpoint, body=body,
+            timeout_seconds=timeout_seconds, progress_callback=progress_callback,
+            user_id=user_id, reservation=reservation,
+        )
+        project_id = _text(job.get("task_id"))
+        billing = job.get("billing") if isinstance(job.get("billing"), dict) else {}
+        return {
+            "success": True, "operation": "generate", "edit_operations": [],
+            "video_bytes": content, "mime_type": "video/mp4",
+            "filename": f"april-video-{project_id[:8] or int(time.time())}.mp4",
+            "provider": "Magic Hour", "model": model, "task_id": project_id,
+            "prompt": clean_prompt, "prompt_language": prompt_language,
+            "prompt_translation_warning": warning,
+            "duration_seconds": float(duration), "fps": None,
+            "resolution": resolution, "ratio": ratio, "audio": bool(audio),
+            "billing": billing,
+        }
+    except Exception:
+        # A reservation without a provider job means no external generation was
+        # submitted and must be refunded. Once a job id exists, keep it reserved
+        # because the provider may still complete and charge it after a timeout.
+        if not project_id:
+            try:
+                conn = _wallet_connection()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT metadata FROM april_video_wallet_transactions WHERE reference=%s", (reservation["reference"],))
+                        row = cur.fetchone() or {}
+                    conn.commit()
+                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    known_job = _text(metadata.get("provider_job_id"))
+                finally:
+                    conn.close()
+                if not known_job:
+                    _update_video_charge(user_id, reservation, actual_credits=0, refund=True)
+            except Exception:
+                pass
+        raise
+
+
+def _requires_remote_ai_edit(request_text: str) -> bool:
+    low = _text(request_text).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?iu)(?:замени|заменить|убери|удали|удалить|добавь\s+(?:объект|эффект|сцену|человека)|измени\s+(?:цвет|внешн|фон|объект|погоду)|поменяй|перерисуй|преврати|сделай\s+(?:киношн|анимац|реалистич)|замена\s+фона|удаление\s+объект|remove\s+(?:the\s+)?object|remove\s+(?:the\s+)?background|replace\s+(?:the\s+)?|change\s+(?:the\s+)?|turn\s+(?:it|this)\s+into|make\s+it\s+(?:cinematic|animated|realistic))", low
+    ))
+
+
+async def edit_video_with_magic_hour(
+    request_text: str, attachments: Any, *, user_id: Any,
+    operation_ref: Any = "", progress_callback: Callable[[str], Any] | None = None,
+    timeout_seconds: int = 420,
+) -> dict[str, Any]:
+    """AI edit through Magic Hour; all provider cost is reserved and settled in C_VIDEO."""
+    api_key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
+    if not api_key:
+        raise CVideoError("MAGIC_HOUR_API_KEY_NOT_CONFIGURED")
+    if os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        raise CVideoError("MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED")
+    if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        raise CVideoError("APRIL_VIDEO_GENERATION_DISABLED")
+    sources = _extract_attachment_videos(attachments)
+    if not sources:
+        raise CVideoError("VIDEO_EDIT_SOURCE_REQUIRED")
+    filename, source_bytes, _mime = sources[0]
+    extension = Path(filename).suffix.lower().lstrip(".")
+    if extension not in {"mp4", "m4v", "mov", "webm"}:
+        raise CVideoError("MAGIC_HOUR_VIDEO_FORMAT_UNSUPPORTED")
+    if len(source_bytes) > MAX_VIDEO_INPUT_BYTES:
+        raise CVideoError("VIDEO_INPUT_TOO_LARGE_FOR_PROVIDER")
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory(prefix="april-c-video-edit-upload-") as directory:
+            source_path = Path(directory) / ("source." + extension)
+            source_path.write_bytes(source_bytes)
+            duration, _has_audio = _probe_media(ffmpeg, source_path)
+    except Exception as exc:
+        if isinstance(exc, CVideoError):
+            raise
+        raise CVideoError("VIDEO_EDIT_SOURCE_DURATION_UNREADABLE") from exc
+    edit_plan = _edit_plan(request_text, len(sources))
+    start_seconds = max(0.0, float(edit_plan.get("trim_start") or 0.0))
+    end_seconds = min(duration, float(edit_plan.get("trim_end") or duration))
+    if end_seconds <= start_seconds:
+        raise CVideoError("VIDEO_EDIT_TIME_RANGE_INVALID")
+    clip_duration = max(1, int(round(end_seconds - start_seconds)))
+    model = os.getenv("APRIL_MAGIC_HOUR_VIDEO_MODEL", "ltx-2.5").strip().lower() or "ltx-2.5"
+    resolution = _text(os.getenv("APRIL_VIDEO_RESOLUTION", "480p")).lower()
+    rate = _magic_hour_rates(model, resolution)
+    reservation = _reserve_video_charge(user_id, operation_ref, "edit", int(clip_duration * rate))
+    project_id = ""
+    try:
+        file_path = await asyncio.to_thread(_magic_hour_upload, source_bytes, api_key=api_key, kind="video", extension=extension)
+        prompt = _text(request_text)[:12000]
+        lang = ""
+        try:
+            lang = _text((await asyncio.to_thread(_translate_prompt_to_english, prompt))[:12000])
+        except Exception:
+            lang = prompt
+        body = {
+            "name": f"April video edit {int(time.time())}",
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "model": model,
+            "resolution": resolution,
+            "style": {"prompt": lang},
+            "assets": {"video_file_path": file_path},
+        }
+        if progress_callback:
+            progress_callback("generating")
+        content, job = await _magic_hour_run_video_job(
+            api_key=api_key, endpoint="/v1/ai-video-editor", body=body,
+            timeout_seconds=timeout_seconds, progress_callback=progress_callback,
+            user_id=user_id, reservation=reservation,
+        )
+        project_id = _text(job.get("task_id"))
+        return {
+            "success": True, "operation": "edit", "edit_operations": [{"operation": "ai_video_edit", "prompt": _text(request_text)[:500]}],
+            "video_bytes": content, "mime_type": "video/mp4", "filename": f"april-ai-edited-{project_id[:8] or int(time.time())}.mp4",
+            "provider": "Magic Hour AI Video Editor", "model": model, "task_id": project_id,
+            "prompt": _text(request_text)[:1200], "prompt_language": "local", "duration_seconds": end_seconds - start_seconds,
+            "fps": None, "resolution": resolution, "ratio": "source", "audio": True,
+            "billing": job.get("billing") if isinstance(job.get("billing"), dict) else {},
+        }
+    except Exception:
+        if not project_id:
+            try:
+                conn = _wallet_connection()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT metadata FROM april_video_wallet_transactions WHERE reference=%s", (reservation["reference"],))
+                        row = cur.fetchone() or {}
+                    conn.commit()
+                    known = _text((row.get("metadata") or {}).get("provider_job_id")) if isinstance(row.get("metadata"), dict) else ""
+                finally:
+                    conn.close()
+                if not known:
+                    _update_video_charge(user_id, reservation, actual_credits=0, refund=True)
+            except Exception:
+                pass
+        raise
 
 
 def _extract_attachment_videos(attachments: Any) -> list[tuple[str, bytes, str]]:
@@ -721,7 +1344,9 @@ async def execute_video_operation(
     *,
     progress_callback: Callable[[str], Any] | None = None,
     source_language: str = "",
-    timeout_seconds: int = 285,
+    timeout_seconds: int = 420,
+    user_id: Any = None,
+    operation_ref: Any = "",
 ) -> dict[str, Any]:
     """Single entry point used by Premium_executor after Interpretation selects C_VIDEO."""
     action = _text(plan.get("action")).lower()
@@ -739,22 +1364,30 @@ async def execute_video_operation(
             "use natural motion and intentional camera movement, preserve the requested sequence and style, "
             "avoid captions/text unless explicitly requested. Direction: " + _text(request_text)[:12000]
         )
-        duration_match = re.search(r"(?iu)(2[0-9]|30|[2-9]|1[0-9])\s*(?:секунд|сек|seconds?|s)\b", _text(request_text))
+        duration_match = re.search(r"(?iu)(60|[1-5]?\d)\s*(?:секунд|сек|seconds?|s)\b", _text(request_text))
         duration = int(duration_match.group(1)) if duration_match else int(os.getenv("APRIL_VIDEO_DEFAULT_DURATION", "5") or 5)
         ratio = "9:16" if re.search(r"(?iu)(?:вертикальн|портретн|сторис|reel|тик.?ток|vertical|portrait)", request_text) else (
-            "1:1" if re.search(r"(?iu)(?:квадратн|square)", request_text) else "adaptive"
+            "1:1" if re.search(r"(?iu)(?:квадратн|square)", request_text) else "16:9"
         )
         audio = not bool(re.search(r"(?iu)(?:без\s+звука|без\s+аудио|mute|no\s+audio|silent)", request_text))
         return await generate_video(
             prompt, first_frame_data_uri=first_frame, duration=duration,
-            resolution=os.getenv("APRIL_VIDEO_RESOLUTION", "720P"), ratio=ratio,
+            resolution=os.getenv("APRIL_VIDEO_RESOLUTION", "480p"), ratio=ratio,
             audio=audio, progress_callback=progress_callback,
             timeout_seconds=timeout_seconds, source_language=source_language,
+            user_id=user_id, operation_ref=operation_ref,
         )
     if action == "edit":
-        return await asyncio.to_thread(edit_video, request_text, attachments, progress_callback=progress_callback)
+        if _requires_remote_ai_edit(request_text):
+            return await edit_video_with_magic_hour(
+                request_text, attachments, user_id=user_id, operation_ref=operation_ref,
+                progress_callback=progress_callback, timeout_seconds=timeout_seconds,
+            )
+        result = await asyncio.to_thread(edit_video, request_text, attachments, progress_callback=progress_callback)
+        _record_local_video_edit(user_id, operation_ref, _text(request_text)[:180] or "Local FFmpeg edit — no provider charge")
+        result["billing"] = {"charged_minor": 0, "provider_cost_minor": 0, "provider_credits": 0, "markup_multiplier": _video_markup_multiplier(), "billing_type": "local_ffmpeg"}
+        return result
     raise CVideoError(f"Unsupported C_VIDEO action: {action or 'none'}")
-
 
 def build_video_render_block(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a VideoBlock by projecting a C_VIDEO artifact through the canonical contract."""
@@ -818,6 +1451,8 @@ class CVideoRoom:
 __all__ = [
     "CVideoError", "CVideoRoom", "MAX_VIDEO_BYTES", "MAX_VIDEO_FRAMES",
     "VIDEO_EXTENSIONS", "build_video_render_block", "classify_video_request",
-    "decode_video_data_uri", "edit_video", "execute_video_operation",
-    "extract_video_frames", "generate_video",
+    "decode_video_data_uri", "edit_video", "edit_video_with_magic_hour", "execute_video_operation",
+    "extract_video_frames", "generate_video", "enable_video_wallet", "get_video_wallet_status",
+    "create_video_wallet_topup_order", "get_video_wallet_order_status",
+    "set_video_wallet_order_status", "settle_video_wallet_topup",
 ]
