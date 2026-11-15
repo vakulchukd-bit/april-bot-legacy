@@ -6183,8 +6183,17 @@ async def execute(
         _video_intent["video_action"] = video_plan.get("action")
         _video_intent["video_plan"] = dict(video_plan)
         if video_plan.get("action") in {"generate", "edit"}:
+            # A source photo is an input frame for C_VIDEO, not an image-generation
+            # request. Give the task an explicit video identity before Provider runs
+            # so the image room cannot claim or replace the requested operation.
+            _video_intent["task"] = "generate_video" if video_plan.get("action") == "generate" else "edit_video"
+            _video_intent["wants_image"] = False
+            _video_intent["image_operation"] = "none"
             _video_outputs = _video_intent.get("requested_outputs") if isinstance(_video_intent.get("requested_outputs"), list) else ["text"]
-            _video_intent["requested_outputs"] = list(dict.fromkeys([*[_text(x).lower() for x in _video_outputs if _text(x)], "video"]))
+            _video_intent["requested_outputs"] = list(dict.fromkeys([*[_text(x).lower() for x in _video_outputs if _text(x) and _text(x).lower() != "image"], "video"]))
+        elif video_plan.get("action") == "analyze":
+            _video_intent["task"] = "analyze_video"
+            _video_intent["wants_image"] = False
         interpretation["intent"] = _video_intent
         _video_structure = interpretation.setdefault("request_structure", {})
         _video_structure["video_scene_contract"] = {
@@ -7331,6 +7340,19 @@ async def execute(
     raw_blocks = [dict(x) for x in (raw.get("render_blocks") or []) if isinstance(x, dict)]
     raw_artifacts = [dict(x) for x in (raw.get("artifacts") or []) if isinstance(x, dict)]
     wants_image = bool((interpretation.get("intent") or {}).get("wants_image"))
+    video_generation_requested = _text(video_plan.get("action") or "none").lower() in {"generate", "edit"}
+    if video_generation_requested:
+        # Provider prose can describe a planned video, but it cannot attest that
+        # a file exists. Discard empty/provider-authored video shells. C_VIDEO will
+        # insert the canonical VideoBlock only after receiving an actual MP4.
+        raw_blocks = [
+            block for block in raw_blocks
+            if _text(block.get("type") or block.get("artifact_type") or "").lower() != "video"
+        ]
+        raw_artifacts = [
+            artifact for artifact in raw_artifacts
+            if _text(artifact.get("type") or artifact.get("artifact_type") or "").lower() != "video"
+        ]
     if not wants_image:
         _unrequested_image_types = {
             "image", "images", "gallery", "generated_image", "generated_image_gallery",
@@ -7394,12 +7416,19 @@ async def execute(
     # Video analysis alone uses sampled frames in the normal Premium model call.
     video_action = _text(video_plan.get("action") or "none").lower()
     video_generation_requested = video_action in {"generate", "edit"}
-    video_provider_configured = (
-        True if video_action == "edit" else bool(
-            os.getenv("DASHSCOPE_API_KEY", "").strip()
-            and os.getenv("DASHSCOPE_WORKSPACE_ID", "").strip()
-        )
+    try:
+        _magic_hour_unit_cost = float(os.getenv("APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS", "").strip())
+        _magic_hour_cost_valid = 0.01 <= _magic_hour_unit_cost <= 100.0
+    except (TypeError, ValueError, OverflowError):
+        _magic_hour_cost_valid = False
+    _magic_hour_ready = bool(
+        os.getenv("MAGIC_HOUR_API_KEY", "").strip()
+        and os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() in {"1", "true", "yes", "on"}
+        and os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+        and _magic_hour_cost_valid
     )
+    # An edit may run locally through FFmpeg; generation always needs Magic Hour.
+    video_provider_configured = _magic_hour_ready if video_action == "generate" else True
     video_pending = bool(video_generation_requested and video_provider_configured)
 
     # First publish all text and non-image typed renderers. The Web replaces this
@@ -8131,7 +8160,10 @@ async def execute(
                     "en": "Video generation is currently disabled in the server configuration.",
                 }
                 failure = disabled_copy.get(language_key, disabled_copy["en"])
-            answer = _merge_image_status(answer, failure, operation_succeeded=False)
+            # A planned prompt is not a completed render. When C_VIDEO has no MP4,
+            # show the actual operation result instead of retaining model prose that
+            # could be read as if a video had already been prepared.
+            answer = failure
             _sync_packaged_answer(packaged, answer)
             packaged["render_blocks"] = [
                 block for block in (packaged.get("render_blocks") or [])
@@ -8146,6 +8178,65 @@ async def execute(
             raw["summary"] = answer[:180]
             raw["internal_answer_en"] = "C_VIDEO did not produce a video artifact."
 
+    # Re-enter the one canonical SceneContract after all room-owned operations.
+    # These values were previously referenced below without being constructed,
+    # causing NameError after C_VIDEO had already returned its controlled failure.
+    normalized_blocks = prepare_render_blocks_for_room_dispatch(
+        packaged.get("render_blocks") or [],
+        answer=answer,
+        requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs") or [],
+        graph_policy=graph_policy,
+        current_request=_render_request_text,
+    )
+    normalized_blocks = _apply_presentation_sequence(normalized_blocks, answer, presentation_sequence)
+    response = MachineResponse(
+        answer=answer,
+        content=_text(packaged.get("content") or answer),
+        response=_text(packaged.get("content") or answer),
+        summary=_text(packaged.get("summary") or answer[:180]),
+        render_blocks=normalized_blocks,
+        artifacts=list(packaged.get("artifacts") or []),
+        metadata={
+            **dict(provider_metadata or {}),
+            "provider_retries": int(provider_metadata.get("provider_retries") or 0),
+            "provider_output_limit": int(provider_metadata.get("provider_output_limit") or 12000),
+            "local_clarification": bool(provider_metadata.get("local_clarification")),
+        },
+    )
+    _turn_candidates = []
+    for _turn_source in (
+        dialogue_context.get("selected_pairs") or [],
+        dialogue_context.get("recent_exchange_window") or [],
+        dialogue_thread_context.get("recent_steps") or [],
+        [dialogue_context.get("anchor")] if isinstance(dialogue_context.get("anchor"), dict) else [],
+    ):
+        if not isinstance(_turn_source, list):
+            continue
+        for _turn_item in _turn_source:
+            if not isinstance(_turn_item, dict):
+                continue
+            _turn_value = _turn_item.get("turn_index", _turn_item.get("turn"))
+            try:
+                if _turn_value is not None:
+                    _turn_candidates.append(int(_turn_value))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    turn_index = max(_turn_candidates, default=-1) + 1
+    route_meta = dict(request.routing or {})
+    safe_visual_context = _strip_inline_binary(visual_context or [])
+    result = _build_scene(
+        response,
+        identity,
+        interpretation,
+        turn_index,
+        route_meta,
+    )
+    scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
+    output_asset_refs: list[dict[str, Any]] = []
+    durable_asset_payloads: list[dict[str, Any]] = []
+    generated_asset_saved = False
+    output_asset_persist_started = time.perf_counter()
+
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
     # later CONTINUE requests retrieve the exact source rather than its summary.
@@ -8158,9 +8249,18 @@ async def execute(
     ]
     video_asset_ref: dict[str, Any] | None = None
     video_asset_persist_failed = False
-    if isinstance(video_result, dict) and isinstance(video_result.get("video_bytes"), (bytes, bytearray)):
-        generated_video_bytes = bytes(video_result.get("video_bytes") or b"")
-        if generated_video_bytes and len(generated_video_bytes) <= 25 * 1024 * 1024:
+    if isinstance(video_result, dict):
+        generated_video_bytes = video_result.get("video_bytes")
+        generated_video_bytes = bytes(generated_video_bytes) if isinstance(generated_video_bytes, (bytes, bytearray)) else b""
+        if not generated_video_bytes:
+            video_result = None
+            video_asset_persist_failed = True
+            video_generation_error = "C_VIDEO returned no MP4 bytes."
+        elif len(generated_video_bytes) > 25 * 1024 * 1024:
+            video_result = None
+            video_asset_persist_failed = True
+            video_generation_error = "C_VIDEO MP4 exceeds the 25 MiB durable-asset limit."
+        else:
             generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")
             generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
             video_asset_ref = _save_premium_asset(
@@ -8180,30 +8280,38 @@ async def execute(
                     "billing": video_result.get("billing") if isinstance(video_result.get("billing"), dict) else {},
                 },
             )
-            if video_asset_ref:
+            valid_video_ref = bool(
+                isinstance(video_asset_ref, dict)
+                and _text(video_asset_ref.get("message_id")) == _text(identity.get("message_id"))
+                and re.fullmatch(r"[a-f0-9]{64}", _text(video_asset_ref.get("sha256")), re.I)
+                and int(video_asset_ref.get("size_bytes") or 0) == len(generated_video_bytes)
+            )
+            if valid_video_ref:
                 output_asset_refs.append(video_asset_ref)
                 generated_asset_saved = True
-                _append_durable_asset(
-                    "video", generated_video_name, "video/mp4", generated_video_bytes,
-                    "april_output", "video",
-                    source_type="premium_c_video_" + _text(video_result.get("operation") or video_action),
-                    operation=_text(video_result.get("operation") or video_action),
-                    edit_operations=video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
-                    provider=_text(video_result.get("provider")),
-                    model=_text(video_result.get("model")),
-                    prompt_language=_text(video_result.get("prompt_language")),
-                    prompt_translation_warning=_text(video_result.get("prompt_translation_warning"))[:240],
-                    duration_seconds=video_result.get("duration_seconds"),
-                    fps=video_result.get("fps"),
-                    resolution=_text(video_result.get("resolution")),
-                    ratio=_text(video_result.get("ratio")),
-                    prompt=_text(video_result.get("prompt"))[:1200],
-                    task_id=_text(video_result.get("task_id")),
-                )
+                durable_asset_payloads.append({
+                    "kind": "video", "mime_type": "video/mp4", "asset_role": "april_output",
+                    "output_type": "video", "filename": generated_video_name,
+                    "message_id": identity["message_id"], "size_bytes": len(generated_video_bytes),
+                    "sha256": generated_video_hash,
+                    "content_base64": base64.b64encode(generated_video_bytes).decode("ascii"),
+                    "source_type": "premium_c_video_" + _text(video_result.get("operation") or video_action),
+                    "operation": _text(video_result.get("operation") or video_action),
+                    "edit_operations": video_result.get("edit_operations") if isinstance(video_result.get("edit_operations"), list) else [],
+                    "provider": _text(video_result.get("provider")),
+                    "model": _text(video_result.get("model")),
+                    "prompt_language": _text(video_result.get("prompt_language")),
+                    "prompt_translation_warning": _text(video_result.get("prompt_translation_warning"))[:240],
+                    "duration_seconds": video_result.get("duration_seconds"),
+                    "fps": video_result.get("fps"), "resolution": _text(video_result.get("resolution")),
+                    "ratio": _text(video_result.get("ratio")), "prompt": _text(video_result.get("prompt"))[:1200],
+                    "task_id": _text(video_result.get("task_id")),
+                })
             else:
                 video_result = None
+                video_asset_ref = None
                 video_asset_persist_failed = True
-                video_generation_error = "Premium video asset store could not persist the MP4."
+                video_generation_error = "Premium video asset store could not persist a verified owner-bound MP4 reference."
 
     should_persist_code = bool(
         (interpretation.get("intent") or {}).get("wants_code")
@@ -8469,6 +8577,22 @@ async def execute(
         raw["content"] = answer
         raw["summary"] = answer[:180]
         raw["internal_answer_en"] = "The video was generated but could not be saved as a durable Premium artifact."
+        result["artifacts"] = [
+            item for item in (result.get("artifacts") or [])
+            if str(item.get("type") or item.get("artifact_type") or "").lower() != "video"
+        ]
+        source_render_blocks = [
+            block for block in source_render_blocks
+            if str(block.get("type") or block.get("artifact_type") or "").lower() != "video"
+        ]
+        text_block = next((block for block in source_render_blocks if isinstance(block, dict) and
+            str(block.get("type") or block.get("artifact_type") or "").lower() in
+            {"text", "markdown", "message", "message_text", "answer"}), None)
+        if text_block is None:
+            text_block = {"type": "text", "artifact_type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock"}
+            source_render_blocks.insert(0, text_block)
+        text_block["content"] = answer
+        text_block["text"] = answer
     source_render_blocks = attach_copy_block(source_render_blocks, requested_for_delivery, answer)
     delivery_blocks, attached_file_blocks = attach_file_delivery_blocks(
         source_render_blocks,
