@@ -3,8 +3,8 @@
 Provider integration, prepaid Video Wallet pricing, reservation and settlement
 stay together in this module. A narrowly allow-listed test mode can use the
 provider account's trial credits without asserting commercial rights. Local
-FFmpeg edits remain free. Binary output is returned to Premium_executor for
-authenticated artifact persistence and rendering. Temporary provider URLs
+FFmpeg edits remain free. Binary output is returned to the active Free or Premium executor for
+authenticated artifact persistence and canonical rendering. Temporary provider URLs
 never leave this module.
 """
 from __future__ import annotations
@@ -88,7 +88,7 @@ def _magic_hour_billing_mode(user_id: Any) -> str:
 
 
 def magic_hour_video_ready(user_id: Any) -> bool:
-    """Cheap readiness check used by Premium_executor before publishing its pending scene."""
+    """Cheap readiness check used by the active executor before publishing its pending scene."""
     if not os.getenv("MAGIC_HOUR_API_KEY", "").strip():
         return False
     if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
@@ -749,6 +749,115 @@ def decode_video_data_uri(value: Any) -> tuple[bytes, str] | None:
         return None
     return data, match.group(1).lower()
 
+
+
+def normalize_video_question_sequence(
+    question_sequence: Any,
+    video_plan: Any,
+    request_text: str,
+) -> list[dict[str, Any]]:
+    """Keep a video-generation request and all of its modifiers in one task.
+
+    The generic splitter can separate a scene description from a duration or
+    style clause. Those clauses are parameters of the same render operation,
+    not independent text answers or extra video jobs. Keep their exact source
+    wording together in one canonical step before the Provider prompt is built.
+    """
+    plan = video_plan if isinstance(video_plan, dict) else {}
+    action = _text(plan.get("action")).lower()
+    source = _text(request_text)
+    items = [dict(item) for item in (question_sequence or []) if isinstance(item, dict)]
+    if action not in {"generate", "edit"} or not source:
+        return items
+
+    source_clauses = [
+        _text(item.get("request")) for item in items if _text(item.get("request"))
+    ]
+    first = dict(items[0]) if items else {}
+    first.update({
+        "step_index": 1,
+        "request": source,
+        "output_types": ["text", "video"],
+        "final_output": True,
+        "video_task": True,
+        "video_action": action,
+        "source_clauses": source_clauses[:12],
+        "semantic_reason": "video_scene_and_modifiers_are_one_render_task",
+    })
+    # The prior branch relation remains available for contextual video requests.
+    if not isinstance(first.get("dialogue_search"), dict):
+        first.pop("dialogue_search", None)
+    return [first]
+
+
+def apply_video_intent_contract(
+    interpretation: Any,
+    video_plan: Any,
+    question_sequence: Any,
+    request_text: str,
+    *,
+    contract_name: str = "C_ARTIFACT_CONTRACT",
+) -> list[dict[str, Any]]:
+    """Synchronize Interpretation, request sequence and C_VIDEO SceneContract.
+
+    This is shared by Free and Premium so a video action cannot be described as
+    unsupported by one layer while another layer schedules the C_VIDEO room.
+    """
+    if not isinstance(interpretation, dict):
+        return [dict(item) for item in (question_sequence or []) if isinstance(item, dict)]
+    plan = video_plan if isinstance(video_plan, dict) else {}
+    action = _text(plan.get("action")).lower()
+    sequence = normalize_video_question_sequence(question_sequence, plan, request_text)
+    if action == "none" or not action:
+        return sequence
+
+    intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+    intent["wants_video"] = True
+    intent["video_action"] = action
+    intent["video_plan"] = dict(plan)
+    intent["video_execution_owner"] = "C_VIDEO"
+    if action in {"generate", "edit"}:
+        # An input still image can be an initial frame; it is never an image
+        # generation request and must not consume the Free image quota.
+        intent["task"] = "generate_video" if action == "generate" else "edit_video"
+        intent["wants_image"] = False
+        intent["image_operation"] = "none"
+        outputs = intent.get("requested_outputs")
+        outputs = outputs if isinstance(outputs, list) else ["text"]
+        outputs = [_text(value).lower() for value in outputs if _text(value)]
+        intent["requested_outputs"] = list(dict.fromkeys([
+            *[value for value in outputs if value not in {"image", "gallery"}],
+            "text", "video",
+        ]))
+    elif action == "analyze":
+        intent["task"] = "analyze_video"
+        intent["wants_image"] = False
+        outputs = intent.get("requested_outputs")
+        intent["requested_outputs"] = [
+            _text(value).lower() for value in (outputs if isinstance(outputs, list) else ["text"])
+            if _text(value).lower() not in {"image", "video"}
+        ] or ["text"]
+
+    interpretation["intent"] = intent
+    structure = interpretation.setdefault("request_structure", {})
+    structure["question_sequence"] = sequence
+    structure["question_search_count"] = len(sequence)
+    structure["video_scene_contract"] = {
+        "version": "april_video_scene_contract_v1",
+        "room": "C_VIDEO",
+        "action": action,
+        "execution_owner": "C_VIDEO",
+        "analysis_method": plan.get("analysis_method"),
+        "video_input_count": int(plan.get("video_input_count") or 0),
+        "image_input_count": int(plan.get("image_input_count") or 0),
+        "requires_video_provider": bool(plan.get("requires_video_provider")),
+        "requires_ffmpeg": bool(plan.get("requires_ffmpeg")),
+        "required_renderer": "VideoBlock" if action in {"generate", "edit"} else "MessageTextBlock",
+        "render_contract": f"{contract_name} -> VideoBlock -> SceneContract",
+        "billing_owner": "C_VIDEO.video_wallet" if action in {"generate", "edit"} else "none",
+        "user_request_preserved_verbatim": bool(_text(request_text)),
+    }
+    return sequence
 
 def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]:
     """Create a deterministic intent plan; analysis never accidentally generates."""
@@ -1518,7 +1627,7 @@ async def execute_video_operation(
     user_id: Any = None,
     operation_ref: Any = "",
 ) -> dict[str, Any]:
-    """Single entry point used by Premium_executor after Interpretation selects C_VIDEO."""
+    """Single entry point used by either plan executor after Interpretation selects C_VIDEO."""
     action = _text(plan.get("action")).lower()
     if action == "generate":
         first_frame = ""
@@ -1567,7 +1676,7 @@ async def execute_video_operation(
 
 def build_video_render_block(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a VideoBlock by projecting a C_VIDEO artifact through the canonical contract."""
-    from blocks.Premium_C_ARTIFACT_CONTRACT import create_artifact, _artifact_canonical_render_blocks
+    from blocks.C_ARTIFACT_CONTRACT import create_artifact, _artifact_canonical_render_blocks
 
     clean_payload = {key: value for key, value in dict(payload or {}).items() if value is not None}
     artifact = create_artifact(
@@ -1598,7 +1707,7 @@ def build_video_render_block(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class CVideoRoom:
-    """Canonical Premium video room. It does not own identity or persistence."""
+    """Canonical plan-independent video room. It does not own identity or persistence."""
 
     room_id = "C_VIDEO"
     artifact_type = "video"
