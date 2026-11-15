@@ -37,6 +37,13 @@ from blocks.C_ARTIFACT_CONTRACT import (
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
 from blocks.C_COPY_ROOM import attach_copy_block
 from blocks.C_FILE_DELIVERY_ROOM import attach_file_delivery_blocks
+from blocks.C_VIDEO import (
+    MAX_VIDEO_BYTES as _MAX_VIDEO_BYTES,
+    classify_video_request as _classify_video_request,
+    apply_video_intent_contract as _apply_video_intent_contract,
+    execute_video_operation as _execute_c_video_operation,
+    build_video_render_block as _build_c_video_render_block,
+)
 # Import the interpretation module itself instead of importing every symbol
 # by name. This keeps startup compatible with a deployment where an older copy
 # of interpretation_identity.py is present and lacks the identity helper.
@@ -97,7 +104,7 @@ from storage import (
 )
 
 
-PROCESSOR_VERSION = "april_exkrutor_single_route_v15_free_parallel_snapshot_search_cached_bootstrap"
+PROCESSOR_VERSION = "april_exkrutor_single_route_v16_shared_cvideo_scene_wallet"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -435,6 +442,11 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
         required_capabilities.extend(["table", "structured_data", "tabular"])
     if intent.get("wants_graph"):
         required_capabilities.extend(["graph", "series", "data_visualization"])
+    if intent.get("wants_video"):
+        required_capabilities.extend([
+            "video", "video_analysis", "video_generation", "video_editing",
+            "video_render", "timeline_editing", "media_processing",
+        ])
 
     # Domain hints from the current request are additive, never authoritative over
     # the Interpretation decision.
@@ -477,15 +489,19 @@ def _select_rooms(interpretation: dict[str, Any]) -> list[dict[str, Any]]:
         ][:1]
 
     # For image generation, keep the generator first and gallery renderer second.
-    if intent.get("wants_image"):
+    if intent.get("wants_video"):
         ordered: list[dict[str, Any]] = []
+        for item in selected:
+            if item["room"] == "C_VIDEO" and item not in ordered:
+                ordered.append(item)
+        selected = ordered + [item for item in selected if item not in ordered]
+    if intent.get("wants_image"):
+        ordered = []
         for preferred in ("APRIL_IMAGES_GENERATION", "GALLERY_ROOM"):
             for item in selected:
                 if item["room"] == preferred and item not in ordered:
                     ordered.append(item)
-        selected = ordered + [
-            item for item in selected if item not in ordered
-        ]
+        selected = ordered + [item for item in selected if item not in ordered]
 
     return selected
 
@@ -2116,6 +2132,20 @@ async def execute(
         }
         question_sequence = [navigation_task]
         normalized_sequence = [dict(navigation_task)]
+
+    # Video generation is one render task: duration/style/action clauses are
+    # modifiers, not independent text-only questions. Apply this before memory
+    # routing so every downstream layer sees the same task and output contract.
+    video_plan = _classify_video_request(original or current_text, attachments)
+    # Free is allowed to create new videos through the independently prepaid
+    # Video Wallet. Editing/analyzing uploaded video sources remains Premium-only.
+    if _text(video_plan.get("action")).lower() != "generate":
+        video_plan = {**dict(video_plan), "action": "none", "requires_video_provider": False, "artifact_type": "text"}
+    if _text(video_plan.get("action")).lower() == "generate":
+        question_sequence = _apply_video_intent_contract(
+            {}, video_plan, question_sequence, original or current_text,
+        )
+        normalized_sequence = question_sequence
     _apr_timing_log(
         "question_decomposition_result",
         user_key=_apr_diag_ref(uid),
@@ -3067,6 +3097,9 @@ async def execute(
         semantic_interpretation=semantic_interpretation,
         question_sequence=question_sequence,
     )
+    question_sequence = _apply_video_intent_contract(
+        interpretation, video_plan, question_sequence, original or current_text,
+    )
     # C_IT_ROOM is the deterministic source for April's own interface map. Do not
     # make navigation depend on the LLM's semantic classifier: force text + diagram
     # whenever the current turn asks how to find/use an April screen.
@@ -3358,6 +3391,21 @@ async def execute(
     except Exception as _room_context_error:
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
+
+    if _text(video_plan.get("action")).lower() != "none":
+        room_context = request.routing.get("room_knowledge_context") if isinstance(request.routing.get("room_knowledge_context"), dict) else {}
+        room_context["C_VIDEO"] = {
+            "action": _text(video_plan.get("action")),
+            "execution_owner": "C_VIDEO",
+            "required_renderer": "VideoBlock" if _text(video_plan.get("action")) in {"generate", "edit"} else "MessageTextBlock",
+            "generation_guidance": (
+                "C_VIDEO is the real execution room for this request. The executor will invoke it and attach the actual MP4. "
+                "Do not claim that April cannot create video, do not replace execution with a prompt-only suggestion, "
+                "and do not invent a completed result before C_VIDEO returns a valid MP4. Preserve the full user scene, action, style, duration and audio direction."
+            ) if _text(video_plan.get("action")) == "generate" else "",
+            "video_scene_contract": (interpretation.get("request_structure") or {}).get("video_scene_contract", {}),
+        }
+        request.routing["room_knowledge_context"] = room_context
 
     _apr_timing_log("machine_request_build", request_build_started,
         relation=dialogue_context.get("relation"), selected_pairs=len(dialogue_context.get("selected_pairs") or []),
@@ -3900,6 +3948,180 @@ async def execute(
             }
             packaged["render_blocks"].append(image_block)
 
+
+    # Free users can purchase C_VIDEO credits without upgrading their dialogue
+    # plan. Execute the same room after Interpretation, package the real MP4 into
+    # the shared VideoBlock, and persist its exact bytes with this 12-hour pair.
+    video_result: dict[str, Any] | None = None
+    video_generation_error = ""
+    if _text(video_plan.get("action")).lower() == "generate":
+        video_started = time.perf_counter()
+        try:
+            video_result = await _execute_c_video_operation(
+                video_plan, original or current_text, attachments or [], visual_context or [],
+                source_language=_text((translation or {}).get("source_language")),
+                timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "420") or 420),
+                user_id=uid,
+                operation_ref=_text(identity.get("message_id") or identity.get("flow_id")),
+            )
+        except Exception as video_error:
+            video_generation_error = _text(video_error)[:600]
+            video_result = None
+            _apr_timing_log(
+                "c_video_operation_failed", video_started,
+                plan="free", action="generate", error_type=type(video_error).__name__,
+                error=video_generation_error[:200],
+            )
+
+        video_bytes = video_result.get("video_bytes") if isinstance(video_result, dict) else None
+        if isinstance(video_bytes, (bytes, bytearray)) and video_bytes and len(video_bytes) <= _MAX_VIDEO_BYTES:
+            language_key = _text(display_language).lower().replace("_", "-").split("-", 1)[0]
+            video_success_copy = {
+                "ru": "Видео создано. MP4 сохраняется в артефактах этого диалога.",
+                "uk": "Відео створено. MP4 зберігається в артефактах цього діалогу.",
+                "en": "The video has been generated. The MP4 is being saved to this conversation's artifacts.",
+            }
+            video_answer = video_success_copy.get(language_key, video_success_copy["en"])
+            generated_video_bytes = bytes(video_bytes)
+            generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")[:240]
+            generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
+            video_asset_pointer = {
+                "message_id": identity["message_id"],
+                "sha256": generated_video_hash,
+                "filename": generated_video_name,
+                "mime_type": "video/mp4",
+                "size_bytes": len(generated_video_bytes),
+                "output_type": "video",
+            }
+            video_payload = {
+                "filename": generated_video_name,
+                "mime_type": "video/mp4",
+                "size_bytes": len(generated_video_bytes),
+                # SceneContract accepts a video renderer only when its source is
+                # already bound to a verifiable message+SHA asset reference.
+                # The same pointer is revalidated against the persisted DB row below.
+                "asset_ref": dict(video_asset_pointer),
+                "description": _text(original or current_text)[:600],
+                "provider": _text(video_result.get("provider")),
+                "model": _text(video_result.get("model")),
+                "prompt_language": _text(video_result.get("prompt_language")),
+                "prompt_translation_warning": _text(video_result.get("prompt_translation_warning"))[:240],
+                "duration_seconds": video_result.get("duration_seconds"),
+                "fps": video_result.get("fps"),
+                "resolution": _text(video_result.get("resolution")),
+                "ratio": _text(video_result.get("ratio")),
+                "audio": bool(video_result.get("audio")),
+                "task_id": _text(video_result.get("task_id")),
+                "operation": "generate",
+                "billing": video_result.get("billing") if isinstance(video_result.get("billing"), dict) else {},
+            }
+            try:
+                video_block = _build_c_video_render_block(video_payload)
+                packaged["render_blocks"] = [
+                    block for block in (packaged.get("render_blocks") or [])
+                    if not isinstance(block, dict) or _text(block.get("type") or block.get("artifact_type")).lower() != "video"
+                ]
+                packaged["render_blocks"].append(video_block)
+                packaged.setdefault("artifacts", []).append({
+                    "type": "video", "artifact_type": "video",
+                    "filename": video_payload["filename"], "mime_type": "video/mp4",
+                    "provider": video_payload["provider"], "model": video_payload["model"],
+                    "duration_seconds": video_payload["duration_seconds"],
+                    "operation": "generate", "source_room": "C_VIDEO",
+                })
+                packaged["answer"] = video_answer
+                packaged["content"] = video_answer
+                packaged["summary"] = video_answer
+                answer = video_answer
+                raw["answer"] = video_answer
+                raw["content"] = video_answer
+                raw["summary"] = video_answer
+                raw["internal_answer_en"] = "C_VIDEO generated a valid MP4; it will be persisted as a Free dialogue asset."
+                _apr_timing_log(
+                    "c_video_operation_complete", video_started,
+                    plan="free", action="generate", video_bytes=len(video_bytes),
+                    renderer="VideoBlock", room="C_VIDEO",
+                )
+            except Exception as render_error:
+                video_generation_error = f"VIDEO_RENDER_CONTRACT_FAILED: {type(render_error).__name__}: {render_error}"[:600]
+                video_result = None
+        elif video_result is not None:
+            video_generation_error = "C_VIDEO returned no valid MP4 bytes or the file exceeds the 25 MiB limit."
+            video_result = None
+
+        if video_result is None:
+            language_key = _text(display_language).lower().replace("_", "-").split("-", 1)[0]
+            localized = {
+                "VIDEO_WALLET_NOT_ENABLED": {
+                    "ru": "Сначала подключите отдельный видеобаланс в личном кабинете. Для этого не требуется Premium.",
+                    "uk": "Спочатку підключіть окремий відеобаланс в особистому кабінеті. Premium для цього не потрібен.",
+                    "en": "Connect the separate Video Wallet in your profile first. Premium is not required.",
+                },
+                "VIDEO_WALLET_INSUFFICIENT_FUNDS": {
+                    "ru": "На отдельном видеобалансе недостаточно средств. Пополните его и повторите запрос; Premium покупать не нужно.",
+                    "uk": "На окремому відеобалансі недостатньо коштів. Поповніть його та повторіть запит; Premium купувати не потрібно.",
+                    "en": "The separate Video Wallet balance is too low. Top it up and retry; you do not need Premium.",
+                },
+                "MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED": {
+                    "ru": "Генерация временно недоступна: на сервере не подтверждены коммерческие права видеопровайдера.",
+                    "uk": "Генерація тимчасово недоступна: на сервері не підтверджено комерційні права відеопровайдера.",
+                    "en": "Video generation is temporarily unavailable because the provider's commercial-use rights are not confirmed on the server.",
+                },
+                "MAGIC_HOUR_API_KEY_NOT_CONFIGURED": {
+                    "ru": "На сервере не настроен ключ видеопровайдера. Пополнение видеобаланса сейчас не поможет — сначала нужно настроить провайдера.",
+                    "uk": "На сервері не налаштовано ключ відеопровайдера. Поповнення відеобалансу зараз не допоможе — спочатку потрібно налаштувати провайдера.",
+                    "en": "The video provider API key is not configured. A top-up will not help until the provider is configured.",
+                },
+                "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED": {
+                    "ru": "На сервере не настроена стоимость кредитов видеопровайдера. Генерация остановлена без неверного списания.",
+                    "uk": "На сервері не налаштовано вартість кредитів відеопровайдера. Генерацію зупинено без неправильного списання.",
+                    "en": "The video provider credit cost is not configured. Generation was stopped to prevent an incorrect charge.",
+                },
+                "VIDEO_WALLET_AUTH_REQUIRED": {
+                    "ru": "Для покупки и списания видеокредитов требуется авторизованный аккаунт April.",
+                    "uk": "Для купівлі та списання відеокредитів потрібен авторизований акаунт April.",
+                    "en": "An authenticated April account is required to purchase and spend video credits.",
+                },
+            }
+            error_upper = video_generation_error.upper()
+            matched = next((key for key in localized if key in error_upper), "")
+            if matched:
+                video_answer = localized[matched].get(language_key, localized[matched]["en"])
+            elif "MAGIC_HOUR_HTTP_402" in error_upper:
+                video_answer = {
+                    "ru": "Видеопровайдер отклонил задачу из-за ограничения тарифа или параметров. Неуспешная генерация не должна списывать пользовательский видеобаланс.",
+                    "uk": "Відеопровайдер відхилив завдання через обмеження тарифу або параметрів. Невдала генерація не повинна списувати користувацький відеобаланс.",
+                    "en": "The video provider rejected this job because of a plan or parameter restriction. A failed generation should not consume the user's video balance.",
+                }.get(language_key, "The video provider rejected this job because of a plan or parameter restriction.")
+            else:
+                video_answer = {
+                    "ru": "Не удалось создать MP4. Карточка видео не будет показана без готового файла. Проверьте видеопровайдера и видеобаланс, затем повторите запрос.",
+                    "uk": "Не вдалося створити MP4. Картка відео не відображатиметься без готового файлу. Перевірте відеопровайдера та відеобаланс і повторіть запит.",
+                    "en": "The MP4 could not be generated. April will not show a video card without a real file. Check the provider and Video Wallet, then retry.",
+                }.get(language_key, "The MP4 could not be generated. Check the provider and Video Wallet, then retry.")
+            packaged["render_blocks"] = [
+                block for block in (packaged.get("render_blocks") or [])
+                if not isinstance(block, dict) or _text(block.get("type") or block.get("artifact_type")).lower() != "video"
+            ]
+            packaged["artifacts"] = [
+                item for item in (packaged.get("artifacts") or [])
+                if not isinstance(item, dict) or _text(item.get("type") or item.get("artifact_type")).lower() != "video"
+            ]
+            packaged["answer"] = video_answer
+            packaged["content"] = video_answer
+            packaged["summary"] = video_answer[:180]
+            answer = video_answer
+            raw["answer"] = video_answer
+            raw["content"] = video_answer
+            raw["summary"] = video_answer[:180]
+            raw["render_blocks"] = list(packaged["render_blocks"])
+            raw["artifacts"] = list(packaged["artifacts"])
+            raw["internal_answer_en"] = "C_VIDEO did not return a persistable MP4 artifact."
+            _apr_timing_log(
+                "c_video_operation_failed_final", video_started,
+                plan="free", action="generate", error=video_generation_error[:200],
+            )
+
     normalized_blocks = list(packaged["render_blocks"] or [])
     if not normalized_blocks:
         normalized_blocks = [
@@ -4087,6 +4309,82 @@ async def execute(
                     "sha256": image_hash, "width": width, "height": height,
                 })
                 generated_asset_saved = True
+
+
+    video_asset_ref: dict[str, Any] | None = None
+    if isinstance(video_result, dict):
+        generated_video_bytes = video_result.get("video_bytes")
+        generated_video_bytes = bytes(generated_video_bytes) if isinstance(generated_video_bytes, (bytes, bytearray)) else b""
+        if generated_video_bytes and len(generated_video_bytes) <= _MAX_VIDEO_BYTES:
+            generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")[:240]
+            generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
+            video_asset_ref = {
+                "filename": generated_video_name,
+                "kind": "video",
+                "mime_type": "video/mp4",
+                "asset_role": "april_output",
+                "output_type": "video",
+                "message_id": identity["message_id"],
+                "size_bytes": len(generated_video_bytes),
+                "sha256": generated_video_hash,
+            }
+            durable_asset_payloads.append({
+                "kind": "video", "mime_type": "video/mp4", "asset_role": "april_output",
+                "output_type": "video", "filename": generated_video_name,
+                "message_id": identity["message_id"], "size_bytes": len(generated_video_bytes),
+                "sha256": generated_video_hash,
+                "content_base64": base64.b64encode(generated_video_bytes).decode("ascii"),
+                "source_type": "free_c_video_generate", "operation": "generate",
+                "provider": _text(video_result.get("provider")),
+                "model": _text(video_result.get("model")),
+                "prompt_language": _text(video_result.get("prompt_language")),
+                "duration_seconds": video_result.get("duration_seconds"),
+                "fps": video_result.get("fps"),
+                "resolution": _text(video_result.get("resolution")),
+                "ratio": _text(video_result.get("ratio")),
+                "task_id": _text(video_result.get("task_id")),
+            })
+            output_asset_refs.append(dict(video_asset_ref))
+            generated_asset_saved = True
+            # Bind the card to the owner-scoped message+hash API. The API checks
+            # the authenticated owner, stored output role and SHA-256 and supports
+            # byte ranges for native video playback/seeking.
+            scene_contract_for_video = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
+            block_lists = [
+                scene_contract_for_video.get("render_blocks"),
+                result.get("render_blocks"),
+                response.render_blocks,
+            ]
+            asset_pointer = {
+                key: video_asset_ref.get(key)
+                for key in ("message_id", "sha256", "filename", "mime_type", "size_bytes", "output_type")
+                if video_asset_ref.get(key) is not None
+            }
+            for blocks_for_video in block_lists:
+                if not isinstance(blocks_for_video, list):
+                    continue
+                for candidate_block in blocks_for_video:
+                    if not isinstance(candidate_block, dict):
+                        continue
+                    if _text(candidate_block.get("type") or candidate_block.get("artifact_type")).lower() != "video":
+                        continue
+                    video_payload = candidate_block.get("payload") if isinstance(candidate_block.get("payload"), dict) else {}
+                    video_payload["asset_ref"] = dict(asset_pointer)
+                    video_payload["size_bytes"] = len(generated_video_bytes)
+                    video_payload["mime_type"] = "video/mp4"
+                    candidate_block["payload"] = video_payload
+                    candidate_block["asset_ref"] = dict(asset_pointer)
+                    candidate_block["filename"] = generated_video_name
+                    candidate_block["mime_type"] = "video/mp4"
+            result["scene_contract"] = scene_contract_for_video
+        else:
+            # A success card is never allowed without a bounded, persistable MP4.
+            video_asset_ref = None
+            generated_asset_saved = False
+            _apr_timing_log(
+                "free_video_asset_rejected", None,
+                reason="missing_or_over_25_mib", size_bytes=len(generated_video_bytes),
+            )
 
     # Save code/file output as a separately versioned asset paired to this turn.
     # A visible CodeBlock remains in SceneContract; this binary/text asset lets
@@ -4515,6 +4813,70 @@ async def execute(
         structured_response_fields=len(structured_response), render_blocks=len(response.render_blocks or []),
         artifacts=len(response.artifacts or []), durable_asset_payloads=len(durable_asset_payloads))
 
+    video_database_persist_failed = bool(video_asset_ref and not saved)
+    if video_database_persist_failed:
+        # The artifact endpoint resolves MP4 bytes through the persisted dialogue
+        # pair. Never publish a VideoBlock whose owner-bound retrieval record did
+        # not commit successfully.
+        language_key = _text(display_language or "en").lower().replace("_", "-").split("-", 1)[0]
+        persist_failure_copy = {
+            "ru": "MP4 был создан, но база данных не подтвердила сохранение видеоартефакта. Поэтому April не прикрепляет недоступную видеокарточку. Проверьте подключение PostgreSQL и повторите запрос.",
+            "uk": "MP4 було створено, але база даних не підтвердила збереження відеоартефакту. Тому April не додає недоступну відеокартку. Перевірте підключення PostgreSQL і повторіть запит.",
+            "en": "The MP4 was generated, but the database did not confirm video artifact persistence. April will not attach an inaccessible video card. Check PostgreSQL connectivity and retry.",
+        }
+        answer = persist_failure_copy.get(language_key, persist_failure_copy["en"])
+        response.answer = answer
+        response.content = answer
+        response.summary = answer[:180]
+        response.response = answer
+        response.render_blocks = [
+            block for block in (response.render_blocks or [])
+            if not isinstance(block, dict)
+            or _text(block.get("type") or block.get("artifact_type")).lower() != "video"
+        ]
+        response.artifacts = [
+            item for item in (response.artifacts or [])
+            if not isinstance(item, dict)
+            or _text(item.get("type") or item.get("artifact_type")).lower() != "video"
+        ]
+        scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
+        for block_field in ("render_blocks", "blocks"):
+            if isinstance(scene_contract.get(block_field), list):
+                scene_contract[block_field] = [
+                    block for block in scene_contract[block_field]
+                    if not isinstance(block, dict)
+                    or _text(block.get("type") or block.get("artifact_type")).lower() != "video"
+                ]
+        scene_contract.setdefault("render_blocks", [])
+        scene_contract["answer"] = answer
+        scene_contract["content"] = answer
+        result["scene_contract"] = scene_contract
+        result["render_blocks"] = list(scene_contract["render_blocks"])
+        result["answer"] = answer
+        result["content"] = answer
+        result["summary"] = answer[:180]
+        result["artifacts"] = list(response.artifacts or [])
+        generated_asset_saved = False
+        result["generated_asset_saved"] = False
+        output_asset_refs = [
+            ref for ref in output_asset_refs
+            if _text(ref.get("output_type")).lower() != "video"
+        ]
+        if isinstance(scene_contract.get("metadata"), dict):
+            dialogue_assets = scene_contract["metadata"].get("dialogue_assets")
+            if isinstance(dialogue_assets, dict):
+                dialogue_assets["april_outputs"] = output_asset_refs
+        video_asset_ref = None
+        raw["answer"] = answer
+        raw["content"] = answer
+        raw["summary"] = answer[:180]
+        raw["internal_answer_en"] = "C_VIDEO generated an MP4, but the database did not confirm durable artifact persistence."
+        _apr_timing_log(
+            "free_video_database_persist_failed", None,
+            user_key=_apr_diag_ref(uid),
+            message_key=_apr_diag_ref(identity.get("message_id")),
+        )
+
     result.update(
         {
             "april_id": uid,
@@ -4534,6 +4896,8 @@ async def execute(
             "memory_saved": saved,
             "dialogue_assets_restored": restored_assets,
             "generated_asset_saved": generated_asset_saved,
+            "video_generated": bool(video_asset_ref and video_asset_ref.get("sha256") and saved),
+            "video_asset_ref": ({key: video_asset_ref.get(key) for key in ("message_id", "sha256", "filename", "mime_type", "size_bytes", "output_type") if video_asset_ref.get(key) is not None} if video_asset_ref else None),
             "free_media_limit_reached": bool(free_media_limit_reached),
             "free_media_edit_restricted": bool(free_media_edit_restricted),
             "dialogue_asset_refs": {"source_inputs": attachment_refs, "april_outputs": output_asset_refs},
