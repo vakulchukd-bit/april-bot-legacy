@@ -3954,7 +3954,19 @@ async def execute(
     # the shared VideoBlock, and persist its exact bytes with this 12-hour pair.
     video_result: dict[str, Any] | None = None
     video_generation_error = ""
-    if _text(video_plan.get("action")).lower() == "generate":
+    _video_intent = interpretation.get("intent") if isinstance(interpretation, dict) and isinstance(interpretation.get("intent"), dict) else {}
+    _video_outputs = _video_intent.get("requested_outputs") if isinstance(_video_intent.get("requested_outputs"), list) else []
+    _video_generation_authorized = bool(
+        _text(video_plan.get("action")).lower() == "generate"
+        and _video_intent.get("wants_video") is True
+        and "video" in {_text(value).lower() for value in _video_outputs if _text(value)}
+        and _video_intent.get("video_generation_authorized") is True
+        and _video_intent.get("video_execution_owner") == "C_VIDEO"
+    )
+    if _text(video_plan.get("action")).lower() == "generate" and not _video_generation_authorized:
+        video_plan.update({"action": "none", "requires_video_provider": False, "artifact_type": "text"})
+        _apr_timing_log("c_video_operation_blocked", None, plan="free", reason="interpretation_did_not_authorize_video")
+    if _video_generation_authorized:
         video_started = time.perf_counter()
         try:
             video_result = await _execute_c_video_operation(
@@ -3976,11 +3988,20 @@ async def execute(
         video_bytes = video_result.get("video_bytes") if isinstance(video_result, dict) else None
         if isinstance(video_bytes, (bytes, bytearray)) and video_bytes and len(video_bytes) <= _MAX_VIDEO_BYTES:
             language_key = _text(display_language).lower().replace("_", "-").split("-", 1)[0]
-            video_success_copy = {
-                "ru": "Видео создано. MP4 сохраняется в артефактах этого диалога.",
-                "uk": "Відео створено. MP4 зберігається в артефактах цього діалогу.",
-                "en": "The video has been generated. The MP4 is being saved to this conversation's artifacts.",
-            }
+            _duration = int(float(video_result.get("duration_seconds") or 3))
+            _duration_limit = int(video_result.get("duration_limit_seconds") or 60)
+            if video_result.get("duration_was_default") is True:
+                video_success_copy = {
+                    "ru": f"Готово: видео длительностью {_duration} с. Вы не указали время, поэтому я создала короткий ролик на 3 с по умолчанию. Для следующего видео укажите длительность прямо в запросе, например: «создай видео на 15 секунд». Максимум для текущих настроек — {_duration_limit} с.",
+                    "uk": f"Готово: відео тривалістю {_duration} с. Ви не вказали час, тому я створила короткий ролик на 3 с за замовчуванням. Для наступного відео вкажіть тривалість у запиті, наприклад: «створи відео на 15 секунд». Максимум для поточних налаштувань — {_duration_limit} с.",
+                    "en": f"Done: your short video is {_duration} seconds long. No duration was specified, so I used the {_duration}-second default. For a longer clip, include the length in your request, for example: ‘create a 15-second video’. The maximum for the current settings is {_duration_limit} seconds.",
+                }
+            else:
+                video_success_copy = {
+                    "ru": f"Видео создано. Длительность — {_duration} с. MP4 сохранён в артефактах этого диалога.",
+                    "uk": f"Відео створено. Тривалість — {_duration} с. MP4 збережено в артефактах цього діалогу.",
+                    "en": f"Video created — {_duration} seconds. The MP4 is saved in this conversation's artifacts.",
+                }
             video_answer = video_success_copy.get(language_key, video_success_copy["en"])
             generated_video_bytes = bytes(video_bytes)
             generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")[:240]
@@ -4007,6 +4028,9 @@ async def execute(
                 "prompt_language": _text(video_result.get("prompt_language")),
                 "prompt_translation_warning": _text(video_result.get("prompt_translation_warning"))[:240],
                 "duration_seconds": video_result.get("duration_seconds"),
+                "duration_was_default": bool(video_result.get("duration_was_default")),
+                "requested_duration_seconds": video_result.get("requested_duration_seconds"),
+                "duration_limit_seconds": video_result.get("duration_limit_seconds"),
                 "fps": video_result.get("fps"),
                 "resolution": _text(video_result.get("resolution")),
                 "ratio": _text(video_result.get("ratio")),
@@ -4087,6 +4111,20 @@ async def execute(
             matched = next((key for key in localized if key in error_upper), "")
             if matched:
                 video_answer = localized[matched].get(language_key, localized[matched]["en"])
+            elif "VIDEO_DURATION_EXPRESSION_UNSUPPORTED" in error_upper:
+                video_answer = {
+                    "ru": "Я не смогла однозначно распознать указанную длительность. Напишите её числом и единицей, например: «15 секунд» или «1 минута». Видео не запускалось и видеобаланс не списывался.",
+                    "uk": "Я не змогла однозначно розпізнати вказану тривалість. Напишіть її числом і одиницею, наприклад: «15 секунд» або «1 хвилина». Відео не запускалося, відеобаланс не списувався.",
+                    "en": "I could not reliably parse that duration. Please write a number and unit, such as ‘15 seconds’ or ‘1 minute’. No video job was submitted and no Video Wallet balance was charged.",
+                }.get(language_key, "Please state the duration as a number plus unit, such as 15 seconds. No video was submitted.")
+            elif "VIDEO_DURATION_LIMIT_EXCEEDED" in error_upper:
+                _limit_match = re.search(r"max=(\d+)", error_upper)
+                _limit = int(_limit_match.group(1)) if _limit_match else 60
+                video_answer = {
+                    "ru": f"Запрошенная длительность превышает лимит текущих настроек. Максимум для одного ролика сейчас — {_limit} с. Укажите длительность до {_limit} с; запрос не был отправлен провайдеру.",
+                    "uk": f"Запитана тривалість перевищує ліміт поточних налаштувань. Максимум для одного ролика зараз — {_limit} с. Вкажіть тривалість до {_limit} с; запит не надсилався провайдеру.",
+                    "en": f"The requested duration exceeds the current settings. One clip can be up to {_limit} seconds. Choose a duration of {_limit} seconds or less; the request was not sent to the provider.",
+                }.get(language_key, f"The current maximum is {_limit} seconds; the request was not sent to the provider.")
             elif "MAGIC_HOUR_HTTP_402" in error_upper:
                 video_answer = {
                     "ru": "Видеопровайдер отклонил задачу из-за ограничения тарифа или параметров. Неуспешная генерация не должна списывать пользовательский видеобаланс.",
