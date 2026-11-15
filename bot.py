@@ -34,7 +34,11 @@ from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 
 from blocks.input_reader import parse_json_payload, parse_multipart_payload
-from blocks.C_VIDEO import extract_video_frames
+from blocks.C_VIDEO import (
+    extract_video_frames, enable_video_wallet, get_video_wallet_status,
+    create_video_wallet_topup_order, get_video_wallet_order_status,
+    set_video_wallet_order_status, settle_video_wallet_topup,
+)
 from blocks.voice_reader import transcribe_voice_bytes
 from blocks.premium_asset_store import load_message_assets as _load_premium_history_assets
 from core.executor import execute as execute_free
@@ -2490,6 +2494,21 @@ class AprilHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(200, {"success": True, "language": get_user_language(canonical_user_id)})
             return
+        if parsed.path == "/api/video-wallet/status":
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            try:
+                self._send_json(200, get_video_wallet_status(canonical_user_id))
+            except Exception as exc:
+                self._send_json(503, {"success": False, "error": _text(exc)[:120] or "VIDEO_WALLET_UNAVAILABLE"})
+            return
         if parsed.path == "/api/subscription/status":
             if not self._service_authorized():
                 self.close_connection = True
@@ -2949,6 +2968,80 @@ class AprilHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         parsed_path = parsed.path
 
+        # Video Wallet is a separate prepaid balance. Every call derives the
+        # canonical owner from the authenticated Next.js bridge, never the body.
+        if parsed_path in {
+            "/api/video-wallet/enable",
+            "/api/video-wallet/liqpay/create-order",
+            "/api/video-wallet/payment-status",
+        }:
+            if not self._service_authorized():
+                self.close_connection = True
+                self._send_json(401, {"success": False, "error": "SERVICE_AUTH_REQUIRED"})
+                return
+            supplied_user_id = _text(self.headers.get("X-April-User-Id"))
+            canonical_user_id = resolve_user_id(supplied_user_id) if supplied_user_id else None
+            if not canonical_user_id or not is_authenticated_user(canonical_user_id):
+                self._send_json(401, {"success": False, "error": "AUTHENTICATED_USER_REQUIRED"})
+                return
+            if parsed_path == "/api/video-wallet/enable":
+                try:
+                    self._send_json(200, enable_video_wallet(canonical_user_id))
+                except Exception as exc:
+                    self._send_json(503, {"success": False, "error": _text(exc)[:120] or "VIDEO_WALLET_ENABLE_FAILED"})
+                return
+            raw, body_error = self._read_bounded_request_body(8 * 1024)
+            if body_error or raw is None:
+                self._send_json(413 if body_error == "REQUEST_BODY_TOO_LARGE" else 400, {"success": False, "error": body_error or "INVALID_REQUEST_BODY"})
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("request must be an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"success": False, "error": "INVALID_JSON"})
+                return
+            if parsed_path == "/api/video-wallet/payment-status":
+                order_id = _text(body.get("order_id"))
+                result = get_video_wallet_order_status(canonical_user_id, order_id)
+                self._send_json(200 if result.get("success") else 404, result)
+                return
+            public_key, private_key, callback_url = _liqpay_enabled_config()
+            if not public_key or not private_key:
+                self._send_json(503, {"success": False, "error": "PAYMENT_PROVIDER_NOT_CONFIGURED"})
+                return
+            try:
+                amount_usd = int(body.get("amount_usd"))
+            except (TypeError, ValueError):
+                amount_usd = 0
+            try:
+                order = create_video_wallet_topup_order(canonical_user_id, amount_usd)
+            except Exception as exc:
+                error = _text(exc) or "VIDEO_WALLET_TOPUP_ORDER_FAILED"
+                self._send_json(400 if "INVALID" in error or "NOT_ENABLED" in error else 503, {"success": False, "error": error[:120]})
+                return
+            return_origin = _text(body.get("return_origin"))
+            if not return_origin.startswith("https://") or len(return_origin) > 300:
+                set_video_wallet_order_status(order["order_id"], "failed")
+                self._send_json(400, {"success": False, "error": "PAYMENT_RETURN_URL_INVALID"})
+                return
+            result_url = return_origin.rstrip("/") + "/settings?video_wallet_order=" + quote(order["order_id"])
+            liqpay_fields = {
+                "public_key": public_key, "version": 7, "action": "pay",
+                "amount": f"{Decimal(str(order['amount'])):.2f}", "currency": "USD",
+                "description": order["description"], "order_id": order["order_id"],
+                "paytypes": "gpay,card", "language": "uk", "server_url": callback_url,
+                "result_url": result_url,
+            }
+            encoded_data = base64.b64encode(json.dumps(liqpay_fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii")
+            signature = _liqpay_signature(encoded_data, private_key)
+            self._send_json(200, {
+                "success": True, "provider": "liqpay", "checkout_url": "https://www.liqpay.ua/api/3/checkout",
+                "order_id": order["order_id"], "amount": order["amount"], "currency": "USD",
+                "data": encoded_data, "signature": signature,
+            })
+            return
+
         # Public LiqPay callback: browser redirects are never proof of payment.
         # Only a valid LiqPay signature plus merchant/order/amount checks can settle.
         if parsed_path == "/api/payments/liqpay/callback":
@@ -2992,7 +3085,9 @@ class AprilHandler(BaseHTTPRequestHandler):
             payment_status = _text(payload.get("status")).lower()
             if payment_status != "success":
                 if order_id and payment_status in {"error", "failure", "reversed"}:
-                    set_premium_payment_order_status(order_id, "failed", expected_payment_source="liqpay_google_pay")
+                    video_failed = set_video_wallet_order_status(order_id, "failed")
+                    if not video_failed.get("success"):
+                        set_premium_payment_order_status(order_id, "failed", expected_payment_source="liqpay_google_pay")
                 self._send_json(200, {"success": True, "acknowledged": True})
                 return
             if _text(payload.get("action")).lower() != "pay":
@@ -3005,8 +3100,14 @@ class AprilHandler(BaseHTTPRequestHandler):
             if not order_id or not payment_id or amount_minor is None or currency != "USD":
                 self._send_json(400, {"success": False, "error": "PAYMENT_AMOUNT_OR_CURRENCY_INVALID"})
                 return
-            result = settle_premium_payment(order_id, payment_id, amount_minor, currency, expected_payment_source="liqpay_google_pay")
+            result = settle_video_wallet_topup(order_id, payment_id, amount_minor, currency)
+            if not result.get("success") and result.get("error") == "VIDEO_WALLET_ORDER_NOT_FOUND":
+                result = settle_premium_payment(order_id, payment_id, amount_minor, currency, expected_payment_source="liqpay_google_pay")
             if result.get("success"):
+                if result.get("payment_status") == "paid" and result.get("order_id"):
+                    _apr_timing_log("liqpay_video_wallet_topup_settled", order_key=_apr_diag_ref(order_id), payment_key=_apr_diag_ref(payment_id), user_key=_apr_diag_ref(result.get("user_id")), amount_minor=int(result.get("order_amount_minor") or 0))
+                    self._send_json(200, {"success": True, "status": "ok", "wallet": "video"})
+                    return
                 _apr_timing_log(
                     "liqpay_payment_settled", order_key=_apr_diag_ref(order_id),
                     payment_key=_apr_diag_ref(payment_id), user_key=_apr_diag_ref(result.get("user_id")),
