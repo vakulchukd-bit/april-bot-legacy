@@ -1,9 +1,11 @@
 """C_VIDEO: one canonical room for April video analysis, generation and editing.
 
 Provider integration, prepaid Video Wallet pricing, reservation and settlement
-stay together in this module. Local FFmpeg edits remain free. Binary output is
-returned to Premium_executor for authenticated artifact persistence and rendering.
-Temporary provider URLs never leave this module.
+stay together in this module. A narrowly allow-listed test mode can use the
+provider account's trial credits without asserting commercial rights. Local
+FFmpeg edits remain free. Binary output is returned to Premium_executor for
+authenticated artifact persistence and rendering. Temporary provider URLs
+never leave this module.
 """
 from __future__ import annotations
 
@@ -43,6 +45,58 @@ def _wallet_identity(user_id: Any) -> str:
     if not canonical or not is_authenticated_user(canonical):
         raise CVideoError("VIDEO_WALLET_AUTH_REQUIRED")
     return canonical
+
+
+def _env_enabled(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _video_test_allowlist() -> set[str]:
+    raw = os.getenv("APRIL_VIDEO_TEST_USER_IDS", "")
+    return {part.strip() for part in re.split(r"[,;\s]+", raw) if part.strip()}
+
+
+def is_video_test_account(user_id: Any) -> bool:
+    """Return true only for an authenticated account explicitly allow-listed for tests.
+
+    APRIL_VIDEO_TEST_USER_IDS accepts either users.user_id or public users.april_id.
+    The test flag alone never exposes the provider to every April account.
+    """
+    if not _env_enabled("APRIL_VIDEO_TEST_MODE") or not _text(user_id):
+        return False
+    allowlist = _video_test_allowlist()
+    if not allowlist:
+        return False
+    raw = _text(user_id)
+    try:
+        canonical = _wallet_identity(raw)
+    except Exception:
+        return False
+    return raw in allowlist or canonical in allowlist
+
+
+def _magic_hour_billing_mode(user_id: Any) -> str:
+    """Resolve provider-use mode without conflating trial tests and commercial use."""
+    if is_video_test_account(user_id):
+        return "test_bonus"
+    if _env_enabled("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED"):
+        return "commercial"
+    if _env_enabled("APRIL_VIDEO_TEST_MODE"):
+        raise CVideoError("MAGIC_HOUR_TEST_ACCOUNT_NOT_ALLOWED")
+    raise CVideoError("MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED")
+
+
+def magic_hour_video_ready(user_id: Any) -> bool:
+    """Cheap readiness check used by Premium_executor before publishing its pending scene."""
+    if not os.getenv("MAGIC_HOUR_API_KEY", "").strip():
+        return False
+    if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    try:
+        _video_cost_per_1000_credits(user_id)
+        return bool(_magic_hour_billing_mode(user_id))
+    except (CVideoError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def _wallet_connection():
@@ -337,23 +391,26 @@ def _video_markup_multiplier() -> float:
     return 2.0
 
 
-def _video_cost_per_1000_credits() -> float:
-    raw = os.getenv("APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS", "").strip()
+def _video_cost_per_1000_credits(user_id: Any = None) -> float:
+    billing_mode = _magic_hour_billing_mode(user_id)
+    env_name = "APRIL_VIDEO_TEST_USD_PER_1000_CREDITS" if billing_mode == "test_bonus" else "APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS"
+    error_code = "APRIL_VIDEO_TEST_COST_NOT_CONFIGURED" if billing_mode == "test_bonus" else "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED"
+    raw = os.getenv(env_name, "").strip()
     if not raw:
-        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED")
+        raise CVideoError(error_code)
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
-        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED") from exc
+        raise CVideoError(error_code) from exc
     if not 0.01 <= value <= 100.0:
-        raise CVideoError("APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED")
+        raise CVideoError(error_code)
     return value
 
 
-def _video_price_for_credits(credits: int) -> tuple[int, int]:
+def _video_price_for_credits(credits: int, unit_cost_per_1000: float) -> tuple[int, int]:
     from decimal import Decimal, ROUND_CEILING
     credits = max(0, int(credits or 0))
-    provider_cost = (Decimal(credits) * Decimal(str(_video_cost_per_1000_credits())) / Decimal(1000) * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
+    provider_cost = (Decimal(credits) * Decimal(str(unit_cost_per_1000)) / Decimal(1000) * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
     provider_minor = int(provider_cost)
     customer_minor = int((Decimal(provider_minor) * Decimal(str(_video_markup_multiplier()))).quantize(Decimal("1"), rounding=ROUND_CEILING))
     return provider_minor, customer_minor
@@ -361,9 +418,11 @@ def _video_price_for_credits(credits: int) -> tuple[int, int]:
 
 def _reserve_video_charge(user_id: Any, operation_ref: Any, operation: str, estimate_credits: int) -> dict[str, Any]:
     canonical = _wallet_identity(user_id)
+    billing_mode = _magic_hour_billing_mode(user_id)
+    unit_cost = _video_cost_per_1000_credits(user_id)
     reference = re.sub(r"[^A-Za-z0-9._:-]", "", _text(operation_ref))[:120] or __import__("uuid").uuid4().hex
     reference = "video:" + reference
-    provider_minor, charge_minor = _video_price_for_credits(estimate_credits)
+    provider_minor, charge_minor = _video_price_for_credits(estimate_credits, unit_cost)
     # Keep a 15% reserve for provider FPS/credit corrections. Only the final
     # provider-reported charge is kept; the unused reserve is returned atomically.
     reserve_minor = int((charge_minor * 1.15) + 0.999999)
@@ -384,14 +443,24 @@ def _reserve_video_charge(user_id: Any, operation_ref: Any, operation: str, esti
                 INSERT INTO april_video_wallet_transactions
                     (user_id, reference, kind, status, delta_minor, provider_cost_minor,
                      provider_credits, markup_multiplier, operation, description, metadata)
-                VALUES (%s, %s, 'video_debit', 'processing', %s, %s, %s, %s, %s, %s, '{}'::jsonb)
+                VALUES (%s, %s, 'video_debit', 'processing', %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT(reference) DO NOTHING
                 RETURNING id
-            """, (canonical, reference, -reserve_minor, provider_minor, int(estimate_credits), _video_markup_multiplier(), operation, "Video generation" if operation == "generate" else "AI video editing"))
+            """, (
+                canonical, reference, -reserve_minor, provider_minor, int(estimate_credits),
+                _video_markup_multiplier(), operation,
+                "Video generation" if operation == "generate" else "AI video editing",
+                json.dumps({"billing_mode": billing_mode, "unit_cost_usd_per_1000_credits": unit_cost}),
+            ))
             if not cur.fetchone():
                 raise CVideoError("VIDEO_OPERATION_ALREADY_PROCESSED")
         conn.commit()
-        return {"reference": reference, "reserve_minor": reserve_minor, "provider_cost_minor": provider_minor, "estimate_credits": int(estimate_credits), "markup_multiplier": _video_markup_multiplier()}
+        return {
+            "reference": reference, "reserve_minor": reserve_minor,
+            "provider_cost_minor": provider_minor, "estimate_credits": int(estimate_credits),
+            "markup_multiplier": _video_markup_multiplier(), "billing_mode": billing_mode,
+            "unit_cost_usd_per_1000_credits": unit_cost,
+        }
     except Exception:
         conn.rollback()
         raise
@@ -403,7 +472,10 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
     canonical = _wallet_identity(user_id)
     reference = _text(reservation.get("reference"))
     actual_credits = max(0, int(actual_credits or 0))
-    provider_minor, actual_minor = _video_price_for_credits(actual_credits)
+    unit_cost = reservation.get("unit_cost_usd_per_1000_credits")
+    if unit_cost is None:
+        unit_cost = _video_cost_per_1000_credits(user_id)
+    provider_minor, actual_minor = _video_price_for_credits(actual_credits, float(unit_cost))
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
@@ -433,7 +505,13 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
                 WHERE user_id=%s AND reference=%s
             """, (actual_delta, provider_minor, actual_credits, "refunded" if refund else status, json.dumps(meta), canonical, reference))
         conn.commit()
-        return {"success": True, "charged_minor": actual_minor if not refund else 0, "provider_cost_minor": provider_minor, "provider_credits": actual_credits, "markup_multiplier": _video_markup_multiplier(), "status": "refunded" if refund else status}
+        return {
+            "success": True, "charged_minor": actual_minor if not refund else 0,
+            "provider_cost_minor": provider_minor, "provider_credits": actual_credits,
+            "markup_multiplier": _video_markup_multiplier(),
+            "billing_mode": _text(reservation.get("billing_mode") or "commercial"),
+            "status": "refunded" if refund else status,
+        }
     except Exception:
         conn.rollback()
         raise
@@ -797,12 +875,11 @@ async def generate_video(
     api_key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
     if not api_key:
         raise CVideoError("MAGIC_HOUR_API_KEY_NOT_CONFIGURED")
-    if os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
-        raise CVideoError("MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED")
     if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
         raise CVideoError("APRIL_VIDEO_GENERATION_DISABLED")
     if not user_id:
         raise CVideoError("VIDEO_WALLET_AUTH_REQUIRED")
+    _video_cost_per_1000_credits(user_id)  # validates test allow-list or commercial authorization
 
     clean_prompt = _text(prompt)[:18000]
     if not clean_prompt:
@@ -910,10 +987,9 @@ async def edit_video_with_magic_hour(
     api_key = os.getenv("MAGIC_HOUR_API_KEY", "").strip()
     if not api_key:
         raise CVideoError("MAGIC_HOUR_API_KEY_NOT_CONFIGURED")
-    if os.getenv("MAGIC_HOUR_COMMERCIAL_RIGHTS_CONFIRMED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
-        raise CVideoError("MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED")
     if os.getenv("APRIL_VIDEO_GENERATION_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
         raise CVideoError("APRIL_VIDEO_GENERATION_DISABLED")
+    _video_cost_per_1000_credits(user_id)  # validates test allow-list or commercial authorization
     sources = _extract_attachment_videos(attachments)
     if not sources:
         raise CVideoError("VIDEO_EDIT_SOURCE_REQUIRED")
@@ -1459,6 +1535,7 @@ __all__ = [
     "VIDEO_EXTENSIONS", "build_video_render_block", "classify_video_request",
     "decode_video_data_uri", "edit_video", "edit_video_with_magic_hour", "execute_video_operation",
     "extract_video_frames", "generate_video", "enable_video_wallet", "get_video_wallet_status",
+    "is_video_test_account", "magic_hour_video_ready",
     "create_video_wallet_topup_order", "get_video_wallet_order_status",
     "set_video_wallet_order_status", "settle_video_wallet_topup",
 ]
