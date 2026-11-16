@@ -563,23 +563,22 @@ def _prepare_attachments(
             "asset_role": "user_input",
             "provider_readable": bool(item.get("provider_readable", kind in {"image", "text_file", "voice"})),
             "sequence_index": sequence_index,
-            **({"video_data_uri": _text(item.get("data_uri")), "video_frame_count": 0} if kind == "video" and is_premium else {}),
+            **({"video_data_uri": _text(item.get("data_uri")), "video_frame_count": 0} if kind == "video" else {}),
         })
 
         if kind == "video":
-            if is_premium:
-                raw_video = getattr(att, "data", b"") or b""
-                try:
-                    extracted_frames = extract_video_frames(raw_video, filename)
-                    for frame in extracted_frames:
-                        frame["sequence_index"] = sequence_index * 10 + int(frame.get("frame_index") or 0)
-                        frame["parent_filename"] = filename
-                        visual.append(frame)
-                    meta[-1]["video_frame_count"] = len(extracted_frames)
-                    if not extracted_frames:
-                        meta[-1]["video_analysis_warning"] = "No frames could be extracted from this video."
-                except Exception as exc:
-                    meta[-1]["video_analysis_warning"] = str(exc)[:240]
+            raw_video = getattr(att, "data", b"") or b""
+            try:
+                extracted_frames = extract_video_frames(raw_video, filename)
+                for frame in extracted_frames:
+                    frame["sequence_index"] = sequence_index * 10 + int(frame.get("frame_index") or 0)
+                    frame["parent_filename"] = filename
+                    visual.append(frame)
+                meta[-1]["video_frame_count"] = len(extracted_frames)
+                if not extracted_frames:
+                    meta[-1]["video_analysis_warning"] = "No frames could be extracted from this video."
+            except Exception as exc:
+                meta[-1]["video_analysis_warning"] = str(exc)[:240]
             continue
 
         if kind == "voice":
@@ -1024,18 +1023,8 @@ def _handle_payload(
     free_media_units = 0
     free_media_limit_reached = False
     free_media_attachments_skipped = False
-    if not is_premium and any(_text(getattr(item, "kind", "")).lower() == "video" for item in attachments):
-        return 403, {
-            "success": False,
-            "error_code": "PREMIUM_VIDEO_REQUIRED",
-            "answer": (
-                "Анализ и монтаж загруженных видео доступны в Premium. Создание нового видео доступно на любом тарифе через отдельный видеобаланс — без покупки Premium."
-                if account_language in {"ru", "uk", "ua"} else
-                "Analysis and editing of uploaded videos require Premium. Creating a new video is available on any plan through the separate Video Wallet; Premium is not required."
-            ),
-            "policy_language": account_language,
-            "canonical_route": CANONICAL_CHAT_ROUTE,
-        }
+    # Uploaded-video analysis and editing use the same C_VIDEO route for Free and
+    # Premium. Provider-backed scene edits are charged through the separate Video Wallet.
     input_normalization_started = time.perf_counter()
     try:
         semantic_text, visual_context, attachment_meta, file_inputs, text_file_contents = _prepare_attachments(
@@ -1050,7 +1039,7 @@ def _handle_payload(
         if videos_without_frames:
             warning = _text(videos_without_frames[0].get("video_analysis_warning"))
             if account_language in {"ru", "uk", "ua"}:
-                message = "Не удалось прочитать видео и извлечь кадры. Проверьте формат и размер файла (до 20 МБ), затем загрузите его снова. Для чтения видео в окружении бота должны быть установлены imageio-ffmpeg и Pillow."
+                message = "Не удалось прочитать видео и извлечь кадры. Проверьте формат и размер файла (до 10 МБ), затем загрузите его снова. Для чтения видео в окружении бота должны быть установлены imageio-ffmpeg и Pillow."
             else:
                 message = "April could not read the video or extract frames. Check the file format and size (up to 10 MB per video), then upload it again. The bot runtime must have imageio-ffmpeg and Pillow installed."
             return 422, {
