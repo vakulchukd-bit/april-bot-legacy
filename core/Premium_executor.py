@@ -7420,7 +7420,7 @@ async def execute(
     # Commercial users still require the explicit rights flag and verified cost.
     _magic_hour_ready = _magic_hour_video_ready(uid)
     # An edit may run locally through FFmpeg; generation always needs Magic Hour.
-    video_provider_configured = _magic_hour_ready if video_action == "generate" else True
+    video_provider_configured = _magic_hour_ready if (video_action == "generate" or bool(video_plan.get("requires_video_provider"))) else True
     video_pending = bool(video_generation_requested and video_provider_configured)
 
     # Do not stream model-authored capability refusals while C_VIDEO is actively
