@@ -3046,7 +3046,6 @@ class AprilHandler(BaseHTTPRequestHandler):
                 "success": True, "provider": "liqpay", "checkout_url": "https://www.liqpay.ua/api/3/checkout",
                 "order_id": order["order_id"], "amount": order["amount"], "currency": "USD",
                 "credits_to_issue": int(order.get("credits_to_issue") or 0),
-                "markup_multiplier": float(order.get("markup_multiplier") or 2),
                 "data": encoded_data, "signature": signature,
             })
             return
