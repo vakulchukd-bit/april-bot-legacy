@@ -2137,11 +2137,10 @@ async def execute(
     # modifiers, not independent text-only questions. Apply this before memory
     # routing so every downstream layer sees the same task and output contract.
     video_plan = _classify_video_request(original or current_text, attachments)
-    # Free is allowed to create new videos through the independently prepaid
-    # Video Wallet. Editing/analyzing uploaded video sources remains Premium-only.
-    if _text(video_plan.get("action")).lower() != "generate":
-        video_plan = {**dict(video_plan), "action": "none", "requires_video_provider": False, "artifact_type": "text"}
-    if _text(video_plan.get("action")).lower() == "generate":
+    # Free and Premium share the same C_VIDEO operation contract. New generation
+    # and source-video AI edits are both charged through the separate Video Wallet;
+    # video analysis remains a non-generating contextual operation.
+    if _text(video_plan.get("action")).lower() in {"generate", "edit"}:
         question_sequence = _apply_video_intent_contract(
             {}, video_plan, question_sequence, original or current_text,
         )
@@ -3402,7 +3401,7 @@ async def execute(
                 "C_VIDEO is the real execution room for this request. The executor will invoke it and attach the actual MP4. "
                 "Do not claim that April cannot create video, do not replace execution with a prompt-only suggestion, "
                 "and do not invent a completed result before C_VIDEO returns a valid MP4. Preserve the full user scene, action, style, duration and audio direction."
-            ) if _text(video_plan.get("action")) == "generate" else "",
+            ) if _text(video_plan.get("action")) in {"generate", "edit"} else "",
             "video_scene_contract": (interpretation.get("request_structure") or {}).get("video_scene_contract", {}),
         }
         request.routing["room_knowledge_context"] = room_context
@@ -3957,14 +3956,14 @@ async def execute(
     _video_intent = interpretation.get("intent") if isinstance(interpretation, dict) and isinstance(interpretation.get("intent"), dict) else {}
     _video_outputs = _video_intent.get("requested_outputs") if isinstance(_video_intent.get("requested_outputs"), list) else []
     _video_generation_authorized = bool(
-        _text(video_plan.get("action")).lower() == "generate"
+        _text(video_plan.get("action")).lower() in {"generate", "edit"}
         and _video_intent.get("wants_video") is True
         and "video" in {_text(value).lower() for value in _video_outputs if _text(value)}
         and _video_intent.get("video_generation_authorized") is True
         and _video_intent.get("video_execution_owner") == "C_VIDEO"
     )
-    if _text(video_plan.get("action")).lower() == "generate" and not _video_generation_authorized:
-        video_plan.update({"action": "none", "requires_video_provider": False, "artifact_type": "text"})
+    if _text(video_plan.get("action")).lower() in {"generate", "edit"} and not _video_generation_authorized:
+        video_plan.update({"action": "none", "requires_video_provider": False, "requires_ffmpeg": False, "artifact_type": "text"})
         _apr_timing_log("c_video_operation_blocked", None, plan="free", reason="interpretation_did_not_authorize_video")
     if _video_generation_authorized:
         video_started = time.perf_counter()
@@ -3981,7 +3980,7 @@ async def execute(
             video_result = None
             _apr_timing_log(
                 "c_video_operation_failed", video_started,
-                plan="free", action="generate", error_type=type(video_error).__name__,
+                plan="free", action=_text(video_plan.get("action") or "generate"), error_type=type(video_error).__name__,
                 error=video_generation_error[:200],
             )
 
@@ -3990,7 +3989,14 @@ async def execute(
             language_key = _text(display_language).lower().replace("_", "-").split("-", 1)[0]
             _duration = int(float(video_result.get("duration_seconds") or 3))
             _duration_limit = int(video_result.get("duration_limit_seconds") or 60)
-            if video_result.get("duration_was_default") is True:
+            _video_operation = _text(video_result.get("operation") or video_plan.get("action") or "generate").lower()
+            if _video_operation == "edit":
+                video_success_copy = {
+                    "ru": "Готово: исходное видео изменено по вашему запросу. MP4 сохранён в артефактах этого диалога.",
+                    "uk": "Готово: вихідне відео змінено за вашим запитом. MP4 збережено в артефактах цього діалогу.",
+                    "en": "Done: the source video was edited as requested. The MP4 is saved in this conversation's artifacts.",
+                }
+            elif video_result.get("duration_was_default") is True:
                 video_success_copy = {
                     "ru": f"Готово: видео длительностью {_duration} с. Вы не указали время, поэтому я создала короткий ролик на 3 с по умолчанию. Для следующего видео укажите длительность прямо в запросе, например: «создай видео на 15 секунд». Максимум для текущих настроек — {_duration_limit} с.",
                     "uk": f"Готово: відео тривалістю {_duration} с. Ви не вказали час, тому я створила короткий ролик на 3 с за замовчуванням. Для наступного відео вкажіть тривалість у запиті, наприклад: «створи відео на 15 секунд». Максимум для поточних налаштувань — {_duration_limit} с.",
@@ -4036,7 +4042,7 @@ async def execute(
                 "ratio": _text(video_result.get("ratio")),
                 "audio": bool(video_result.get("audio")),
                 "task_id": _text(video_result.get("task_id")),
-                "operation": "generate",
+                "operation": _video_operation,
                 "billing": video_result.get("billing") if isinstance(video_result.get("billing"), dict) else {},
             }
             try:
@@ -4051,7 +4057,7 @@ async def execute(
                     "filename": video_payload["filename"], "mime_type": "video/mp4",
                     "provider": video_payload["provider"], "model": video_payload["model"],
                     "duration_seconds": video_payload["duration_seconds"],
-                    "operation": "generate", "source_room": "C_VIDEO",
+                    "operation": _video_operation, "source_room": "C_VIDEO",
                 })
                 packaged["answer"] = video_answer
                 packaged["content"] = video_answer
@@ -4063,7 +4069,7 @@ async def execute(
                 raw["internal_answer_en"] = "C_VIDEO generated a valid MP4; it will be persisted as a Free dialogue asset."
                 _apr_timing_log(
                     "c_video_operation_complete", video_started,
-                    plan="free", action="generate", video_bytes=len(video_bytes),
+                    plan="free", action=_video_operation, video_bytes=len(video_bytes),
                     renderer="VideoBlock", room="C_VIDEO",
                 )
             except Exception as render_error:
@@ -4157,7 +4163,7 @@ async def execute(
             raw["internal_answer_en"] = "C_VIDEO did not return a persistable MP4 artifact."
             _apr_timing_log(
                 "c_video_operation_failed_final", video_started,
-                plan="free", action="generate", error=video_generation_error[:200],
+                plan="free", action=_text(video_plan.get("action") or "generate"), error=video_generation_error[:200],
             )
 
     normalized_blocks = list(packaged["render_blocks"] or [])
@@ -4372,7 +4378,7 @@ async def execute(
                 "message_id": identity["message_id"], "size_bytes": len(generated_video_bytes),
                 "sha256": generated_video_hash,
                 "content_base64": base64.b64encode(generated_video_bytes).decode("ascii"),
-                "source_type": "free_c_video_generate", "operation": "generate",
+                "source_type": "free_c_video", "operation": _text(video_result.get("operation") or video_plan.get("action") or "generate"),
                 "provider": _text(video_result.get("provider")),
                 "model": _text(video_result.get("model")),
                 "prompt_language": _text(video_result.get("prompt_language")),
