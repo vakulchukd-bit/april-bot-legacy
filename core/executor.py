@@ -560,44 +560,72 @@ def _final_portrait_prompt(request_text: str, interpretation: dict[str, Any] | N
     if not (final_image_cue or followup_cue or possessive_or_appearance):
         return ""
 
-    def collect(value: Any, out: list[str], depth: int = 0) -> None:
-        if depth > 5 or len(out) >= 60:
+    def collect_pair(pair: Any, out: list[str]) -> None:
+        if not isinstance(pair, dict):
             return
-        if isinstance(value, str):
-            candidate = value.strip()
-            if candidate and candidate not in out:
-                out.append(candidate[:1200])
-        elif isinstance(value, dict):
-            preferred = ("active_topic", "topic", "title", "heading", "subject", "request", "original_request", "anchor", "selected_section", "text", "content", "answer", "summary", "april", "april_en", "assistant", "response", "memory_summary", "user", "user_en", "selected_pairs", "active_work_branch", "continuation_context")
-            for key in preferred:
-                if key in value:
-                    collect(value[key], out, depth + 1)
-            for key, child in value.items():
-                if key not in preferred and isinstance(child, (dict, list)):
-                    collect(child, out, depth + 1)
-        elif isinstance(value, list):
-            for child in value[:12]:
-                collect(child, out, depth + 1)
+        # Only these fields contain actual user/assistant message text. Never
+        # recurse into dialogue_transition_analysis, sequence plans, room specs,
+        # request_structure or any other interpreter metadata.
+        safe_keys = (
+            "source_user_text", "user_request", "user", "user_text", "request", "question",
+            "source_april_text", "april", "april_text", "assistant_last_message",
+            "assistant", "assistant_text", "answer", "response",
+            "april_answer_summary", "april_answer_excerpt", "summary",
+        )
+        internal_context_marker = re.compile(
+            r"(?:COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS|PROTECTED_CURRENT_INPUT|AUTHENTICATED_IDENTITY|"
+            r"CURRENT_USER_PROFILE|REQUEST_SEQUENCE|SCENE_CONTRACT|DIALOGUE_TRANSITION_ANALYSIS|"
+            r"C_ARTIFACT_RENDER_PLAN|ROOM_KNOWLEDGE_CONTEXT|ACTIVE_WORK_BRANCH|"
+            r"dialogue_transition_analysis|pre_response_analysis|semantic_intent|requested_outputs|"
+            r"output_types|machine_request_build|interpretation_ready|system_prompt|token_budget)",
+            re.IGNORECASE,
+        )
+        internal_identifier = re.compile(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b")
+        for key in safe_keys:
+            value = pair.get(key)
+            if isinstance(value, str):
+                candidate = value.strip()
+                # Some legacy summaries already contain appended interpreter
+                # guidance. Keep their clean natural-language prefix only; never
+                # send pipeline labels/instructions to the image provider.
+                marker = internal_context_marker.search(candidate)
+                if marker:
+                    candidate = candidate[:marker.start()].rstrip(" \t\r\n,;:-")
+                if len(internal_identifier.findall(candidate)) >= 2:
+                    continue
+                if candidate and candidate not in out:
+                    out.append(candidate[:1400])
 
     context_values: list[str] = []
     if isinstance(interpretation, dict):
-        dialogue = interpretation.get("dialogue")
-        collect(dialogue, context_values)
-        collect(interpretation.get("request_structure"), context_values)
-        collect(interpretation.get("input"), context_values)
+        dialogue = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+        continuation = dialogue.get("continuation_context") if isinstance(dialogue.get("continuation_context"), dict) else {}
+        anchor = continuation.get("anchor") if isinstance(continuation.get("anchor"), dict) else {}
+        collect_pair(anchor, context_values)
+        selected_pairs = continuation.get("selected_pairs") if isinstance(continuation.get("selected_pairs"), list) else []
+        for pair in selected_pairs[:6]:
+            collect_pair(pair, context_values)
+        # Small, plain-text topic/section labels are safe referents; do not walk
+        # the rest of the continuation object.
+        for label_key in ("active_topic", "topic"):
+            label = continuation.get(label_key)
+            if isinstance(label, str) and label.strip():
+                context_values.append(label.strip()[:240])
     context = "\n".join(context_values)[:9000]
 
     subject = ""
     # First use a current-turn named person after "про/about"; stop at request clauses.
     name_match = re.search(
-        r"(?:\b(?:про|об|о|about)\s+|\b(?:photo|portrait)\s+of\s+)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё.'’-]*(?:[ \t]+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё.'’-]*){0,3})",
+        r"(?:\b(?:про|об|о|about)\s+|\b(?:photo|portrait)\s+of\s+)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*(?:[ \t]+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*){0,3})",
         source, re.IGNORECASE,
     )
     if name_match:
         candidate = name_match.group(1).strip(" .,!?:;—-")
-        candidate = re.split(r"\s+(?:все|всю|всё|его|ее|её|их|опыты|жизнь|биограф\w*|ссылк\w*|ресурс\w*|and|all|his|her|their|experiments?|life|links?|resources?)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
+        candidate = re.split(r"[.!?;:\n]|\s+(?:что|кто|как|почему|когда|где|все|всю|всё|его|ее|её|их|опыты|жизнь|биограф\w*|ссылк\w*|ресурс\w*|what|which|and|all|his|her|their|experiments?|life|links?|resources?)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         if candidate and len(candidate) <= 70:
             subject = candidate
+            if re.fullmatch(r"менделеев\w*", subject.lower()):
+                subject = "Dmitri Mendeleev (Дмитрий Иванович Менделеев)"
 
     if subject and len(subject.split()) == 1:
         # The current request may use a declined surname ("Менделеева"). If the
@@ -660,11 +688,77 @@ def _build_image_spec(
         return None
 
     request_text = _text((interpretation.get("input") or {}).get("original_request"))
+    _INTERNAL_VISUAL_PROMPT_RE = re.compile(
+        r"(?:COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS|PROTECTED_CURRENT_INPUT|AUTHENTICATED_IDENTITY|"
+        r"CURRENT_USER_PROFILE|REQUEST_SEQUENCE|SCENE_CONTRACT|DIALOGUE_TRANSITION_ANALYSIS|"
+        r"C_ARTIFACT_RENDER_PLAN|ROOM_KNOWLEDGE_CONTEXT|ACTIVE_WORK_BRANCH|"
+        r"dialogue_transition_analysis|pre_response_analysis|semantic_intent|requested_outputs|"
+        r"output_types|machine_request_build|interpretation_ready|system_prompt|token_budget)",
+        re.IGNORECASE,
+    )
+
+    def _safe_visual_prompt(candidate: Any) -> str:
+        value = _text(candidate).strip()
+        if not value or len(value) > 6000 or _INTERNAL_VISUAL_PROMPT_RE.search(value):
+            return ""
+        # A cluster of uppercase snake-case identifiers is almost always an
+        # interpreter/pipeline dump, not a user-facing image description.
+        if len(re.findall(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b", value)) >= 2:
+            return ""
+        if re.search(r"<\|(?:system|assistant|developer|tool)[^|]*\|>|```", value, re.I):
+            return ""
+        return value
+
     prompt_keys = (
         "openai_structured_visual_plan_semantic", "visual_generation_prompt",
         "image_prompt", "visual_prompt", "image_description", "visual_description",
         "scene_prompt", "prompt", "description",
     )
+
+    _INTERNAL_CONTEXT_KEY_RE = re.compile(
+        r"^(?:authenticated_identity|current_user_profile|request_sequence|protected_current_input|"
+        r"protected_structured_data|scene_contract|dialogue_transition_analysis|c_artifact_render_plan|"
+        r"room_knowledge_context|active_work_branch|request_structure|semantic_interpretation|"
+        r"pre_response_analysis|system_prompt|token_budget|machine_request_build|interpretation_ready)$",
+        re.IGNORECASE,
+    )
+
+    def _sanitize_visual_context_value(value: Any, depth: int = 0) -> Any:
+        """Keep useful visual grounding while stripping interpreter/control-plane dumps."""
+        if depth > 6:
+            return None
+        if isinstance(value, str):
+            text_value = value.strip()
+            marker = _INTERNAL_VISUAL_PROMPT_RE.search(text_value)
+            if marker:
+                text_value = text_value[:marker.start()].rstrip(" \t\r\n,;:-")
+            if not text_value or len(text_value) > 8000:
+                return None
+            if len(re.findall(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b", text_value)) >= 2:
+                return None
+            if re.search(r"<\|(?:system|assistant|developer|tool)[^|]*\|>|```", text_value, re.I):
+                return None
+            return text_value
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, child in list(value.items())[:80]:
+                key_text = str(key)
+                if _INTERNAL_CONTEXT_KEY_RE.fullmatch(key_text):
+                    continue
+                cleaned = _sanitize_visual_context_value(child, depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    result[key_text] = cleaned
+            return result
+        if isinstance(value, (list, tuple)):
+            result_list = []
+            for child in list(value)[:32]:
+                cleaned = _sanitize_visual_context_value(child, depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    result_list.append(cleaned)
+            return result_list
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return None
 
     def _first_prompt(value: Any, *, allow_description: bool = True) -> str:
         if not isinstance(value, dict):
@@ -672,8 +766,9 @@ def _build_image_spec(
         keys = prompt_keys if allow_description else prompt_keys[:-1]
         for key in keys:
             candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+            safe_candidate = _safe_visual_prompt(candidate)
+            if safe_candidate:
+                return safe_candidate
         return ""
 
     def _continuation_visual_prompt() -> str:
@@ -766,7 +861,7 @@ def _build_image_spec(
         clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
         clean["prompt"] = final_portrait_prompt or _text(clean.get("prompt") or semantic)
         clean["openai_structured_visual_plan_semantic"] = semantic
-        if isinstance(raw_plan, dict):
+        if isinstance(raw_plan, dict) and not _INTERNAL_VISUAL_PROMPT_RE.search(json.dumps(raw_plan, ensure_ascii=False, default=str)):
             clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
         clean.setdefault("width", 512)
         clean.setdefault("height", 512)
@@ -774,6 +869,7 @@ def _build_image_spec(
         clean.setdefault("visual_context", {})
         if not isinstance(clean.get("visual_context"), dict):
             clean["visual_context"] = {}
+        clean["visual_context"] = _sanitize_visual_context_value(clean.get("visual_context")) or {}
         # A screenshot-style April navigation illustration must be grounded in the
         # existing screen blueprint. Do not let the image model invent unrelated UI.
         _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
@@ -782,13 +878,19 @@ def _build_image_spec(
             _nested_visual = interpretation["intent"].get("visual") if isinstance(interpretation["intent"].get("visual"), dict) else {}
             _visual_brief = _nested_visual.get("site_navigation_visual_brief") if isinstance(_nested_visual.get("site_navigation_visual_brief"), dict) else None
         if _visual_brief:
-            clean["visual_context"]["site_navigation_visual_brief"] = _visual_brief
+            # The navigation brief is useful only as visual grounding. Pass it
+            # through the same sanitizer as every other context field so nested
+            # interpreter/control-plane metadata cannot leak into image prompts.
+            safe_visual_brief = _sanitize_visual_context_value(_visual_brief)
+            if isinstance(safe_visual_brief, dict) and safe_visual_brief:
+                clean["visual_context"]["site_navigation_visual_brief"] = safe_visual_brief
         clean.setdefault("flow_id", identity["flow_id"])
         clean.setdefault("turn_id", identity["message_id"])
         clean.setdefault("user_id", identity["user_id"])
         clean.setdefault("conversation_id", identity["conversation_id"])
         clean.setdefault("dialogue_sequence_id", identity["dialog_id"])
-        clean.setdefault("dialogue_development", interpretation.get("dialogue") or {})
+        dialogue_source = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+        clean.setdefault("dialogue_development", _sanitize_visual_context_value(dialogue_source) or {})
         return clean
 
     # Canonical form requested by the Provider contract.
