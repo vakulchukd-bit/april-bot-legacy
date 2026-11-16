@@ -117,6 +117,7 @@ def _wallet_connection():
                     balance_credits BIGINT NOT NULL DEFAULT 0,
                     debt_credits BIGINT NOT NULL DEFAULT 0,
                     credits_migrated BOOLEAN NOT NULL DEFAULT FALSE,
+                    credit_conversion_version INTEGER NOT NULL DEFAULT 0,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     currency TEXT NOT NULL DEFAULT 'USD',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -151,6 +152,7 @@ def _wallet_connection():
                     usd_per_1000_provider_credits NUMERIC(14,6) NOT NULL DEFAULT 0,
                     markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2,
                     billing_mode TEXT NOT NULL DEFAULT 'test_bonus',
+                    credit_pricing_version INTEGER NOT NULL DEFAULT 0,
                     currency TEXT NOT NULL DEFAULT 'USD',
                     payment_status TEXT NOT NULL DEFAULT 'pending',
                     payment_source TEXT NOT NULL DEFAULT 'liqpay_google_pay',
@@ -162,11 +164,13 @@ def _wallet_connection():
             cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS balance_credits BIGINT NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS debt_credits BIGINT NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS credits_migrated BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS credit_conversion_version INTEGER NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallet_transactions ADD COLUMN IF NOT EXISTS delta_credits BIGINT NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS credits_to_issue BIGINT NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS usd_per_1000_provider_credits NUMERIC(14,6) NOT NULL DEFAULT 0")
             cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2")
             cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS billing_mode TEXT NOT NULL DEFAULT 'test_bonus'")
+            cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS credit_pricing_version INTEGER NOT NULL DEFAULT 0")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_tx_user_created ON april_video_wallet_transactions(user_id, created_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_orders_user_created ON april_video_wallet_orders(user_id, created_at DESC)")
         conn.commit()
@@ -178,52 +182,65 @@ def _wallet_connection():
 
 
 def _april_credits_for_usd_minor(amount_minor: int, usd_per_1000_provider_credits: Any) -> int:
-    """Convert USD cents to April credits at the provider-cost basis.
+    """Convert a USD payment into internal wallet units.
 
-    One provider credit consumes exactly 2 April credits. Thus one April
-    credit carries one provider-credit cost unit; the customer's total
-    price remains 2x the provider's cost.
+    One visible April Video Credit is backed by two internal units. The 2x
+    customer price is applied once when credits are purchased; video operations
+    consume two internal units per provider credit. The cabinet exposes only
+    visible credits (internal units / 2), never the internal multiplier.
     """
     rate = Decimal(str(usd_per_1000_provider_credits))
     if rate <= 0:
         raise CVideoError("VIDEO_WALLET_PRICING_NOT_CONFIGURED")
     amount_minor = max(0, int(amount_minor or 0))
-    credits = (Decimal(amount_minor) * Decimal("10") / rate).to_integral_value(rounding=ROUND_FLOOR)
-    return max(0, int(credits))
+    # rate is the provider's cost in USD per 1,000 provider credits.
+    # customer pays 2x, so USD cents convert to 2x internal units.
+    internal_units = (Decimal(amount_minor) * Decimal("10") / rate).to_integral_value(rounding=ROUND_FLOOR)
+    return max(0, int(internal_units))
 
 
-def _usd_minor_for_april_credits(april_credits: int, usd_per_1000_provider_credits: Any) -> int:
-    """Return a conservative USD-cent equivalent for audit/display only."""
+def _usd_minor_for_april_credits(internal_units: int, usd_per_1000_provider_credits: Any) -> int:
+    """Return the user-facing USD equivalent for internal wallet units."""
     rate = Decimal(str(usd_per_1000_provider_credits))
     if rate <= 0:
         raise CVideoError("VIDEO_WALLET_PRICING_NOT_CONFIGURED")
-    value = Decimal(max(0, int(april_credits or 0))) * rate / Decimal("10")
+    value = Decimal(max(0, int(internal_units or 0))) * rate / Decimal("10")
     return int(value.to_integral_value(rounding=ROUND_CEILING)) if value else 0
 
 
+def _rebalance_net_units(balance_units: int, debt_units: int, delta_net_units: int) -> tuple[int, int]:
+    """Apply a one-time historical credit correction without losing consumed value."""
+    net = int(balance_units or 0) - int(debt_units or 0) + int(delta_net_units or 0)
+    return (net, 0) if net >= 0 else (0, -net)
+
+
 def _ensure_wallet_credit_state(cur: Any, user_id: str, unit_cost: Any) -> dict[str, int]:
-    """Convert an existing USD wallet into credits exactly once."""
+    """Migrate legacy USD balances and repair the earlier over-credit conversion once."""
     cur.execute("""
-        SELECT balance_minor, balance_credits, debt_credits, credits_migrated
+        SELECT balance_minor, balance_credits, debt_credits, credits_migrated,
+               credit_conversion_version
         FROM april_video_wallets WHERE user_id=%s FOR UPDATE
     """, (user_id,))
     wallet = cur.fetchone()
     if not wallet:
         raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
+
     balance = int(wallet.get("balance_credits") or 0)
     debt = int(wallet.get("debt_credits") or 0)
+    version = int(wallet.get("credit_conversion_version") or 0)
+
     if not bool(wallet.get("credits_migrated")):
         legacy_balance_minor = int(wallet.get("balance_minor") or 0)
         legacy_minor = max(0, legacy_balance_minor)
         legacy_debt_minor = max(0, -legacy_balance_minor)
-        migrated_credits = _april_credits_for_usd_minor(legacy_minor, unit_cost)
-        migrated_debt = _april_credits_for_usd_minor(legacy_debt_minor, unit_cost)
-        balance = migrated_credits
-        debt += migrated_debt
+        migrated_units = _april_credits_for_usd_minor(legacy_minor, unit_cost)
+        migrated_debt_units = _april_credits_for_usd_minor(legacy_debt_minor, unit_cost)
+        balance = migrated_units
+        debt = migrated_debt_units
         cur.execute("""
             UPDATE april_video_wallets
             SET balance_minor=0, balance_credits=%s, debt_credits=%s,
-                credits_migrated=TRUE, updated_at=NOW()
+                credits_migrated=TRUE, credit_conversion_version=3, updated_at=NOW()
             WHERE user_id=%s
         """, (balance, debt, user_id))
         safe_user = re.sub(r"[^A-Za-z0-9._:-]", "", user_id)[:80] or uuid.uuid4().hex
@@ -235,10 +252,11 @@ def _ensure_wallet_credit_state(cur: Any, user_id: str, unit_cost: Any) -> dict[
                 VALUES (%s, %s, 'migration', 'completed', %s, %s,
                         'migration', 'Legacy USD balance converted to April Video Credits', %s::jsonb)
                 ON CONFLICT(reference) DO NOTHING
-            """, (user_id, f"migration:usd-wallet-v1:{safe_user}", legacy_minor, migrated_credits,
+            """, (user_id, f"migration:usd-wallet-v1:{safe_user}", legacy_minor, migrated_units,
                   json.dumps({"legacy_balance_minor": legacy_minor,
                               "usd_per_1000_provider_credits": float(unit_cost),
-                              "conversion": "floor(USD * 1000 / provider_USD_per_1000)"})))
+                              "credit_conversion_version": 3,
+                              "conversion": "USD / (2x provider cost per credit); two internal units per visible April credit"})))
         if legacy_debt_minor > 0:
             cur.execute("""
                 INSERT INTO april_video_wallet_transactions
@@ -247,9 +265,102 @@ def _ensure_wallet_credit_state(cur: Any, user_id: str, unit_cost: Any) -> dict[
                 VALUES (%s, %s, 'migration_debt', 'completed', %s, %s,
                         'migration', 'Legacy wallet overage converted to credit debt', %s::jsonb)
                 ON CONFLICT(reference) DO NOTHING
-            """, (user_id, f"migration:usd-wallet-v1-debt:{safe_user}", -legacy_debt_minor, -migrated_debt,
+            """, (user_id, f"migration:usd-wallet-v1-debt:{safe_user}", -legacy_debt_minor, -migrated_debt_units,
                   json.dumps({"legacy_debt_minor": legacy_debt_minor,
-                              "usd_per_1000_provider_credits": float(unit_cost)})))
+                              "usd_per_1000_provider_credits": float(unit_cost),
+                              "credit_conversion_version": 3})))
+        version = 3
+
+    elif version < 3:
+        # Previous Stage-1 migration could grant 100,000 credits per dollar if
+        # APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS was mis-set. Reprice every
+        # historical migration/top-up issuance from its original USD amount.
+        cur.execute("""
+            SELECT id, reference, kind, delta_minor, delta_credits, metadata
+            FROM april_video_wallet_transactions
+            WHERE user_id=%s AND kind IN ('migration', 'migration_debt', 'topup', 'reversal')
+            ORDER BY created_at ASC, id ASC
+            FOR UPDATE
+        """, (user_id,))
+        rows = cur.fetchall() or []
+        net_adjustment = 0
+        for row in rows:
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if int(meta.get("credit_conversion_version") or meta.get("credit_pricing_version") or 0) >= 3:
+                continue
+            old_delta = int(row.get("delta_credits") or 0)
+            kind = _text(row.get("kind")).lower()
+            if kind == "migration":
+                original_minor = max(0, int(meta.get("legacy_balance_minor") or row.get("delta_minor") or 0))
+                if original_minor <= 0:
+                    continue
+                target_delta = _april_credits_for_usd_minor(original_minor, unit_cost)
+            elif kind == "migration_debt":
+                original_minor = max(0, int(meta.get("legacy_debt_minor") or abs(int(row.get("delta_minor") or 0))))
+                if original_minor <= 0:
+                    continue
+                target_delta = -_april_credits_for_usd_minor(original_minor, unit_cost)
+            elif kind == "topup":  # historical paid top-up
+                original_minor = max(0, int(row.get("delta_minor") or 0))
+                if original_minor <= 0 or old_delta <= 0:
+                    continue
+                target_delta = _april_credits_for_usd_minor(original_minor, unit_cost)
+                old_repaid = max(0, int(meta.get("debt_repaid") or 0))
+                old_spendable = max(0, int(meta.get("spendable_credits", old_delta - old_repaid) or 0))
+                target_repaid = min(target_delta, old_repaid)
+                target_spendable = max(0, target_delta - target_repaid)
+                meta["debt_repaid"] = target_repaid
+                meta["spendable_credits"] = target_spendable
+                order_id = _text(meta.get("order_id"))
+                if order_id:
+                    cur.execute("""
+                        UPDATE april_video_wallet_orders
+                        SET credits_to_issue=%s, usd_per_1000_provider_credits=%s,
+                            markup_multiplier=2, credit_pricing_version=3
+                        WHERE order_id=%s AND user_id=%s
+                    """, (target_delta, unit_cost, order_id, user_id))
+            else:  # payment reversal must be repriced with its original top-up
+                order_id = _text(meta.get("order_id"))
+                if not order_id:
+                    continue
+                cur.execute("""
+                    SELECT delta_credits, delta_minor FROM april_video_wallet_transactions
+                    WHERE user_id=%s AND reference=%s AND kind='topup'
+                    FOR UPDATE
+                """, (user_id, "topup:" + order_id))
+                original_topup = cur.fetchone() or {}
+                original_minor = max(0, int(original_topup.get("delta_minor") or abs(int(row.get("delta_minor") or 0))))
+                if original_minor <= 0:
+                    continue
+                target_delta = -_april_credits_for_usd_minor(original_minor, unit_cost)
+            if target_delta != old_delta:
+                net_adjustment += target_delta - old_delta
+                meta["previous_delta_credits"] = old_delta
+                meta["credit_conversion_version"] = 3
+                meta["credit_pricing_version"] = 3
+                meta["reconciled_from_usd_minor"] = original_minor
+                cur.execute("""
+                    UPDATE april_video_wallet_transactions
+                    SET delta_credits=%s, metadata=%s::jsonb, updated_at=NOW()
+                    WHERE id=%s
+                """, (target_delta, json.dumps(meta), int(row["id"])))
+            else:
+                meta["credit_conversion_version"] = 3
+                meta["credit_pricing_version"] = 3
+                cur.execute("""
+                    UPDATE april_video_wallet_transactions
+                    SET metadata=%s::jsonb, updated_at=NOW() WHERE id=%s
+                """, (json.dumps(meta), int(row["id"])))
+
+        balance, debt = _rebalance_net_units(balance, debt, net_adjustment)
+        cur.execute("""
+            UPDATE april_video_wallets
+            SET balance_credits=%s, debt_credits=%s,
+                credit_conversion_version=3, updated_at=NOW()
+            WHERE user_id=%s
+        """, (balance, debt, user_id))
+        version = 3
+
     return {"balance_credits": balance, "debt_credits": debt}
 
 
@@ -280,8 +391,8 @@ def enable_video_wallet(user_id: Any) -> dict[str, Any]:
         conn.commit()
         return {
             "success": True, "enabled": bool(row.get("enabled")),
-            "balance_credits": int(row.get("balance_credits") or 0),
-            "debt_credits": int(row.get("debt_credits") or 0),
+            "balance_credits": int(row.get("balance_credits") or 0) // 2,
+            "debt_credits": (int(row.get("debt_credits") or 0) + 1) // 2,
             "currency": row.get("currency") or "USD", "pricing_ready": pricing_ready,
         }
     except Exception:
@@ -296,11 +407,13 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT balance_minor, balance_credits, debt_credits, credits_migrated, enabled, currency
+                SELECT balance_minor, balance_credits, debt_credits, credits_migrated,
+                       credit_conversion_version, enabled, currency
                 FROM april_video_wallets WHERE user_id=%s
             """, (canonical,))
             wallet = cur.fetchone() or {}
             pricing_ready = False
+            unit_cost = None
             if wallet and wallet.get("enabled"):
                 try:
                     unit_cost = _video_cost_per_1000_credits(canonical)
@@ -315,8 +428,7 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
                         raise
             cur.execute("""
                 SELECT id, reference, kind, status, delta_minor, delta_credits,
-                       provider_cost_minor, provider_credits, markup_multiplier,
-                       operation, description, created_at
+                       provider_credits, operation, description, created_at
                 FROM april_video_wallet_transactions
                 WHERE user_id=%s
                 ORDER BY created_at DESC, id DESC LIMIT %s
@@ -326,20 +438,36 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
                 item = dict(row)
                 created = item.get("created_at")
                 item["created_at"] = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
-                for key in ("delta_minor", "delta_credits", "provider_cost_minor", "provider_credits"):
-                    item[key] = int(item.get(key) or 0)
-                item["markup_multiplier"] = float(item.get("markup_multiplier") or 2)
+                provider_credits = max(0, int(item.get("provider_credits") or 0))
+                internal_delta = int(item.get("delta_credits") or 0)
+                # Legacy USD-wallet video rows did not persist delta_credits.
+                if internal_delta == 0 and provider_credits and _text(item.get("kind")).lower() == "video_debit":
+                    internal_delta = -provider_credits * 2
+                item["delta_minor"] = int(item.get("delta_minor") or 0)
+                if unit_cost is not None and provider_credits and _text(item.get("kind")).lower() == "video_debit":
+                    _provider_minor, customer_minor = _video_price_for_credits(provider_credits, unit_cost)
+                    item["delta_minor"] = -customer_minor
+                item["delta_credits"] = int(internal_delta / 2)
+                # Provider accounting and internal multiplier are deliberately private.
+                item.pop("provider_credits", None)
+                item.pop("markup_multiplier", None)
+                item.pop("provider_cost_minor", None)
                 transactions.append(item)
         conn.commit()
+        balance_units = int(wallet.get("balance_credits") or 0) if wallet else 0
+        debt_units = int(wallet.get("debt_credits") or 0) if wallet else 0
         return {
             "success": True,
             "enabled": bool(wallet.get("enabled")) if wallet else False,
-            "balance_credits": int(wallet.get("balance_credits") or 0) if wallet else 0,
-            "debt_credits": int(wallet.get("debt_credits") or 0) if wallet else 0,
+            "balance_credits": balance_units // 2,
+            "debt_credits": (debt_units + 1) // 2,
             "legacy_balance_minor": int(wallet.get("balance_minor") or 0) if wallet else 0,
             "currency": _text(wallet.get("currency") if wallet else "USD") or "USD",
-            "markup_multiplier": _video_markup_multiplier(),
             "pricing_ready": pricing_ready,
+            "package_options": ([
+                {"amount_usd": amount, "credits_to_issue": _april_credits_for_usd_minor(amount * 100, unit_cost) // 2}
+                for amount in (5, 10, 20, 50)
+            ] if unit_cost is not None else []),
             "transactions": transactions,
         }
     except Exception:
@@ -347,6 +475,7 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
         raise
     finally:
         conn.close()
+
 
 def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, Any]:
     canonical = _wallet_identity(user_id)
@@ -374,17 +503,15 @@ def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, 
             cur.execute("""
                 INSERT INTO april_video_wallet_orders
                     (order_id, user_id, amount_minor, credits_to_issue,
-                     usd_per_1000_provider_credits, markup_multiplier, billing_mode, currency)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'USD')
+                     usd_per_1000_provider_credits, markup_multiplier, billing_mode, credit_pricing_version, currency)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 3, 'USD')
             """, (order_id, canonical, amount_minor, credits_to_issue,
                   unit_cost, _video_markup_multiplier(), billing_mode))
         conn.commit()
         return {
             "success": True, "order_id": order_id, "amount": amount,
             "amount_minor": amount_minor, "currency": "USD",
-            "credits_to_issue": credits_to_issue,
-            "usd_per_1000_provider_credits": float(unit_cost),
-            "markup_multiplier": _video_markup_multiplier(),
+            "credits_to_issue": credits_to_issue // 2,
             "payment_status": "pending",
             "description": f"April Video Credits top-up ${amount}.",
         }
@@ -405,7 +532,7 @@ def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT order_id, amount_minor, credits_to_issue, currency,
-                       payment_status, created_at, paid_at
+                       payment_status, created_at, paid_at, credit_pricing_version
                 FROM april_video_wallet_orders WHERE order_id=%s AND user_id=%s
             """, (order_key, canonical))
             row = cur.fetchone()
@@ -416,7 +543,7 @@ def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]
             "success": True, "order_id": row["order_id"],
             "amount": round(int(row["amount_minor"]) / 100, 2),
             "amount_minor": int(row["amount_minor"]),
-            "credits_to_issue": int(row.get("credits_to_issue") or 0),
+            "credits_to_issue": int(row.get("credits_to_issue") or 0) // 2,
             "currency": row["currency"], "payment_status": row["payment_status"],
             "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
             "paid_at": row["paid_at"].isoformat() if row.get("paid_at") else "",
@@ -518,7 +645,7 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
                     "user_id": order["user_id"],
                     "order_amount_minor": int(order["amount_minor"]),
                     "order_currency": order["currency"],
-                    "credited_credits": int(order.get("credits_to_issue") or 0),
+                    "credited_credits": int(order.get("credits_to_issue") or 0) // 2,
                 }
             if _text(order.get("payment_status")).lower() != "pending":
                 conn.rollback()
@@ -529,7 +656,8 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
 
             unit_cost = Decimal(str(order.get("usd_per_1000_provider_credits") or 0))
             credits_to_issue = int(order.get("credits_to_issue") or 0)
-            if unit_cost <= 0 or credits_to_issue <= 0:
+            pricing_version = int(order.get("credit_pricing_version") or 0)
+            if unit_cost <= 0 or credits_to_issue <= 0 or pricing_version < 3:
                 # Upgrade a pending order created by the previous USD-wallet
                 # version without changing its already-fixed payment amount.
                 unit_cost = Decimal(str(_video_cost_per_1000_credits(order["user_id"])))
@@ -541,7 +669,7 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
                 cur.execute("""
                     UPDATE april_video_wallet_orders
                     SET credits_to_issue=%s, usd_per_1000_provider_credits=%s,
-                        markup_multiplier=%s, billing_mode=%s
+                        markup_multiplier=%s, billing_mode=%s, credit_pricing_version=3
                     WHERE order_id=%s
                 """, (credits_to_issue, unit_cost, _video_markup_multiplier(), billing_mode, order_key))
                 order["credits_to_issue"] = credits_to_issue
@@ -584,6 +712,7 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
                     "spendable_credits": spendable_credits,
                     "usd_per_1000_provider_credits": float(unit_cost),
                     "billing_mode": _text(order.get("billing_mode") or "test_bonus"),
+                    "credit_pricing_version": 3,
                 }),
             ))
             if not cur.fetchone():
@@ -599,10 +728,10 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
         return {
             "success": True, "order_id": order_key, "payment_status": "paid",
             "user_id": order["user_id"], "order_amount_minor": int(amount_minor),
-            "order_currency": "USD", "credited_credits": credits_to_issue,
-            "debt_repaid": debt_repaid,
-            "balance_credits": int(after.get("balance_credits") or 0),
-            "debt_credits": int(after.get("debt_credits") or 0),
+            "order_currency": "USD", "credited_credits": credits_to_issue // 2,
+            "debt_repaid": debt_repaid // 2,
+            "balance_credits": int(after.get("balance_credits") or 0) // 2,
+            "debt_credits": (int(after.get("debt_credits") or 0) + 1) // 2,
         }
     except Exception:
         conn.rollback()
@@ -616,19 +745,27 @@ def _video_markup_multiplier() -> float:
 
 
 def _video_cost_per_1000_credits(user_id: Any = None) -> float:
+    """Return provider cost per 1,000 credits from a clear 12,000-credit price.
+
+    Current configured baseline is $19 / 12,000 provider credits. The old
+    *_USD_PER_1000_CREDITS values are intentionally ignored because they were
+    easy to confuse with per-credit or package prices and caused over-crediting.
+    """
     billing_mode = _magic_hour_billing_mode(user_id)
-    env_name = "APRIL_VIDEO_TEST_USD_PER_1000_CREDITS" if billing_mode == "test_bonus" else "APRIL_MAGIC_HOUR_USD_PER_1000_CREDITS"
+    env_name = (
+        "APRIL_VIDEO_TEST_USD_PER_12000_CREDITS"
+        if billing_mode == "test_bonus"
+        else "APRIL_MAGIC_HOUR_USD_PER_12000_CREDITS"
+    )
     error_code = "APRIL_VIDEO_TEST_COST_NOT_CONFIGURED" if billing_mode == "test_bonus" else "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED"
-    raw = os.getenv(env_name, "").strip()
-    if not raw:
-        raise CVideoError(error_code)
+    raw = os.getenv(env_name, "19").strip()
     try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
+        bundle_cost = Decimal(raw)
+    except Exception as exc:
         raise CVideoError(error_code) from exc
-    if not 0.01 <= value <= 100.0:
+    if not Decimal("1") <= bundle_cost <= Decimal("10000"):
         raise CVideoError(error_code)
-    return value
+    return float(bundle_cost / Decimal("12"))
 
 
 def _video_price_for_credits(credits: int, unit_cost_per_1000: float) -> tuple[int, int]:
@@ -732,9 +869,7 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
                 return {
                     "success": True, "already_settled": True,
                     "charged_minor": abs(int(tx.get("delta_minor") or 0)),
-                    "charged_credits": abs(int(tx.get("delta_credits") or 0)),
-                    "provider_credits": int(tx.get("provider_credits") or 0),
-                    "markup_multiplier": _video_markup_multiplier(),
+                    "charged_credits": abs(int(tx.get("delta_credits") or 0)) // 2,
                     "status": _text(tx.get("status")),
                 }
             old_reserved_credits = abs(int(tx.get("delta_credits") or reservation.get("reserve_credits") or 0))
@@ -785,11 +920,9 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
         conn.commit()
         return {
             "success": True, "charged_minor": actual_minor if not refund else 0,
-            "charged_credits": actual_april_credits if not refund else 0,
-            "provider_cost_minor": provider_minor, "provider_credits": actual_credits,
-            "markup_multiplier": _video_markup_multiplier(),
+            "charged_credits": (actual_april_credits // 2) if not refund else 0,
             "billing_mode": _text(reservation.get("billing_mode") or "commercial"),
-            "balance_credits": balance, "debt_credits": debt,
+            "balance_credits": balance // 2, "debt_credits": (debt + 1) // 2,
             "status": "refunded" if refund else status,
         }
     except Exception:
