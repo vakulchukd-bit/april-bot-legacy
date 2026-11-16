@@ -742,7 +742,7 @@ def _has_affirmative_visual_instruction(text: str) -> bool:
     if _is_explicit_visual_revision_request(low):
         return True
 
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    image_noun = r"(?:портрет\w*|фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     negated_prefix = re.compile(
         r"(?:\bне|\bни|\bникогда|\bnever|\bnot|\bdon't|\bdo\s+not|\bdidn't|\bdoesn't|"
         r"\b(?:i\s+)?(?:did\s+not|didn't)\s+ask\s+you\s+to|"
@@ -896,7 +896,7 @@ def _is_visual_capability_question(text: str) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
-    image_noun = r"(?:фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
+    image_noun = r"(?:портрет\w*|фото\b|фотограф\w*|фотк\w*|снимк\w*|картинк\w*|изображени\w*|иллюстраци\w*|рисун\w*|\bimage\b|\bphoto\b|\bpicture\w*|\billustration\w*)"
     if not re.search(image_noun, low, re.IGNORECASE):
         return False
     # If a concrete present-turn action is expressed, let the edit/generation path
@@ -1238,8 +1238,8 @@ def _detect_image_generation_request(text: str) -> bool:
     if self_portrait:
         return True
 
-    action = r"(?:draw|show|display|send|give|provide|create|make|generate|render|нарис\w*|покаж\w*|показ\w*|пришл\w*|отправ\w*|дай\w*|выдай\w*|предостав\w*|отобраз\w*|созда\w*|сдела\w*|сгенерир\w*|изобраз\w*)"
-    image_noun = r"(?:picture|image|illustration|drawing|photo|картинк\w*|рисун\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
+    action = r"(?:draw|show|display|send|give|provide|create|make|generate|render|нарисуй(?:те)?|нарисовать|покажи(?:те)?|показать|отобрази(?:те)?|отобразить|пришли(?:те)?|прислать|отправь(?:те)?|отправить|дай(?:те)?|дать|выдай(?:те)?|выдать|предоставь(?:те)?|предоставить|создай(?:те)?|создать|сделай(?:те)?|сделать|сгенерируй(?:те)?|сгенерировать|изобрази(?:те)?|изобразить)"
+    image_noun = r"(?:picture|image|illustration|drawing|photo|portrait\w*|screenshot\w*|screen\s*capture|портрет\w*|скриншот\w*|картинк\w*|рисун\w*|изображени\w*|иллюстраци\w*|фотк\w*|фото\b|фотограф\w*|снимк\w*)"
     # Permit polite words and ordinary modifiers, but do not skip a preceding
     # explicit schema/graph/table noun to reinterpret its object as an image.
     filler = r"(?:(?!(?:схем\w*|диаграмм\w*|график\w*|таблиц\w*|черт[её]ж\w*)\b)[\w-]+\s+)"
@@ -1319,7 +1319,8 @@ def _implicit_visual_request_as_diagram(text: str, existing_outputs: list[str] |
 
     action = bool(re.search(
         r"(?<![\w\u0080-\uffff])(?:draw|depict|sketch|illustrate|show|display|render|visuali[sz]e|"
-        r"нарис\w*|изобраз\w*|покаж\w*|показ\w*|отобраз\w*|визуализир\w*)(?![\w\u0080-\uffff])",
+        r"нарисуй(?:те)?|нарисовать|изобрази(?:те)?|изобразить|покажи(?:те)?|показать|"
+        r"отобрази(?:те)?|отобразить|визуализируй(?:те)?|визуализировать)(?![\w\u0080-\uffff])",
         low,
     ))
     if not action:
@@ -1331,8 +1332,10 @@ def _implicit_visual_request_as_diagram(text: str, existing_outputs: list[str] |
     nonvisual_target = bool(re.search(
         r"(?:ответ\w*|результат\w*|статус\w*|ссылк\w*|текст\w*|сообщен\w*|"
         r"инструкц\w*|объяснен\w*|объясн\w*|описан\w*|истори\w*|список\w*|"
+        r"файл\w*|документ\w*|вложени\w*|источник\w*|адрес\w*|"
         r"путь\w*\s+в\s+меню|настройк\w*\s+аккаунт\w*|"
         r"answer\w*|result\w*|status\w*|link\w*|text\w*|message\w*|"
+        r"file\w*|document\w*|attachment\w*|source\w*|url\w*|"
         r"instruction\w*|explanation\w*|description\w*|history\w*|list\w*)",
         low,
     ))
@@ -1567,10 +1570,19 @@ def _detect_requested_outputs(text: str) -> list[str]:
     file_delivery_request = bool(re.search(
         r"(?:\b(?:пришли|пришлите|дай|дайте|выдай|выдайте|приложи|приложите|прикрепи|прикрепите|сохрани|экспортируй|экспортировать|скачай|скачать|отправь|отправить|сформируй|сформировать|сделай|создай|сгенерируй|напиши)\b.{0,100}\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b|"
         r"\b(?:файл\w*|файлом|xlsx|excel|csv|pdf|docx)\b.{0,80}\b(?:для\s+скачиван\w*|скачать|скачиван\w*)\b|"
+        r"\b(?:файл\w*|файлом)\b.{0,90}\b(?:пришл\w*|присла\w*|отправ\w*|дай\w*|выдай\w*|прикреп\w*|сформир\w*|скача\w*|сохран\w*)\b|"
         r"\b(?:send|give|export|download|save|deliver|create|generate|write)\b.{0,100}\b(?:file|xlsx|csv|pdf|docx|excel)\b|(?:таблиц\w*|код\w*|скрипт\w*|текст\w*).{0,65}(?:\bв\s+(?:отдельн\w*\s+)?файл\w*|\bв\s+(?:формат\w*\s+)?(?:xlsx|excel|csv|pdf|docx)\b|\bfile\b|\bxlsx\b|\bcsv\b|\bpdf\b|\bdocx\b))",
         low, re.I | re.S,
     ))
-    if file_delivery_request and "file" not in result:
+    file_view_request = bool(re.search(
+        r"(?:\b(?:show|display|open|send|give|provide|download|export|attach)\b\s+(?:(?:me|the|this|that)\s+){0,3}(?:file|document|attachment)\b|"
+        r"\b(?:покажи(?:те)?|показать|отобрази(?:те)?|отобразить|открой(?:те)?|открыть|пришли(?:те)?|прислать|"
+        r"отправь(?:те)?|отправить|дай(?:те)?|дать|выдай(?:те)?|выдать|прикрепи(?:те)?|прикрепить|скачай(?:те)?|скачать)\b"
+        r"\s+(?:(?:мне|нам|этот|эту|это|этого|сам|самый|отдельный|готовый|исправленный)\s+){0,4}(?:файл\w*|документ\w*|вложени\w*)|"
+        r"(?:файл\w*|документ\w*|вложени\w*)\s+(?:мне\s+)?(?:покажи(?:те)?|показать|пришли(?:те)?|отправь(?:те)?|дай(?:те)?|выдай(?:те)?|открой(?:те)?)\b)",
+        low, re.IGNORECASE,
+    ))
+    if (file_delivery_request or file_view_request) and "file" not in result:
         result.append("file")
     if ui_instruction_request:
         # Existing-media / account-navigation guidance is never a generated image.
@@ -1592,17 +1604,36 @@ def _detect_requested_outputs(text: str) -> list[str]:
         and not _is_self_portrait_generation_request(low)
     )
     explicit_image_request = False if (ui_instruction_request or incidental_nonvisual_followup) else _detect_image_generation_request(low)
-    portrait_request = False if (ui_instruction_request or incidental_nonvisual_followup) else _detect_portrait_request(low)
+    # Portrait is an independent requested visual deliverable; keep it when a
+    # table, graph, or diagram is requested in the same turn. The portrait helper
+    # already rejects image discussion/corrections without a new visual action.
+    portrait_request = False if ui_instruction_request else _detect_portrait_request(low)
     if (explicit_image_request or portrait_request) and "image" not in result:
         result.append("image")
     explicit_link_request = _detect_link_request(low)
     if explicit_link_request and "link" not in result:
         result.append("link")
-    if explicit_image_request:
-        # The requested output is the picture itself. Do not also classify
-        # words describing the picture (e.g. "картинку со схемой") as a
-        # separate schematic artifact. A scheme named before "на картинке"
-        # does not enter this branch and keeps the diagram route.
+    # Keep an independently commanded diagram even when a portrait/image is also
+    # requested. Only remove a diagram that is merely part of the picture description.
+    diagram_command = r"(?:show|display|create|make|draw|build|render|покажи(?:те)?|показать|отобрази(?:те)?|отобразить|создай(?:те)?|создать|сделай(?:те)?|сделать|нарисуй(?:те)?|нарисовать|построй(?:те)?|построить)"
+    explicit_diagram_action = bool(re.search(
+        rf"(?:\b{diagram_command}\b\s+(?:мне\s+)?(?:наглядн\w*\s+|полную\s+|простую\s+)?(?:схем\w*|диаграмм\w*|flowchart|diagram)\b|"
+        rf"(?:схем\w*|диаграмм\w*|flowchart|diagram)\s+(?:мне\s+)?\b{diagram_command}\b)",
+        low, re.IGNORECASE,
+    ))
+    # One imperative may govern two coordinated deliverables: "нарисуй его
+    # портрет и схему". Keep the portrait and the separate diagram instead of
+    # treating the latter as a decorative detail of the image prompt.
+    coordinated_diagram_action = bool(re.search(
+        r"(?:нарисуй(?:те)?|покажи(?:те)?|создай(?:те)?|сделай(?:те)?|построй(?:те)?|"
+        r"draw|show|create|make|build)\s+(?:мне\s+)?[\s\S]{0,90}?"
+        r"(?:портрет\w*|картинк\w*|изображени\w*|фото\w*|picture\w*|image\w*|portrait\w*|photo\w*)"
+        r"[\s\S]{0,65}?(?:и|а\s+также|and|as\s+well\s+as)\s+"
+        r"(?:его\s+|ее\s+|её\s+|также\s+)?(?:схем\w*|диаграмм\w*|flowchart|diagram)\b",
+        low, re.IGNORECASE,
+    ))
+    explicit_diagram_action = explicit_diagram_action or coordinated_diagram_action
+    if explicit_image_request and not explicit_diagram_action:
         result = [kind for kind in result if kind != "diagram"]
 
     # Keep a diagram request when the user asks for an explanation first and then
@@ -1614,12 +1645,7 @@ def _detect_requested_outputs(text: str) -> list[str]:
         r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
         low, re.IGNORECASE,
     ))
-    diagram_visual_action = bool(re.search(
-        r"(?:\b(?:draw|show|display|create|build|render|visuali[sz]e)\b|"
-        r"нарис\w*|постро\w*|покаж\w*|показ\w*|отобраз\w*|изобраз\w*|сдела\w*|визуализир\w*)",
-        low, re.IGNORECASE,
-    ))
-    if explicit_diagram_target and diagram_visual_action and not explicit_image_request and "diagram" not in result:
+    if explicit_diagram_target and explicit_diagram_action and "diagram" not in result:
         result.append("diagram")
     # Catch compound/hyphenated programming requests such as "Python-код" even when
     # the exact phrase is absent from the phrase table. A code noun alone is not enough.
@@ -1629,8 +1655,10 @@ def _detect_requested_outputs(text: str) -> list[str]:
         low, re.IGNORECASE,
     ))
     has_code_action = bool(re.search(
-        r"\b(?:напиш\w*|созда\w*|сгенерир\w*|покаж\w*|дай\w*|выдай\w*|исправ\w*|перепиш\w*|"
-        r"оптимизир\w*|улучш\w*|рефактор\w*|write|create|generate|show|give|provide|fix|rewrite|refactor|optimi[sz]e)\b",
+        r"\b(?:напиши(?:те)?|написать|создай(?:те)?|создать|сгенерируй(?:те)?|сгенерировать|покажи(?:те)?|показать|"
+        r"дай(?:те)?|дать|выдай(?:те)?|выдать|исправь(?:те)?|исправить|перепиши(?:те)?|переписать|"
+        r"оптимизируй(?:те)?|оптимизировать|улучши(?:те)?|улучшить|рефакторь|рефакторить|"
+        r"write|create|generate|show|give|provide|fix|rewrite|refactor|optimi[sz]e)\b",
         low, re.IGNORECASE,
     ))
     if has_code_noun and has_code_action and "code" not in result:
@@ -1645,7 +1673,12 @@ def _detect_requested_outputs(text: str) -> list[str]:
     has_graph_action = bool(re.search(
         # Stem matching catches inflected forms like "построим", "построила",
         # and polite/imperative variants without depending on exact endings.
-        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|постро\w*|созда\w*|покаж\w*|нарис\w*|сдела\w*|визуализир\w*|побуд\w*|пришл\w*|выдай\w*|вывед\w*|дай\w*|отобраз\w*|представ\w*|добав\w*|допол\w*|исправ\w*|измен\w*|обнов\w*|перестро\w*|передел\w*|редакт\w*|улучш\w*)\b",
+        r"\b(?:build|create|show|draw|plot|make|visualize|visualise|построй(?:те)?|построить|создай(?:те)?|создать|"
+        r"покажи(?:те)?|показать|нарисуй(?:те)?|нарисовать|сделай(?:те)?|сделать|визуализируй(?:те)?|визуализировать|"
+        r"побудуй(?:те)?|побудувати|пришли(?:те)?|прислать|выдай(?:те)?|выдать|выведи(?:те)?|вывести|дай(?:те)?|дать|"
+        r"отобрази(?:те)?|отобразить|представь(?:те)?|представить|добавь(?:те)?|добавить|дополни(?:те)?|дополнить|"
+        r"исправь(?:те)?|исправить|измени(?:те)?|изменить|обнови(?:те)?|обновить|перестрой(?:те)?|перестроить|"
+        r"переделай(?:те)?|переделать|редактируй(?:те)?|редактировать|улучши(?:те)?|улучшить)\b",
         low,
     ))
     if has_graph_noun and has_graph_action and "graph" not in result:
@@ -1763,7 +1796,9 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         and not _is_self_portrait_generation_request(low)
     )
     explicit_image_request = False if incidental_nonvisual_followup else _detect_image_generation_request(low)
-    portrait_request = False if incidental_nonvisual_followup else _detect_portrait_request(low)
+    # Preserve an explicitly requested portrait as a separate output when the
+    # same turn also asks for a table, graph, file, or diagram.
+    portrait_request = _detect_portrait_request(low)
     structured_visual_explanation = _is_structured_visual_explanation_request(low)
 
     comparison = bool(re.search(
@@ -1796,18 +1831,13 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     # Semantic contract: formula language requests a FormulaRenderer, applications/examples
     # request a populated TableBlock, and an explicit appearance question requests an
     # illustrative image. These cues are independent and cumulative, not exclusive.
-    if formula_cue and "formula" not in outputs:
-        outputs.append("formula")
     if structured_visual_explanation and "diagram" not in outputs:
         outputs.append("diagram")
-    if application_cue and "table" not in outputs:
-        outputs.append("table")
     if portrait_request and "image" not in outputs:
         outputs.append("image")
 
-    if comparison and "table" not in outputs:
-        outputs.append("table")
-    if workflow_or_architecture and not explicit_image_request and "diagram" not in outputs:
+    explicit_workflow_visual_action = _has_affirmative_visual_instruction(low)
+    if workflow_or_architecture and explicit_workflow_visual_action and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
 
     # Table intent may use Russian inverted word order or an adjective between
@@ -1817,10 +1847,11 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
     table_noun = r"(?:\btable\b|\bтаблиц\w*)"
     table_action = (
         r"(?:\b(?:show|display|build|create|make|prepare|construct|render|generate|draw|list|provide|present|print|output|export)\b|"
-        r"покаж\w*|отобраз\w*|постро\w*|созда\w*|сдела\w*|подготов\w*|сформир\w*|"
-        r"состав\w*|вывед\w*|вывел\w*|выдай\w*|выда\w*|распечат\w*|напечат\w*|"
-        r"представ\w*|нарис\w*|перечисл\w*|предостав\w*|выстав\w*|собер\w*|"
-        r"створи\w*|покажи|виведи\w*|надруку\w*|зроби\w*)"
+        r"покажи(?:те)?|показать|отобрази(?:те)?|отобразить|построй(?:те)?|построить|создай(?:те)?|создать|сделай(?:те)?|сделать|"
+        r"подготовь(?:те)?|подготовить|сформируй(?:те)?|сформировать|составь(?:те)?|составить|выведи(?:те)?|вывести|"
+        r"выдай(?:те)?|выдать|распечатай(?:те)?|распечатать|напечатай(?:те)?|напечатать|представь(?:те)?|представить|"
+        r"нарисуй(?:те)?|нарисовать|перечисли(?:те)?|перечислить|предоставь(?:те)?|предоставить|собери(?:те)?|собрать|"
+        r"створи(?:те)?|створити|побудуй(?:те)?|побудувати|виведи(?:те)?|вивести|надрукуй(?:те)?|надрукувати|зроби(?:те)?|зробити)"
     )
     # Requests often contain an inflected table noun and an output verb in a
     # different clause: "элементы в таблице, вывел каждый в своё окошко; выдай
@@ -1837,7 +1868,7 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"(?:full\s+periodic\s+table).{0,50}(?:table|elements))",
         low, re.IGNORECASE,
     ))
-    if (table_request or table_grid_request) and "table" not in outputs:
+    if (table_request or (table_grid_request and _has_affirmative_visual_instruction(low))) and "table" not in outputs:
         outputs.append("table")
 
     # Explicit renderer requests remain hard requirements. When no renderer is
@@ -1853,10 +1884,19 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
         r"диаграмм\w*|схем\w*|чертеж\w*|креслен\w*|блок[- ]схем\w*)",
         low,
     ))
-    if visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
+    diagram_command = r"(?:show|display|create|make|draw|build|render|покажи(?:те)?|показать|отобрази(?:те)?|отобразить|создай(?:те)?|создать|сделай(?:те)?|сделать|нарисуй(?:те)?|нарисовать|построй(?:те)?|построить)"
+    explicit_diagram_action = bool(re.search(
+        rf"(?:\b{diagram_command}\b\s+(?:мне\s+)?(?:наглядн\w*\s+|полную\s+|простую\s+)?(?:схем\w*|диаграмм\w*|flowchart|diagram)\b|"
+        rf"(?:схем\w*|диаграмм\w*|flowchart|diagram)\s+(?:мне\s+)?\b{diagram_command}\b)",
+        low, re.IGNORECASE,
+    ))
+    if explicit_diagram_action and "diagram" not in outputs:
+        outputs.append("diagram")
+    elif visual_action and explicit_diagram_intent and not explicit_image_request and "diagram" not in outputs:
         outputs.append("diagram")
     if explicit_image_request:
-        outputs = [kind for kind in outputs if kind != "diagram"]
+        # Keep independent diagram requests in the same turn. Image intent is
+        # additive, not a reason to delete a separately requested visual.
         if "image" not in outputs:
             outputs.append("image")
     elif "graph" not in outputs and _implicit_visual_request_as_diagram(low, outputs) and "diagram" not in outputs:
@@ -1866,14 +1906,30 @@ def _enhance_requested_outputs(text: str, explicit_outputs: list[str]) -> list[s
 
     # Formula view only for a clearly mathematical request. Graphs remain explicit
     # unless the request asks to plot/visualize data or a function.
-    if mathematical_function and bool(re.search(
-        r"(?:формул\w*|уравнен\w*|запиши\w*|реши\w*|formula|equation|derive|solve|write\s+the)"
-        r"|(?:график\w*|построй\w*|визуализир\w*|plot\s+the|graph\s+of)", low
-    )) and "formula" not in outputs and "graph" not in outputs:
+    formula_noun = bool(re.search(
+        r"(?:\bformula\b|\bequation\b|формул\w*|уравнен\w*)", low, re.IGNORECASE
+    ))
+    formula_action = bool(re.search(
+        r"(?:\b(?:write|show|draw|display|render|derive|solve|give|present)\b|"
+        r"напиши(?:те)?|написать|покажи(?:те)?|показать|нарисуй(?:те)?|нарисовать|"
+        r"запиши(?:те)?|записать|выведи(?:те)?|вывести|реши(?:те)?|решить|"
+        r"представь(?:те)?|представить|отобрази(?:те)?|отобразить)",
+        low, re.IGNORECASE,
+    ))
+    if formula_noun and formula_action and not explicit_image_request and "formula" not in outputs and "graph" not in outputs:
         outputs.append("formula")
 
     if _is_image_discussion_without_new_visual_action(low):
         outputs = [kind for kind in outputs if kind != "image"]
+    diagram_description_only = bool(re.search(
+        r"(?:\b(?:what|how|why)\b.{0,80}\b(?:show|shows|showing|represent|represents|depict|depicts|mean|means|explain|explains)\b.{0,70}\b(?:diagram|chart|graph|schematic)\b|"
+        r"(?:что|как|почему)\s*.{0,90}(?:показыва\w*|отобража\w*|означа\w*|объясня\w*|изобража\w*).{0,70}(?:диаграмм\w*|схем\w*|график\w*)|"
+        r"(?:объясни\w*|поясни\w*|расскажи\w*|опиши\w*).{0,80}(?:диаграмм\w*|схем\w*|график\w*)|"
+        r"(?:диаграмм\w*|схем\w*|график\w*).{0,60}(?:что\s+(?:знач\w*|означа\w*)|как\s+читать))",
+        low, re.IGNORECASE | re.DOTALL,
+    ))
+    if diagram_description_only and not _has_affirmative_visual_instruction(low):
+        outputs = [kind for kind in outputs if kind not in {"diagram", "graph"}]
     if "text" not in outputs:
         outputs.insert(0, "text")
     return list(dict.fromkeys(outputs))
