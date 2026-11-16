@@ -593,7 +593,7 @@ def _is_feedback_control_help_request(text: Any) -> bool:
 
 
 def _explicit_video_output_intent(
-    text: Any, attachments: Any = None, *, allow_edit: bool = False,
+    text: Any, attachments: Any = None, *, allow_edit: bool = True,
 ) -> tuple[bool, list[str]]:
     """Resolve a C_VIDEO output using the same source-aware room classifier."""
     try:
