@@ -2121,7 +2121,8 @@ APRIL_UI_HELP_QUERY_CASE_COUNT = len({case[0] for case in APRIL_UI_HELP_ALIAS_RO
 _SITE_NAVIGATION_ACTION_RE = re.compile(
     r"(?:куда\s+(?:мне\s+)?(?:зайти|нажать|перейти|открыть)|как\s+(?:зайти|попасть|перейти|открыть|найти|посмотреть|просмотреть|скачать|сохранить|скопировать|поделиться|сортир\w*|поверн\w*|увелич\w*|уменьш\w*|измен\w*|управля\w*|сброс\w*|разверн\w*|сверн\w*|масштаб\w*|ракурс\w*)|"
     r"как.{0,70}?(?:скача\w*|сохран\w*|скопир\w*|поделит\w*|download|save|copy|share)|"
-    r"где\s+(?:(?:у\s+(?:меня|тебя|вас|april|април)\s+)?(?:находится|расположен|найти|открыть|посмотреть|вход|кнопк|ссылк)|.{0,55}(?:вход|кнопк|ссылк))|покажи\s+(?:мне\s+)?(?:куда|путь|раздел|ссылк)|"
+    r"где\s+(?:(?:у\s+(?:меня|тебя|вас|april|април)\s+)?(?:находится|расположен|найти|открыть|посмотреть|вход|кнопк|ссылк)|.{0,55}(?:вход|кнопк|ссылк))|"
+    r"где.{0,65}(?:находится|расположен|найти|открыть|посмотреть)|покажи\s+(?:мне\s+)?(?:куда|путь|раздел|ссылк)|"
     r"проведи\s+меня|как\s+пользоваться|по\s+сайту|по\s+интерфейсу|навигац|"
     r"where\s+(?:do\s+i|can\s+i)|how\s+do\s+i\s+(?:open|find|navigate|download|save|copy|share)|how\s+to\s+(?:download|save|copy|share)|where\s+is|show\s+me\s+where)",
     re.IGNORECASE,
@@ -2132,7 +2133,6 @@ _SITE_NAVIGATION_ACTION_RE = re.compile(
 _SITE_UI_TARGET_RE = re.compile(
     r"(?:кабинет|профил\w*|аккаунт|раздел|кнопк\w*|меню|сайт|интерфейс|страниц\w*|"
     r"истор\w*\s+диалог\w*|сообществ\w*|тариф\w*|подписк\w*|памят\w*|удален\w*|"
-    r"таблиц\w*|график\w*|диаграмм\w*|код\w*|артефакт\w*|"
     r"поддержк\w*|community|profile|account|settings|history|support|help center|features|capabilities|"
     r"april\s+(?:web|interface|site|screen|account|profile)|април\w*.{0,25}(?:сайт|интерфейс|страниц|профил|настройк)|"
     r"эйприл\w*.{0,25}(?:сайт|интерфейс|страниц|профил|настройк)|скриншот\w*|снимок\s+экрана|"
@@ -2374,7 +2374,10 @@ def _site_direct_function_intent(query: str) -> bool:
 def _is_video_help_query(query: str) -> bool:
     """Identify questions about April's video workflow without treating them as generation commands."""
     low = _text(query).lower().replace("ё", "е")
-    if not low or not re.search(r"(?iu)(?:виде\w*|ролик\w*|клип\w*|відео|video|clip|фото|фотографи\w*|картинк\w*|изображени\w*|image|photo)", low):
+    # This is a guide for the video workflow, not a catch-all for image/table
+    # requests. A photo or image mention alone must never divert an ordinary
+    # knowledge request into the April interface-help room.
+    if not low or not re.search(r"(?iu)(?:виде\w*|ролик\w*|клип\w*|відео|video|clip)", low):
         return False
     # A direct imperative belongs to C_VIDEO, not to the help knowledge route.
     direct_generation = bool(re.search(
@@ -4008,6 +4011,83 @@ def _site_help_requested(machine_request: Any) -> bool:
 
 
 
+def _site_navigation_map_requested(machine_request: Any) -> bool:
+    """Allow the IT room's route appendix/map only for a real site-navigation task.
+
+    is_site_help_query() intentionally also recognizes conceptual April/API/architecture
+    questions. Those may use IT-room knowledge, but they do not authorize injecting
+    website routes or a route diagram into the answer.
+    """
+    raw_query = _current_user_query(machine_request)
+    query, removed_negative_clause = _effective_site_help_query(raw_query)
+    low = str(query or "").strip().lower().replace("ё", "е")
+    if not low or removed_negative_clause:
+        return False
+
+    # A concrete navigation verb must be tied to a real April UI target. Generic
+    # media nouns (table/image/file/chart) are intentionally insufficient.
+    explicit_ui_navigation = bool(
+        (_SITE_NAVIGATION_ACTION_RE.search(low) and _has_site_ui_target(low))
+        or (
+            _SITE_EXPLICIT_DIAGRAM_RE.search(low)
+            and _has_site_ui_target(low)
+            and re.search(r"(?:покажи|покажите|выведи|отобрази|нарисуй|создай|построй|сделай|show|draw|create|build)", low, re.I)
+        )
+    )
+    explicit_site_map = _site_full_interface_overview_requested(low)
+    explicit_attachment_guide = _is_attachment_instruction_query(low)
+    explicit_plan_navigation = _is_april_premium_navigation_query(low)
+    if explicit_ui_navigation or explicit_site_map or explicit_attachment_guide or explicit_plan_navigation:
+        return True
+
+    # A short follow-up may inherit a previously selected UI route only when the
+    # semantic layer explicitly marks it as a site-navigation continuation and
+    # supplies a real route ID. Never infer that from stale history alone.
+    if _ELLIPTICAL_SITE_FOLLOWUP_RE.search(low):
+        if isinstance(machine_request, dict):
+            intent = machine_request.get("intent") if isinstance(machine_request.get("intent"), dict) else machine_request
+        else:
+            intent = getattr(machine_request, "intent", {})
+            intent = intent if isinstance(intent, dict) else {}
+        nested = intent.get("interpretation") if isinstance(intent.get("interpretation"), dict) else {}
+        nested_intent = intent.get("intent") if isinstance(intent.get("intent"), dict) else {}
+        nested_structure = intent.get("request_structure") if isinstance(intent.get("request_structure"), dict) else {}
+        valid_ids = {
+            str(area.get("id")) for area in APRIL_SITE_MAP.get("areas", [])
+            if isinstance(area, dict) and area.get("id")
+        }
+        known_function_ids = {
+            str(item.get("id")) for item in APRIL_UI_FUNCTION_CATALOG.get("functions", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        dialogue = intent.get("dialogue") if isinstance(intent.get("dialogue"), dict) else {}
+        relation = _text(dialogue.get("relation")).upper()
+        semantic = nested_structure.get("semantic_interpretation") if isinstance(nested_structure.get("semantic_interpretation"), dict) else {}
+        features = semantic.get("features") if isinstance(semantic.get("features"), dict) else semantic.get("intent_features", {})
+        features = features if isinstance(features, dict) else {}
+        contextual = bool(
+            features.get("context_dependent_question")
+            or features.get("previous_assistant_output_reference")
+            or features.get("strong_anaphoric_reference")
+            or _text(semantic.get("primary_intent") or semantic.get("semantic_intent") or semantic.get("intent")).upper()
+                in {"TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP"}
+        )
+        for source in (intent, nested, nested_intent, nested_structure):
+            refs = source.get("site_navigation_referent") or source.get("site_navigation_target_ids")
+            carried = source.get("site_navigation_target_functions")
+            if (
+                source.get("site_navigation_context_followup")
+                and isinstance(refs, list)
+                and any(str(ref) in valid_ids for ref in refs)
+                and isinstance(carried, list)
+                and any(str(value) in known_function_ids for value in carried)
+                and (relation in {"CONTINUE", "FOLLOWUP", "CONTINUATION"} or source.get("site_navigation_context_source") == "selected_active_dialogue_branch")
+                and (contextual or source.get("site_navigation_context_source") == "selected_active_dialogue_branch")
+            ):
+                return True
+    return False
+
+
 def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: Any) -> Dict[str, Any]:
     """Deterministically add clickable route links and a source-derived route diagram to UI-help answers.
 
@@ -4019,7 +4099,13 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         return decoded
     current_query = _current_user_query(machine_request)
     requested_outputs = _requested_outputs_from_machine_request(machine_request)
-    if not _site_should_render_diagram(current_query, requested_outputs):
+    site_help_requested = _site_help_requested(machine_request)
+    site_navigation_map_requested = site_help_requested and _site_navigation_map_requested(machine_request)
+    # This function owns April's site-navigation map, not general-purpose
+    # diagrams. Conceptual IT/API/architecture questions may use this room's
+    # knowledge, but only a concrete UI-navigation request authorizes route links.
+    # A thematic diagram requested by the user must be rendered by its own renderer.
+    if not (site_navigation_map_requested and _site_should_render_diagram(current_query, requested_outputs)):
         # Renderer correction: preserve the textual answer and all non-diagram
         # artifacts, but drop an unsolicited diagram block from this turn.
         original_blocks = decoded.get("render_blocks")
@@ -4042,7 +4128,47 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 if isinstance(value, str):
                     value = re.split(r"\n\s*(?:\*\*)?(?:проверенные переходы|verified links)(?:\*\*)?\s*:", value, maxsplit=1, flags=re.I)[0].rstrip()
                     decoded[text_key] = value
-    if not _site_help_requested(machine_request):
+    if not site_navigation_map_requested:
+        # UI route links are a room-owned supplement, not part of an ordinary
+        # knowledge answer. A misrouted or legacy IT response can carry this
+        # trailer even after its diagram/link renderers are filtered. Remove the
+        # complete route-only trailer for every non-UI request, not just social
+        # acknowledgements, while preserving the substantive answer above it.
+        def _strip_route_trailer(value: Any) -> Any:
+            if not isinstance(value, str) or not value.strip():
+                return value
+            return re.split(
+                r"\n\s*(?:\*\*)?(?:проверенные переходы|verified links)(?:\*\*)?\s*:",
+                value,
+                maxsplit=1,
+                flags=re.I,
+            )[0].rstrip()
+
+        text_keys = ("answer", "content", "text", "message", "markdown", "display_text")
+        for text_key in text_keys:
+            if text_key in decoded:
+                decoded[text_key] = _strip_route_trailer(decoded.get(text_key))
+        # The Web consumes render_blocks, not just the response envelope. Keep
+        # every text alias and payload copy synchronized so a legacy block cannot
+        # reintroduce the route appendix after the envelope has been cleaned.
+        for collection_key in ("render_blocks", "artifacts"):
+            items = decoded.get(collection_key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                block_type = _text(item.get("type") or item.get("artifact_type") or "text").lower()
+                renderer = _text(item.get("renderer") or item.get("viewer")).lower()
+                if block_type in {"text", "markdown", "message", "message_text"} or renderer in {"messagetextblock", "textblock", "markdownblock"}:
+                    for text_key in text_keys:
+                        if isinstance(item.get(text_key), str):
+                            item[text_key] = _strip_route_trailer(item[text_key])
+                    payload = item.get("payload")
+                    if isinstance(payload, dict):
+                        for text_key in text_keys:
+                            if isinstance(payload.get(text_key), str):
+                                payload[text_key] = _strip_route_trailer(payload[text_key])
         return decoded
     context: Dict[str, Any] = {}
     routing = getattr(machine_request, "routing", {}) if not isinstance(machine_request, dict) else machine_request.get("routing", {})
