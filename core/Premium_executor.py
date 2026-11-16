@@ -2004,31 +2004,38 @@ def _renderer_plan(
 
 
 def _final_portrait_prompt(request_text: str) -> str:
-    """Return a portrait-only prompt when the user explicitly reserved an image for last."""
+    """Build a clean standalone portrait brief for an explicitly requested person image."""
     source = _text(request_text)
     low = source.lower().replace("ё", "е")
+    portrait_noun = r"(?:изображени\w*|картинк\w*|портрет\w*|фото\b|фотографи\w*|снимк\w*|image\w*|picture\w*|portrait\w*|photo\w*)"
+    action = r"(?:покаж\w*|изобраз\w*|представ\w*|нарис\w*|созда\w*|сгенерир\w*|show|display|present|draw|create|generate)"
+    direct_image = bool(
+        re.search(rf"{action}\s+(?:мне\s+)?(?:его\s+|ее\s+|её\s+|их\s+)?{portrait_noun}", low, re.I)
+        or re.search(rf"(?:его|ее|её|их|his|her|their)\s+{portrait_noun}", low, re.I)
+        or re.search(r"(?:как\s+(?:он|она|они)\s+выгляд\w*|внешност\w*|appearance|look\s+like|portrait\s+of)", low, re.I)
+    )
     final_image_cue = bool(re.search(
-        r"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)"
-        r"[\s\S]{0,140}?(?:покаж\w*|изобраз\w*|представ\w*|show|display|present)"
-        r"[\s\S]{0,90}?(?:изображени\w*|картинк\w*|портрет\w*|фото\b|image\w*|picture\w*|portrait\w*)",
-        low, re.IGNORECASE,
+        rf"(?:в\s+(?:самом\s+)?конце|напоследок|в\s+завершени\w*|at\s+the\s+end|finally)[\s\S]{{0,140}}?{action}[\s\S]{{0,90}}?{portrait_noun}",
+        low, re.I,
     ))
-    if not final_image_cue:
+    if not (direct_image or final_image_cue):
         return ""
+
     subject_match = re.search(
-        r"(?:про|об|о|about)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’-]*){0,3}?)"
-        r"(?=\s+(?:все|всю|всё|его|ее|её|их|формул\w*|истори\w*|кратк\w*|and|all|his|her|their|formul\w*|biograph\w*)|[,.;!?]|$)",
-        source,
-        re.IGNORECASE,
+        r"(?:про|об|о|about)\s+([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’-]*)(?=[\s,.;:!?]|$)",
+        source, re.I,
     )
     subject = _text(subject_match.group(1) if subject_match else "").strip(" .,!?:;")
+    if re.fullmatch(r"менделеев[а-яё]*", subject.lower()):
+        subject = "Dmitri Mendeleev (Дмитрий Иванович Менделеев)"
     if not subject:
         return ""
     return (
         f"Create one standalone, historically grounded portrait of {subject}. "
-        "This is the final portrait in a factual educational answer. Show only the subject; "
-        "do not create an infographic, poster, collage, formula sheet, diagrams, panels, labels, captions, "
-        "or any text. Use a clear composition, natural proportions, coherent lighting, and a neutral background."
+        "This is one separate visual deliverable; do not combine it with any requested table, "
+        "diagram, chart, formula sheet, or document. Show only the person, with historically "
+        "plausible clothing and appearance, natural proportions, coherent lighting, and a "
+        "neutral background. Do not add labels, captions, borders, or text."
     )
 
 
@@ -2702,6 +2709,27 @@ def _has_concrete_image_plan(raw: dict[str, Any]) -> bool:
     """True only if a provider response includes a non-empty explicit image spec."""
     if not isinstance(raw, dict):
         return False
+    _INTERNAL_VISUAL_PROMPT_RE = re.compile(
+        r"(?:COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS|PROTECTED_CURRENT_INPUT|AUTHENTICATED_IDENTITY|"
+        r"CURRENT_USER_PROFILE|REQUEST_SEQUENCE|SCENE_CONTRACT|DIALOGUE_TRANSITION_ANALYSIS|"
+        r"C_ARTIFACT_RENDER_PLAN|ROOM_KNOWLEDGE_CONTEXT|ACTIVE_WORK_BRANCH|"
+        r"dialogue_transition_analysis|pre_response_analysis|semantic_intent|requested_outputs|"
+        r"output_types|machine_request_build|interpretation_ready|system_prompt|token_budget)",
+        re.IGNORECASE,
+    )
+
+    def _safe_visual_prompt(candidate: Any) -> str:
+        value = _text(candidate).strip()
+        if not value or len(value) > 6000 or _INTERNAL_VISUAL_PROMPT_RE.search(value):
+            return ""
+        # A cluster of uppercase snake-case identifiers is almost always an
+        # interpreter/pipeline dump, not a user-facing image description.
+        if len(re.findall(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b", value)) >= 2:
+            return ""
+        if re.search(r"<\|(?:system|assistant|developer|tool)[^|]*\|>|```", value, re.I):
+            return ""
+        return value
+
     prompt_keys = (
         "openai_structured_visual_plan_semantic", "visual_generation_prompt",
         "image_prompt", "visual_prompt", "prompt",
@@ -2847,6 +2875,69 @@ def _build_image_spec(
         "image_prompt", "visual_prompt", "image_description", "visual_description",
         "scene_prompt", "prompt", "description",
     )
+    _INTERNAL_VISUAL_PROMPT_RE = re.compile(
+        r"(?:COUNT_AND_CLASSIFY_CURRENT_REQUEST_TASKS|PROTECTED_CURRENT_INPUT|AUTHENTICATED_IDENTITY|"
+        r"CURRENT_USER_PROFILE|REQUEST_SEQUENCE|SCENE_CONTRACT|DIALOGUE_TRANSITION_ANALYSIS|"
+        r"C_ARTIFACT_RENDER_PLAN|ROOM_KNOWLEDGE_CONTEXT|ACTIVE_WORK_BRANCH|"
+        r"dialogue_transition_analysis|pre_response_analysis|semantic_intent|requested_outputs|"
+        r"output_types|machine_request_build|interpretation_ready|system_prompt|token_budget)",
+        re.IGNORECASE,
+    )
+
+    def _safe_visual_prompt(candidate: Any) -> str:
+        value = _text(candidate).strip()
+        if not value or len(value) > 6000 or _INTERNAL_VISUAL_PROMPT_RE.search(value):
+            return ""
+        if len(re.findall(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b", value)) >= 2:
+            return ""
+        if re.search(r"<\|(?:system|assistant|developer|tool)[^|]*\|>|```", value, re.I):
+            return ""
+        return value
+
+    _INTERNAL_CONTEXT_KEY_RE = re.compile(
+        r"^(?:authenticated_identity|current_user_profile|request_sequence|protected_current_input|"
+        r"protected_structured_data|scene_contract|dialogue_transition_analysis|c_artifact_render_plan|"
+        r"room_knowledge_context|active_work_branch|request_structure|semantic_interpretation|"
+        r"pre_response_analysis|system_prompt|token_budget|machine_request_build|interpretation_ready)$",
+        re.IGNORECASE,
+    )
+
+    def _sanitize_visual_context_value(value: Any, depth: int = 0) -> Any:
+        """Keep useful visual grounding while stripping interpreter/control-plane dumps."""
+        if depth > 6:
+            return None
+        if isinstance(value, str):
+            text_value = value.strip()
+            marker = _INTERNAL_VISUAL_PROMPT_RE.search(text_value)
+            if marker:
+                text_value = text_value[:marker.start()].rstrip(" \t\r\n,;:-")
+            if not text_value or len(text_value) > 8000:
+                return None
+            if len(re.findall(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]{2,})+\b", text_value)) >= 2:
+                return None
+            if re.search(r"<\|(?:system|assistant|developer|tool)[^|]*\|>|```", text_value, re.I):
+                return None
+            return text_value
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, child in list(value.items())[:80]:
+                key_text = str(key)
+                if _INTERNAL_CONTEXT_KEY_RE.fullmatch(key_text):
+                    continue
+                cleaned = _sanitize_visual_context_value(child, depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    result[key_text] = cleaned
+            return result
+        if isinstance(value, (list, tuple)):
+            result_list = []
+            for child in list(value)[:32]:
+                cleaned = _sanitize_visual_context_value(child, depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    result_list.append(cleaned)
+            return result_list
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return None
 
     def _first_prompt(value: Any, *, allow_description: bool = True) -> str:
         if not isinstance(value, dict):
@@ -2854,8 +2945,9 @@ def _build_image_spec(
         keys = prompt_keys if allow_description else prompt_keys[:-1]
         for key in keys:
             candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
+            safe_candidate = _safe_visual_prompt(candidate)
+            if safe_candidate:
+                return safe_candidate
         return ""
 
     def _canonicalize(candidate: Any, *, raw_plan: Any = None) -> dict[str, Any] | None:
@@ -2915,7 +3007,8 @@ def _build_image_spec(
         clean["request_anchor"] = _text(clean.get("request_anchor") or request_text)
         clean["prompt"] = dialogue_portrait_prompt or final_portrait_prompt or _text(clean.get("prompt") or semantic)
         clean["openai_structured_visual_plan_semantic"] = semantic
-        if isinstance(raw_plan, dict) and not final_portrait_prompt and not dialogue_portrait_prompt:
+        if (isinstance(raw_plan, dict) and not final_portrait_prompt and not dialogue_portrait_prompt
+                and not _INTERNAL_VISUAL_PROMPT_RE.search(json.dumps(raw_plan, ensure_ascii=False, default=str))):
             clean.setdefault("openai_structured_visual_plan_raw", raw_plan)
         clean.setdefault("width", 512)
         clean.setdefault("height", 512)
@@ -2923,6 +3016,7 @@ def _build_image_spec(
         clean.setdefault("visual_context", {})
         if not isinstance(clean.get("visual_context"), dict):
             clean["visual_context"] = {}
+        clean["visual_context"] = _sanitize_visual_context_value(clean.get("visual_context")) or {}
         if safe_alternative_after_refusal:
             # The only authorized visual subject is the model's explicit bounded
             # alternative; do not carry hazardous source dimensions/assembly text
@@ -3029,6 +3123,7 @@ def _build_image_spec(
             # Do not rebuild or replace OpenAI's plan with a stale thread title.
             # The generator receives the current instruction plus the latest reply
             # and artifact facts as grounding, while the structured plan stays intact.
+            grounding = ""
             if latest_answer_text or artifact_facts:
                 grounding = (
                     "Verified latest April answer: " + latest_answer_text[:1800] + ". "
@@ -3041,8 +3136,9 @@ def _build_image_spec(
                 )
                 if active_branch_evidence:
                     grounding += "\nVerified selected active-branch evidence (not a global history search): " + active_branch_evidence
-            clean["visual_context"]["latest_answer_grounding"] = grounding[:6800]
-            clean["visual_context"]["active_branch_evidence_source"] = "authenticated_state_manager_selected_pairs"
+            if grounding:
+                clean["visual_context"]["latest_answer_grounding"] = grounding[:6800]
+                clean["visual_context"]["active_branch_evidence_source"] = "authenticated_state_manager_selected_pairs"
         # A screenshot-style April navigation illustration must be grounded in the
         # existing screen blueprint. Do not let the image model invent unrelated UI.
         _visual_source = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else {}
@@ -3051,13 +3147,19 @@ def _build_image_spec(
             _nested_visual = interpretation["intent"].get("visual") if isinstance(interpretation["intent"].get("visual"), dict) else {}
             _visual_brief = _nested_visual.get("site_navigation_visual_brief") if isinstance(_nested_visual.get("site_navigation_visual_brief"), dict) else None
         if _visual_brief:
-            clean["visual_context"]["site_navigation_visual_brief"] = _visual_brief
+            # The navigation brief is useful only as visual grounding. Pass it
+            # through the same sanitizer as every other context field so nested
+            # interpreter/control-plane metadata cannot leak into image prompts.
+            safe_visual_brief = _sanitize_visual_context_value(_visual_brief)
+            if isinstance(safe_visual_brief, dict) and safe_visual_brief:
+                clean["visual_context"]["site_navigation_visual_brief"] = safe_visual_brief
         clean.setdefault("flow_id", identity["flow_id"])
         clean.setdefault("turn_id", identity["message_id"])
         clean.setdefault("user_id", identity["user_id"])
         clean.setdefault("conversation_id", identity["conversation_id"])
         clean.setdefault("dialogue_sequence_id", identity["dialog_id"])
-        clean.setdefault("dialogue_development", interpretation.get("dialogue") or {})
+        dialogue_source = interpretation.get("dialogue") if isinstance(interpretation.get("dialogue"), dict) else {}
+        clean.setdefault("dialogue_development", _sanitize_visual_context_value(dialogue_source) or {})
         return clean
 
     # Ambiguous-but-materially-plausible readings may each need their own image.
