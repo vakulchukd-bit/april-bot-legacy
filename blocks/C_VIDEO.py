@@ -1205,6 +1205,13 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
         r"(?<![\w])" + video_noun + r".{0,55}(?:generate|create|animate)\b",
         low, re.I | re.S,
     )))
+    direct_video_creation_phrase = bool(re.search(
+        r"(?iu)\b(?:сделай(?:те)?|сделать|создай(?:те)?|создать|сгенерируй(?:те)?|"
+        r"генерируй(?:те)?|зроби(?:те)?|створи(?:те)?|згенеруй(?:те)?|"
+        r"make|create|generate)\s+(?:(?:мне|нам|коротк\w*|небольш\w*|a|an|the)\s+){0,3}"
+        r"(?:виде\w*|ролик\w*|клип\w*|відео|video|clip)\b", low
+    ))
+    explicit_create = bool(explicit_create or direct_video_creation_phrase)
     generic_create = explicit_create
     # Editing also consumes paid provider credits for remote AI edits. Require
     # an actual editing instruction, not a noun/topic such as "format" or a
@@ -1213,6 +1220,11 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
         r"(?iu)\b(?:обрежи(?:те)?|обрежь(?:те)?|вырежи(?:те)?|вырежь(?:те)?|укороти(?:те)?|нарежь(?:те)?|склей(?:те)?|"
         r"соедини(?:те)?|вставь(?:те)?|наложи(?:те)?|улучши(?:те)?|стабилизируй(?:те)?|"
         r"кадрируй(?:те)?|смонтируй(?:те)?|перемонтируй(?:те)?|отредактируй(?:те)?|редактируй(?:те)?|"
+        r"измени(?:те)?|переделай(?:те)?|переработай(?:те)?|покажи(?:те)?|"
+        r"разлей(?:те)?|разлейся|разли\w*|разол\w*|вылей(?:те)?|выливай(?:те)?|вылил\w*|"
+        r"опрокинь\w*|опрокид\w*|переверни\w*|урони\w*|разбей(?:те)?|разбрызгай(?:те)?|"
+        r"пролей\w*|пролил\w*|плесни\w*|преврати(?:те)?|добавь(?:те)?|убери(?:те)?|замени(?:те)?|"
+        r"spill\w*|pour\w*|tip\s+over|knock\s+over|flip|turn\s+over|break\w*|shatter\w*|splash\w*|"
         r"trim|crop|cut|splice|insert|overlay|enhance|improve|sharpen|denoise|stabili[sz]e|edit|montage)\b",
         low,
     ))
@@ -1230,18 +1242,24 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
     image_animation_request = bool(
         images and re.search(
             r"(?iu)(?:оживи(?:те)?|анимируй(?:те)?|сделай(?:те)?\s+(?:из\s+)?(?:эт\w*\s+)?(?:фото|фотографи\w*|картинк\w*|изображени\w*)\s+(?:коротк\w*\s+)?(?:видео|ролик)|"
+            r"(?:из\s+)?(?:эт\w*\s+)?(?:фото|фотографи\w*|картинк\w*|изображени\w*).{0,180}"
+            r"(?:сделай(?:те)?|создай(?:те)?|сгенерируй(?:те)?|зроби(?:те)?|створи(?:те)?).{0,45}(?:виде\w*|ролик\w*|відео|video)|"
             r"animate\s+(?:this\s+)?(?:photo|picture|image)|turn\s+(?:this\s+)?image\s+into\s+(?:a\s+)?video)", low, re.I,
         )
     )
+    # A request to change events inside an uploaded clip is an AI EDIT even when
+    # the user casually ends with "make a video". Never reduce it to image-to-video
+    # from a sampled frame: that loses the source timeline and the requested action.
+    source_video_scene_edit = bool(videos and edit_words and not advice_or_howto_request)
     # Explicit creation starts a new render. An uploaded source plus a direct
     # editing command starts an edit. Advice/capability questions never start a paid
     # operation; they remain ordinary text questions even when media is attached.
     if advice_or_howto_request:
         action = "none"
+    elif source_video_scene_edit:
+        action = "edit"
     elif image_animation_request:
         action = "generate"
-    elif videos and edit_words and not re.search(r"(?iu)\b(?:создай|создайте|сгенерируй|сгенерируйте|generate|create)\b", low):
-        action = "edit"
     elif explicit_create:
         action = "generate"
     elif generic_create and not videos:
@@ -1260,7 +1278,7 @@ def classify_video_request(text: str, attachments: Any = None) -> dict[str, Any]
         "video_input_count": len(videos),
         "has_image_input": bool(images),
         "image_input_count": len(images),
-        "requires_video_provider": action == "generate",
+        "requires_video_provider": action == "generate" or (action == "edit" and _requires_remote_ai_edit(value)),
         "requires_ffmpeg": action == "edit" or action == "analyze",
         "analysis_method": "sampled_ordered_frames" if action == "analyze" else "not_applicable",
         "artifact_type": "video" if action in {"generate", "edit"} else "text",
@@ -1546,7 +1564,11 @@ async def generate_video(
 def _requires_remote_ai_edit(request_text: str) -> bool:
     low = _text(request_text).lower().replace("ё", "е")
     return bool(re.search(
-        r"(?iu)(?:замени|заменить|убери|удали|удалить|добавь\s+(?:объект|эффект|сцену|человека)|измени\s+(?:цвет|внешн|фон|объект|погоду)|поменяй|перерисуй|преврати|сделай\s+(?:киношн|анимац|реалистич)|замена\s+фона|удаление\s+объект|remove\s+(?:the\s+)?object|remove\s+(?:the\s+)?background|replace\s+(?:the\s+)?|change\s+(?:the\s+)?|turn\s+(?:it|this)\s+into|make\s+it\s+(?:cinematic|animated|realistic))", low
+        r"(?iu)(?:замени|заменить|убери|удали|удалить|добавь\s+(?:объект|эффект|сцену|человека)|измени\s+(?:цвет|внешн|фон|объект|погоду)|поменяй|перерисуй|преврати|сделай\s+(?:киношн|анимац|реалистич)|"
+        r"разлей(?:те)?|разлейся|разли\w*|разол\w*|вылей(?:те)?|выливай(?:те)?|вылил\w*|опрокин\w*|опрокид\w*|переверни\w*|"
+        r"урони(?:те)?|разбей(?:те)?|разбрызгай(?:те)?|пролей\w*|пролил\w*|плесни\w*|"
+        r"spill\w*|pour\w*|tip\s+over|knock\s+over|flip|turn\s+over|break\w*|shatter\w*|splash\w*|"
+        r"замена\s+фона|удаление\s+объект|remove\s+(?:the\s+)?object|remove\s+(?:the\s+)?background|replace\s+(?:the\s+)?|change\s+(?:the\s+)?|turn\s+(?:it|this)\s+into|make\s+it\s+(?:cinematic|animated|realistic))", low
     ))
 
 
@@ -1595,7 +1617,15 @@ async def edit_video_with_magic_hour(
     project_id = ""
     try:
         file_path = await asyncio.to_thread(_magic_hour_upload, source_bytes, api_key=api_key, kind="video", extension=extension)
-        prompt = _text(request_text)[:12000]
+        prompt = (
+            "EDIT THE PROVIDED SOURCE VIDEO, preserving its original scene, subjects, camera viewpoint, "
+            "continuity, and all content not mentioned by the user. Apply the requested event/change to "
+            "the source footage itself; do not create an unrelated replacement clip and do not substitute "
+            "a zoom or camera move for the requested object action. Make the requested action clearly visible, "
+            "with a coherent chronological cause-and-effect sequence and physically plausible motion. "
+            "Do not add unrelated objects, text, people, or effects. USER'S EXACT EDIT INSTRUCTION: "
+            + _text(request_text)[:10000]
+        )
         lang = ""
         try:
             lang = _text((await asyncio.to_thread(_translate_prompt_to_english, prompt))[:12000])
@@ -2008,9 +2038,15 @@ async def execute_video_operation(
                 first_frame = uri
                 break
         prompt = (
-            "Create a coherent, polished video following the user direction. Keep subjects consistent, "
-            "use natural motion and intentional camera movement, preserve the requested sequence and style, "
-            "avoid captions/text unless explicitly requested. Direction: " + _text(request_text)[:12000]
+            "Create the requested image-to-video scene from the supplied source image. "
+            "PRIMARY REQUIREMENT: execute every concrete action explicitly requested by the user; "
+            "do not replace the requested event with a camera zoom, pan, close-up, or generic motion. "
+            "Preserve the identity, appearance, labels, shape, and relative positions of all source objects "
+            "unless the user explicitly asks to change them. Animate the requested cause-and-effect in a "
+            "clear chronological sequence with physically plausible motion, visible contact, gravity, and "
+            "the requested final state. Keep the camera mostly stable unless camera movement is requested. "
+            "Do not invent extra actions, props, text, people, or scene changes. No captions unless requested. "
+            "USER'S EXACT DIRECTION: " + _text(request_text)[:12000]
         )
         duration_info = {
             key: plan.get(key) for key in (
