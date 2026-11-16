@@ -2325,6 +2325,13 @@ def _scene_block_type(block: Dict[str, Any]) -> str:
         "arithmeticdiagram": "diagram", "arithmetic_diagram": "diagram", "experimental_diagram": "diagram",
         "mermaid": "diagram", "scene": "diagram", "layout": "diagram", "visual": "diagram", "renderer_scene": "diagram",
         "message": "text", "message_text": "text",
+        # Legacy room payloads occasionally use a renderer class as `type`.
+        # Canonicalize it here so the Web renderer is resolved correctly too.
+        "graphblock": "graph", "tableblock": "table", "galleryblock": "image",
+        "linkcard": "link", "filedeliveryblock": "file", "codeblock": "code",
+        "copyblock": "copy", "formulablock": "formula", "formularenderer": "formula",
+        "diagramrenderer": "diagram", "svgblock": "diagram",
+        "videoblock": "video",
     }
     normalized = [
         aliases.get(str(item).strip().lower().replace("-", "_"), str(item).strip().lower().replace("-", "_"))
@@ -2551,6 +2558,89 @@ def _filter_video_only_scene_blocks(
                     continue
             filtered.append(item)
     return filtered
+
+
+def _filter_requested_scene_blocks(
+    blocks: Any,
+    requested_outputs: Any,
+) -> list[dict[str, Any]]:
+    """Fail closed: expose only renderer kinds authorized by Interpretation.
+
+    Text/domain-room messages remain available. A specialized renderer is kept
+    only when its matching output was selected for this authenticated turn.
+    Image and gallery are one visual family because both use GalleryBlock.
+    """
+    requested = _render_requested_outputs(requested_outputs)
+    renderer_kinds = {
+        "graphblock": "graph",
+        "tableblock": "table",
+        "galleryblock": "image",
+        "linkcard": "link",
+        "filedeliveryblock": "file",
+        "codeblock": "code",
+        "copyblock": "copy",
+        "formulablock": "formula",
+        "formularenderer": "formula",
+        "diagramrenderer": "diagram",
+        "svgblock": "diagram",
+        "arithmeticdiagram": "diagram",
+        "videoblock": "video",
+    }
+    aliases = {
+        "chart": "graph", "plot": "graph", "graph_data": "graph",
+        "table_data": "table", "math": "formula", "latex": "formula",
+        "generated_image": "image", "image_artifact": "image", "image_data": "image",
+        "figure": "image", "image_gallery": "gallery", "gallery_block": "gallery",
+        "sources_gallery": "gallery", "screenshot": "image",
+        "hyperlink": "link", "links": "link", "link_list": "link",
+        "linklist": "link", "source_links": "link", "file_card": "file",
+        "document": "file", "document_file": "file", "text_file": "file",
+        "code_file": "file", "pdf": "file", "spreadsheet": "file",
+        "presentation": "file", "copy_block": "copy", "copyable_text": "copy",
+        "text_copy_block": "copy", "svg": "diagram", "schematic": "diagram",
+        "mermaid": "diagram", "flowchart": "diagram", "flow_chart": "diagram",
+        "technical_drawing": "diagram", "blueprint": "diagram",
+        "message": "text", "message_text": "text",
+        # Accept canonical renderer component names even when an older room
+        # omitted the separate `renderer` field from its block envelope.
+        "graphblock": "graph", "tableblock": "table", "galleryblock": "image",
+        "linkcard": "link", "filedeliveryblock": "file", "codeblock": "code",
+        "copyblock": "copy", "formulablock": "formula", "formularenderer": "formula",
+        "diagramrenderer": "diagram", "svgblock": "diagram",
+        "arithmeticdiagram": "diagram", "videoblock": "video",
+    }
+    text_types = {
+        "text", "markdown", "message", "message_text", "unknown",
+        "function", "biology", "it", "literature", "mathematics",
+        "news", "politics", "social", "trigonometry", "utc", "memory", "action",
+    }
+    visual_family_requested = bool(requested.intersection({"image", "gallery"}))
+    allowed: list[dict[str, Any]] = []
+    for raw in blocks or []:
+        if not isinstance(raw, dict):
+            continue
+        block = dict(raw)
+        raw_type = str(_scene_block_type(block) or "text").strip().lower().replace("-", "_")
+        kind = aliases.get(raw_type, raw_type)
+        renderer = str(_scene_block_renderer(block) or "").strip().lower()
+        renderer_kind = renderer_kinds.get(renderer.replace(" ", ""))
+        if renderer_kind:
+            kind = renderer_kind
+        elif kind in text_types or (
+            kind not in {"graph", "table", "image", "gallery", "link", "file", "code", "copy", "formula", "diagram", "video"}
+            and renderer in {"", "messagetextblock", "textblock", "markdownblock"}
+        ):
+            kind = "text"
+        if kind == "text":
+            allowed.append(block)
+            continue
+        if kind in {"image", "gallery"}:
+            if visual_family_requested:
+                allowed.append(block)
+            continue
+        if kind in requested:
+            allowed.append(block)
+    return allowed
 
 def _split_markdown_table_row(line: str) -> List[str]:
     text = str(line or "").strip()
@@ -2980,6 +3070,55 @@ def _strip_rendered_segments(
 
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def _sanitize_unrequested_text_markup(text: Any, requested_outputs: Any) -> str:
+    """Prevent Markdown inside a text block from bypassing renderer authorization.
+
+    MessageTextBlock uses GFM/KaTeX, so table rows, code fences, links, images and
+    math delimiters can otherwise create rich output even after the corresponding
+    typed renderer has been filtered. This converts/removes only those structures
+    whose output family was not selected by Interpretation.
+    """
+    value = str(text or "")
+    if not value:
+        return value
+    requested = _render_requested_outputs(requested_outputs)
+
+    if "table" not in requested:
+        table_pattern = re.compile(
+            r"(?m)^\s*\|[^\n]+\|\s*\n\s*\|[\s:|\-]+\|\s*\n(?:\s*\|[^\n]+\|\s*\n?)+"
+        )
+        value = table_pattern.sub("", value)
+
+    if "code" not in requested:
+        # A Mermaid/diagram fence is also suppressed here unless a typed diagram
+        # block has already taken ownership of its source in _strip_rendered_segments.
+        value = re.sub(r"```[\w.+-]*\s*\n[\s\S]*?\n```", "", value)
+
+    if not requested.intersection({"image", "gallery"}):
+        value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", value)
+
+    if "link" not in requested:
+        # Keep human-readable labels, but remove every Markdown destination
+        # (not only http links), reference-style targets, and autolink URL forms.
+        value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+        value = re.sub(r"\[([^\]]+)\]\[[^\]]*\]", r"\1", value)
+        value = re.sub(r"(?m)^\s*\[[^\]]+\]:\s*\S+.*$", "", value)
+        value = re.sub(r"(?i)<(?:https?://|mailto:)[^>]+>", "", value)
+        value = re.sub(r"(?i)\b(?:https?://|www\.)[^\s<>()]+", "", value)
+        value = re.sub(r"(?i)\bmailto:[^\s<>()]+", "", value)
+
+    if "formula" not in requested:
+        # Preserve mathematical meaning as ordinary text without activating KaTeX.
+        value = re.sub(r"\\\[([\s\S]*?)\\\]", r"\1", value)
+        value = re.sub(r"\\\(([^\n]*?)\\\)", r"\1", value)
+        value = re.sub(r"(?<!\$)\$([^$\n]{1,180})\$(?!\$)", r"\1", value)
+        value = re.sub(r"\$\$([\s\S]*?)\$\$", r"\1", value)
+
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", value)
+    return value.strip()
 
 def _number_for_render(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -3779,6 +3918,16 @@ def _unwrap_render_payload_envelopes(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[str, Any] | None = None) -> bool:
     p = payload if isinstance(payload, dict) else {}
+    if block_type == "video":
+        # A video is user-visible only after the MP4 has a durable, owner-bound
+        # artifact reference. Match Premium's integrity rule so Free cannot
+        # publish a placeholder or a provider-only result as a playable block.
+        ref = p.get("asset_ref") if isinstance(p.get("asset_ref"), dict) else (block or {}).get("asset_ref")
+        return bool(
+            isinstance(ref, dict)
+            and str(ref.get("message_id") or "").strip()
+            and re.fullmatch(r"[a-f0-9]{64}", str(ref.get("sha256") or "").lower())
+        )
     if block_type == "table":
         cols = p.get("columns") or p.get("headers")
         rows = p.get("rows") or p.get("data")
@@ -3870,13 +4019,11 @@ def prepare_render_blocks_for_room_dispatch(
 ) -> List[Dict[str, Any]]:
     """Bind same-turn structured content to the canonical Web renderer types.
 
-    This is a deterministic adapter, not a second route. It promotes a structure
-    only when Interpretation requested it OR the same-turn answer already contains
-    an unambiguous representation (Markdown table, fenced source code, Mermaid
-    flowchart, delimited math, or literal URL). Room identifiers are provenance and
-    domain metadata only; they are never renderer triggers. Preserve every valid
-    requested block and its SceneContract payload without inferring a new output
-    from the selected room. This adapter never invents data or assets.
+    This is a deterministic adapter, not a second route. It may hydrate a
+    requested renderer from an exact same-turn payload (Markdown table, fenced
+    code, Mermaid, math, or URL), but it never authorizes a renderer itself.
+    Interpretation is the sole output authority; structures in prose and room
+    identity cannot add a new renderer. This adapter never invents data or assets.
     """
     requested = _render_requested_outputs(requested_outputs)
     interpreted_graph_policy = deepcopy(graph_policy) if isinstance(graph_policy, dict) else {}
@@ -4072,7 +4219,7 @@ def prepare_render_blocks_for_room_dispatch(
     # A requested source gallery may be absent as a separate block even though
     # the same answer contains explicit Markdown image embeds. Reuse only those
     # URLs; never convert ordinary source links into guessed image URLs.
-    if "gallery" in requested and "gallery" not in existing_types and markdown_images:
+    if requested.intersection({"image", "gallery"}) and "gallery" not in existing_types and markdown_images:
         prepared.append({
             "type": "gallery", "artifact_type": "gallery", "renderer": "GalleryBlock",
             "viewer": "GalleryBlock", "payload": {"images": deepcopy(markdown_images), "source": "same_turn_markdown_image"},
@@ -4086,7 +4233,7 @@ def prepare_render_blocks_for_room_dispatch(
     # A Markdown table may be useful as source data for a requested graph, but it
     # must not become a second standalone TableBlock unless the user requested a
     # table too. Keep the parsed table available above for graph-data extraction.
-    allow_answer_table_block = "table" in requested or (bool(table_from_answer) and "graph" not in requested)
+    allow_answer_table_block = "table" in requested
     if allow_answer_table_block and "table" not in existing_types and table_candidate and _has_render_payload("table", table_candidate):
         prepared.append({"type": "table", "artifact_type": "table", "renderer": "TableBlock", "viewer": "TableBlock", "payload": table_candidate, "source_room": "C_TABLE_ROOM" if table_from_answer else "C_ARTIFACT_CONTRACT"})
         existing_types.add("table")
@@ -4110,7 +4257,7 @@ def prepare_render_blocks_for_room_dispatch(
         if graph_payload and _has_render_payload("graph", graph_payload):
             prepared.append({"type": "graph", "artifact_type": "graph", "renderer": "GraphBlock", "viewer": "GraphBlock", "payload": graph_payload, "source_room": "C_GRAPH_ROOM"})
             existing_types.add("graph")
-    if ("link" in requested or urls_from_answer) and "link" not in existing_types:
+    if "link" in requested and "link" not in existing_types:
         if urls_from_answer:
             # Preserve every source URL from the same-turn answer. Previously only
             # urls_from_answer[0] reached LinkRenderer, silently dropping citations.
@@ -4142,11 +4289,11 @@ def prepare_render_blocks_for_room_dispatch(
         if diagram_payload:
             prepared.append({"type": "diagram", "artifact_type": "diagram", "renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "payload": diagram_payload, "source_room": "C_DIAGRAM_ROOM"})
             existing_types.add("diagram")
-    if ("code" in requested or code_match) and "code" not in existing_types:
+    if "code" in requested and code_match and "code" not in existing_types:
         if code_match:
             prepared.append({"type": "code", "artifact_type": "code", "renderer": "CodeBlock", "viewer": "CodeBlock", "payload": {"code": code_match.group(2), "content": code_match.group(2), "language": code_match.group(1) or "text", "filename": "generated-code.txt"}})
             existing_types.add("code")
-    if ("formula" in requested or formulas_from_answer) and "formula" not in existing_types:
+    if "formula" in requested and formulas_from_answer and "formula" not in existing_types:
         if formulas_from_answer:
             prepared.append({"type": "formula", "artifact_type": "formula", "renderer": "FormulaRenderer", "viewer": "FormulaRenderer", "payload": {"formulas": formulas_from_answer, "formula": formulas_from_answer[0], "latex": formulas_from_answer[0]}})
 
@@ -4163,7 +4310,7 @@ def prepare_render_blocks_for_room_dispatch(
             item for item in prepared
             if isinstance(item, dict) and _scene_block_type(item) == "diagram"
         ]
-        if not present_diagrams and _should_add_adaptive_diagram(current_request, source_answer, requested):
+        if "diagram" in requested and not present_diagrams and _should_add_adaptive_diagram(current_request, source_answer, requested):
             adaptive_payload = _build_answer_outline_payload(source_answer)
             if adaptive_payload:
                 prepared.append({
@@ -4225,6 +4372,8 @@ def prepare_render_blocks_for_room_dispatch(
             continue
         seen.add(signature)
         result.append(block)
+
+    result = _filter_requested_scene_blocks(result, requested)
 
     # If the user asked for a graph but not a table, the graph owns the requested
     # visual output. Do not expose a second table merely because the model included
@@ -4976,13 +5125,49 @@ def _fallback_link_card_description(link: Dict[str, Any], section: str, language
     return f"{fallback_label}{template.format(topic=topic)}"
 
 
-def _ensure_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "") -> List[Dict[str, Any]]:
+
+def _explicit_visual_explanation_request(request_text: Any) -> bool:
+    """True only when the same clause explicitly asks to explain/read a visual."""
+    low = str(request_text or "").lower().replace("ё", "е")
+    visual = r"(?:картинк\w*|изображени\w*|фото\w*|портрет\w*|схем\w*|диаграмм\w*|график\w*|таблиц\w*|формул\w*|код\w*|image\w*|picture\w*|diagram\w*|chart\w*|graph\w*|table\w*|formula\w*|code\w*)"
+    direct_visual = (
+        r"(?:объясни\w*|поясни\w*|опиши\w*|разъясни\w*|describe\w*|explain\w*)"
+        r"\s+(?:мне\s+)?(?:эту\s+|это\s+|данн\w*\s+)?" + visual
+        + r"|" + visual + r"\s+(?:объясни\w*|поясни\w*|опиши\w*|разъясни\w*|describe\w*|explain\w*)"
+    )
+    reading_or_caption = (
+        r"(?:как\s+читать|что\s+(?:показыва\w*|изображен\w*)|what\s+does\s+.{0,35}\s+show|how\s+to\s+read)"
+        r".{0,45}" + visual
+        + r"|" + visual + r".{0,45}(?:как\s+читать|что\s+показыва\w*|how\s+to\s+read|what\s+does)"
+    )
+    # Sentence/semicolon boundaries stop a general topic request such as
+    # "расскажи о Менделееве. Покажи его таблицу" from authorizing captions.
+    clauses = re.split(r"[.!?;\n]+|\s+(?:либо|или|but|however)\s+", low)
+    return any(
+        bool(re.search(direct_visual, clause, re.I) or re.search(reading_or_caption, clause, re.I))
+        for clause in clauses if clause.strip()
+    )
+
+
+def _ensure_render_explanations(blocks: List[Dict[str, Any]], answer: str, language_hint: Any = "", *, allow_explanations: bool = False) -> List[Dict[str, Any]]:
     """Guarantee a visible text explanation immediately after every concrete Premium renderer.
 
     Provider-created `explanation` is preferred. Older output is repaired from the
     matching answer section and actual renderer payload; this never creates a
     renderer or invents a URL, equation, row, image edit, or numeric data.
     """
+    # Visual renderers are self-explanatory by default. Do not manufacture an
+    # extra paragraph after an image/table/diagram unless the user asked for it.
+    if not allow_explanations:
+        return [
+            dict(block) for block in blocks
+            if isinstance(block, dict)
+            and not (
+                _scene_block_type(block) in {"text", "markdown", "message", "message_text"}
+                and (block.get("explanation_for_block_id") or block.get("explanation_for")
+                     or "render_explanation_contract" in str(block.get("source") or "").lower())
+            )
+        ]
     language = _explanation_language(answer, language_hint)
     ordered: List[Dict[str, Any]] = []
     additions = 0
@@ -5145,9 +5330,18 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
                 text_candidates.append(candidate_text)
         if text_candidates:
             answer = max(text_candidates, key=len)
-    active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
     metadata_for_request = scene.metadata if isinstance(scene.metadata, dict) else {}
+    metadata_active_task = metadata_for_request.get("active_task")
+    metadata_active_task = metadata_active_task if isinstance(metadata_active_task, dict) else {}
+    scene_active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
+    active_task = {**metadata_active_task, **scene_active_task}
     interpretation_for_request = metadata_for_request.get("interpretation") if isinstance(metadata_for_request.get("interpretation"), dict) else {}
+    intent_for_request = interpretation_for_request.get("intent") if isinstance(interpretation_for_request.get("intent"), dict) else {}
+    requested_outputs_for_request = active_task.get("requested_outputs")
+    if not isinstance(requested_outputs_for_request, (list, tuple, set)) or not requested_outputs_for_request:
+        requested_outputs_for_request = metadata_active_task.get("requested_outputs")
+    if not isinstance(requested_outputs_for_request, (list, tuple, set)) or not requested_outputs_for_request:
+        requested_outputs_for_request = intent_for_request.get("requested_outputs")
     interpretation_input = interpretation_for_request.get("input") if isinstance(interpretation_for_request.get("input"), dict) else {}
     request_structure = interpretation_for_request.get("request_structure") if isinstance(interpretation_for_request.get("request_structure"), dict) else {}
     dialogue_structure = interpretation_for_request.get("dialogue") if isinstance(interpretation_for_request.get("dialogue"), dict) else {}
@@ -5163,13 +5357,13 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     blocks = prepare_render_blocks_for_room_dispatch(
         blocks,
         answer,
-        active_task.get("requested_outputs"),
+        requested_outputs_for_request,
         graph_policy=active_task.get("graph_policy"),
         current_request=current_request,
     )
-    blocks = _filter_video_only_scene_blocks(blocks, active_task.get("requested_outputs"), current_request)
+    blocks = _filter_video_only_scene_blocks(blocks, requested_outputs_for_request, current_request)
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
-    requested_outputs = _render_requested_outputs(active_task.get("requested_outputs"))
+    requested_outputs = _render_requested_outputs(requested_outputs_for_request)
     suppress_unrequested_table = "graph" in requested_outputs and "table" not in requested_outputs and any(
         isinstance(item, dict)
         and _scene_block_type(item) == "graph"
@@ -5181,6 +5375,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         answer, visible_types, blocks,
         suppress_unrequested_table=suppress_unrequested_table,
     )
+    answer = _sanitize_unrequested_text_markup(answer, requested_outputs_for_request)
 
     # Critical integrity step: the old code cleaned the local `answer` string,
     # but left the original full answer inside the existing MessageTextBlock.
@@ -5201,6 +5396,7 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
             # A shorter text section may contain a renderable fragment too. Clean
             # only exact structures which have a corresponding concrete renderer.
             cleaned_text = _strip_rendered_segments(block_source_text, visible_types, blocks, suppress_unrequested_table=suppress_unrequested_table)
+        cleaned_text = _sanitize_unrequested_text_markup(cleaned_text, requested_outputs_for_request)
         present_text_keys = [key for key in text_keys if isinstance(block.get(key), str)]
         for key in (present_text_keys or ["content"]):
             block[key] = cleaned_text
@@ -5247,8 +5443,12 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
 
     # Add concise explanations directly after every non-text renderer, even if the
     # model omitted the optional explanation field. Keep the original answer first.
-    blocks = _ensure_render_explanations(blocks, source_answer or answer, language_hint)
-    blocks = _filter_video_only_scene_blocks(blocks, active_task.get("requested_outputs"), current_request)
+    blocks = _ensure_render_explanations(
+        blocks, source_answer or answer, language_hint,
+        allow_explanations=_explicit_visual_explanation_request(current_request),
+    )
+    blocks = _filter_requested_scene_blocks(blocks, requested_outputs_for_request)
+    blocks = _filter_video_only_scene_blocks(blocks, requested_outputs_for_request, current_request)
 
     order = [str(x).strip() for x in _scene_list(blueprint.get("order")) if str(x).strip()]
     order_pos = {value: idx for idx, value in enumerate(order)}
@@ -5473,7 +5673,9 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.conversation_id = str(scene.conversation_id or scene.metadata.get("conversation_id") or "")
     contract.dialogue_sequence_id = str(scene.dialogue_sequence_id or scene.metadata.get("dialogue_sequence_id") or "")
     contract.sequence_turn_index = int(scene.sequence_turn_index or scene.metadata.get("sequence_turn_index") or 0)
-    contract.active_task = deepcopy(scene.active_task or scene.metadata.get("active_task") or {})
+    metadata_active_task = scene.metadata.get("active_task") if isinstance(scene.metadata.get("active_task"), dict) else {}
+    scene_active_task = scene.active_task if isinstance(scene.active_task, dict) else {}
+    contract.active_task = deepcopy({**metadata_active_task, **scene_active_task})
     contract.dialogue_state = deepcopy(scene.dialogue_state or scene.metadata.get("dialogue_state") or {})
     contract.dialogue_development = deepcopy(scene.dialogue_development or scene.metadata.get("dialogue_development") or {})
     contract.result_event = deepcopy(scene.result_event or scene.metadata.get("result_event") or {})
@@ -5488,6 +5690,19 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     contract.scene_blueprint = deepcopy(scene.scene_blueprint or {})
 
     canonical_blocks = _canonical_scene_blocks(scene)
+    active_task_for_gate = contract.active_task if isinstance(contract.active_task, dict) else {}
+    metadata_for_gate = scene.metadata if isinstance(scene.metadata, dict) else {}
+    interpretation_for_gate = metadata_for_gate.get("interpretation") if isinstance(metadata_for_gate.get("interpretation"), dict) else {}
+    intent_for_gate = interpretation_for_gate.get("intent") if isinstance(interpretation_for_gate.get("intent"), dict) else {}
+    gate_outputs = active_task_for_gate.get("requested_outputs")
+    if not isinstance(gate_outputs, (list, tuple, set)) or not gate_outputs:
+        metadata_active_outputs = metadata_for_gate.get("active_task") if isinstance(metadata_for_gate.get("active_task"), dict) else {}
+        gate_outputs = metadata_active_outputs.get("requested_outputs")
+    if not isinstance(gate_outputs, (list, tuple, set)) or not gate_outputs:
+        gate_outputs = intent_for_gate.get("requested_outputs")
+    if isinstance(gate_outputs, (list, tuple, set)) and gate_outputs:
+        contract.active_task["requested_outputs"] = list(gate_outputs)
+    canonical_blocks = _filter_requested_scene_blocks(canonical_blocks, gate_outputs)
     for block in canonical_blocks:
         if isinstance(block, dict):
             block["user_id"] = contract.user_id
