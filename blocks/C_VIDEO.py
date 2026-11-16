@@ -1,6 +1,6 @@
 """C_VIDEO: one canonical room for April video analysis, generation and editing.
 
-Provider integration, prepaid Video Wallet pricing, reservation and settlement
+Provider integration, April Video Credits, USD package orders, reservation and settlement
 stay together in this module. A narrowly allow-listed test mode can use the
 provider account's trial credits without asserting commercial rights. Local
 FFmpeg edits remain free. Binary output is returned to the active Free or Premium executor for
@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from urllib.parse import quote
 from pathlib import Path
 from typing import Any, Callable
@@ -113,6 +114,9 @@ def _wallet_connection():
                 CREATE TABLE IF NOT EXISTS april_video_wallets (
                     user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
                     balance_minor BIGINT NOT NULL DEFAULT 0,
+                    balance_credits BIGINT NOT NULL DEFAULT 0,
+                    debt_credits BIGINT NOT NULL DEFAULT 0,
+                    credits_migrated BOOLEAN NOT NULL DEFAULT FALSE,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     currency TEXT NOT NULL DEFAULT 'USD',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -127,6 +131,7 @@ def _wallet_connection():
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
                     delta_minor BIGINT NOT NULL DEFAULT 0,
+                    delta_credits BIGINT NOT NULL DEFAULT 0,
                     provider_cost_minor BIGINT NOT NULL DEFAULT 0,
                     provider_credits BIGINT NOT NULL DEFAULT 0,
                     markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2,
@@ -142,6 +147,10 @@ def _wallet_connection():
                     order_id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
                     amount_minor BIGINT NOT NULL,
+                    credits_to_issue BIGINT NOT NULL DEFAULT 0,
+                    usd_per_1000_provider_credits NUMERIC(14,6) NOT NULL DEFAULT 0,
+                    markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2,
+                    billing_mode TEXT NOT NULL DEFAULT 'test_bonus',
                     currency TEXT NOT NULL DEFAULT 'USD',
                     payment_status TEXT NOT NULL DEFAULT 'pending',
                     payment_source TEXT NOT NULL DEFAULT 'liqpay_google_pay',
@@ -150,6 +159,14 @@ def _wallet_connection():
                     paid_at TIMESTAMPTZ
                 )
             """)
+            cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS balance_credits BIGINT NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS debt_credits BIGINT NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE april_video_wallets ADD COLUMN IF NOT EXISTS credits_migrated BOOLEAN NOT NULL DEFAULT FALSE")
+            cur.execute("ALTER TABLE april_video_wallet_transactions ADD COLUMN IF NOT EXISTS delta_credits BIGINT NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS credits_to_issue BIGINT NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS usd_per_1000_provider_credits NUMERIC(14,6) NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS markup_multiplier NUMERIC(8,3) NOT NULL DEFAULT 2")
+            cur.execute("ALTER TABLE april_video_wallet_orders ADD COLUMN IF NOT EXISTS billing_mode TEXT NOT NULL DEFAULT 'test_bonus'")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_tx_user_created ON april_video_wallet_transactions(user_id, created_at DESC)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_april_video_wallet_orders_user_created ON april_video_wallet_orders(user_id, created_at DESC)")
         conn.commit()
@@ -160,37 +177,146 @@ def _wallet_connection():
         raise
 
 
+def _april_credits_for_usd_minor(amount_minor: int, usd_per_1000_provider_credits: Any) -> int:
+    """Convert USD cents to April credits at the provider-cost basis.
+
+    One provider credit consumes exactly 2 April credits. Thus one April
+    credit carries one provider-credit cost unit; the customer's total
+    price remains 2x the provider's cost.
+    """
+    rate = Decimal(str(usd_per_1000_provider_credits))
+    if rate <= 0:
+        raise CVideoError("VIDEO_WALLET_PRICING_NOT_CONFIGURED")
+    amount_minor = max(0, int(amount_minor or 0))
+    credits = (Decimal(amount_minor) * Decimal("10") / rate).to_integral_value(rounding=ROUND_FLOOR)
+    return max(0, int(credits))
+
+
+def _usd_minor_for_april_credits(april_credits: int, usd_per_1000_provider_credits: Any) -> int:
+    """Return a conservative USD-cent equivalent for audit/display only."""
+    rate = Decimal(str(usd_per_1000_provider_credits))
+    if rate <= 0:
+        raise CVideoError("VIDEO_WALLET_PRICING_NOT_CONFIGURED")
+    value = Decimal(max(0, int(april_credits or 0))) * rate / Decimal("10")
+    return int(value.to_integral_value(rounding=ROUND_CEILING)) if value else 0
+
+
+def _ensure_wallet_credit_state(cur: Any, user_id: str, unit_cost: Any) -> dict[str, int]:
+    """Convert an existing USD wallet into credits exactly once."""
+    cur.execute("""
+        SELECT balance_minor, balance_credits, debt_credits, credits_migrated
+        FROM april_video_wallets WHERE user_id=%s FOR UPDATE
+    """, (user_id,))
+    wallet = cur.fetchone()
+    if not wallet:
+        raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
+    balance = int(wallet.get("balance_credits") or 0)
+    debt = int(wallet.get("debt_credits") or 0)
+    if not bool(wallet.get("credits_migrated")):
+        legacy_balance_minor = int(wallet.get("balance_minor") or 0)
+        legacy_minor = max(0, legacy_balance_minor)
+        legacy_debt_minor = max(0, -legacy_balance_minor)
+        migrated_credits = _april_credits_for_usd_minor(legacy_minor, unit_cost)
+        migrated_debt = _april_credits_for_usd_minor(legacy_debt_minor, unit_cost)
+        balance = migrated_credits
+        debt += migrated_debt
+        cur.execute("""
+            UPDATE april_video_wallets
+            SET balance_minor=0, balance_credits=%s, debt_credits=%s,
+                credits_migrated=TRUE, updated_at=NOW()
+            WHERE user_id=%s
+        """, (balance, debt, user_id))
+        safe_user = re.sub(r"[^A-Za-z0-9._:-]", "", user_id)[:80] or uuid.uuid4().hex
+        if legacy_minor > 0:
+            cur.execute("""
+                INSERT INTO april_video_wallet_transactions
+                    (user_id, reference, kind, status, delta_minor, delta_credits,
+                     operation, description, metadata)
+                VALUES (%s, %s, 'migration', 'completed', %s, %s,
+                        'migration', 'Legacy USD balance converted to April Video Credits', %s::jsonb)
+                ON CONFLICT(reference) DO NOTHING
+            """, (user_id, f"migration:usd-wallet-v1:{safe_user}", legacy_minor, migrated_credits,
+                  json.dumps({"legacy_balance_minor": legacy_minor,
+                              "usd_per_1000_provider_credits": float(unit_cost),
+                              "conversion": "floor(USD * 1000 / provider_USD_per_1000)"})))
+        if legacy_debt_minor > 0:
+            cur.execute("""
+                INSERT INTO april_video_wallet_transactions
+                    (user_id, reference, kind, status, delta_minor, delta_credits,
+                     operation, description, metadata)
+                VALUES (%s, %s, 'migration_debt', 'completed', %s, %s,
+                        'migration', 'Legacy wallet overage converted to credit debt', %s::jsonb)
+                ON CONFLICT(reference) DO NOTHING
+            """, (user_id, f"migration:usd-wallet-v1-debt:{safe_user}", -legacy_debt_minor, -migrated_debt,
+                  json.dumps({"legacy_debt_minor": legacy_debt_minor,
+                              "usd_per_1000_provider_credits": float(unit_cost)})))
+    return {"balance_credits": balance, "debt_credits": debt}
+
+
 def enable_video_wallet(user_id: Any) -> dict[str, Any]:
     canonical = _wallet_identity(user_id)
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO april_video_wallets(user_id, enabled)
-                VALUES (%s, TRUE)
+                INSERT INTO april_video_wallets(user_id, enabled, credits_migrated)
+                VALUES (%s, TRUE, FALSE)
                 ON CONFLICT(user_id) DO UPDATE SET enabled=TRUE, updated_at=NOW()
-                RETURNING balance_minor, enabled, currency
+                RETURNING balance_minor, balance_credits, debt_credits, enabled, currency, credits_migrated
             """, (canonical,))
             row = dict(cur.fetchone() or {})
+            pricing_ready = False
+            try:
+                unit_cost = _video_cost_per_1000_credits(canonical)
+                credit_state = _ensure_wallet_credit_state(cur, canonical, unit_cost)
+                row.update(credit_state)
+                pricing_ready = True
+            except CVideoError as exc:
+                if str(exc) not in {
+                    "APRIL_VIDEO_TEST_COST_NOT_CONFIGURED", "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED",
+                    "MAGIC_HOUR_TEST_ACCOUNT_NOT_ALLOWED", "MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED",
+                }:
+                    raise
         conn.commit()
-        return {"success": True, "enabled": bool(row.get("enabled")), "balance_minor": int(row.get("balance_minor") or 0), "currency": row.get("currency") or "USD"}
+        return {
+            "success": True, "enabled": bool(row.get("enabled")),
+            "balance_credits": int(row.get("balance_credits") or 0),
+            "debt_credits": int(row.get("debt_credits") or 0),
+            "currency": row.get("currency") or "USD", "pricing_ready": pricing_ready,
+        }
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
 
-
 def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
     canonical = _wallet_identity(user_id)
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT balance_minor, enabled, currency FROM april_video_wallets WHERE user_id=%s", (canonical,))
-            wallet = cur.fetchone() or {}
             cur.execute("""
-                SELECT id, reference, kind, status, delta_minor, provider_cost_minor,
-                       provider_credits, markup_multiplier, operation, description, created_at
+                SELECT balance_minor, balance_credits, debt_credits, credits_migrated, enabled, currency
+                FROM april_video_wallets WHERE user_id=%s
+            """, (canonical,))
+            wallet = cur.fetchone() or {}
+            pricing_ready = False
+            if wallet and wallet.get("enabled"):
+                try:
+                    unit_cost = _video_cost_per_1000_credits(canonical)
+                    wallet.update(_ensure_wallet_credit_state(cur, canonical, unit_cost))
+                    wallet["balance_minor"] = 0
+                    pricing_ready = True
+                except CVideoError as exc:
+                    if str(exc) not in {
+                        "APRIL_VIDEO_TEST_COST_NOT_CONFIGURED", "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED",
+                        "MAGIC_HOUR_TEST_ACCOUNT_NOT_ALLOWED", "MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED",
+                    }:
+                        raise
+            cur.execute("""
+                SELECT id, reference, kind, status, delta_minor, delta_credits,
+                       provider_cost_minor, provider_credits, markup_multiplier,
+                       operation, description, created_at
                 FROM april_video_wallet_transactions
                 WHERE user_id=%s
                 ORDER BY created_at DESC, id DESC LIMIT %s
@@ -200,18 +326,20 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
                 item = dict(row)
                 created = item.get("created_at")
                 item["created_at"] = created.isoformat() if hasattr(created, "isoformat") else str(created or "")
-                item["delta_minor"] = int(item.get("delta_minor") or 0)
-                item["provider_cost_minor"] = int(item.get("provider_cost_minor") or 0)
-                item["provider_credits"] = int(item.get("provider_credits") or 0)
+                for key in ("delta_minor", "delta_credits", "provider_cost_minor", "provider_credits"):
+                    item[key] = int(item.get(key) or 0)
                 item["markup_multiplier"] = float(item.get("markup_multiplier") or 2)
                 transactions.append(item)
         conn.commit()
         return {
             "success": True,
             "enabled": bool(wallet.get("enabled")) if wallet else False,
-            "balance_minor": int(wallet.get("balance_minor") or 0) if wallet else 0,
+            "balance_credits": int(wallet.get("balance_credits") or 0) if wallet else 0,
+            "debt_credits": int(wallet.get("debt_credits") or 0) if wallet else 0,
+            "legacy_balance_minor": int(wallet.get("balance_minor") or 0) if wallet else 0,
             "currency": _text(wallet.get("currency") if wallet else "USD") or "USD",
             "markup_multiplier": _video_markup_multiplier(),
+            "pricing_ready": pricing_ready,
             "transactions": transactions,
         }
     except Exception:
@@ -219,7 +347,6 @@ def get_video_wallet_status(user_id: Any, *, limit: int = 8) -> dict[str, Any]:
         raise
     finally:
         conn.close()
-
 
 def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, Any]:
     canonical = _wallet_identity(user_id)
@@ -229,6 +356,12 @@ def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, 
         raise CVideoError("VIDEO_WALLET_TOPUP_AMOUNT_INVALID")
     if amount not in {5, 10, 20, 50}:
         raise CVideoError("VIDEO_WALLET_TOPUP_AMOUNT_INVALID")
+    billing_mode = _magic_hour_billing_mode(canonical)
+    unit_cost = _video_cost_per_1000_credits(canonical)
+    amount_minor = amount * 100
+    credits_to_issue = _april_credits_for_usd_minor(amount_minor, unit_cost)
+    if credits_to_issue <= 0:
+        raise CVideoError("VIDEO_WALLET_CREDIT_PACKAGE_INVALID")
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
@@ -236,14 +369,25 @@ def create_video_wallet_topup_order(user_id: Any, amount_usd: Any) -> dict[str, 
             wallet = cur.fetchone()
             if not wallet or not wallet.get("enabled"):
                 raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
-            order_id = "APRIL-" + __import__("uuid").uuid4().hex[:24].upper()
-            amount_minor = amount * 100
+            _ensure_wallet_credit_state(cur, canonical, unit_cost)
+            order_id = "APRIL-" + uuid.uuid4().hex[:24].upper()
             cur.execute("""
-                INSERT INTO april_video_wallet_orders(order_id, user_id, amount_minor, currency)
-                VALUES (%s, %s, %s, 'USD')
-            """, (order_id, canonical, amount_minor))
+                INSERT INTO april_video_wallet_orders
+                    (order_id, user_id, amount_minor, credits_to_issue,
+                     usd_per_1000_provider_credits, markup_multiplier, billing_mode, currency)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'USD')
+            """, (order_id, canonical, amount_minor, credits_to_issue,
+                  unit_cost, _video_markup_multiplier(), billing_mode))
         conn.commit()
-        return {"success": True, "order_id": order_id, "amount": amount, "amount_minor": amount_minor, "currency": "USD", "payment_status": "pending", "description": f"April Video Wallet top-up ${amount}."}
+        return {
+            "success": True, "order_id": order_id, "amount": amount,
+            "amount_minor": amount_minor, "currency": "USD",
+            "credits_to_issue": credits_to_issue,
+            "usd_per_1000_provider_credits": float(unit_cost),
+            "markup_multiplier": _video_markup_multiplier(),
+            "payment_status": "pending",
+            "description": f"April Video Credits top-up ${amount}.",
+        }
     except Exception:
         conn.rollback()
         raise
@@ -260,7 +404,8 @@ def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT order_id, amount_minor, currency, payment_status, created_at, paid_at
+                SELECT order_id, amount_minor, credits_to_issue, currency,
+                       payment_status, created_at, paid_at
                 FROM april_video_wallet_orders WHERE order_id=%s AND user_id=%s
             """, (order_key, canonical))
             row = cur.fetchone()
@@ -270,8 +415,9 @@ def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]
         return {
             "success": True, "order_id": row["order_id"],
             "amount": round(int(row["amount_minor"]) / 100, 2),
-            "amount_minor": int(row["amount_minor"]), "currency": row["currency"],
-            "payment_status": row["payment_status"],
+            "amount_minor": int(row["amount_minor"]),
+            "credits_to_issue": int(row.get("credits_to_issue") or 0),
+            "currency": row["currency"], "payment_status": row["payment_status"],
             "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
             "paid_at": row["paid_at"].isoformat() if row.get("paid_at") else "",
         }
@@ -280,7 +426,6 @@ def get_video_wallet_order_status(user_id: Any, order_id: Any) -> dict[str, Any]
         raise
     finally:
         conn.close()
-
 
 def set_video_wallet_order_status(order_id: Any, status: str) -> dict[str, Any]:
     order_key = _text(order_id)
@@ -302,26 +447,48 @@ def set_video_wallet_order_status(order_id: Any, status: str) -> dict[str, Any]:
             if target == "reversed" and current == "paid":
                 reversal_reference = "reversal:" + order_key
                 cur.execute("""
+                    SELECT delta_credits, metadata FROM april_video_wallet_transactions
+                    WHERE user_id=%s AND reference=%s FOR UPDATE
+                """, (order["user_id"], "topup:" + order_key))
+                topup_tx = cur.fetchone() or {}
+                topup_meta = topup_tx.get("metadata") if isinstance(topup_tx.get("metadata"), dict) else {}
+                total_credits = max(0, int(topup_tx.get("delta_credits") or order.get("credits_to_issue") or 0))
+                debt_repaid = max(0, int(topup_meta.get("debt_repaid") or 0))
+                spendable_credits = max(0, int(topup_meta.get("spendable_credits") or (total_credits - debt_repaid)))
+                cur.execute("""
                     INSERT INTO april_video_wallet_transactions
-                        (user_id, reference, kind, status, delta_minor, operation, description, metadata)
-                    VALUES (%s, %s, 'reversal', 'completed', %s, 'reversal', 'Video Wallet payment reversed', %s::jsonb)
+                        (user_id, reference, kind, status, delta_minor, delta_credits,
+                         operation, description, metadata)
+                    VALUES (%s, %s, 'reversal', 'completed', %s, %s,
+                            'reversal', 'Video credits payment reversed', %s::jsonb)
                     ON CONFLICT(reference) DO NOTHING
                     RETURNING id
-                """, (order["user_id"], reversal_reference, -int(order["amount_minor"]), json.dumps({"order_id": order_key, "provider_payment_id": order.get("provider_payment_id")})))
+                """, (
+                    order["user_id"], reversal_reference, -int(order["amount_minor"]),
+                    -total_credits,
+                    json.dumps({"order_id": order_key, "provider_payment_id": order.get("provider_payment_id"),
+                                "debt_repaid_restored": debt_repaid, "spendable_credits_reversed": spendable_credits}),
+                ))
                 inserted = cur.fetchone()
                 if inserted:
                     cur.execute("""
+                        SELECT balance_credits, debt_credits FROM april_video_wallets
+                        WHERE user_id=%s FOR UPDATE
+                    """, (order["user_id"],))
+                    wallet = cur.fetchone() or {}
+                    available = max(0, int(wallet.get("balance_credits") or 0))
+                    debt = max(0, int(wallet.get("debt_credits") or 0))
+                    used = min(available, spendable_credits)
+                    new_debt = debt + debt_repaid + max(0, spendable_credits - used)
+                    cur.execute("""
                         UPDATE april_video_wallets
-                        SET balance_minor=balance_minor-%s, updated_at=NOW()
+                        SET balance_credits=%s, debt_credits=%s, updated_at=NOW()
                         WHERE user_id=%s
-                    """, (int(order["amount_minor"]), order["user_id"]))
+                    """, (available - used, new_debt, order["user_id"]))
             elif current != "pending":
                 conn.rollback()
                 return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_PENDING"}
-            cur.execute("""
-                UPDATE april_video_wallet_orders SET payment_status=%s
-                WHERE order_id=%s
-            """, (target, order_key))
+            cur.execute("UPDATE april_video_wallet_orders SET payment_status=%s WHERE order_id=%s", (target, order_key))
         conn.commit()
         return {"success": True, "order_id": order_key, "payment_status": target}
     except Exception:
@@ -329,7 +496,6 @@ def set_video_wallet_order_status(order_id: Any, status: str) -> dict[str, Any]:
         raise
     finally:
         conn.close()
-
 
 def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_minor: int, currency: str) -> dict[str, Any]:
     order_key = _text(order_id)
@@ -345,12 +511,14 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
                 conn.rollback()
                 return {"success": False, "error": "VIDEO_WALLET_ORDER_NOT_FOUND"}
             if _text(order.get("payment_status")).lower() == "paid":
+                conn.commit()
                 return {
                     "success": True, "already_settled": True,
                     "order_id": order_key, "payment_status": "paid",
                     "user_id": order["user_id"],
                     "order_amount_minor": int(order["amount_minor"]),
                     "order_currency": order["currency"],
+                    "credited_credits": int(order.get("credits_to_issue") or 0),
                 }
             if _text(order.get("payment_status")).lower() != "pending":
                 conn.rollback()
@@ -358,36 +526,89 @@ def settle_video_wallet_topup(order_id: Any, provider_payment_id: Any, amount_mi
             if int(order["amount_minor"]) != int(amount_minor) or _text(order["currency"]).upper() != _text(currency).upper() or _text(currency).upper() != "USD":
                 conn.rollback()
                 return {"success": False, "error": "VIDEO_WALLET_PAYMENT_AMOUNT_MISMATCH"}
+
+            unit_cost = Decimal(str(order.get("usd_per_1000_provider_credits") or 0))
+            credits_to_issue = int(order.get("credits_to_issue") or 0)
+            if unit_cost <= 0 or credits_to_issue <= 0:
+                # Upgrade a pending order created by the previous USD-wallet
+                # version without changing its already-fixed payment amount.
+                unit_cost = Decimal(str(_video_cost_per_1000_credits(order["user_id"])))
+                credits_to_issue = _april_credits_for_usd_minor(int(order["amount_minor"]), unit_cost)
+                if credits_to_issue <= 0:
+                    conn.rollback()
+                    return {"success": False, "error": "VIDEO_WALLET_ORDER_CREDIT_SNAPSHOT_INVALID"}
+                billing_mode = _magic_hour_billing_mode(order["user_id"])
+                cur.execute("""
+                    UPDATE april_video_wallet_orders
+                    SET credits_to_issue=%s, usd_per_1000_provider_credits=%s,
+                        markup_multiplier=%s, billing_mode=%s
+                    WHERE order_id=%s
+                """, (credits_to_issue, unit_cost, _video_markup_multiplier(), billing_mode, order_key))
+                order["credits_to_issue"] = credits_to_issue
+                order["usd_per_1000_provider_credits"] = unit_cost
+
             cur.execute("""
-                INSERT INTO april_video_wallets(user_id, enabled, balance_minor)
-                VALUES (%s, TRUE, %s)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    enabled=TRUE, balance_minor=april_video_wallets.balance_minor + EXCLUDED.balance_minor,
-                    updated_at=NOW()
-            """, (order["user_id"], amount_minor))
+                INSERT INTO april_video_wallets(user_id, enabled, credits_migrated)
+                VALUES (%s, TRUE, FALSE)
+                ON CONFLICT(user_id) DO UPDATE SET enabled=TRUE, updated_at=NOW()
+            """, (order["user_id"],))
+            _ensure_wallet_credit_state(cur, str(order["user_id"]), unit_cost)
+            cur.execute("""
+                SELECT balance_credits, debt_credits FROM april_video_wallets
+                WHERE user_id=%s FOR UPDATE
+            """, (order["user_id"],))
+            wallet = cur.fetchone() or {}
+            current_debt = max(0, int(wallet.get("debt_credits") or 0))
+            debt_repaid = min(current_debt, credits_to_issue)
+            spendable_credits = credits_to_issue - debt_repaid
+            cur.execute("""
+                UPDATE april_video_wallets
+                SET enabled=TRUE, balance_credits=balance_credits+%s,
+                    debt_credits=GREATEST(0, debt_credits-%s), updated_at=NOW()
+                WHERE user_id=%s
+            """, (spendable_credits, debt_repaid, order["user_id"]))
             cur.execute("""
                 INSERT INTO april_video_wallet_transactions
-                    (user_id, reference, kind, status, delta_minor, operation, description, metadata)
-                VALUES (%s, %s, 'topup', 'completed', %s, 'topup', 'Video Wallet top-up', %s::jsonb)
+                    (user_id, reference, kind, status, delta_minor, delta_credits,
+                     markup_multiplier, operation, description, metadata)
+                VALUES (%s, %s, 'topup', 'completed', %s, %s, %s,
+                        'topup', 'April Video Credits purchase', %s::jsonb)
                 ON CONFLICT(reference) DO NOTHING
-            """, (order["user_id"], "topup:" + order_key, amount_minor, json.dumps({"order_id": order_key, "provider_payment_id": payment_key})))
+                RETURNING id
+            """, (
+                order["user_id"], "topup:" + order_key, int(amount_minor), credits_to_issue,
+                float(order.get("markup_multiplier") or 2),
+                json.dumps({
+                    "order_id": order_key, "provider_payment_id": payment_key,
+                    "credited_credits": credits_to_issue, "debt_repaid": debt_repaid,
+                    "spendable_credits": spendable_credits,
+                    "usd_per_1000_provider_credits": float(unit_cost),
+                    "billing_mode": _text(order.get("billing_mode") or "test_bonus"),
+                }),
+            ))
+            if not cur.fetchone():
+                raise CVideoError("VIDEO_WALLET_TOPUP_ALREADY_RECORDED")
             cur.execute("""
                 UPDATE april_video_wallet_orders
                 SET payment_status='paid', provider_payment_id=%s, paid_at=NOW()
                 WHERE order_id=%s
             """, (payment_key, order_key))
+            cur.execute("SELECT balance_credits, debt_credits FROM april_video_wallets WHERE user_id=%s", (order["user_id"],))
+            after = cur.fetchone() or {}
         conn.commit()
         return {
             "success": True, "order_id": order_key, "payment_status": "paid",
             "user_id": order["user_id"], "order_amount_minor": int(amount_minor),
-            "order_currency": "USD",
+            "order_currency": "USD", "credited_credits": credits_to_issue,
+            "debt_repaid": debt_repaid,
+            "balance_credits": int(after.get("balance_credits") or 0),
+            "debt_credits": int(after.get("debt_credits") or 0),
         }
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
-
 
 def _video_markup_multiplier() -> float:
     # The agreed customer price is exactly 2x the provider's effective cost.
@@ -411,11 +632,12 @@ def _video_cost_per_1000_credits(user_id: Any = None) -> float:
 
 
 def _video_price_for_credits(credits: int, unit_cost_per_1000: float) -> tuple[int, int]:
-    from decimal import Decimal, ROUND_CEILING
-    credits = max(0, int(credits or 0))
-    provider_cost = (Decimal(credits) * Decimal(str(unit_cost_per_1000)) / Decimal(1000) * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
-    provider_minor = int(provider_cost)
-    customer_minor = int((Decimal(provider_minor) * Decimal(str(_video_markup_multiplier()))).quantize(Decimal("1"), rounding=ROUND_CEILING))
+    """Return provider and customer USD-cent equivalents without double rounding."""
+    provider_credits = max(0, int(credits or 0))
+    provider_value = Decimal(provider_credits) * Decimal(str(unit_cost_per_1000)) / Decimal("10")
+    customer_value = provider_value * Decimal(str(_video_markup_multiplier()))
+    provider_minor = int(provider_value.to_integral_value(rounding=ROUND_CEILING)) if provider_value else 0
+    customer_minor = int(customer_value.to_integral_value(rounding=ROUND_CEILING)) if customer_value else 0
     return provider_minor, customer_minor
 
 
@@ -423,44 +645,58 @@ def _reserve_video_charge(user_id: Any, operation_ref: Any, operation: str, esti
     canonical = _wallet_identity(user_id)
     billing_mode = _magic_hour_billing_mode(user_id)
     unit_cost = _video_cost_per_1000_credits(user_id)
-    reference = re.sub(r"[^A-Za-z0-9._:-]", "", _text(operation_ref))[:120] or __import__("uuid").uuid4().hex
+    estimate_credits = max(0, int(estimate_credits or 0))
+    reference = re.sub(r"[^A-Za-z0-9._:-]", "", _text(operation_ref))[:120] or uuid.uuid4().hex
     reference = "video:" + reference
-    provider_minor, charge_minor = _video_price_for_credits(estimate_credits, unit_cost)
-    # Keep a 15% reserve for provider FPS/credit corrections. Only the final
-    # provider-reported charge is kept; the unused reserve is returned atomically.
-    reserve_minor = int((charge_minor * 1.15) + 0.999999)
+    provider_minor, estimated_customer_minor = _video_price_for_credits(estimate_credits, unit_cost)
+    expected_april_credits = estimate_credits * int(_video_markup_multiplier())
+    reserve_credits = int((Decimal(expected_april_credits) * Decimal("1.15")).to_integral_value(rounding=ROUND_CEILING))
+    reserve_minor = _usd_minor_for_april_credits(reserve_credits, unit_cost)
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT balance_minor, enabled FROM april_video_wallets WHERE user_id=%s FOR UPDATE", (canonical,))
+            cur.execute("SELECT enabled FROM april_video_wallets WHERE user_id=%s FOR UPDATE", (canonical,))
             wallet = cur.fetchone()
             if not wallet or not wallet.get("enabled"):
                 raise CVideoError("VIDEO_WALLET_NOT_ENABLED")
-            if int(wallet.get("balance_minor") or 0) < reserve_minor:
+            _ensure_wallet_credit_state(cur, canonical, unit_cost)
+            cur.execute("SELECT balance_credits, debt_credits FROM april_video_wallets WHERE user_id=%s FOR UPDATE", (canonical,))
+            wallet = cur.fetchone() or {}
+            balance_credits = max(0, int(wallet.get("balance_credits") or 0))
+            debt_credits = max(0, int(wallet.get("debt_credits") or 0))
+            if debt_credits > 0 or balance_credits < reserve_credits:
                 raise CVideoError("VIDEO_WALLET_INSUFFICIENT_FUNDS")
             cur.execute("""
-                UPDATE april_video_wallets SET balance_minor=balance_minor-%s, updated_at=NOW()
+                UPDATE april_video_wallets SET balance_credits=balance_credits-%s, updated_at=NOW()
                 WHERE user_id=%s
-            """, (reserve_minor, canonical))
+            """, (reserve_credits, canonical))
             cur.execute("""
                 INSERT INTO april_video_wallet_transactions
-                    (user_id, reference, kind, status, delta_minor, provider_cost_minor,
-                     provider_credits, markup_multiplier, operation, description, metadata)
-                VALUES (%s, %s, 'video_debit', 'processing', %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (user_id, reference, kind, status, delta_minor, delta_credits,
+                     provider_cost_minor, provider_credits, markup_multiplier,
+                     operation, description, metadata)
+                VALUES (%s, %s, 'video_debit', 'processing', %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT(reference) DO NOTHING
                 RETURNING id
             """, (
-                canonical, reference, -reserve_minor, provider_minor, int(estimate_credits),
-                _video_markup_multiplier(), operation,
+                canonical, reference, -reserve_minor, -reserve_credits,
+                provider_minor, estimate_credits, _video_markup_multiplier(), operation,
                 "Video generation" if operation == "generate" else "AI video editing",
-                json.dumps({"billing_mode": billing_mode, "unit_cost_usd_per_1000_credits": unit_cost}),
+                json.dumps({
+                    "billing_mode": billing_mode,
+                    "unit_cost_usd_per_1000_credits": unit_cost,
+                    "estimated_customer_minor": estimated_customer_minor,
+                    "expected_april_credits": expected_april_credits,
+                    "reserved_april_credits": reserve_credits,
+                }),
             ))
             if not cur.fetchone():
                 raise CVideoError("VIDEO_OPERATION_ALREADY_PROCESSED")
         conn.commit()
         return {
             "reference": reference, "reserve_minor": reserve_minor,
-            "provider_cost_minor": provider_minor, "estimate_credits": int(estimate_credits),
+            "reserve_credits": reserve_credits, "provider_cost_minor": provider_minor,
+            "estimate_credits": estimate_credits,
             "markup_multiplier": _video_markup_multiplier(), "billing_mode": billing_mode,
             "unit_cost_usd_per_1000_credits": unit_cost,
         }
@@ -479,40 +715,81 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
     if unit_cost is None:
         unit_cost = _video_cost_per_1000_credits(user_id)
     provider_minor, actual_minor = _video_price_for_credits(actual_credits, float(unit_cost))
+    actual_april_credits = actual_credits * int(_video_markup_multiplier())
     conn = _wallet_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT delta_minor, metadata FROM april_video_wallet_transactions
+                SELECT delta_minor, delta_credits, provider_credits, metadata, status
+                FROM april_video_wallet_transactions
                 WHERE user_id=%s AND reference=%s FOR UPDATE
             """, (canonical, reference))
             tx = cur.fetchone()
             if not tx:
                 raise CVideoError("VIDEO_WALLET_RESERVATION_NOT_FOUND")
-            old_delta = int(tx.get("delta_minor") or 0)
-            old_reserved = abs(old_delta)
-            actual_delta = 0 if refund else -actual_minor
-            balance_adjustment = old_reserved - actual_minor if not refund else old_reserved
-            cur.execute("""
-                UPDATE april_video_wallets SET balance_minor=balance_minor+%s, updated_at=NOW()
-                WHERE user_id=%s
-            """, (balance_adjustment, canonical))
+            if _text(tx.get("status")).lower() != "processing":
+                conn.commit()
+                return {
+                    "success": True, "already_settled": True,
+                    "charged_minor": abs(int(tx.get("delta_minor") or 0)),
+                    "charged_credits": abs(int(tx.get("delta_credits") or 0)),
+                    "provider_credits": int(tx.get("provider_credits") or 0),
+                    "markup_multiplier": _video_markup_multiplier(),
+                    "status": _text(tx.get("status")),
+                }
+            old_reserved_credits = abs(int(tx.get("delta_credits") or reservation.get("reserve_credits") or 0))
             meta = tx.get("metadata") if isinstance(tx.get("metadata"), dict) else {}
+            cur.execute("""
+                SELECT balance_credits, debt_credits FROM april_video_wallets
+                WHERE user_id=%s FOR UPDATE
+            """, (canonical,))
+            wallet = cur.fetchone() or {}
+            balance = max(0, int(wallet.get("balance_credits") or 0))
+            debt = max(0, int(wallet.get("debt_credits") or 0))
+            if refund:
+                balance += old_reserved_credits
+                actual_delta_credits = 0
+                actual_delta_minor = 0
+                actual_april_credits = 0
+                actual_minor = 0
+            elif old_reserved_credits >= actual_april_credits:
+                balance += old_reserved_credits - actual_april_credits
+                actual_delta_credits = -actual_april_credits
+                actual_delta_minor = -actual_minor
+            else:
+                extra = actual_april_credits - old_reserved_credits
+                extra_from_balance = min(balance, extra)
+                balance -= extra_from_balance
+                debt += extra - extra_from_balance
+                actual_delta_credits = -actual_april_credits
+                actual_delta_minor = -actual_minor
+            cur.execute("""
+                UPDATE april_video_wallets
+                SET balance_credits=%s, debt_credits=%s, updated_at=NOW()
+                WHERE user_id=%s
+            """, (balance, debt, canonical))
             if provider_job_id:
                 meta["provider_job_id"] = provider_job_id
             meta["actual_credits"] = actual_credits
+            meta["actual_april_credits"] = actual_april_credits
+            meta["settlement_debt_created"] = max(0, debt - max(0, int(wallet.get("debt_credits") or 0)))
             cur.execute("""
                 UPDATE april_video_wallet_transactions
-                SET delta_minor=%s, provider_cost_minor=%s, provider_credits=%s,
-                    status=%s, metadata=%s::jsonb, updated_at=NOW()
+                SET delta_minor=%s, delta_credits=%s, provider_cost_minor=%s,
+                    provider_credits=%s, status=%s, metadata=%s::jsonb, updated_at=NOW()
                 WHERE user_id=%s AND reference=%s
-            """, (actual_delta, provider_minor, actual_credits, "refunded" if refund else status, json.dumps(meta), canonical, reference))
+            """, (
+                actual_delta_minor, actual_delta_credits, provider_minor, actual_credits,
+                "refunded" if refund else status, json.dumps(meta), canonical, reference,
+            ))
         conn.commit()
         return {
             "success": True, "charged_minor": actual_minor if not refund else 0,
+            "charged_credits": actual_april_credits if not refund else 0,
             "provider_cost_minor": provider_minor, "provider_credits": actual_credits,
             "markup_multiplier": _video_markup_multiplier(),
             "billing_mode": _text(reservation.get("billing_mode") or "commercial"),
+            "balance_credits": balance, "debt_credits": debt,
             "status": "refunded" if refund else status,
         }
     except Exception:
@@ -520,7 +797,6 @@ def _update_video_charge(user_id: Any, reservation: dict[str, Any], *, actual_cr
         raise
     finally:
         conn.close()
-
 
 def _record_local_video_edit(user_id: Any, operation_ref: Any, description: str) -> None:
     try:
