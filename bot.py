@@ -3045,6 +3045,8 @@ class AprilHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "success": True, "provider": "liqpay", "checkout_url": "https://www.liqpay.ua/api/3/checkout",
                 "order_id": order["order_id"], "amount": order["amount"], "currency": "USD",
+                "credits_to_issue": int(order.get("credits_to_issue") or 0),
+                "markup_multiplier": float(order.get("markup_multiplier") or 2),
                 "data": encoded_data, "signature": signature,
             })
             return
@@ -3092,7 +3094,8 @@ class AprilHandler(BaseHTTPRequestHandler):
             payment_status = _text(payload.get("status")).lower()
             if payment_status != "success":
                 if order_id and payment_status in {"error", "failure", "reversed"}:
-                    video_failed = set_video_wallet_order_status(order_id, "failed")
+                    wallet_target_status = "reversed" if payment_status == "reversed" else "failed"
+                    video_failed = set_video_wallet_order_status(order_id, wallet_target_status)
                     if not video_failed.get("success"):
                         set_premium_payment_order_status(order_id, "failed", expected_payment_source="liqpay_google_pay")
                 self._send_json(200, {"success": True, "acknowledged": True})
