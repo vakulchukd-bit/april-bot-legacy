@@ -1032,6 +1032,20 @@ def _continuation_marker(query: str) -> bool:
     )
 
 
+
+def _is_immediate_previous_message_reference(query: str) -> bool:
+    low = _text(query).lower().replace("ё", "е")
+    direct_pointer = bool(re.search(
+        r"\b(?:предыдущ(?:ем|его|ей|ую)\s+(?:моем\s+)?сообщени\w*|"
+        r"предыдущ(?:ем|его|ей)\s+(?:моем\s+)?запрос\w*|"
+        r"мое\s+предыдущее\s+сообщени\w*|мой\s+предыдущий\s+вопрос|"
+        r"последн(?:ем|ее|его)\s+моем\s+сообщени\w*|"
+        r"in\s+my\s+previous\s+message|my\s+last\s+(?:message|question))\b",
+        low, re.IGNORECASE,
+    ))
+    asks_to_resolve = bool(re.search(r"\b(?:о\s+чем|про\s+что|что|какой\s+вопрос|what|which)\b", low)) or "?" in low
+    return direct_pointer and asks_to_resolve
+
 def _is_history_request(query: str) -> bool:
     low = _text(query).lower().replace("ё", "е")
     if not low:
@@ -3174,6 +3188,21 @@ def _history_topic_text(item: dict[str, Any]) -> str:
 def _rank_history_topics(query: str, topics: list[dict[str, Any]], limit: int, *, fallback: bool = True) -> list[dict[str, Any]]:
     """Prefer matching topics for a subject-specific recall; keep recency order for broad recall."""
     bounded = [dict(item) for item in topics if isinstance(item, dict)]
+    if _is_immediate_previous_message_reference(query):
+        # Immediate-message references are positional, not topical. Select the
+        # latest saved pair in the already-authenticated, already-scoped rows.
+        # Never run lexical subject ranking on words like "route" or "previous".
+        immediate_rows = [
+            row for row in all_rows
+            if isinstance(row, dict) and not row.get("is_pending_clarification")
+        ]
+        immediate_rows.sort(
+            key=lambda row: (float(row.get("created_at") or 0), int(row.get("turn_index") or 0)),
+            reverse=True,
+        )
+        if immediate_rows:
+            chosen = immediate_rows[0]
+            return [_compact_pair(chosen)], "immediate_previous_exchange", 1
     tokens = _history_query_topic_tokens(query)
     if not tokens:
         return bounded[:max(1, min(5, int(limit or 5)))] if fallback else []
