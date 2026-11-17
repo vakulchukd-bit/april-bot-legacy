@@ -1911,6 +1911,29 @@ def _infer_dialogue_act_profile(
     }
 
 
+
+
+def _is_immediate_previous_message_reference(text: Any) -> bool:
+    """True when the user points to the immediately preceding turn, not archive history."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    direct_pointer = bool(re.search(
+        r"\b(?:предыдущ(?:ем|ему|его|ей|ую)\s+(?:моем\s+)?сообщени\w*|"
+        r"предыдущ(?:ем|его|ей)\s+(?:моем\s+)?запрос\w*|"
+        r"мое\s+предыдущее\s+сообщени\w*|мой\s+предыдущий\s+вопрос|"
+        r"последн(?:ем|ее|его)\s+моем\s+сообщени\w*|"
+        r"только\s+что\s+(?:я\s+)?(?:написал\w*|спросил\w*)|"
+        r"in\s+my\s+previous\s+message|my\s+last\s+(?:message|question)|"
+        r"the\s+message\s+i\s+just\s+sent)\b",
+        low, re.IGNORECASE,
+    ))
+    asks_to_resolve = bool(re.search(
+        r"\b(?:о\s+чем|про\s+что|что|какой\s+вопрос|what|which)\b", low
+    )) or "?" in low
+    return direct_pointer and asks_to_resolve
+
+
 def interpret_request_semantics(text: str) -> dict[str, Any]:
     """Infer request intent and retrieval direction before splitting into tasks.
 
@@ -2669,6 +2692,28 @@ def build_question_sequence(
     """
     sequence: list[dict[str, Any]] = []
     parent = dict(parent_interpretation or interpret_request_semantics(text))
+    if _is_immediate_previous_message_reference(text):
+        # This is a pointer to the immediately preceding USER↔APRIL exchange.
+        # Keep the complete utterance intact; splitting it creates empty child
+        # searches and loses the referent before State Manager can bind it.
+        outputs = _enhance_requested_outputs(text, _detect_requested_outputs(text))
+        return [{
+            "step_index": 1, "request": _text(text),
+            "output_types": outputs or ["text"], "answer_in_order": True,
+            "semantic_intent": parent.get("primary_intent", "HISTORY_RECALL"),
+            "search_direction": parent.get("direction", "SEARCH_DIALOGUE_HISTORY"),
+            "time_scope": "IMMEDIATE_PREVIOUS_EXCHANGE",
+            "topic_reference": "IMMEDIATE_PREVIOUS_USER_MESSAGE",
+            "requires_memory": True, "history_request": True,
+            "semantic_reason": "immediate_previous_message_reference_atomic",
+            "parent_context_dependency": True,
+            "context_signature": "IMMEDIATE_PREVIOUS_EXCHANGE",
+            "action_contract": {
+                "action": "ANSWER_FROM_IMMEDIATE_PREVIOUS_EXCHANGE",
+                "output_types": outputs or ["text"],
+                "must_not": ["не подменять предыдущий запрос архивным поиском", "не придумывать тему при отсутствии пары"],
+            },
+        }]
     pieces = _split_request_sequence(text)
     parent_introduces_subject = _has_explicit_topic_introduction(text)
     subject_intro_seen = False
