@@ -6504,7 +6504,16 @@ async def execute(
         _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
         if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
             request.routing["site_help_requested"] = True
+            # Keep IT Room's verified interface catalogue and its response protocol
+            # together in the single Premium provider request.
+            _it_context["response_guidance"] = list(_it_contribution.get("prompt_fragments") or [])
             request.routing["room_knowledge_context"] = {"it": _it_context}
+            _apr_timing_log(
+                "it_room_context_ready", None,
+                provider_handoff=True,
+                guidance_items=len(_it_context["response_guidance"]),
+                context_keys=len(_it_context),
+            )
     except Exception as _room_context_error:
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
@@ -7052,6 +7061,27 @@ async def execute(
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
+
+    # Premium uses the same IT Room -> OpenAI -> SceneContract sequence as Free.
+    # The model authors the conversational answer; IT Room only appends verified
+    # route links/diagrams after the provider response has returned.
+    if bool(request.routing.get("site_help_requested")):
+        try:
+            from blocks.C_IT_ROOM import ensure_site_navigation_response
+            raw = ensure_site_navigation_response(raw, request)
+            provider_packet["machine_response"] = raw
+            _apr_timing_log(
+                "it_room_provider_response_enriched", None,
+                provider_handoff=True,
+                provider_answer_chars=len(_text(raw.get("answer") or raw.get("content"))),
+                render_blocks=len(raw.get("render_blocks") or []),
+            )
+        except Exception as _it_postprocess_error:
+            _apr_timing_log(
+                "it_room_postprocess_unavailable", None,
+                error=type(_it_postprocess_error).__name__,
+                provider_answer_preserved=True,
+            )
 
     # A selected artifact revision is complete only if the response contains a
     # value-bearing block of the same family. Text saying "done" is not a renderer.
