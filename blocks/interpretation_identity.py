@@ -1124,6 +1124,8 @@ def _infer_routing_capabilities(text: str) -> list[str]:
     for pattern, values in rules:
         if re.search(pattern, low):
             capabilities.extend(values)
+    if _infer_april_ui_semantics(text):
+        capabilities.extend(("site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"))
     return list(dict.fromkeys(capabilities))
 
 
@@ -1254,12 +1256,239 @@ _SITE_NAVIGATION_TARGET_RE = re.compile(
     r"(?:сообществ|community|истори\w*\s+диалог|saved\s+dialogues?|history|"
     r"кабинет|профил|настройк|settings|account|help\s+center|справк|support|поддержк|"
     r"тариф|premium|памят|удален\w*\s+аккаунт|privacy\s+policy|terms\s+of\s+service|"
-    r"отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*|feedback|report\s+(?:button|response|answer)|thank(?:s|ing)?\s+button)",
+    r"отблагодар\w*|поблагодар\w*|пожалова\w*|жалоб\w*|feedback|report\s+(?:button|response|answer)|thank(?:s|ing)?\s+button|"
+    r"кнопк\w*|значок|иконк\w*|квадрат|скрепк\w*|метл\w*|микрофон|стрелк\w*|"
+    r"язык\w*|language|имя\s+в\s+чате|display\s+name|april\s*id|premium\s*id|current\s+plan|"
+    r"invite\s+friend|add\s+friend|search\s+friends|добав\w*\s+друг|поиск\s+друз|"
+    r"заявк\w*\s+в\s+поддержк|обращен\w*\s+в\s+поддержк|support\s+ticket|"
+    r"message\s+april|поле\s+сообщен|рабоч\w*\s+поле|clear\s+workspace|"
+    r"чат|ответ\s+april|сообщен\w*\s+april|график\w*|таблиц\w*|код\w*|изображен\w*|файл\w*)",
     re.IGNORECASE,
 )
 
+_UI_CONTROL_EXPLANATION_RE = re.compile(
+    r"(?:что\s+(?:делает|значит|показывает|это\s+за)|зачем\s+(?:нужна|нужен|нужно)|для\s+чего|"
+    r"объясни(?:те)?|расскажи(?:те)?|what\s+(?:does|is)|what\s+is\s+it\s+for)",
+    re.IGNORECASE,
+)
+_UI_CONTROL_TROUBLE_RE = re.compile(
+    r"(?:не\s+(?:нажимается|работает|реагирует|открывается|срабатывает|активируется)|"
+    r"не\s+могу\s+(?:нажать|открыть|перейти|отправить)|"
+    r"кнопк\w*.{0,45}(?:неактивн|серая|серый|заблокир|не\s+работ|не\s+реагир)|"
+    r"(?:disabled|not\s+clickable|doesn't\s+work|does\s+not\s+respond|button\s+is\s+grey))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _infer_april_ui_semantics(value: Any) -> dict[str, Any]:
+    """Resolve a user-facing April UI request into a route and exact control family."""
+    source = _text(value).strip()
+    low = source.lower().replace("ё", "е")
+    if not low or _has_direct_non_ui_output_action(low):
+        return {}
+
+    action = "GUIDE_UI_ACTION"
+    target = "verified_site_map"
+    route = "/"
+    guidance_mode = "step_by_step"
+    function_ids: list[str] = []
+    related_targets: list[str] = []
+    screen_id = "chat_home"
+
+    # Video how-to questions are a navigation task in the chat composer, not a
+    # request to generate a video. Keep direct creation verbs on the media path.
+    video_noun = bool(re.search(r"(?:\bvideo\b|\bvideos\b|\bclip\b|\bclips\b|видео\w*|ролик\w*)", low, re.I))
+    direct_video_creation = bool(re.search(
+        r"^\s*(?:создай(?:те)?|сгенерируй(?:те)?|сгенерировать|оживи(?:те)?|анимируй(?:те)?|generate|create|make)\b.{0,45}(?:\bvideo\b|\bclip\b|виде\w*|ролик\w*)",
+        low, re.I,
+    ))
+    video_howto = video_noun and not direct_video_creation and bool(re.search(
+        r"(?:как\b|подскажи|помоги|объясни|расскажи|можно\s+ли|куда\s+нажать|how\b|help\s+me|show\s+me|can\s+i|where\s+do\s+i)",
+        low, re.I,
+    ))
+
+    if video_howto:
+        action, target, route, guidance_mode = "GUIDE_ATTACH_IMAGE", "chat.paperclip_picker", "/", "step_by_step"
+        function_ids = ["chat_attach_file", "chat_attachment_picker_controls", "chat_text_send"]
+        screen_id = "chat_home"
+    elif _is_video_workflow_navigation(source) and not _has_direct_video_generation_action(source):
+        action, target, route, guidance_mode = "GUIDE_ATTACH_IMAGE", "chat.paperclip_picker", "/", "step_by_step"
+        function_ids = ["chat_attach_file", "chat_attachment_picker_controls", "chat_text_send"]
+        screen_id = "chat_home"
+    elif _is_attachment_tutorial_request(source):
+        action, target, route, guidance_mode = "GUIDE_ATTACH_IMAGE", "chat.paperclip_picker", "/", "step_by_step"
+        function_ids = ["chat_attach_file", "chat_attachment_picker_controls", "chat_text_send"]
+        screen_id = "chat_home"
+    elif re.search(r"(?:поддержк\w*|support).{0,65}(?:истори\w*|предыдущ\w*|прошл\w*|тикет\w*|обращен\w*)|(?:истори\w*|предыдущ\w*|прошл\w*|откры\w*).{0,65}(?:поддержк\w*|support|тикет\w*|обращен\w*)", low, re.I):
+        target, route, screen_id = "support.thread", "/insights?room=support", "support_room"
+        function_ids = ["support_thread_select", "support_history_view"]
+    elif re.search(r"(?:поддержк\w*|support).{0,65}(?:скриншот\w*|снимок\s+экрана)|(?:скриншот\w*|снимок\s+экрана).{0,65}(?:поддержк\w*|support)", low, re.I):
+        target, route, screen_id = "support.attach_screenshot", "/insights?room=support", "support_room"
+        function_ids = ["support_attach_screenshot", "support_new_request"]
+    elif re.search(r"(?:заявк\w*|обращен\w*|тикет\w*|ticket).{0,50}(?:поддержк\w*|support)|(?:поддержк\w*|support).{0,60}(?:заявк\w*|обращен\w*|тикет\w*|ticket)", low, re.I):
+        target, route, screen_id = "support.request", "/insights?room=support", "support_room"
+        function_ids = ["support_new_request", "support_send_ticket"]
+    elif re.search(r"(?:сменить|изменить|поменять|выбрать|настроить).{0,40}(?:язык|language)|(?:язык|language).{0,40}(?:сменить|изменить|поменять|выбрать)", low, re.I):
+        target, route, screen_id = "profile.language", "/settings", "settings_profile"
+        function_ids = ["settings_language"]
+    elif re.search(r"(?:истори\w*\s+диалог|истори\w*\s+бесед|saved\s+dialogues?|conversation\s+history|history\s+page)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "dialogue_history", "/history", "history_list"
+        function_ids = ["history_resume"]
+    elif re.search(r"(?:добав\w*.{0,35}друг|найти\w*.{0,35}(?:друг|пользоват)|поиск\w*.{0,35}(?:друз|участник)|add\s+friend|search\s+friends)", low, re.I):
+        target, route, screen_id = "community.friends", "/space", "community_feed"
+        function_ids = ["community_search_members", "community_friend_manage"]
+    elif re.search(r"(?:приглас\w*.{0,35}друг|invite\s+(?:a\s+)?friend)", low, re.I):
+        target, route, screen_id = "community.invite", "/space", "community_feed"
+        function_ids = ["community_invite_friend", "community_invite"]
+    elif re.search(r"(?:community|сообществ\w*).{0,65}(?:ник\w*|nickname|личн\w* профил)|(?:ник\w*|nickname|личн\w* профил).{0,65}(?:community|сообществ\w*)", low, re.I):
+        target, route, screen_id = "community.personal_profile", "/space", "community_feed"
+        function_ids = ["community_personal_profile", "community_profile_toggle"]
+    elif re.search(r"(?:community|сообществ\w*).{0,75}(?:удал\w*|пожалова\w*|жалоб\w*|report|delete).{0,45}(?:пост\w*|сообщен\w*|публикац\w*)|(?:удал\w*|пожалова\w*|жалоб\w*|report|delete).{0,45}(?:пост\w*|сообщен\w*|публикац\w*).{0,65}(?:community|сообществ\w*)", low, re.I):
+        target, route, screen_id = "community.post_actions", "/space", "community_feed"
+        function_ids = ["community_post_actions", "community_delete_post", "community_report_post"]
+    elif re.search(r"(?:созда\w*|написа\w*|опубликова\w*|размест\w*|post|publish).{0,55}(?:пост\w*|сообщен\w*|публикац\w*).{0,55}(?:community|сообществ\w*)|(?:community|сообществ\w*).{0,55}(?:созда\w*|написа\w*|опубликова\w*|размест\w*|post|publish)", low, re.I):
+        target, route, screen_id = "community.public_post", "/space", "community_feed"
+        function_ids = ["community_public_post"]
+    elif re.search(r"(?:личн\w*\s+чат|приватн\w*\s+чат|private\s+chat|direct\s+message)", low, re.I):
+        target, route, screen_id = "community.private_chat", "/space", "community_feed"
+        function_ids = ["community_private_chat", "direct_chat_controls"]
+    elif re.search(r"(?:метл\w*|clear\s+workspace|очист\w*.{0,40}(?:чат|рабоч\w*\s+пол\w*|видим\w*\s+сообщен)|очистить\s+чат)", low, re.I):
+        target, route, screen_id = "chat.clear_workspace", "/", "chat_home"
+        function_ids = ["chat_clear_workspace"]
+    elif re.search(r"(?:скрепк\w*|прикреп\w*|вложен\w*|attach\s+(?:a\s+)?file|paperclip|upload\s+(?:a\s+)?file)", low, re.I):
+        action, target, route, screen_id = "GUIDE_ATTACH_IMAGE", "chat.paperclip_picker", "/", "chat_home"
+        function_ids = ["chat_attach_file", "chat_attachment_picker_controls"]
+    elif re.search(r"(?:микрофон|голос\w*|voice\s+(?:input|message))", low, re.I):
+        target, route, screen_id = "chat.voice_input", "/", "chat_home"
+        function_ids = ["chat_voice_input"]
+    elif re.search(r"(?:создать|отправить|написать|подать).{0,50}(?:заявк\w*|обращен\w*|тикет\w*)", low, re.I) and re.search(r"(?:поддержк\w*|support)", low, re.I):
+        target, route, screen_id = "support.request", "/insights?room=support", "support_room"
+        function_ids = ["support_new_request", "support_send_ticket"]
+    elif re.search(r"(?:имя\s+в\s+чате|отображаем\w*\s+имя|display\s*name|поменять\s+имя|изменить\s+имя)", low, re.I):
+        target, route, screen_id = "profile.display_name", "/settings", "settings_profile"
+        function_ids = ["settings_display_name"]
+    elif re.search(r"(?:april\s*id|premium\s*id|идентификатор\w*)", low, re.I):
+        target, route, screen_id = "profile.identifiers", "/settings", "settings_profile"
+        function_ids = ["settings_copy_ids"]
+    elif re.search(r"(?:выйти\s+из\s+(?:аккаунт\w*|учетн\w*\s+запис\w*)|выход\s+из\s+аккаунт\w*|log\s*out|sign\s*out)", low, re.I):
+        target, route, screen_id = "profile.logout", "/settings", "settings_profile"
+        function_ids = ["settings_logout"]
+    elif re.search(r"(?:купить|оплатить|продлить|пакет\w*|premium|премиум|тариф\w*)", low, re.I) and re.search(r"(?:april|април|у\s+тебя|в\s+приложени\w*|где|как)", low, re.I):
+        target, route, screen_id = "profile.plan", "/settings", "settings_profile"
+        function_ids = ["settings_plan_payment", "settings_premium_packages"]
+    elif re.search(r"(?:настройк\w*|профил\w*|личн\w*\s+кабинет|settings|profile)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "profile.settings", "/settings", "settings_profile"
+        function_ids = ["settings_language", "settings_display_name", "settings_plan_payment"]
+    elif re.search(r"(?:поддержк\w*|contact\s+support|support\s+page)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "support.request", "/insights?room=support", "support_room"
+        function_ids = ["support_new_request", "support_send_ticket", "support_history_view"]
+    elif re.search(r"(?:help\s*&\s*information|справк\w*|центр\s+помощи|how\s+to\s+use)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "april.help_information", "/aprill", "help_information"
+        function_ids = ["help_article_navigation", "help_topic_cards", "help_topic_back_controls"]
+    elif re.search(r"(?:удал\w*.{0,35}аккаунт|delete\s+(?:my\s+)?account)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "account.delete", "/account-deletion", "account_deletion"
+        function_ids = ["account_delete", "account_deletion_controls"]
+    elif re.search(r"(?:privacy\s+policy|конфиденциальност\w*)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "legal.privacy", "/privacy-policy", "privacy_policy"
+        function_ids = ["help_static_legal_pages"]
+    elif re.search(r"(?:terms\s+of\s+service|услови\w*\s+использован)", low, re.I):
+        action, target, route, screen_id = "EXPLAIN_UI_ROUTE", "legal.terms", "/terms-of-service", "terms_of_service"
+        function_ids = ["help_static_legal_pages"]
+    elif re.search(r"(?:зел\w*.{0,25}(?:стрелк\w*|кнопк\w*)|опубликов\w*.{0,40}сообществ|share.{0,30}community)", low, re.I):
+        target, route, screen_id = "response.share_to_community", "/", "chat_home"
+        function_ids = ["assistant_response_share"]
+    elif re.search(r"(?:жалоб\w*|пожалова\w*|спасибо\s+под\s+ответ|report\s+(?:answer|response)|thank\s+button)", low, re.I):
+        target, route, screen_id = "response.feedback", "/", "chat_home"
+        function_ids = ["response_feedback"]
+    elif re.search(r"(?:график\w*|graph).{0,50}(?:кнопк\w*|ракурс|масштаб|показать\s+данн)|(?:кнопк\w*|ракурс|масштаб).{0,50}(?:график\w*|graph)", low, re.I):
+        target, route, screen_id = "rendered_graph.controls", "/", "render_graph"
+        function_ids = ["rendered_graph_controls"]
+    elif re.search(r"(?:таблиц\w*|table).{0,50}(?:скача\w*|сортир\w*|копир\w*)", low, re.I):
+        target, route, screen_id = "render.table", "/", "render_table"
+        function_ids = ["render_table_controls"]
+    elif re.search(r"(?:код\w*|code).{0,50}(?:копир\w*|скача\w*)", low, re.I):
+        target, route, screen_id = "render.code", "/", "render_code"
+        function_ids = ["render_code_copy"]
+    elif re.search(r"(?:откры\w*|развер\w*|увелич\w*|на\s+весь\s+экран|fullscreen|full\s*screen).{0,45}(?:изображен\w*|картинк\w*|фото|image|picture)|(?:изображен\w*|картинк\w*|фото|image|picture).{0,45}(?:на\s+весь\s+экран|fullscreen|full\s*screen)", low, re.I):
+        target, route, screen_id = "render.gallery", "/", "render_gallery"
+        function_ids = ["render_gallery_controls", "rendered_artifact_menu"]
+    elif re.search(r"(?:откры\w*|развер\w*|увелич\w*|закры\w*|open|expand|close).{0,45}(?:svg|схем\w*|диаграмм\w*|diagram)", low, re.I):
+        target, route, screen_id = "render.diagram", "/", "render_diagram_link_video"
+        function_ids = ["render_diagram_expand"]
+    elif re.search(r"(?:откры\w*|перейти\s+по|нажать|open|follow).{0,45}(?:ссылк\w*|link|linkcard)", low, re.I):
+        target, route, screen_id = "render.link", "/", "render_diagram_link_video"
+        function_ids = ["render_link_open"]
+    elif re.search(r"(?:скача\w*|сохран\w*|поделит\w*|download|save|share).{0,40}(?:изображен\w*|картинк\w*|фото|image|picture)", low, re.I):
+        target, route, screen_id = "render.gallery", "/", "render_gallery"
+        function_ids = ["render_gallery_controls", "rendered_artifact_menu"]
+
+    troubleshooting = bool(_UI_CONTROL_TROUBLE_RE.search(low)) and bool(re.search(
+        r"(?:кнопк\w*|значок|иконк\w*|квадрат|переключател|скрепк\w*|метл\w*|микрофон|стрелк\w*|button|icon|toggle)", low, re.I,
+    ))
+    if troubleshooting:
+        guidance_mode = "troubleshoot"
+        if function_ids:
+            action = "GUIDE_UI_ACTION"
+        elif target == "verified_site_map":
+            action, target, route, screen_id = "GUIDE_UI_ACTION", "chat.ui_control_troubleshooting", "unspecified", "unknown_ui_context"
+            related_targets = ["chat.ui_control_troubleshooting"]
+
+    explicit_overview = bool(re.search(
+        r"(?:полна\w*|весь|все|всю|кажд\w*|карт\w*|структур\w*|обзор\w*|перечисл\w*).{0,80}(?:интерфейс\w*|сайт\w*|экран\w*|страниц\w*|раздел\w*|функци\w*)|"
+        r"(?:full|complete|entire|whole|overview|site\s+map).{0,80}(?:april\s+)?(?:interface|site|website|screens?|pages?|navigation|ui)", low, re.I,
+    ))
+    # "На весь экран" means expand one rendered item, not a full-site overview.
+    if re.search(r"(?:на\s+весь\s+экран|full\s*screen|fullscreen)", low, re.I) and re.search(
+        r"(?:откры\w*|развер\w*|увелич\w*|open|expand|zoom).{0,55}(?:изображен\w*|картинк\w*|фото|svg|схем\w*|диаграмм\w*|график\w*|image|picture|diagram|graph)",
+        low, re.I,
+    ):
+        explicit_overview = False
+    if explicit_overview:
+        action, target, route, guidance_mode = "EXPLAIN_UI_ROUTE", "verified_site_map", "/", "overview"
+        function_ids = []
+        screen_id = "complete_site_inventory"
+
+    has_explicit_ui_target = bool(_SITE_NAVIGATION_TARGET_RE.search(low))
+    should_route = bool(
+        _is_attachment_tutorial_request(source)
+        or (_is_video_workflow_navigation(source) and not _has_direct_video_generation_action(source))
+        or explicit_overview
+        or bool(function_ids)
+        or troubleshooting
+        or (_UI_CONTROL_EXPLANATION_RE.search(low) and has_explicit_ui_target)
+        or _SITE_NAVIGATION_REQUEST_RE.search(low)
+        or any(term in low for term in ("метла", "скрепка", "микрофон", "язык интерфейса", "current plan"))
+    )
+    if not should_route:
+        return {}
+    if function_ids and not related_targets:
+        related_targets = [target]
+    return {
+        "schema": "april.site_navigation_semantics.v1",
+        "domain": "april_ui",
+        "action": action,
+        "target": target,
+        "user_goal": source[:1000],
+        "ui_navigation": {
+            "target": target,
+            "targets": related_targets or [target],
+            "route": route,
+            "starting_route": route,
+            "screen_id": screen_id,
+            "guidance_mode": guidance_mode,
+            "candidate_function_ids": function_ids,
+            "required_steps": True,
+            "expected_result_required": True,
+            "ask_for_screenshot_when_unresolved": guidance_mode == "troubleshoot",
+            "current_screen_unresolved": screen_id == "unknown_ui_context",
+        },
+        "confidence": 0.99 if function_ids or explicit_overview else 0.88,
+        "source": "interpretation_ui_intent_rules_v1",
+    }
+
+
 def _is_site_navigation_request(text: Any) -> bool:
-    """True for requests about where/how to use an April UI route, not history recall."""
+    """True for April UI walkthroughs, control explanations and safe troubleshooting."""
     source = _text(text).strip()
     if not source:
         return False
@@ -1270,9 +1499,19 @@ def _is_site_navigation_request(text: Any) -> bool:
         return True
     if _has_direct_non_ui_output_action(low):
         return False
+    # A typed route/control result is more reliable than the broad lexical gate.
+    # _infer_april_ui_semantics does not call this function, so this is not recursive.
+    if _infer_april_ui_semantics(source):
+        return True
+    if _UI_CONTROL_TROUBLE_RE.search(low) and re.search(
+        r"(?:кнопк\w*|значок|иконк\w*|квадрат|переключател|скрепк\w*|метл\w*|микрофон|стрелк\w*|button|icon|toggle)", low, re.I,
+    ):
+        return True
+    if _UI_CONTROL_EXPLANATION_RE.search(low) and _SITE_NAVIGATION_TARGET_RE.search(low):
+        return True
     if not _SITE_NAVIGATION_TARGET_RE.search(low):
         return False
-    return bool(_SITE_NAVIGATION_REQUEST_RE.search(low))
+    return bool(_SITE_NAVIGATION_REQUEST_RE.search(low) or re.search(r"(?:язык\w*|скрепк\w*|метл\w*|микрофон)", low, re.I))
 
 
 _HISTORY_COUNTS = {
@@ -2548,7 +2787,8 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
     output_names = [str(x).lower().replace("-", "_") for x in (outputs or ["text"])]
     attach_help = _is_attachment_tutorial_request(request)
     ui_instruction_detector = globals().get("_is_ui_instruction_request")
-    ui_help = _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
+    ui_semantics = _infer_april_ui_semantics(request)
+    ui_help = bool(ui_semantics) or _is_site_navigation_request(request) or (callable(ui_instruction_detector) and bool(ui_instruction_detector(request))) or attach_help
     composite_detector = globals().get("_detect_image_compositing_request")
     image_edit = _detect_image_modification(request) or (
         callable(composite_detector) and bool(composite_detector(request))
@@ -2569,13 +2809,36 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         action, domain, target = "GUIDE_ATTACH_IMAGE", "april_ui", "chat.paperclip_picker"
         must_not = ["не запускать генерацию или редактирование вместо инструкции", "не утверждать, что фото прикреплено до появления вложения и отправки сообщения"]
         success = ["пользователь понимает, где скрепка", "пользователь различает Камера, Изображения и Файлы", "объяснено, что после выбора надо вернуться в чат и нажать отправку"]
-        outputs = list(dict.fromkeys(["text", "diagram"]))
-        source_requirement = "никакой исходный файл не требуется для инструкции"
+        outputs = list(outputs or ["text"])
+        explicit_ui_diagram = bool(re.search(r"(?:схем\w*|диаграмм\w*|flowchart|diagram)", low, re.I)) or "diagram" in output_names
+        if not explicit_ui_diagram:
+            outputs = [kind for kind in outputs if str(kind).lower() != "diagram"] or ["text"]
+        source_requirement = "инструкция основана на проверенном маршруте и контролах IT Room; исходный файл для объяснения не требуется"
     elif ui_help:
-        action, domain, target = "EXPLAIN_UI_ROUTE", "april_ui", "verified_site_map"
-        must_not = ["не придумывать кнопку, раздел, URL или тариф", "для страницы без реализации честно описать статус"]
-        success = ["назвать стартовый экран и точную кнопку", "описать куда попадёт пользователь", "дать следующий шаг и безопасный путь назад"]
-        source_requirement = "APRIL_SITE_MAP и проверенные UI blueprint-описания"
+        action = _text(ui_semantics.get("action") or "EXPLAIN_UI_ROUTE").upper()
+        domain = "april_ui"
+        target = _text(ui_semantics.get("target") or "verified_site_map")
+        guidance_mode = _text((ui_semantics.get("ui_navigation") or {}).get("guidance_mode") or "step_by_step")
+        must_not = [
+            "не придумывать кнопку, раздел, URL, подпись или тариф",
+            "не утверждать, что April нажала кнопку, отправила форму, изменила настройку или завершила оплату",
+            "не выдавать структуру исходников за актуальный скриншот production-экрана",
+            "не советовать многократно нажимать платёжные, публикационные или необратимые кнопки",
+        ]
+        success = [
+            "назвать точный стартовый экран и подтверждённый относительный маршрут",
+            "определить конкретную функцию/элемент управления и его видимый ориентир",
+            "дать последовательные короткие шаги нажатий и ввода",
+            "описать ожидаемое изменение экрана и следующий шаг пользователя",
+            "указать только относящиеся к действию ограничения доступа и безопасный возврат",
+        ]
+        if guidance_mode == "troubleshoot":
+            success.extend(["определить, что именно не нажимается", "проверить обязательные поля/disabled-состояние/перекрывающий диалог", "при недостатке данных запросить скриншот текущего экрана"])
+        source_requirement = "APRIL_SITE_MAP + APRIL_UI_FUNCTION_CATALOG + APRIL_UI_SCREEN_REGISTRY; приоритет точного целевого action и control ID"
+        ui_semantics = dict(ui_semantics)
+        ui_semantics.setdefault("ui_navigation", {})
+        ui_semantics["ui_navigation"] = dict(ui_semantics.get("ui_navigation") or {})
+        ui_semantics["ui_navigation"].setdefault("guidance_mode", guidance_mode)
     elif history:
         action, domain, target = "SEARCH_DIALOGUE_HISTORY", "dialogue_history", "dialogue_memory"
         must_not = ["не подменять названную тему другой похожей темой", "не сообщать время без подходящей записи или достоверной отметки времени", "при отсутствии точного совпадения явно сказать об этом и предложить ближайшие подтверждённые совпадения"]
@@ -2606,12 +2869,16 @@ def _build_action_contract_for_step(request: str, semantics: dict[str, Any], out
         must_not = ["не притягивать несвязанные старые темы", "не терять числа, отрицания, ограничения и указанные объекты"]
         success = ["получен прямой ответ на текущий шаг", "непрерывный смысл запроса сохранён"]
         source_requirement = "текущий текст запроса; история только при явной ссылке или подтверждённой зависимости"
-    return {
+    result = {
         "step_index": int(index), "domain": domain, "action": action, "target": target,
         "output_types": list(outputs or ["text"]),
         "source_requirement": source_requirement, "depends_on_previous": bool(sem.get("parent_context_dependency") or sem.get("inherits_current_request_subject")),
         "must_not": must_not, "success_criteria": success,
     }
+    if ui_help:
+        result["ui_navigation"] = dict(ui_semantics.get("ui_navigation") or {})
+        result["site_navigation_semantics"] = ui_semantics
+    return result
 
 
 def _has_explicit_independent_non_ui_action(text: Any) -> bool:
@@ -2646,7 +2913,7 @@ def _split_request_sequence(text: str) -> list[str]:
         return [source]
     # Keep several route questions together as one navigation workflow. A separate
     # explicit artifact/calculation action is still split by the normal task path.
-    if _is_site_navigation_request(source) and not _has_explicit_independent_non_ui_action(source):
+    if (_infer_april_ui_semantics(source) or _is_site_navigation_request(source)) and not _has_explicit_independent_non_ui_action(source):
         return [source]
     if _looks_like_previous_answer_followup(source):
         return [source]
@@ -4353,6 +4620,11 @@ def build_interpretation(
     ):
         requested_outputs.append("code")
     routing_capabilities = _infer_routing_capabilities(request_text)
+    site_navigation_semantics = _infer_april_ui_semantics(request_text)
+    if site_navigation_semantics:
+        for capability in ("site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"):
+            if capability not in routing_capabilities:
+                routing_capabilities.append(capability)
 
     # Keep edit restrictions separate from permitted creation. A new picture
     # described in the current dialogue remains a normal Free generation. An edit
@@ -4682,6 +4954,7 @@ def build_interpretation(
             "topic_index": [dict(item) for item in (memory.get("topic_index") or []) if isinstance(item, dict)][:10],
             "asset_task_map": asset_task_map,
             "question_sequence": resolved_question_sequence,
+            "site_navigation_semantics": site_navigation_semantics,
             "answer_sequence_in_order": True,
             "presentation_contract": {
                 "mcdowell_required": True,
@@ -4714,6 +4987,11 @@ def build_interpretation(
             "dialogue_transition_analysis_version": "april_dialogue_transition_v1",
         },
     }
+    if site_navigation_semantics:
+        result["site_navigation_semantics"] = site_navigation_semantics
+        # A local site-help target is a deterministic lookup request, not a browser
+        # action: the downstream IT Room reads the map and explains the route.
+        result["site_navigation_help"] = True
     if image_edit_restricted:
         sequence_items = ((result.get("request_structure") or {}).get("question_sequence") or [])
         for sequence_item in sequence_items:
