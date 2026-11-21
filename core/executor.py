@@ -3488,7 +3488,17 @@ async def execute(
         _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
         if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
             request.routing["site_help_requested"] = True
+            # The room's prompt fragments are the user-facing response contract.
+            # Carry them beside the verified catalogue so the provider can explain
+            # the actual controls naturally instead of treating the room as a renderer.
+            _it_context["response_guidance"] = list(_it_contribution.get("prompt_fragments") or [])
             request.routing["room_knowledge_context"] = {"it": _it_context}
+            _apr_timing_log(
+                "it_room_context_ready", None,
+                provider_handoff=True,
+                guidance_items=len(_it_context["response_guidance"]),
+                context_keys=len(_it_context),
+            )
     except Exception as _room_context_error:
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
@@ -3718,51 +3728,6 @@ async def execute(
             user_key=_apr_diag_ref(uid),
             message_key=_apr_diag_ref(identity.get("message_id")),
         )
-    elif bool(request.routing.get("site_help_requested")) and not has_non_voice_attachment:
-        # The verified C_IT_ROOM catalogue already contains the route, positions,
-        # controls, and local SVG contract. Render navigation without another model
-        # request, an output-recovery retry, or a separate diagram-repair request.
-        from blocks.C_IT_ROOM import ensure_site_navigation_response
-        navigation_seed = "Проверяю маршрут по реальному интерфейсу April."
-        local_packet = _local_text_provider_packet(
-            navigation_seed,
-            identity,
-            metadata={
-                "local_site_navigation": True,
-                "site_navigation_source": "C_IT_ROOM",
-                "provider_calls": 0,
-            },
-        )
-        local_machine = ensure_site_navigation_response(local_packet["machine_response"], request)
-        local_answer = _text(local_machine.get("answer") or local_machine.get("content"))
-        local_meta = local_machine.get("metadata") if isinstance(local_machine.get("metadata"), dict) else {}
-        local_meta.update({
-            "local_site_navigation": True,
-            "site_navigation_source": "C_IT_ROOM",
-            "provider_calls": 0,
-            "dialogue_memory_record": {
-                "topic": "Навигация по интерфейсу April",
-                "summary": local_answer[:1200],
-                "sections": [],
-                "entities": ["Your profile", "CURRENT PLAN"] if re.search(r"premium|премиум|тариф|подписк", current_text, re.I) else [],
-                "pending_clarification": {},
-            },
-        })
-        local_machine["metadata"] = local_meta
-        local_machine["answer"] = local_answer
-        local_machine["content"] = local_answer
-        provider_packet = {"machine_response": local_machine}
-        provider_ms = 0.0
-        _apr_timing_log(
-            "site_navigation_local_response", provider_started,
-            navigation_mode=("direct_local" if direct_site_help_turn else "active_branch_local"),
-            provider_calls=0,
-            user_key=_apr_diag_ref(uid),
-            message_key=_apr_diag_ref(identity.get("message_id")),
-            render_blocks=len(local_machine.get("render_blocks") or []),
-            artifacts=len(local_machine.get("artifacts") or []),
-            answer_chars=len(local_answer),
-        )
     elif bool(dialogue_context.get("clarification_needed")):
         # This is a deterministic UI-facing clarification, not a provider fallback.
         # The original request and options are persisted in dialogue_memory_record,
@@ -3825,6 +3790,27 @@ async def execute(
     raw = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else None
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
+
+    # IT Room is consulted before OpenAI and its verified route/control guidance is
+    # included in ROOM_KNOWLEDGE_CONTEXT. Only after OpenAI has written the answer
+    # may the room add its deterministic route links/diagram to the SceneContract.
+    if bool(request.routing.get("site_help_requested")):
+        try:
+            from blocks.C_IT_ROOM import ensure_site_navigation_response
+            raw = ensure_site_navigation_response(raw, request)
+            provider_packet["machine_response"] = raw
+            _apr_timing_log(
+                "it_room_provider_response_enriched", None,
+                provider_handoff=True,
+                provider_answer_chars=len(_text(raw.get("answer") or raw.get("content"))),
+                render_blocks=len(raw.get("render_blocks") or []),
+            )
+        except Exception as _it_postprocess_error:
+            _apr_timing_log(
+                "it_room_postprocess_unavailable", None,
+                error=type(_it_postprocess_error).__name__,
+                provider_answer_preserved=True,
+            )
 
     provider_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
     asset_summary_started = time.perf_counter()
