@@ -2926,79 +2926,64 @@ _SITE_OTHER_RENDERERS = {"image", "gallery", "code", "table", "graph", "formula"
 
 
 def _site_should_render_diagram(query: str, requested_outputs: Any = None) -> bool:
-    """Render an interface diagram only when the current request/interpretation asks for it."""
+    """The IT room may render a diagram only when Interpretation authorizes it."""
     low = str(query or "").lower().replace("ё", "е")
-    if _SITE_NO_DIAGRAM_RE.search(low):
+    if _SITE_NO_DIAGRAM_RE.search(low) or _is_social_acknowledgement_only(low):
         return False
-    if _is_social_acknowledgement_only(low):
+    if not isinstance(requested_outputs, (list, tuple, set)):
         return False
     outputs = {
         str(value or "").strip().lower().replace("-", "_")
-        for value in (requested_outputs or [])
+        for value in requested_outputs
         if str(value or "").strip()
-    } if isinstance(requested_outputs, (list, tuple, set)) else set()
-    aliases = {"plot": "graph", "chart": "graph", "generated_image": "image", "image_gallery": "gallery", "latex": "formula", "math": "formula", "svg": "diagram", "flowchart": "diagram", "schematic": "diagram"}
+    }
+    aliases = {
+        "plot": "graph", "chart": "graph", "generated_image": "image",
+        "image_gallery": "gallery", "latex": "formula", "math": "formula",
+        "svg": "diagram", "svgblock": "diagram", "diagramrenderer": "diagram",
+        "flowchart": "diagram", "schematic": "diagram",
+    }
     outputs = {aliases.get(value, value) for value in outputs}
-    # Structured output selection wins: a text-only/table/code/image/graph request
-    # must not receive a second unsolicited UI diagram. An explicit diagram request
-    # in the same turn still wins unless the user says "no diagram" above.
-    if "diagram" in outputs:
-        return True
-    # A text/table/code/image/graph request is not expanded into a second visual
-    # product merely because April is explaining its own interface.
-    # A renderer noun on its own is not a visual request ("что такое диаграмма?",
-    # "объясни разницу между схемой и таблицей"). Require an action directed at
-    # creating/showing the visual, unless the structured output contract says diagram.
-    explicit_visual = bool(re.search(
-        r"(?:покажи|покажите|выведи|отобрази|визуализируй|сделай|создай|построй|нарисуй|дай)\s+(?:мне\s+)?(?:наглядн\w*\s+)?(?:схем\w*|диаграмм\w*|flowchart|diagram|карту\s+переход\w*)|"
-        r"(?:схем\w*|диаграмм\w*|flowchart|diagram|карт\w*\s+переход\w*).{0,55}(?:покажи|построй|создай|сделай|нарисуй|отобрази|выведи)|"
-        r"(?:нарисуй|покажи|отобрази).{0,55}(?:стрелк\w*|путь\s+переход\w*|схем\w*|диаграмм\w*)|"
-        r"(?:через\s+стрелк\w*|стрелк\w*.{0,35}(?:куда\s+нажать|путь|переход))|"
-        r"(?:визуализируй|покажи\s+визуально|наглядно\s+покажи).{0,70}(?:интерфейс\w*|сайт\w*|функци\w*|карт\w*\s+интерфейс\w*|комнат\w*|страниц\w*)|"
-        r"(?:show\s+visually|visuali[sz]e).{0,70}(?:interface|website|functions|site\s+map|pages)",
-        low, re.I | re.S
-    ))
-    if outputs:
-        return explicit_visual
-    # Natural-language visual intent is evaluated on the current turn only.
-    return explicit_visual
+    # This room is deliberately not a second interpreter. Natural-language phrase
+    # matching here must never add a diagram absent from Interpretation's plan.
+    return "diagram" in outputs
 
 
 def _requested_outputs_from_machine_request(machine_request: Any) -> List[str]:
-    """Read output preferences from both the request envelope and interpretation."""
-    sources: List[Dict[str, Any]] = []
+    """Return Interpretation's output plan; never infer it from a room or request envelope."""
     if isinstance(machine_request, dict):
         root = machine_request
+        metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
+        request_intent = root.get("intent") if isinstance(root.get("intent"), dict) else {}
     else:
-        explicit = getattr(machine_request, "requested_outputs", None)
-        if isinstance(explicit, (list, tuple, set)) and explicit:
-            sources.append({"requested_outputs": list(explicit)})
-        root = getattr(machine_request, "intent", {})
-    if not isinstance(root, dict):
+        request_intent = getattr(machine_request, "intent", {})
+        request_intent = request_intent if isinstance(request_intent, dict) else {}
+        metadata = getattr(machine_request, "metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
         root = {}
-    sources.append(root)
-    nested = root.get("intent")
-    if isinstance(nested, dict):
-        sources.append(nested)
-    interpretation = root.get("interpretation")
-    if isinstance(interpretation, dict):
-        sources.append(interpretation)
-        nested_intent = interpretation.get("intent")
-        if isinstance(nested_intent, dict):
-            sources.append(nested_intent)
 
-    # Merge rather than returning the first source: MachineRequest keeps the
-    # public output contract alongside the interpretation payload. Some callers
-    # populate one before the other while a diagram is being requested.
-    output: List[str] = []
-    for source in sources:
-        values = source.get("requested_outputs")
+    interpretation = metadata.get("interpretation") if isinstance(metadata.get("interpretation"), dict) else None
+    if interpretation is None:
+        interpretation = root.get("interpretation") if isinstance(root.get("interpretation"), dict) else request_intent
+    nested_intent = interpretation.get("intent") if isinstance(interpretation, dict) else None
+
+    # The nested intent is the canonical Interpretation result. If it explicitly
+    # carries an empty/invalid plan, fail closed to text instead of merging stale
+    # request or room metadata into it.
+    if isinstance(nested_intent, dict) and "requested_outputs" in nested_intent:
+        values = nested_intent.get("requested_outputs")
         if isinstance(values, (list, tuple, set)):
-            for value in values:
-                item = str(value).strip()
-                if item and item not in output:
-                    output.append(item)
-    return output
+            cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+            return list(dict.fromkeys(cleaned)) or ["text"]
+        return ["text"]
+    if isinstance(interpretation, dict) and "requested_outputs" in interpretation:
+        values = interpretation.get("requested_outputs")
+        if isinstance(values, (list, tuple, set)):
+            cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+            return list(dict.fromkeys(cleaned)) or ["text"]
+    # No Interpretation plan means no specialized renderer. Do not fall back to
+    # request-envelope or room hints: those are not user-output authorization.
+    return ["text"]
 
 
 _ELLIPTICAL_SITE_FOLLOWUP_RE = re.compile(
@@ -3244,14 +3229,15 @@ def _interpretation_has_concrete_image_edit(interpretation: Any) -> bool:
     requested_outputs = intent.get("requested_outputs")
     if not isinstance(requested_outputs, (list, tuple, set)):
         requested_outputs = interpretation.get("requested_outputs")
-    if isinstance(requested_outputs, (list, tuple, set)) and requested_outputs:
-        normalized_outputs = {str(value or "").strip().lower().replace("-", "_") for value in requested_outputs}
-        image_outputs = {"image", "gallery", "generated_image", "image_gallery"}
-        # An edit flag alone is insufficient: the selected plan/interpretation must
-        # actually authorize the image renderer. Otherwise site navigation falls back
-        # to verified links and SVG instead of disappearing behind an unavailable edit.
-        if not normalized_outputs.intersection(image_outputs):
-            return False
+    normalized_outputs = {
+        str(value or "").strip().lower().replace("-", "_")
+        for value in requested_outputs
+    } if isinstance(requested_outputs, (list, tuple, set)) else set()
+    image_outputs = {"image", "gallery", "generated_image", "image_gallery"}
+    # An edit flag alone is insufficient: Interpretation must explicitly
+    # authorize the image renderer, including when the plan is empty/malformed.
+    if not normalized_outputs.intersection(image_outputs):
+        return False
     if intent.get("source_image_available") is True or visual.get("source_image_available") is True:
         return True
     items = visual.get("items") if isinstance(visual.get("items"), list) else []
@@ -3472,17 +3458,13 @@ def prepare_site_help_interpretation(
         # must not carry a stale diagram request into the next provider call.
         stale_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else None
         if isinstance(stale_intent, dict):
-            stale_outputs = stale_intent.get("requested_outputs")
-            if isinstance(stale_outputs, (list, tuple, set)):
-                clean_outputs = [value for value in stale_outputs if str(value).strip().lower().replace("-", "_") not in {"diagram", "svg", "flowchart", "schematic"}]
-                stale_intent["requested_outputs"] = clean_outputs or ["text"]
+            # The room may clear its own stale presentation hints, but must never
+            # rewrite Interpretation's requested_outputs, even on acknowledgements.
             stale_intent["wants_diagram"] = False
             stale_intent["site_navigation_diagram_required"] = False
         stale_structure = interpretation.get("request_structure") if isinstance(interpretation.get("request_structure"), dict) else None
         if isinstance(stale_structure, dict):
             stale_structure["site_navigation_diagram_required"] = False
-            if isinstance(stale_structure.get("requested_outputs"), list):
-                stale_structure["requested_outputs"] = [value for value in stale_structure["requested_outputs"] if str(value).strip().lower().replace("-", "_") not in {"diagram", "svg", "flowchart", "schematic"}] or ["text"]
         stale_visual = interpretation.get("visual") if isinstance(interpretation.get("visual"), dict) else None
         if isinstance(stale_visual, dict):
             stale_visual["wants_diagram"] = False
@@ -3518,83 +3500,28 @@ def prepare_site_help_interpretation(
         intent = {}
         interpretation["intent"] = intent
     outputs = intent.get("requested_outputs")
-    outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else ["text"]
+    outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else []
     source_image_edit = _interpretation_has_concrete_image_edit(interpretation)
-    attachment_help = _is_attachment_instruction_query(query) or any(_text(item.get("action")).upper() == "GUIDE_ATTACH_IMAGE" for item in action_contracts)
     navigation_visual_request = _site_should_render_diagram(query, outputs)
-    if contextual_ui_followup and not navigation_visual_request:
-        selected_pairs = recent_context.get("selected_pairs") if isinstance(recent_context, dict) else []
-        previous_ui_request = " ".join(
-            _text(pair.get("source_user_text") or pair.get("user"))
-            for pair in (selected_pairs or [])[:2] if isinstance(pair, dict)
-        )
-        # A short "I'm waiting for the answer" must receive the unfinished
-        # route, including its requested scheme, rather than a generic apology.
-        if re.search(r"(?:покажи|покажите|схем\w*|диаграмм\w*|flowchart|diagram|visuali[sz]e)", previous_ui_request, re.I):
-            navigation_visual_request = True
-    route_picture = navigation_visual_request and not source_image_edit
+    # Prior dialogue may resolve the target/control, but must never authorize a
+    # renderer that the current Interpretation plan did not request.
     explicit_raster_requested = bool(_SITE_EXPLICIT_RASTER_REQUEST_RE.search(str(query or "")))
-    # The application source cannot capture the user's live browser. A UI screenshot
-    # request must become a grounded SVG map, never a fabricated image of a real screen.
-    # Actual pixel-level annotation remains available only when a source screenshot is attached.
-    explicit_raster = False
-    # Free's source-image edit limitation must not be bypassed by turning an edit
-    # request into a newly generated substitute image. SVG route guidance remains available.
-    if intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted":
-        explicit_raster = False
     visual = interpretation.get("visual")
     if not isinstance(visual, dict):
         visual = {}
         interpretation["visual"] = visual
-    if navigation_visual_request and (source_image_edit or intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted"):
-        # Pass the map into the authorized image-edit path, or provide an SVG fallback
-        # if this plan deliberately removes image output. Never suppress all visual guidance.
+    if navigation_visual_request:
         visual["site_navigation_visual_brief"] = _site_navigation_visual_brief(query, referent_ids)
-        visual["site_navigation_annotation"] = True
+        visual["site_navigation_annotation"] = bool(source_image_edit)
     if navigation_visual_request and (intent.get("image_edit_restricted") or intent.get("task") == "image_edit_restricted") and not source_image_edit:
         intent["site_navigation_edit_fallback"] = {
             "reason": "source_image_edit_not_available_in_current_plan",
-            "message": "Честно объясни, что текущий пакет не разрешает редактировать исходное изображение; не создавай отдельную картинку вместо правки. Дай понятную SVG-схему нужного маршрута и ссылку [Настройки и профиль](/settings), где пользователь может проверить текущий тариф и условия Premium. Не выдумывай отдельную страницу или кнопку покупки, если её нет в подтверждённой карте.",
+            "message": "Честно объясни, что текущий пакет не разрешает редактировать исходное изображение; не создавай отдельную картинку вместо правки. Дай текстовое объяснение и подтверждённую ссылку [Настройки и профиль](/settings), где пользователь может проверить текущий тариф и условия Premium. Добавляй SVG-схему только если diagram уже присутствует в INTERPRETATION.intent.requested_outputs. Не выдумывай отдельную страницу или кнопку покупки, если её нет в подтверждённой карте.",
         }
-    if route_picture:
-        # UI guidance is always a source-derived SVG route map. Even if the user says
-        # "real screenshot", never use an image generator to counterfeit the live UI.
-        # Pixel-level arrows are only permitted on an actual screenshot supplied by the user.
-        if explicit_raster:
-            if "image" not in outputs:
-                outputs.append("image")
-            intent["wants_image"] = True
-            intent["explicit_generation_request"] = True
-            if isinstance(visual, dict):
-                visual["generation_required"] = True
-                visual["wants_image"] = True
-                visual["site_navigation_visual_brief"] = _site_navigation_visual_brief(query, referent_ids)
-        else:
-            outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
-            intent["wants_image"] = False
-            intent["explicit_generation_request"] = False
-            intent["image_operation"] = "none"
-            if isinstance(visual, dict):
-                visual["generation_required"] = False
-                visual["wants_image"] = False
-                visual["generator"] = ""
-                visual["image_model"] = ""
-    wants_diagram = navigation_visual_request and not source_image_edit
-    if source_image_edit:
-        # The image edit is the requested visual deliverable; keep text and verified
-        # route links, but don't add a redundant UI diagram unless explicitly requested.
-        explicitly_requested_diagram = bool(_SITE_EXPLICIT_DIAGRAM_RE.search(query))
-        wants_diagram = explicitly_requested_diagram
-        if not wants_diagram:
-            outputs = [value for value in outputs if str(value).lower().replace("-", "_") not in {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}]
-    if "text" not in outputs:
-        outputs.insert(0, "text")
-    if wants_diagram and "diagram" not in outputs:
-        outputs.append("diagram")
-    if not wants_diagram:
-        diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
-        outputs = [output for output in outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
-    intent["requested_outputs"] = outputs
+    wants_diagram = navigation_visual_request
+    # Output authorization remains byte-for-byte owned by Interpretation. This
+    # room may add verified route/control context and mirror the diagram decision,
+    # but it never inserts text or rewrites the output allow-list.
     intent["wants_diagram"] = wants_diagram
     intent["site_navigation_help"] = True
     if semantic_nav:
@@ -3612,7 +3539,7 @@ def prepare_site_help_interpretation(
         intent["site_navigation_target_functions"] = list(contextual_ui_followup.get("function_ids") or [])
         intent["site_navigation_semantic_targets"] = list(contextual_ui_followup.get("semantic_targets") or [])
         intent["site_navigation_context_source"] = "selected_active_dialogue_branch"
-    intent["adaptive_visual_policy"] = True
+    intent["adaptive_visual_policy"] = False
     if explicit_raster_requested and not source_image_edit:
         intent["real_screenshot_unavailable"] = True
         intent["real_screenshot_policy"] = (
@@ -3620,12 +3547,6 @@ def prepare_site_help_interpretation(
             "Return a clearly labelled source-derived SVG map, explain that it is a scheme rather than a screenshot, "
             "and ask the user to attach the actual screenshot for pixel-level annotation. Never call the raster image generator for this purpose."
         )
-        if isinstance(visual, dict):
-            visual["site_navigation_visual_brief"] = _site_navigation_visual_brief(query, referent_ids)
-            visual["generation_required"] = False
-            visual["wants_image"] = False
-            visual["generator"] = ""
-            visual["image_model"] = ""
     caps = interpretation.get("routing_capabilities")
     caps = list(caps) if isinstance(caps, (list, tuple, set)) else []
     for capability in ("april_site_help", "site_navigation", "user_guidance"):
@@ -3659,32 +3580,6 @@ def prepare_site_help_interpretation(
         "annotate_actual_screenshot_only_if_user_uploaded_source_image": True,
         "never_call_raster_image_generator_to_imitate_live_april_ui": True,
     }
-    if isinstance(question_sequence, list):
-        for item in question_sequence:
-            if not isinstance(item, dict):
-                continue
-            step_outputs = item.get("output_types")
-            step_outputs = list(step_outputs) if isinstance(step_outputs, (list, tuple, set)) else ["text"]
-            if "text" not in step_outputs:
-                step_outputs.insert(0, "text")
-            if wants_diagram and "diagram" not in step_outputs:
-                step_outputs.append("diagram")
-            if not wants_diagram:
-                diagram_aliases = {"diagram", "svg", "schematic", "flowchart", "scene", "layout", "visual", "renderer_scene", "experimental_diagram"}
-                step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in diagram_aliases]
-            if route_picture:
-                if not explicit_raster:
-                    step_outputs = [output for output in step_outputs if str(output).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
-                elif "image" not in step_outputs:
-                    step_outputs.append("image")
-                if "diagram" not in step_outputs:
-                    step_outputs.append("diagram")
-                item["outputs"] = step_outputs
-            item["output_types"] = step_outputs
-            item["history_request"] = False if route_picture else item.get("history_request", False)
-            if isinstance(item.get("dialogue_search"), dict) and route_picture:
-                item["dialogue_search"]["history_request"] = False
-                item["dialogue_search"]["search_scope"] = "CURRENT_DIALOGUE"
     structure = interpretation.get("request_structure")
     if isinstance(structure, dict):
         structure["site_navigation_help"] = True
@@ -3693,34 +3588,6 @@ def prepare_site_help_interpretation(
             structure["site_navigation_context_followup"] = True
             structure["site_navigation_target_functions"] = list(contextual_ui_followup.get("function_ids") or [])
             structure["site_navigation_semantic_targets"] = list(contextual_ui_followup.get("semantic_targets") or [])
-        if route_picture:
-            structure["history_request"] = False
-            structure["requested_outputs"] = ["text", "diagram", *(["image"] if explicit_raster else [])]
-            for sequence_key in ("question_sequence", "presentation_sequence", "answer_sequence"):
-                seq = structure.get(sequence_key)
-                if isinstance(seq, list):
-                    for item in seq:
-                        if not isinstance(item, dict):
-                            continue
-                        key = "output_types" if "output_types" in item or sequence_key == "question_sequence" else "outputs"
-                        child_outputs = item.get(key) if isinstance(item.get(key), list) else ["text"]
-                        if not explicit_raster:
-                            child_outputs = [value for value in child_outputs if str(value).lower().replace("-", "_") not in {"image", "gallery", "generated_image", "image_gallery"}]
-                        elif "image" not in child_outputs:
-                            child_outputs.append("image")
-                        if "text" not in child_outputs: child_outputs.insert(0, "text")
-                        if "diagram" not in child_outputs: child_outputs.append("diagram")
-                        item[key] = child_outputs
-    if route_picture:
-        if not explicit_raster:
-            intent["task"] = "answer_request" if intent.get("task") in {"generate_image", "create_image", "image_generation"} else intent.get("task", "answer_request")
-            intent["wants_image"] = False
-            intent["requested_outputs"] = ["text", "diagram"]
-        else:
-            intent["wants_image"] = True
-            intent["explicit_generation_request"] = True
-            intent["requested_outputs"] = ["text", "diagram", "image"]
-        intent["wants_diagram"] = True
     return True
 
 
@@ -5637,29 +5504,31 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
                 return any(str(key).lower().replace("-", "_") in allowed and _has_site_image_source(child, depth + 1) for key, child in value.items())
             return False
         cleaned_blocks = []
-        allowed_outputs = set(_requested_outputs_from_machine_request(machine_request)) | {"text", "diagram"}
+        allowed_outputs = set(_requested_outputs_from_machine_request(machine_request)) | {"text"}
         # Visual terms cited as examples ("a picture, graph or code") are not
-        # generation requests. The intent layer is authoritative for deliverables.
+        # generation requests. The Interpretation plan is the sole authority for
+        # every specialized renderer, including diagrams created by this room.
         output_aliases = {
             "image": "image", "gallery": "image", "generated_image": "image",
             "graph": "graph", "chart": "graph", "plot": "graph",
             "code": "code", "code_block": "code", "formula": "formula",
-            "table": "table", "diagram": "diagram", "flowchart": "diagram",
+            "table": "table", "diagram": "diagram", "diagramrenderer": "diagram",
+            "svg": "diagram", "svgblock": "diagram", "flowchart": "diagram",
             "flow": "flow", "text": "text", "markdown": "text",
-            "message": "text", "message_text": "text",
+            "message": "text", "message_text": "text", "file": "file",
+            "filedeliveryblock": "file", "copy": "copy", "copyblock": "copy",
+            "link": "link", "linkcard": "link", "video": "video", "videoblock": "video",
         }
+        specialized_outputs = {"image", "graph", "code", "formula", "table", "flow", "diagram", "file", "copy", "link", "video"}
         for block in blocks:
             if not isinstance(block, dict):
                 continue
             block_kind = _text(block.get("type") or block.get("artifact_type") or block.get("renderer")).lower().replace("-", "_")
             canonical_kind = output_aliases.get(block_kind, block_kind)
-            if canonical_kind in {"image", "graph", "code", "formula", "table", "flow"} and canonical_kind not in allowed_outputs:
+            if canonical_kind in specialized_outputs and canonical_kind not in allowed_outputs:
                 continue
-            if canonical_kind == "image" and not source_image_edit:
-                # A page map must never be represented by a fabricated screenshot or
-                # a generated image. User-uploaded screenshots can be annotated only
-                # through the separately authorized source-image edit path.
-                continue
+            # Image authorization is already enforced by allowed_outputs. The IT
+            # room must not suppress a separately requested image deliverable.
             cleaned_blocks.append(block)
         blocks = cleaned_blocks
     diagram_explanation = (
@@ -5840,7 +5709,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person. Never replace the actual page/button instructions with generic words like 'open settings and find the plan'.",
             "When the user asks to be guided or asks what to click, answer with the actual visible April interface and the exact path. Do not output a room/function list, a generic inventory, or backend route names in place of controls. For payment questions, the real action is Profile → CURRENT PLAN → a package button that is actually visible; the Plans & Payments Help card is informational and is not the purchase button.",
             "Do not claim a free trial exists unless the current visible screen or pre-payment terms explicitly show Free trial / Start trial. A screenshot showing only paid packages is not evidence of a trial. Do not infer a live user's plan from an example screenshot.",
-            "Respect the current requested_outputs exactly. Text-only explanation stays text-only. Render a diagram only when requested_outputs contains diagram/SVG/flowchart or the current user text explicitly asks for a scheme/visual path. Never infer a diagram from the fact that a UI-help intent exists.",
+            "Respect INTERPRETATION.intent.requested_outputs exactly. Render a diagram only when that canonical allow-list contains diagram/SVG/flowchart. The current wording, UI-help intent, route usefulness or room guidance must never independently authorize a diagram.",
             "Never invent a base domain or unverified anchor. If a card's exact URL is unknown, link its known parent page and name the card to click.",
             "If a page is marked empty/unimplemented, state that limitation and offer the verified fallback route.",
             "Explain the complete user path: starting screen, exact visible control/card, click action, expected next screen, and what to do next. Keep each step short and numbered; describe back-navigation if the user gets lost.",
