@@ -1509,16 +1509,54 @@ def _is_feedback_control_help_request(text: Any) -> bool:
     return feedback_target and interaction_question and not explicit_artifact_creation
 
 
+def _is_video_workflow_help_request(text: Any) -> bool:
+    """A wish to learn/use the video tool is guidance, not authorization to render."""
+    low = _text(text).lower().replace("ё", "е")
+    if not re.search(r"(?:виде\w*|ролик\w*|video\w*|clip\w*|animation\w*)", low, re.I):
+        return False
+    help_frame = bool(re.search(
+        r"(?:где|куда|как|почему|подскажи\w*|покажи\w*|объясни\w*|расскажи\w*|"
+        r"куда\s+(?:идти|перейти|нажать)|как\s+(?:подключить|открыть|включить|пользоваться)|"
+        r"where|how|why|show\s+me|tell\s+me|help\s+me|не\s+знаю\s+как|хочу\s+понять)",
+        low, re.I,
+    ))
+    return help_frame
+
+
+def _has_direct_video_generation_action(text: Any) -> bool:
+    low = _text(text).lower().replace("ё", "е")
+    video = r"(?:виде\w*|ролик\w*|video\w*|clip\w*|animation\w*|анимаци\w*)"
+    # Imperative production verbs only. Infinitives/desires such as "хочу сделать видео"
+    # describe the user's goal and must not be mistaken for an instruction to render now.
+    action = r"(?:сгенерируй(?:те)?|создай(?:те)?|сделай(?:те)?|смонтируй(?:те)?|анимируй(?:те)?|produce|generate|create|make|render|animate)"
+    for match in re.finditer(action + r".{0,70}" + video, low, re.I):
+        prefix = low[max(0, match.start() - 64):match.start()]
+        if re.search(r"(?:как\s+(?:мне\s+)?|не\s+знаю\s+как\s+|хочу\s+|хотел(?:а)?\s+бы\s+|i\s+want\s+to\s+|i(?:'d|\s+would)\s+like\s+to\s+|how\s+(?:do\s+i|to|can\s+i)\s+|where\s+can\s+i\s+)", prefix, re.I):
+            continue
+        return True
+    return False
+
+
 def _explicit_video_output_intent(
     text: Any, attachments: Any = None, *, allow_edit: bool = True,
 ) -> tuple[bool, list[str]]:
-    """Resolve a C_VIDEO output using the same source-aware room classifier."""
+    """Resolve video production only for an explicit imperative, never a how-to question."""
+    source = _text(text)
+    low = source.lower().replace("ё", "е")
+    direct_action = _has_direct_video_generation_action(source)
+    help_frame = _is_video_workflow_help_request(source) or bool(re.search(
+        r"(?:куда\s+(?:идти|нажать)|где\s+(?:найти|находится)|как\s+(?:подключить|открыть|включить|пользоваться)|\bwhere\b|\bhow\b)", low, re.I
+    ))
+    if help_frame and not direct_action:
+        return False, []
     try:
         from blocks.C_VIDEO import classify_video_request, explicit_video_companion_outputs
-        plan = classify_video_request(_text(text), attachments or [])
+        plan = classify_video_request(source, attachments or [])
         action = _text(plan.get("action")).lower()
-        if action == "generate" or (allow_edit and action == "edit"):
-            return True, explicit_video_companion_outputs(text)
+        if action == "generate" and direct_action:
+            return True, explicit_video_companion_outputs(source)
+        if allow_edit and action == "edit" and direct_action:
+            return True, explicit_video_companion_outputs(source)
     except Exception:
         return False, []
     return False, []
@@ -7610,8 +7648,14 @@ def build_interpretation(
     detected_outputs = _detect_requested_outputs(original or text)
     requested_outputs = _enhance_requested_outputs(original or text, detected_outputs)
     video_output_requested, video_companions = _explicit_video_output_intent(original or text, attachments)
+    video_workflow_help = _is_video_workflow_help_request(original or text)
     if video_output_requested:
         requested_outputs = list(dict.fromkeys(["text", "video", *video_companions]))
+    elif video_workflow_help:
+        requested_outputs = [kind for kind in requested_outputs if kind != "video"] or ["text"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                sequence_item["output_types"] = [kind for kind in (sequence_item.get("output_types") or []) if _text(kind).lower() != "video"] or ["text"]
     for sequence_item in question_sequence:
         if not isinstance(sequence_item, dict):
             continue
@@ -7635,6 +7679,8 @@ def build_interpretation(
             if recovered_output not in presentation_outputs:
                 presentation_outputs.append(recovered_output)
             presentation_sequence[-1]["output_types"] = presentation_outputs
+    if video_workflow_help and not video_output_requested:
+        requested_outputs = [kind for kind in requested_outputs if kind != "video"] or ["text"]
     if "text" not in requested_outputs:
         requested_outputs.insert(0, "text")
     if dialogue_profile_request:
