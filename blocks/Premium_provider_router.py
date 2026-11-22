@@ -57,7 +57,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v11_recent_exchange_branch_context"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v12_site_navigation_preserved_scene_contract"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -68,9 +68,10 @@ NATURAL CONVERSATION AND USER INTENT:
 - First identify the action the user actually wants. A question containing words such as "picture", "graph", "file" or "button" may ask how to use or find an existing item; it does not automatically request a new artifact. Explain an operation when the verb is about downloading, saving, copying, opening, sharing, finding or navigating.
 - When correcting a misunderstanding, briefly acknowledge the specific point missed and immediately answer the corrected request. Do not repeat the previous wrong instruction or create a new image/diagram merely because the user said "show me".
 - For interface help, name the exact visible control/icon and its on-screen label, describe each tap in order, and distinguish actions confirmed in the April code/UI map from device/browser options that may vary. If the control is not present, say so instead of inventing it.
+- SITE NAVIGATION FOLLOW-UP: treat short continuations such as “как именно”, “где подключить”, “на какой странице”, “куда пройти”, “что нажать” and “ищи по своему интерфейсу” as part of the same active navigation task when the selected recent dialogue concerns a site feature, video or wallet. Retain the original target and use April’s own IT Room map when the user points to April’s interface; do not ask which external service they mean unless the selected context actually identifies one. If the verified map is not present, say that the internal UI evidence was not supplied and do not invent controls.
 - Answer each independent request in the order asked; keep dependent clauses together. Resolve every turn in this order: (1) compare the current request with the immediately preceding April answer; (2) if it does not fit, compare it with the previous nine April answers in RECENT_DIALOGUE_EXCHANGE_WINDOW; (3) for a named subject not found in that window, search the authenticated user's retained Premium history by subject, topic and branch; (4) create a new topic only after those searches find no relevant branch. A short/elliptical reply with no newly named subject continues from the latest answer or the best-matching answer in the recent branch; do not require the user to repeat the topic. Preserve the actual latest answer separately from an older matched branch anchor.
 APRIL SITE NAVIGATION CONTEXT:
-When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. If ROOM_KNOWLEDGE_CONTEXT.it.response_guidance is present, follow it as the IT Room's task-specific response protocol; use the attached site_ui_help_playbook, site_ui_screen_registry, site_ui_search and site_ui_screenshot_evidence to identify the exact control and explain it in natural conversational language. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Add a DiagramRenderer block only when the user explicitly asks for a diagram/visual route map or when the route relationships genuinely clarify the next action. A diagram must add navigation structure (for example, route-to-route transitions), not copy the prose steps or repeat the answer's headings. When a diagram does not add new information, return the text and links only. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.
+When ROOM_KNOWLEDGE_CONTEXT contains site_navigation_map, answer interface-help questions from that map. If ROOM_KNOWLEDGE_CONTEXT.it.response_guidance is present, follow it as the IT Room's task-specific response protocol; use the attached site_ui_help_playbook, site_ui_screen_registry, site_ui_search and site_ui_screenshot_evidence to identify the exact control and explain it in natural conversational language. Give a clickable Markdown link with the exact relative route, then visible card/button labels and clear ordered steps; if lost, offer the main chat link [April](/). Add a DiagramRenderer block only when the user explicitly asks for a diagram/visual route map or when the route relationships genuinely clarify the next action. A diagram must add navigation structure (for example, route-to-route transitions), not copy the prose steps or repeat the answer's headings. When a diagram does not add new information, return the text and links only. Use only map routes; do not invent the site origin or URL anchors. If a card has no verified direct URL, link its parent page and tell the user which card to click. Never claim to have clicked, changed a setting, purchased Premium, or deleted data for the user. Do not promise empty/unimplemented functions or route ordinary users to admin.\n- For verified April interface navigation, treat ROOM_KNOWLEDGE_CONTEXT.it.site_navigation_map, response_guidance and site_ui_* evidence as the operative interface manual. Give only the exact supported route, visible label and ordered taps. Never replace that evidence with generic guesses or claim the interface is inaccessible when the manual is present; when a control is not documented, say so and ask one focused question.
 
 VIDEO GENERATION AND SCENE CONTRACT:
 - When INTERPRETATION.task=generate_video, wants_video=true, or ROOM_KNOWLEDGE_CONTEXT contains an active C_VIDEO generation action, C_VIDEO is the real plan-independent execution owner. A Free user may use it through the separate prepaid C_VIDEO.video_wallet; Premium is not a prerequisite. Do not claim April cannot create video, replace the requested operation with a prompt-only suggestion, or invent a completed video. Preserve the full scene, motion, duration, style and audio requirements. The executor generates the MP4, persists its exact bytes and SHA-256 under the authenticated message, and then attaches the canonical VideoBlock through SceneContract. A failed generation or failed persistence must not be represented as a completed video artifact. Provider-authored empty/fake VideoBlock payloads are not valid substitutes.
@@ -2435,31 +2436,10 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                     },
                 }
                 continue
-            raw_site_map = room_value.get("site_navigation_map")
-            if not isinstance(raw_site_map, dict) or not room_value.get("site_help_requested"):
+            if not room_value.get("site_help_requested"):
                 continue
-            areas_min = []
-            for area in (raw_site_map.get("areas") or [])[:3]:
-                if not isinstance(area, dict):
-                    continue
-                areas_min.append({
-                    "id": _text(area.get("id"))[:60],
-                    "path": _text(area.get("path"))[:100],
-                    "label": _text(area.get("label"))[:100],
-                    "purpose": _text(area.get("purpose"))[:180],
-                    "steps": [_text(step)[:140] for step in (area.get("steps") or [])[:3]],
-                    "related": [_text(item)[:45] for item in (area.get("related") or [])[:3]],
-                })
-            room_context_min[str(room_key)[:60]] = {
-                "site_help_requested": True,
-                "site_navigation_map": {
-                    "schema": _text(raw_site_map.get("schema"))[:60],
-                    "source": _text(raw_site_map.get("source"))[:120],
-                    "areas": areas_min,
-                    "navigation_policy": [_text(item)[:140] for item in (raw_site_map.get("navigation_policy") or [])[:3]],
-                    "map_area_count": raw_site_map.get("map_area_count", len(areas_min)),
-                },
-            }
+            compact_site_room = _compact_site_navigation_room(str(room_key), room_value)
+            room_context_min[str(room_key)[:60]] = compact_site_room
         raw_renderer_policy = data.get("SCENE_COMPLEMENTARITY_POLICY") if isinstance(data.get("SCENE_COMPLEMENTARITY_POLICY"), dict) else {}
         renderer_policy_min = {
             "enabled": bool(raw_renderer_policy.get("enabled", True)),
@@ -3340,7 +3320,11 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 if not isinstance(nav, dict):
                     continue
                 nav["areas"] = [
-                    {k: area[k] for k in ("id", "path", "label", "purpose", "steps") if k in area}
+                    {k: area[k] for k in (
+                        "id", "path", "route", "label", "title", "purpose", "steps",
+                        "related", "parent_path", "direct_url", "screen_id", "screen_name",
+                        "breadcrumbs", "controls", "buttons", "actions", "search_terms", "evidence",
+                    ) if k in area}
                     for area in (nav.get("areas") or [])[:4] if isinstance(area, dict)
                 ]
                 nav["navigation_policy"] = (nav.get("navigation_policy") or [])[:2]
@@ -3420,6 +3404,8 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             + "never create a diagram by copying prose or headings; add a diagram only when the user explicitly asks for one or a concrete "
             + "process/relationship map materially clarifies the answer. For site help, use only verified ROOM_KNOWLEDGE_CONTEXT routes "
             + "and output clickable relative links when applicable. Return valid JSON with answer, content, render_blocks, artifacts and "
+            + "SITE NAVIGATION EXECUTION: when ROOM_KNOWLEDGE_CONTEXT.it.site_help_requested=true, use its site_navigation_map, response_guidance and site_ui_* evidence as the authoritative interface manual. Give the exact verified page/relative route, visible card or button label, and ordered tap sequence. Do not say you cannot access or see the interface when this verified map is supplied. Do not guess generic buttons, menu names, wallet locations, URLs or anchors; if the map does not identify the requested control, state that the exact control is not documented and ask one narrowly targeted question. Treat short followups such as “где подключить”, “на какой странице”, “куда пройти” and “ищи по своему интерфейсу” as the same active navigation task when recent selected dialogue concerns that site feature; keep the original target and do not request an external service name when the user points to April’s own interface. If no verified map is supplied, state that its evidence is missing and never guess. A request to show where to click means explain the actual UI; do not create a decorative image or diagram unless it adds navigation structure or was explicitly requested. "
+            + "Return valid JSON with answer, content, render_blocks, artifacts and "
             + "dialogue_memory_record. Never invent routes, history, values or render payloads."
         )
         system = emergency_system
@@ -3970,6 +3956,91 @@ def _safe_prompt_manifest(items: Any, limit: int = 12) -> list[dict[str, Any]]:
             clean[str(key)] = value
         if clean:
             result.append(clean)
+    return result
+
+
+
+
+def _compact_room_prompt_value(value: Any, *, depth: int = 0) -> Any:
+    """Keep verified IT-room evidence readable during bounded prompt compaction."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:280]
+    if depth >= 3:
+        return _text(value)[:180] if not isinstance(value, (dict, list, tuple)) else None
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in list(value.items())[:8]:
+            if item in (None, "", [], {}):
+                continue
+            compact[str(key)[:72]] = _compact_room_prompt_value(item, depth=depth + 1)
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [
+            _compact_room_prompt_value(item, depth=depth + 1)
+            for item in list(value)[:4]
+            if item not in (None, "", [], {})
+        ]
+    return _text(value)[:180]
+
+
+def _compact_site_navigation_room(room_key: str, room_value: dict[str, Any]) -> dict[str, Any]:
+    """Retain the actionable IT map, guidance and UI evidence without copying the full room."""
+    raw_map = room_value.get("site_navigation_map")
+    raw_map = raw_map if isinstance(raw_map, dict) else {}
+    compact_areas: list[dict[str, Any]] = []
+    area_keys = (
+        "id", "path", "route", "label", "title", "purpose", "steps", "related",
+        "parent_path", "direct_url", "screen_id", "screen_name", "breadcrumbs",
+        "controls", "buttons", "actions", "search_terms", "evidence",
+    )
+    for area in (raw_map.get("areas") or [])[:4]:
+        if not isinstance(area, dict):
+            continue
+        compact_area: dict[str, Any] = {}
+        for key in area_keys:
+            if key not in area or area.get(key) in (None, "", [], {}):
+                continue
+            value = area[key]
+            if key == "steps" and isinstance(value, list):
+                compact_area[key] = [_text(step)[:180] for step in value[:3] if _text(step)]
+            else:
+                compact_area[key] = _compact_room_prompt_value(value)
+        if compact_area:
+            compact_areas.append(compact_area)
+
+    result: dict[str, Any] = {
+        "site_help_requested": bool(room_value.get("site_help_requested")),
+        "site_navigation_available": bool(raw_map or room_value.get("site_navigation_available")),
+    }
+    if raw_map:
+        raw_policy = raw_map.get("navigation_policy")
+        policy_items = raw_policy if isinstance(raw_policy, list) else ([raw_policy] if isinstance(raw_policy, str) else [])
+        result["site_navigation_map"] = {
+            "schema": _text(raw_map.get("schema"))[:60],
+            "source": _text(raw_map.get("source"))[:140],
+            "areas": compact_areas,
+            "navigation_policy": [_text(item)[:180] for item in policy_items[:4] if _text(item)],
+            "map_area_count": raw_map.get("map_area_count", len(compact_areas)),
+        }
+
+    guidance = room_value.get("response_guidance")
+    if isinstance(guidance, list):
+        result["response_guidance"] = [
+            _text(item)[:380] if not isinstance(item, dict) else _compact_room_prompt_value(item)
+            for item in guidance[:6] if item not in (None, "", [], {})
+        ]
+    elif guidance not in (None, "", {}, []):
+        result["response_guidance"] = _compact_room_prompt_value(guidance)
+
+    for key in (
+        "site_ui_help_playbook", "site_ui_screen_registry",
+        "site_ui_search", "site_ui_screenshot_evidence",
+    ):
+        if room_value.get(key) not in (None, "", [], {}):
+            result[key] = _compact_room_prompt_value(room_value[key])
+
     return result
 
 
@@ -7036,9 +7107,8 @@ async def generate_text(
             else:
                 try:
                     decoded = _json_load(raw)
-                    # C_IT_ROOM owns April's verified navigation map. Enrich site-help
-                    # answers before SceneContract normalization so route links and a
-                    # concrete complementary diagram cannot be omitted by the model.
+                    # C_IT_ROOM is the single owner of verified site-navigation enrichment.
+                    # Apply its route/control evidence before canonical normalization and SceneContract.
                     try:
                         from blocks.C_IT_ROOM import ensure_site_navigation_response as _ensure_site_navigation_response
                         decoded = _ensure_site_navigation_response(decoded, request)
