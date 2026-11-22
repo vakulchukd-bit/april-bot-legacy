@@ -834,6 +834,25 @@ APRIL_UI_FUNCTION_CATALOG["functions"].append({
     "limits": "Не обещать глобальный поиск по всем страницам, файлам или публикациям. Production deployment не был доступен для прямой проверки."
 })
 
+APRIL_UI_FUNCTION_CATALOG["functions"].append({
+    "id": "settings_video_wallet",
+    "areas": ["settings"],
+    "screen": "Your profile /settings · APRIL · C_VIDEO WALLET",
+    "entry": "Основной чат → кнопка профиля с именем пользователя в верхней панели справа → Your profile /settings.",
+    "position": "Отдельная карточка APRIL · C_VIDEO WALLET внутри Your profile. Её точное вертикальное положение может отличаться в адаптивной сборке; не считать её частью CURRENT PLAN.",
+    "control": "APRIL · C_VIDEO WALLET → «Подключить видеокошелёк».",
+    "does": "Открывает отдельный Video Wallet для покупки April Video Credits, которыми оплачиваются генерация и удалённое AI-редактирование видео.",
+    "how_to_use": [
+        "Откройте основной чат April и нажмите кнопку профиля с вашим именем в верхней панели справа.",
+        "На странице [Your profile](/settings) прокрутите и найдите отдельную карточку APRIL · C_VIDEO WALLET.",
+        "Нажмите «Подключить видеокошелёк».",
+        "В открывшемся окне проверьте пакет, сумму в USD и количество April Video Credits, показанное именно для этого заказа.",
+        "Подтверждайте оплату только после проверки суммы и условий; затем дождитесь подтверждения платёжного сервиса и обновления баланса."
+    ],
+    "result": "Открывается отдельный checkout Video Wallet; зачисление кредитов считается завершённым только после подтверждения платёжного сервиса.",
+    "availability": "Video Wallet предусмотрен отдельно для Free и Premium. Доступность продажи и checkout зависит от текущей конфигурации платёжного шлюза и сборки.",
+    "limits": "Не является Premium-подпиской и не находится в пакете CURRENT PLAN. Не обещать, что оплата или начисление уже выполнены; количества кредитов и итоговую сумму брать только из конкретного checkout."
+})
 
 
 _UI_AREA_FUNCTION_IDS = {
@@ -842,7 +861,7 @@ _UI_AREA_FUNCTION_IDS = {
     "image-controls": ["rendered_artifact_menu"],
     "graph-controls": ["rendered_graph_controls"],
     "response-feedback": ["response_feedback", "assistant_response_share"],
-    "settings": ["chat_open_profile", "settings_display_name", "settings_copy_ids", "settings_language", "settings_plan_payment", "history_resume", "support_send_ticket", "account_delete", "auth_google_sign_in"],
+    "settings": ["chat_open_profile", "settings_display_name", "settings_copy_ids", "settings_language", "settings_plan_payment", "settings_video_wallet", "history_resume", "support_send_ticket", "account_delete", "auth_google_sign_in"],
     "history": ["history_resume", "chat_side_panels", "history_back_to_chat"],
     "space": ["community_public_post", "community_invite", "community_friend_manage", "community_private_chat", "community_personal_profile", "community_post_actions", "auth_google_sign_in"],
     "direct": ["community_private_chat"],
@@ -1035,6 +1054,31 @@ def _is_help_information_plans_topic_query(value: Any) -> bool:
     return has_help_surface and has_plans_article
 
 
+def _is_video_wallet_purchase_query(value: Any) -> bool:
+    """Recognize April Video Wallet navigation without conflating Premium plans."""
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if not text:
+        return False
+    credit_or_wallet = bool(re.search(
+        r"(?:видеокредит\w*|кредит\w*|\bcredits?\b|video\s*wallet|c_video\s*wallet|"
+        r"видеокошел\w*|кошел\w*|wallet|баланс\w*|попол\w*|top[ -]?up)",
+        text, re.I,
+    ))
+    explicit_video = bool(re.search(r"(?:виде\w*|video|c_video)", text, re.I))
+    april_owned = bool(re.search(
+        r"(?:\bapril\b|април\w*|эйприл\w*|эппл\w*|эпл\w*|"
+        r"на\s+(?:сайт\w*|страниц\w*)|в\s+(?:сайт\w*|приложени\w*))",
+        text, re.I,
+    ))
+    subscription_only = bool(re.search(
+        r"(?:премиум|\bpremium\b|подписк\w*|тариф\w*|plan\s+payments|free\s+trial)",
+        text, re.I,
+    ))
+    # Explicit video-wallet intent is always distinct; generic credits are routed
+    # here only when the user clearly means credits on April's own site.
+    return bool(credit_or_wallet and (explicit_video or (april_owned and not subscription_only)))
+
+
 def _is_april_premium_navigation_query(value: Any) -> bool:
     """Recognize a user's navigation request for April's own plan card.
 
@@ -1079,6 +1123,12 @@ def _site_semantic_function_targets(query: str, semantic: Dict[str, Any], area_i
     goal = _text(semantic.get("user_goal"))
     combined = f"{query} {goal}".lower().replace("ё", "е")
     inferred_areas = list(area_ids) if isinstance(area_ids, (list, tuple, set)) else []
+    if _is_video_wallet_purchase_query(combined):
+        return {
+            "function_ids": ["settings_video_wallet"],
+            "semantic_targets": ["video_wallet.purchase"],
+            "area_ids": ["settings"],
+        }
     if _is_april_premium_navigation_query(combined):
         return {
             "function_ids": ["settings_plan_payment", "settings_premium_packages"],
@@ -1256,6 +1306,9 @@ def _site_focused_function_candidates(query: str, area_ids: List[str]) -> List[s
                 out.append(value)
 
     # High-specificity current operation resolution, before broad page overlap.
+    if _is_video_wallet_purchase_query(q):
+        add("settings_video_wallet")
+        return out
     if re.search(r"(?:метл\w*|иконк\w*.{0,25}очист|очист\w*.{0,35}(?:рабоч\w* пол\w*|видим\w* чат|сообщен\w*|чат)|стереть.{0,25}(?:сообщен\w*|чат)|clear workspace)", q, re.I):
         add("chat_clear_workspace")
         return out
@@ -1646,6 +1699,18 @@ APRIL_UI_SCREEN_EVIDENCE = {
             "trial_evidence": "На предоставленном экране нет надписи Free trial / Start trial. Пробный период нельзя обещать, если он не указан отдельным условием до оплаты.",
         },
         {
+            "id": "profile_video_wallet", "route": "/settings", "title": "Your profile · APRIL · C_VIDEO WALLET",
+            "aliases": ["video wallet", "c_video wallet", "видеокошелек", "видеокредиты", "video credits", "купить кредиты", "пополнить кредиты", "подключить видеокошелек"],
+            "position": "Отдельная карточка APRIL · C_VIDEO WALLET на странице Your profile. В логе пользовательского сеанса карточка была распознана по присланному скриншоту; точное положение не фиксируется как часть CURRENT PLAN и может меняться в адаптивной версии.",
+            "visible_labels": ["Your profile", "APRIL · C_VIDEO WALLET", "Подключить видеокошелёк"],
+            "controls": [
+                {"label": "Кнопка профиля с именем", "position": "верхняя панель основного чата, справа", "purpose": "Открывает Your profile /settings"},
+                {"label": "APRIL · C_VIDEO WALLET", "position": "отдельная карточка в профиле; расположение относительно CURRENT PLAN не фиксировать", "purpose": "Отдельный кошелёк видеокредитов, не Premium-подписка"},
+                {"label": "Подключить видеокошелёк", "position": "внутри карточки APRIL · C_VIDEO WALLET", "purpose": "Открывает оформление пополнения Video Wallet"},
+            ],
+            "limits": "Карточка и кнопка распознаны по скриншоту пользователя из лога; production-страница и актуальный checkout напрямую не проверялись. Проверяйте фактические суммы и число кредитов в открывшемся заказе."
+        },
+        {
             "id": "help_information", "route": "/aprill", "title": "Help & Information",
             "aliases": ["помощь", "справка", "help center", "how to use", "privacy policy", "terms of service", "plans and payments", "удаление аккаунта"],
             "position": "Заголовок и вводная карточка находятся сверху; ниже идут отдельные тематические карточки вертикальным списком.",
@@ -1706,9 +1771,12 @@ def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
     q = str(query or "").strip()[:1200]
     terms = _ui_search_terms(q)
     plan_query = _is_april_premium_navigation_query(q)
+    wallet_query = _is_video_wallet_purchase_query(q)
     area_scores = _semantic_site_area_scores(q)
     area_ids = [area_id for score, area_id in area_scores if score >= 2.0]
-    if not area_ids:
+    if wallet_query:
+        area_ids = ["settings"]
+    elif not area_ids:
         area_ids = ["chat"] if re.search(r"(?:april|април|чат|кнопк|скрепк|метла|микрофон)", q, re.I) else []
 
     # Typed semantics, when available through an explicit local target, are stronger
@@ -1742,6 +1810,8 @@ def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
         score = 2 * len(terms & screen_terms)
         if plan_query and screen.get("id") == "profile_plan":
             score += 100
+        if wallet_query and screen.get("id") == "profile_video_wallet":
+            score += 150
         if area_ids and screen.get("route"):
             route_by_area = {
                 "chat": "/", "attachments": "/", "image-controls": "/", "graph-controls": "/",
@@ -1754,6 +1824,11 @@ def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
         if score:
             screen_rows.append((score, screen))
     screen_rows.sort(key=lambda row: row[0], reverse=True)
+    # A video-wallet purchase is a distinct checkout flow, not a subscription
+    # package action. Do not leak the generic CURRENT PLAN screen into its
+    # focused evidence set merely because both happen to live under /settings.
+    if wallet_query:
+        screen_rows = [row for row in screen_rows if row[1].get("id") == "profile_video_wallet"]
 
     function_rows = []
     for item in APRIL_UI_FUNCTION_CATALOG.get("functions", []):
@@ -1773,6 +1848,8 @@ def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
             score += 5
         if plan_query and item_id in {"settings_plan_payment", "settings_premium_packages"}:
             score += 500
+        if wallet_query and item_id == "settings_video_wallet":
+            score += 600
         # Exclude low-signal matches instead of filling the result with unrelated controls.
         if score >= (900 if candidate_ids else 3):
             function_rows.append((score, item))
@@ -1807,7 +1884,7 @@ def search_april_ui(query: str, limit: int = 4) -> Dict[str, Any]:
 
     return {
         "schema": "april.ui_search_result.v2", "query": q,
-        "domain": "april_ui", "focused_intent": "premium_plan_navigation" if plan_query else "screen_and_control_lookup",
+        "domain": "april_ui", "focused_intent": "video_wallet_purchase" if wallet_query else ("premium_plan_navigation" if plan_query else "screen_and_control_lookup"),
         "screen_matches": chosen_screens, "control_matches": chosen_functions,
         "candidate_function_ids": candidate_ids[:8], "matched_area_ids": area_ids[:8],
         "troubleshooting": _is_ui_troubleshooting_query(q),
@@ -2359,7 +2436,7 @@ _SITE_AREA_HINTS = {
     "response-feedback": ("отблагодарить", "поблагодарить за ответ", "кнопка спасибо", "кнопка жалоба", "пожаловаться на ответ", "где спасибо", "где жалоба", "зелёная стрелка под ответом", "опубликовать ответ в сообществе", "поделиться ответом April", "feedback button", "report response", "thank button", "share April reply to community"),
     "history": ("истор", "history", "сохраненн", "прошл", "старый диалог", "предыдущ", "восстанов", "продолж", "saved dialogues", "saved dialogs"),
     "memory": ("памят", "memory", "запом", "срок хранения", "окно памяти"),
-    "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "языка интерфейса", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен"),
+    "settings": ("кабинет", "личный кабинет", "профил", "аккаунт", "account", "settings", "настройк", "язык", "языка интерфейса", "language", "april id", "premium id", "тариф", "подпис", "premium", "free", "выйти", "выход", "logout", "продлен", "видеокредит", "видеокошел", "video wallet", "video credits", "c_video wallet"),
     "space": ("сообществ", "community", "space", "чат с пользовател", "чат с другими", "другие пользовател", "публичный чат", "участник", "контакт", "друз", "поиск участников"),
     "direct": ("личн", "direct message", "личный диалог", "приватный чат", "переписк"),
     "support": ("поддерж", "support", "обращен", "техподдерж", "contact support"),
@@ -3675,6 +3752,10 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
         query, re.I | re.S,
     )) and bool(re.search(r"(?:куда.{0,40}наж|где.{0,60}(?:кноп|наход|это)|покажи.{0,50}(?:где|куда|путь)|как.{0,30}(?:это|так|сделать|поблагодар)|расскажи.{0,35}покажи|where.{0,50}(?:click|button|find))", query, re.I | re.S)))
     direct_hint_ids = [area_id for area_id, hints in _SITE_AREA_HINTS.items() if any(hint in query for hint in hints)]
+    wallet_query = _is_video_wallet_purchase_query(query)
+    if wallet_query:
+        selected_ids = ["settings"]
+        direct_hint_ids = ["settings"]
     if feedback_help:
         selected_ids = ["response-feedback", "chat"]
         direct_hint_ids = ["response-feedback", "chat"]
@@ -3745,7 +3826,14 @@ def _select_site_map_excerpt(machine_request: Any) -> Dict[str, Any]:
                     "semantic_targets": semantic_resolved.get("semantic_targets", []),
                     "area_ids": focused_areas,
                 }
-    if _is_april_premium_navigation_query(query):
+    if wallet_query:
+        semantic_resolved = {
+            "function_ids": ["settings_video_wallet"],
+            "semantic_targets": ["video_wallet.purchase"],
+            "area_ids": ["settings"],
+        }
+        selected_ids = ["settings"]
+    elif _is_april_premium_navigation_query(query):
         semantic_resolved = {
             "function_ids": ["settings_plan_payment", "settings_premium_packages"],
             "semantic_targets": ["plans.payment", "settings.payment_packages"],
@@ -4148,6 +4236,10 @@ def _site_screen_for_query(query: str, selected_area_ids: Any = None, semantic_t
     low = str(query or "").lower().replace("ё", "е")
     ids = {str(value) for value in (selected_area_ids or [])} if isinstance(selected_area_ids, (list, tuple, set)) else set()
     semantic = {str(value) for value in (semantic_targets or [])} if isinstance(semantic_targets, (list, tuple, set)) else set()
+    # Resolve the independent Video Wallet purchase path before generic
+    # plans.payment semantics or the broad Profile/CURRENT PLAN shortcut.
+    if "video_wallet.purchase" in semantic or _is_video_wallet_purchase_query(low):
+        return "profile"
     if "response.share_to_community" in semantic:
         return "response-share-community"
     if _is_video_help_query(low):
@@ -4356,7 +4448,11 @@ def _site_navigation_map_requested(machine_request: Any) -> bool:
     explicit_site_map = _site_full_interface_overview_requested(low)
     explicit_attachment_guide = _is_attachment_instruction_query(low)
     explicit_plan_navigation = _is_april_premium_navigation_query(low)
-    if explicit_ui_navigation or explicit_site_map or explicit_attachment_guide or explicit_plan_navigation:
+    explicit_wallet_navigation = _is_video_wallet_purchase_query(low) and bool(re.search(
+        r"(?:куда\s+(?:зайти|нажать)|где\s+(?:купить|пополнить|найти)|как\s+(?:купить|пополнить)|купить|пополнить|where\s+to|how\s+to\s+(?:buy|purchase))",
+        low, re.I,
+    ))
+    if explicit_ui_navigation or explicit_site_map or explicit_attachment_guide or explicit_plan_navigation or explicit_wallet_navigation:
         return True
 
     # A short follow-up may inherit a previously selected UI route only when the
@@ -4405,6 +4501,49 @@ def _site_navigation_map_requested(machine_request: Any) -> bool:
             ):
                 return True
     return False
+
+
+def build_video_wallet_navigation_response(machine_request: Any) -> Dict[str, Any] | None:
+    """Build the exact Video Wallet purchase walkthrough without an LLM call.
+
+    This fast path is intentionally narrow: it requires both a recognized April
+    Video Wallet purchase intent and an explicit site-navigation action. It
+    prevents oversized Free prompts from falling back before answering a simple,
+    source-backed UI question.
+    """
+    query = _current_user_query(machine_request)
+    if (
+        not _is_video_wallet_purchase_query(query)
+        or not _site_help_requested(machine_request)
+        or not _site_navigation_map_requested(machine_request)
+    ):
+        return None
+    language = ""
+    if isinstance(machine_request, dict):
+        constraints = machine_request.get("constraints") if isinstance(machine_request.get("constraints"), dict) else {}
+    else:
+        constraints = getattr(machine_request, "constraints", {})
+        constraints = constraints if isinstance(constraints, dict) else {}
+    language = _text(constraints.get("display_language") or constraints.get("provider_output_language")).lower()
+    is_ru_or_uk = not language or language.startswith(("ru", "uk", "ua"))
+    seed = "Подскажу, где пополнить видеокредиты April." if is_ru_or_uk else "Here is where to purchase April video credits."
+    decoded = {
+        "answer": seed,
+        "content": seed,
+        "render_blocks": [{
+            "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+            "content": seed,
+        }],
+        "artifacts": [],
+        "metadata": {"provider_calls": 0, "provider_fallback": False, "deterministic_site_navigation": True},
+    }
+    result = ensure_site_navigation_response(decoded, machine_request)
+    if not isinstance(result, dict) or not _text(result.get("answer") or result.get("content")):
+        return None
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    metadata.update({"provider_calls": 0, "provider_fallback": False, "deterministic_site_navigation": True})
+    result["metadata"] = metadata
+    return result
 
 
 def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: Any) -> Dict[str, Any]:
@@ -4573,12 +4712,47 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     target_function_ids = site_map.get("target_function_ids") if isinstance(site_map.get("target_function_ids"), list) else []
     contextual_site_followup = bool(site_map.get("context_followup"))
     site_semantic_targets = site_map.get("semantic_targets") if isinstance(site_map.get("semantic_targets"), list) else []
-    premium_plan_help = bool(
-        _is_april_premium_navigation_query(query_for_routes)
-        or {"settings_plan_payment", "settings_premium_packages"}.intersection(target_function_ids)
-        or {"plans.payment", "settings.payment_packages"}.intersection(site_semantic_targets)
+    video_wallet_help = bool(
+        _is_video_wallet_purchase_query(query_for_routes)
+        or "settings_video_wallet" in target_function_ids
+        or "video_wallet.purchase" in site_semantic_targets
     )
-    if premium_plan_help and is_ru_or_uk:
+    premium_plan_help = bool(
+        not video_wallet_help and (
+            _is_april_premium_navigation_query(query_for_routes)
+            or {"settings_plan_payment", "settings_premium_packages"}.intersection(target_function_ids)
+            or {"plans.payment", "settings.payment_packages"}.intersection(site_semantic_targets)
+        )
+    )
+    if video_wallet_help and is_ru_or_uk:
+        answer = (
+            "Если речь о **видеокредитах April**, пополнение выполняется через отдельный **Video Wallet** — это не Premium-подписка и не пакет **CURRENT PLAN**.\n\n"
+            "1. В основном чате нажмите кнопку профиля с вашим именем в верхней панели справа. Откроется [Your profile](/settings).\n"
+            "2. На странице профиля прокрутите и найдите отдельную карточку **APRIL · C_VIDEO WALLET**. Не ориентируйтесь на её положение относительно CURRENT PLAN: расположение может меняться в адаптивной версии.\n"
+            "3. В этой карточке нажмите **«Подключить видеокошелёк»**.\n"
+            "4. В открывшемся checkout проверьте сумму в USD и количество **April Video Credits**, показанное для конкретного пакета. Не выбирайте пакет наугад и не считайте кредиты по общей таблице.\n"
+            "5. Подтвердите оплату только после проверки условий. Затем дождитесь подтверждения платёжного сервиса и обновления баланса — одно нажатие ещё не означает, что кредиты начислены.\n\n"
+            "**Важно:** Video Wallet предназначен и для Free, и для Premium, но оплачивается отдельно от подписки. Если карточки или кнопки нет, не переходите вместо неё к пакетам CURRENT PLAN: доступность кошелька зависит от текущей сборки и конфигурации checkout."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif video_wallet_help and not is_ru_or_uk:
+        answer = (
+            "April video credits are purchased through a separate **Video Wallet**. It is not a Premium subscription and is not part of the **CURRENT PLAN** packages.\n\n"
+            "1. In the main chat, click the profile button with your name at the top right. This opens [Your profile](/settings).\n"
+            "2. Scroll the profile page and find the separate **APRIL · C_VIDEO WALLET** card. Its vertical position can vary; do not treat it as part of CURRENT PLAN.\n"
+            "3. Click **«Подключить видеокошелёк»** in that card.\n"
+            "4. In checkout, verify the USD amount and the exact number of **April Video Credits** shown for that package.\n"
+            "5. Confirm only after reviewing the terms, then wait for payment-provider confirmation and the balance update. A button click alone does not mean credits were granted.\n\n"
+            "The Video Wallet is separate from Premium and is intended for both Free and Premium accounts. If the card/control is not shown, do not substitute a CURRENT PLAN package; availability depends on the current build and checkout configuration."
+        )
+        decoded["answer"] = answer
+        decoded["content"] = answer
+        if answer_key not in {"answer", "content"}:
+            decoded[answer_key] = answer
+    elif premium_plan_help and is_ru_or_uk:
         answer = (
             "В April покупку нужно искать **не в Help Center и не в карточке Plans & Payments**. Кнопки пакетов находятся в личном профиле — в карточке **CURRENT PLAN**.\n\n"
             "1. Вернитесь на главный экран April и нажмите **кнопку профиля с вашим именем в верхней панели справа**. Откроется страница **Your profile**. Можно открыть её напрямую: [Your profile](/settings).\n"
@@ -4771,9 +4945,9 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     missing_links = []
     linked_paths = set(re.findall(r"\]\((/[^)]+)\)", answer))
     seen_missing_paths = set()
-    if premium_plan_help:
-        # The walkthrough already starts from the home screen and links directly
-        # to /settings. Do not append a redundant "Main chat" link afterwards.
+    if video_wallet_help or premium_plan_help:
+        # These purchase walkthroughs already link to /settings; never append an
+        # informational plans article or unrelated route to the payment action.
         route_rows_for_links = [row for row in route_rows if row.get("id") == "settings"]
     elif product_walkthrough:
         walkthrough_route_ids = {"chat", "settings", "space", "history", "guide"}
@@ -4802,7 +4976,7 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
         area_id for area_id, hints in _SITE_AREA_HINTS.items()
         if any(hint in query_for_routes for hint in hints)
     ]
-    if targeted_ids and not feedback_help and not product_walkthrough:
+    if targeted_ids and not feedback_help and not product_walkthrough and not video_wallet_help:
         full_areas = {str(area.get("id")): area for area in APRIL_SITE_MAP.get("areas", []) if isinstance(area, dict)}
         target_area = next((full_areas.get(area_id) for area_id in targeted_ids if full_areas.get(area_id) and area_id != "admin-support"), None)
         if target_area:
@@ -5707,7 +5881,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             "If the user asks to be shown where to click, provide a clear source-derived step diagram only when diagram/SVG/flowchart was explicitly requested. Otherwise explain in text with exact landmarks. Never claim the source archive is a live screenshot or that you can see the user's current screen.",
             "For every requested function, explain: exact starting page and how to reach it, relative screen position, visible button/field label, what it does, why the user goes there, ordered click/input steps, expected result, availability/plan conditions and important limits.",
             "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person. Never replace the actual page/button instructions with generic words like 'open settings and find the plan'.",
-            "When the user asks to be guided or asks what to click, answer with the actual visible April interface and the exact path. Do not output a room/function list, a generic inventory, or backend route names in place of controls. For payment questions, the real action is Profile → CURRENT PLAN → a package button that is actually visible; the Plans & Payments Help card is informational and is not the purchase button.",
+            "When the user asks to be guided or asks what to click, answer with the actual visible April interface and the exact path. Do not output a room/function list, a generic inventory, or backend route names in place of controls. Distinguish purchases: Premium subscription packages are in Profile → CURRENT PLAN, but April video credits are a separate Video Wallet purchase in the profile card labelled APRIL · C_VIDEO WALLET, opened by «Подключить видеокошелёк». For a Video Wallet/April credits query, never route to CURRENT PLAN or describe wallet credits as Premium. Use the video_wallet knowledge context; package amount and credit quantity must come from the actual checkout, and a balance update is complete only after gateway confirmation. The Plans & Payments Help card is informational, not a purchase button.",
             "Do not claim a free trial exists unless the current visible screen or pre-payment terms explicitly show Free trial / Start trial. A screenshot showing only paid packages is not evidence of a trial. Do not infer a live user's plan from an example screenshot.",
             "Respect INTERPRETATION.intent.requested_outputs exactly. Render a diagram only when that canonical allow-list contains diagram/SVG/flowchart. The current wording, UI-help intent, route usefulness or room guidance must never independently authorize a diagram.",
             "Never invent a base domain or unverified anchor. If a card's exact URL is unknown, link its known parent page and name the card to click.",
