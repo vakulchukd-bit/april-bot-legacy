@@ -2492,6 +2492,27 @@ def _scene_blueprint_blocks(blueprint: Dict[str, Any], *, scene_id: str, turn_id
     return nodes
 
 
+def _authoritative_requested_outputs(
+    interpretation_intent: Any,
+    active_task: Any = None,
+    metadata_active_task: Any = None,
+) -> list[str]:
+    """Resolve the one canonical output plan for the current user turn.
+
+    Interpretation is the only authority. Room/executor task metadata is accepted
+    as parameters for call-site compatibility, but can never authorize a renderer.
+    An absent, explicitly empty or malformed interpretation plan fails closed to
+    text rather than allowing a room to widen the renderers.
+    """
+    del active_task, metadata_active_task  # Never use room/executor metadata as an output source.
+    if isinstance(interpretation_intent, dict) and "requested_outputs" in interpretation_intent:
+        raw = interpretation_intent.get("requested_outputs")
+        if isinstance(raw, (list, tuple, set)):
+            values = [str(value).strip() for value in raw if str(value or "").strip()]
+            return list(dict.fromkeys(values)) or ["text"]
+    return ["text"]
+
+
 def _render_requested_outputs(values: Any) -> set[str]:
     """Normalize outputs selected by Interpretation, never by a room identifier.
 
@@ -2627,7 +2648,7 @@ def _filter_requested_scene_blocks(
         if renderer_kind:
             kind = renderer_kind
         elif kind in text_types or (
-            kind not in {"graph", "table", "image", "gallery", "link", "file", "code", "copy", "formula", "diagram", "video"}
+            kind not in {"graph", "table", "image", "gallery", "link", "file", "code", "copy", "formula", "diagram", "audio", "video"}
             and renderer in {"", "messagetextblock", "textblock", "markdownblock"}
         ):
             kind = "text"
@@ -5337,11 +5358,13 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
     active_task = {**metadata_active_task, **scene_active_task}
     interpretation_for_request = metadata_for_request.get("interpretation") if isinstance(metadata_for_request.get("interpretation"), dict) else {}
     intent_for_request = interpretation_for_request.get("intent") if isinstance(interpretation_for_request.get("intent"), dict) else {}
-    requested_outputs_for_request = active_task.get("requested_outputs")
-    if not isinstance(requested_outputs_for_request, (list, tuple, set)) or not requested_outputs_for_request:
-        requested_outputs_for_request = metadata_active_task.get("requested_outputs")
-    if not isinstance(requested_outputs_for_request, (list, tuple, set)) or not requested_outputs_for_request:
-        requested_outputs_for_request = intent_for_request.get("requested_outputs")
+    # A room may describe a useful artifact, but only Interpretation decides
+    # which renderers the user requested. Resolve this once and use the same list
+    # for preparation, filtering, and the final SceneContract.
+    requested_outputs_for_request = _authoritative_requested_outputs(
+        intent_for_request, active_task, metadata_active_task,
+    )
+    active_task["requested_outputs"] = list(requested_outputs_for_request)
     interpretation_input = interpretation_for_request.get("input") if isinstance(interpretation_for_request.get("input"), dict) else {}
     request_structure = interpretation_for_request.get("request_structure") if isinstance(interpretation_for_request.get("request_structure"), dict) else {}
     dialogue_structure = interpretation_for_request.get("dialogue") if isinstance(interpretation_for_request.get("dialogue"), dict) else {}
@@ -5694,14 +5717,14 @@ def build_scene_contract(scene: MachineScene) -> SceneContract:
     metadata_for_gate = scene.metadata if isinstance(scene.metadata, dict) else {}
     interpretation_for_gate = metadata_for_gate.get("interpretation") if isinstance(metadata_for_gate.get("interpretation"), dict) else {}
     intent_for_gate = interpretation_for_gate.get("intent") if isinstance(interpretation_for_gate.get("intent"), dict) else {}
-    gate_outputs = active_task_for_gate.get("requested_outputs")
-    if not isinstance(gate_outputs, (list, tuple, set)) or not gate_outputs:
-        metadata_active_outputs = metadata_for_gate.get("active_task") if isinstance(metadata_for_gate.get("active_task"), dict) else {}
-        gate_outputs = metadata_active_outputs.get("requested_outputs")
-    if not isinstance(gate_outputs, (list, tuple, set)) or not gate_outputs:
-        gate_outputs = intent_for_gate.get("requested_outputs")
-    if isinstance(gate_outputs, (list, tuple, set)) and gate_outputs:
-        contract.active_task["requested_outputs"] = list(gate_outputs)
+    metadata_active_outputs = metadata_for_gate.get("active_task") if isinstance(metadata_for_gate.get("active_task"), dict) else {}
+    # Re-read the same canonical source at contract finalization. This second
+    # boundary is intentional: legacy rooms can mutate active_task after the
+    # canonical blocks have been prepared, but cannot widen the user's output plan.
+    gate_outputs = _authoritative_requested_outputs(
+        intent_for_gate, active_task_for_gate, metadata_active_outputs,
+    )
+    contract.active_task["requested_outputs"] = list(gate_outputs)
     canonical_blocks = _filter_requested_scene_blocks(canonical_blocks, gate_outputs)
     for block in canonical_blocks:
         if isinstance(block, dict):
