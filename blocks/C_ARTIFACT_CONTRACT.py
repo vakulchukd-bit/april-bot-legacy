@@ -6,9 +6,6 @@ import uuid
 import time
 import hashlib
 import re
-import base64
-import struct
-import xml.etree.ElementTree as ET
 
 # =====================================================
 # ARTIFACT METADATA
@@ -420,131 +417,6 @@ def _normalize_diagram_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _svg_diagram_to_png_data_uri(svg_value: Any) -> tuple[str, int, int] | None:
-    """Rasterize a bounded, local SVG diagram into a self-contained PNG URI.
-
-    The Free Web client uses GalleryBlock for image payloads. Keeping a diagram's
-    semantic type while passing raw SVG to SvgBlock caused some clients/builds to
-    expose SVG source text instead of the requested drawing. This adapter makes
-    the visible media contract deterministic and never fetches remote resources.
-    """
-    svg = str(svg_value or "").strip()
-    if not svg or len(svg.encode("utf-8", errors="ignore")) > 2_000_000:
-        return None
-    # SVG is untrusted provider output. Disallow active content, DTD/entity
-    # expansion and all remote/file resource references before parsing/rendering.
-    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b|<\s*(?:script|foreignObject)\b|\bon[a-z]+\s*=|@import", svg, re.I):
-        return None
-    for reference in re.findall(r"\b(?:href|xlink:href)\s*=\s*['\"]([^'\"]+)['\"]", svg, re.I):
-        if not reference.startswith(("#", "data:image/")):
-            return None
-    if re.search(r"url\(\s*['\"]?(?!#|data:image/)", svg, re.I):
-        return None
-    try:
-        root = ET.fromstring(svg)
-        if root.tag.rsplit("}", 1)[-1].lower() != "svg":
-            return None
-        view_box = root.attrib.get("viewBox") or root.attrib.get("viewbox") or ""
-        view_values = [float(value) for value in re.split(r"[ ,]+", view_box.strip()) if value]
-        def _dimension(value: Any) -> float | None:
-            match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$", str(value or ""), re.I)
-            if not match:
-                return None
-            number = float(match.group(1))
-            return number if 0 < number <= 100_000 else None
-        width = _dimension(root.attrib.get("width"))
-        height = _dimension(root.attrib.get("height"))
-        if len(view_values) == 4 and view_values[2] > 0 and view_values[3] > 0:
-            width = width or view_values[2]
-            height = height or view_values[3]
-        width = width or 1200.0
-        height = height or 800.0
-        scale = min(1.0, 1600.0 / width, 2000.0 / height, (3_000_000.0 / (width * height)) ** 0.5)
-        output_width = max(1, int(round(width * scale)))
-        output_height = max(1, int(round(height * scale)))
-        import cairosvg
-        png = cairosvg.svg2png(
-            bytestring=svg.encode("utf-8"),
-            output_width=output_width,
-            output_height=output_height,
-            unsafe=False,
-        )
-        if not isinstance(png, (bytes, bytearray)) or not bytes(png).startswith(b"\x89PNG\r\n\x1a\n") or len(png) > 12_000_000:
-            return None
-        actual_width, actual_height = struct.unpack(">II", bytes(png)[16:24])
-        if not (0 < actual_width <= 1600 and 0 < actual_height <= 2000 and actual_width * actual_height <= 3_000_000):
-            return None
-        return "data:image/png;base64," + base64.b64encode(bytes(png)).decode("ascii"), actual_width, actual_height
-    except Exception:
-        return None
-
-
-def _rasterize_free_diagram_blocks(blocks: Any) -> list[dict[str, Any]]:
-    """Convert SVG diagrams to PNG GalleryBlock media on the Free route only."""
-    converted: list[dict[str, Any]] = []
-    for raw in blocks or []:
-        if not isinstance(raw, dict):
-            continue
-        block = dict(raw)
-        if _scene_block_type(block) != "diagram":
-            converted.append(block)
-            continue
-        payload = _payload_for_render_block(block, "diagram")
-        svg = next((payload.get(key) for key in ("svg", "svg_payload", "drawing") if isinstance(payload.get(key), str) and payload.get(key).strip()), "")
-        if not svg:
-            converted.append(block)
-            continue
-        raster = _svg_diagram_to_png_data_uri(svg)
-        if raster is None:
-            # Do not send unrenderable raw SVG to the UI. Keep a structured
-            # DiagramRenderer fallback only if real nodes and edges survive.
-            for key in ("svg", "svg_payload", "drawing", "mermaid"):
-                payload.pop(key, None)
-                block.pop(key, None)
-            has_structure = (
-                isinstance(payload.get("nodes"), list) and len(payload["nodes"]) >= 2
-                and isinstance(payload.get("edges"), list) and bool(payload["edges"])
-            )
-            if has_structure:
-                block["renderer"] = block["viewer"] = "DiagramRenderer"
-                payload["presentation"] = {**dict(payload.get("presentation") or {}), "renderer": "DiagramRenderer"}
-                block["payload"] = payload
-                converted.append(block)
-            else:
-                print("[APRIL_FREE_DIAGRAM_RASTER] discarded_unrenderable_svg", flush=True)
-            continue
-        data_uri, width, height = raster
-        title = str(payload.get("title") or block.get("title") or "April diagram")
-        alt = str(payload.get("alt") or payload.get("description") or title or "Diagram")
-        payload["images"] = [{
-            "src": data_uri, "url": data_uri, "image": data_uri,
-            "mime_type": "image/png", "width": width, "height": height,
-            "title": title, "alt": alt, "caption": str(payload.get("caption") or ""),
-        }]
-        payload["mime_type"] = "image/png"
-        payload["width"] = width
-        payload["height"] = height
-        payload["alt"] = alt
-        payload["rasterized"] = True
-        payload["render_format"] = "png"
-        payload["presentation"] = {
-            **dict(payload.get("presentation") or {}),
-            "renderer": "GalleryBlock", "viewer": "GalleryBlock",
-            "media_type": "image/png", "fit": "contain", "rasterized": True,
-        }
-        for key in ("svg", "svg_payload", "drawing", "mermaid"):
-            payload.pop(key, None)
-            block.pop(key, None)
-        block["type"] = "diagram"
-        block["artifact_type"] = "diagram"
-        block["renderer"] = "GalleryBlock"
-        block["viewer"] = "GalleryBlock"
-        block["render_format"] = "png"
-        block["payload"] = payload
-        converted.append(block)
-    return converted
-
-
 def _normalize_image_gallery_payload(structured_payload: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize one image source into the exact GalleryBlock image-item contract."""
     payload = dict(structured_payload or {})
@@ -748,10 +620,26 @@ class BaseArtifact:
 # artifact_type identifies the produced representation; renderer identifies
 # the concrete Web viewer for this particular artifact. One room may therefore
 # produce multiple concrete renderers without creating a second route.
-WEB_RENDERER_REGISTRY_VERSION = "3.7"
+WEB_RENDERER_REGISTRY_VERSION = "3.6"
 
 # Exact renderer contract mirrored from the actual April Web RenderMessage
 # registry. This describes the destination component; it never performs routing.
+#
+# STRICT VISUAL-INTENT CONTRACT (Free and Premium):
+# - "draw/make a diagram, chart, flowchart, schematic, blueprint or technical
+#   drawing" => diagram/graph artifact and DiagramRenderer/GraphBlock. Do not
+#   invoke image generation merely because the user said "draw".
+# - "generate/create an image, picture, illustration, artwork, portrait or
+#   photo" => image artifact and GalleryBlock/image-generation route.
+# - A screenshot request is interpreted from its object: a UI/layout/process
+#   mockup or annotated schematic may use the diagram route; a realistic or
+#   photographic screenshot-like image may use image generation only when the
+#   user explicitly asks for an image. Existing screenshots supplied by the
+#   user are source images to inspect/edit, not a reason to regenerate them.
+# - Never convert a diagram into a gallery image or an image into a diagram as
+#   a transport workaround. Keep artifact_type, payload and renderer aligned.
+# - The interpreter/room dispatcher decides intent; this registry only maps the
+#   already-decided artifact type to its renderer. No cross-route fallback.
 WEB_RENDERER_REGISTRY = {
     "text": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "answer"]},
     "markdown": {"renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "fallback_renderer": "", "payload_keys": ["content", "text", "markdown"]},
@@ -761,7 +649,7 @@ WEB_RENDERER_REGISTRY = {
     "relation_graph": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "series", "points", "labels", "title", "description"]},
     "relations": {"renderer": "GraphBlock", "viewer": "GraphBlock", "fallback_renderer": "", "payload_keys": ["nodes", "edges", "relations", "title", "description"]},
     "table": {"renderer": "TableBlock", "viewer": "TableBlock", "fallback_renderer": "", "payload_keys": ["rows", "columns", "headers", "data", "values", "items", "caption", "column_roles", "cell_roles", "wrap", "download"]},
-    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "components", "vertices", "connections", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction", "images", "mime_type", "width", "height", "alt", "caption", "rasterized", "render_format", "presentation"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram", "GalleryBlock"]},
+    "diagram": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["svg", "svg_payload", "drawing", "nodes", "edges", "components", "vertices", "connections", "relations", "elements", "shapes", "points", "source", "mermaid", "format", "layout", "direction"], "specialized_renderers": ["SvgBlock", "ArithmeticDiagram"]},
     "image": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "image", "asset_url", "image_asset_url", "image_data_uri", "image_base64", "base64", "mime_type", "width", "height", "alt", "caption"]},
     "gallery": {"renderer": "GalleryBlock", "viewer": "GalleryBlock", "fallback_renderer": "", "payload_keys": ["images", "items", "gallery", "sources", "src", "url", "asset_url", "image_asset_url", "image_url", "image", "image_data_uri", "alt", "title", "caption", "source_url"]},
     "scene": {"renderer": "DiagramRenderer", "viewer": "DiagramRenderer", "fallback_renderer": "", "payload_keys": ["elements", "svg", "images", "objects", "nodes", "edges", "title", "description"]},
@@ -2772,13 +2660,7 @@ def _filter_requested_scene_blocks(
         raw_type = str(_scene_block_type(block) or "text").strip().lower().replace("-", "_")
         kind = aliases.get(raw_type, raw_type)
         renderer = str(_scene_block_renderer(block) or "").strip().lower()
-        block_payload = block.get("payload") if isinstance(block.get("payload"), dict) else {}
-        free_raster_diagram = bool(
-            kind == "diagram" and renderer.replace(" ", "") == "galleryblock"
-            and block_payload.get("rasterized") is True
-            and str(block_payload.get("mime_type") or "").lower() == "image/png"
-        )
-        renderer_kind = None if free_raster_diagram else renderer_kinds.get(renderer.replace(" ", ""))
+        renderer_kind = renderer_kinds.get(renderer.replace(" ", ""))
         if renderer_kind:
             kind = renderer_kind
         elif kind in text_types or (
@@ -4126,22 +4008,6 @@ def _has_render_payload(block_type: str, payload: Dict[str, Any], block: Dict[st
             or bool(p.get("objects_3d") or p.get("spheres") or p.get("objects") or p.get("shapes") or p.get("meshes"))
         )
     if block_type == "diagram":
-        if p.get("rasterized") is True:
-            images = p.get("images") if isinstance(p.get("images"), list) else []
-            def _positive_dimension(value: Any) -> bool:
-                try:
-                    return int(value) > 0
-                except (TypeError, ValueError, OverflowError):
-                    return False
-            valid_png = any(
-                isinstance(item, dict)
-                and str(item.get("mime_type") or p.get("mime_type") or "").lower() == "image/png"
-                and str(item.get("src") or item.get("url") or "").startswith("data:image/png;base64,")
-                and _positive_dimension(item.get("width") or p.get("width"))
-                and _positive_dimension(item.get("height") or p.get("height"))
-                for item in images
-            )
-            return valid_png
         diagram_nodes = p.get("nodes") or p.get("components") or p.get("vertices")
         diagram_edges = p.get("edges") or p.get("connections") or p.get("relations")
         return bool(
@@ -5534,9 +5400,6 @@ def _canonical_scene_blocks(scene: MachineScene) -> List[Dict[str, Any]]:
         graph_policy=active_task.get("graph_policy"),
         current_request=current_request,
     )
-    route_meta = metadata_for_request.get("route") if isinstance(metadata_for_request.get("route"), dict) else {}
-    if str(route_meta.get("plan") or "").lower() == "free":
-        blocks = _rasterize_free_diagram_blocks(blocks)
     blocks = _filter_video_only_scene_blocks(blocks, requested_outputs_for_request, current_request)
     visible_types = {str(item.get("type") or "").lower() for item in blocks if isinstance(item, dict)}
     requested_outputs = _render_requested_outputs(requested_outputs_for_request)
