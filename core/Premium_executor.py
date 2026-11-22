@@ -8166,7 +8166,7 @@ async def execute(
             video_result = await _execute_c_video_operation(
                 video_plan, original or current_text, attachments or [], visual_context or [],
                 progress_callback=_emit_video_stage,
-                source_language=_text((translation or {}).get("source_language")),
+                source_language=_text((translation or {}).get("source_language") or display_language or ""),
                 timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "420") or 420),
                 user_id=uid,
                 operation_ref=_text(identity.get("message_id") or identity.get("flow_id")),
