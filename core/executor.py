@@ -3768,13 +3768,33 @@ async def execute(
             options=len(pending.get("options") or []), active_topic=topic_name,
             original_request_chars=len(_text(pending.get("original_request"))))
     else:
+        wallet_fast_response = None
         try:
-            provider_packet = await generate_text(request)
-        except Exception:
-            if image_generation_reserved:
-                release_free_media_reservation(uid, identity["message_id"], "generation")
-            raise
-        provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+            from blocks.C_IT_ROOM import build_video_wallet_navigation_response
+            wallet_fast_response = build_video_wallet_navigation_response(request)
+        except Exception as _wallet_fast_path_error:
+            _apr_timing_log(
+                "it_room_video_wallet_fast_path_unavailable", None,
+                error=type(_wallet_fast_path_error).__name__,
+            )
+        if isinstance(wallet_fast_response, dict):
+            provider_packet = {"machine_response": wallet_fast_response}
+            provider_ms = 0.0
+            _apr_timing_log(
+                "it_room_video_wallet_fast_path", provider_started,
+                provider_calls=0,
+                deterministic=True,
+                user_key=_apr_diag_ref(uid),
+                message_key=_apr_diag_ref(identity.get("message_id")),
+            )
+        else:
+            try:
+                provider_packet = await generate_text(request)
+            except Exception:
+                if image_generation_reserved:
+                    release_free_media_reservation(uid, identity["message_id"], "generation")
+                raise
+            provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
     provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
     provider_meta_for_log = provider_machine.get("metadata") if isinstance(provider_machine.get("metadata"), dict) else {}
@@ -3794,7 +3814,8 @@ async def execute(
     # IT Room is consulted before OpenAI and its verified route/control guidance is
     # included in ROOM_KNOWLEDGE_CONTEXT. Only after OpenAI has written the answer
     # may the room add its deterministic route links/diagram to the SceneContract.
-    if bool(request.routing.get("site_help_requested")):
+    raw_metadata_for_it = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+    if bool(request.routing.get("site_help_requested")) and not raw_metadata_for_it.get("deterministic_site_navigation"):
         try:
             from blocks.C_IT_ROOM import ensure_site_navigation_response
             raw = ensure_site_navigation_response(raw, request)
@@ -4316,6 +4337,7 @@ async def execute(
         {
             "canonical_route": CANONICAL_ROUTE,
             "processor_version": PROCESSOR_VERSION,
+            "plan": "free",
             "stages": [
                 "bot.ru",
                 "input_reader",
