@@ -84,7 +84,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v15_shared_cvideo_scene_wallet"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v16_it_room_context_merge_scene_contract"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -6505,13 +6505,28 @@ async def execute(
         if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
             request.routing["site_help_requested"] = True
             # Keep IT Room's verified interface catalogue and its response protocol
-            # together in the single Premium provider request.
+            # together in the same canonical request. Merge rather than replace so a
+            # second active room (for example C_VIDEO) cannot erase the UI manual.
+            _it_context = dict(_it_context)
             _it_context["response_guidance"] = list(_it_contribution.get("prompt_fragments") or [])
-            request.routing["room_knowledge_context"] = {"it": _it_context}
+            _existing_room_context = request.routing.get("room_knowledge_context")
+            _merged_room_context = dict(_existing_room_context) if isinstance(_existing_room_context, dict) else {}
+            _merged_room_context["it"] = _it_context
+            request.routing["room_knowledge_context"] = _merged_room_context
+            _site_map = _it_context.get("site_navigation_map") if isinstance(_it_context.get("site_navigation_map"), dict) else {}
+            _ui_evidence_keys = [
+                key for key in (
+                    "site_ui_help_playbook", "site_ui_screen_registry",
+                    "site_ui_search", "site_ui_screenshot_evidence",
+                ) if _it_context.get(key) not in (None, "", [], {})
+            ]
             _apr_timing_log(
                 "it_room_context_ready", None,
                 provider_handoff=True,
+                site_navigation_available=bool(_site_map),
+                route_count=len(_site_map.get("areas") or []) if isinstance(_site_map.get("areas"), list) else 0,
                 guidance_items=len(_it_context["response_guidance"]),
+                ui_evidence_keys=_ui_evidence_keys,
                 context_keys=len(_it_context),
             )
     except Exception as _room_context_error:
@@ -7062,26 +7077,7 @@ async def execute(
     if not isinstance(raw, dict):
         raise RuntimeError("PROVIDER_CONTRACT_MISSING")
 
-    # Premium uses the same IT Room -> OpenAI -> SceneContract sequence as Free.
-    # The model authors the conversational answer; IT Room only appends verified
-    # route links/diagrams after the provider response has returned.
-    if bool(request.routing.get("site_help_requested")):
-        try:
-            from blocks.C_IT_ROOM import ensure_site_navigation_response
-            raw = ensure_site_navigation_response(raw, request)
-            provider_packet["machine_response"] = raw
-            _apr_timing_log(
-                "it_room_provider_response_enriched", None,
-                provider_handoff=True,
-                provider_answer_chars=len(_text(raw.get("answer") or raw.get("content"))),
-                render_blocks=len(raw.get("render_blocks") or []),
-            )
-        except Exception as _it_postprocess_error:
-            _apr_timing_log(
-                "it_room_postprocess_unavailable", None,
-                error=type(_it_postprocess_error).__name__,
-                provider_answer_preserved=True,
-            )
+    # IT Room enrichment is performed once by the provider parser before response normalization.
 
     # A selected artifact revision is complete only if the response contains a
     # value-bearing block of the same family. Text saying "done" is not a renderer.
