@@ -32,7 +32,6 @@ from blocks.C_ARTIFACT_CONTRACT import (
     MachineScene,
     build_scene_contract,
     get_web_renderer_registration,
-    _filter_requested_scene_blocks,
     list_registered_rooms,
 )
 from blocks.dialog_identity import resolve_dialog_identity, assert_identity_match
@@ -3202,9 +3201,9 @@ async def execute(
     question_sequence = _apply_video_intent_contract(
         interpretation, video_plan, question_sequence, original or current_text,
     )
-    # C_IT_ROOM is the deterministic source for April's own interface map. It adds
-    # verified route/control evidence, but never widens Interpretation's canonical
-    # requested_outputs. A diagram is included only when Interpretation requested it.
+    # C_IT_ROOM is the deterministic source for April's own interface map. Do not
+    # make navigation depend on the LLM's semantic classifier: force text + diagram
+    # whenever the current turn asks how to find/use an April screen.
     try:
         from blocks.C_IT_ROOM import prepare_site_help_interpretation as _prepare_site_help_interpretation
         _prepare_site_help_interpretation(interpretation, current_text, question_sequence, dialogue_context)
@@ -4059,7 +4058,7 @@ async def execute(
         try:
             video_result = await _execute_c_video_operation(
                 video_plan, original or current_text, attachments or [], visual_context or [],
-                source_language=_text((translation or {}).get("source_language")),
+                source_language=_text((translation or {}).get("source_language") or display_language or ""),
                 timeout_seconds=int(os.getenv("APRIL_VIDEO_TASK_TIMEOUT_SECONDS", "420") or 420),
                 user_id=uid,
                 operation_ref=_text(identity.get("message_id") or identity.get("flow_id")),
@@ -4744,14 +4743,11 @@ async def execute(
     # as the renderer blocks; no data URI or private file bytes enter the Scene.
     scene_contract = result.get("scene_contract") if isinstance(result.get("scene_contract"), dict) else {}
     plan_intent = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
-    raw_delivery_outputs = plan_intent.get("requested_outputs")
-    requested_for_delivery = (
-        list(raw_delivery_outputs)
-        if isinstance(raw_delivery_outputs, (list, tuple, set)) and raw_delivery_outputs
-        else ["text"]
-    )
-    # Copy/file are renderer outputs too. Their wants_* booleans are descriptive
-    # mirrors of Interpretation, not a second authorization path at delivery time.
+    requested_for_delivery = list(plan_intent.get("requested_outputs") or request.requested_outputs or [])
+    if plan_intent.get("wants_copy") and "copy" not in requested_for_delivery:
+        requested_for_delivery.append("copy")
+    if plan_intent.get("wants_file") and "file" not in requested_for_delivery:
+        requested_for_delivery.append("file")
     source_render_blocks = scene_contract.get("render_blocks") or result.get("render_blocks") or response.render_blocks or []
     render_reference_context = dialogue_context
     if not (isinstance(render_reference_context.get("explicit_render_reference"), dict) and render_reference_context.get("explicit_render_reference")):
@@ -4774,9 +4770,6 @@ async def execute(
         language=str(display_language or "en"),
         message_id=str(identity.get("message_id") or ""),
     )
-    # SceneContract is the first gate; apply the same authoritative list again
-    # after replay/copy/file adapters so no late adapter can add an unrequested UI.
-    delivery_blocks = _filter_requested_scene_blocks(delivery_blocks, requested_for_delivery)
     if delivery_blocks:
         scene_contract["render_blocks"] = delivery_blocks
         result["render_blocks"] = delivery_blocks
