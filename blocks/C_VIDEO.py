@@ -1395,7 +1395,7 @@ def normalize_video_question_sequence(
     first.update({
         "step_index": 1,
         "request": source,
-        "output_types": list(dict.fromkeys(["text", "video", *explicit_video_companion_outputs(source)])),
+        "output_types": ["text", "video"],
         "final_output": True,
         "video_task": True,
         "video_action": action,
@@ -1445,31 +1445,26 @@ def apply_video_intent_contract(
                 "explicit_user_action": False,
             })
             sequence = [dict(item) for item in (question_sequence or []) if isinstance(item, dict)]
+            canonical_outputs = list(dict.fromkeys(
+                _text(value).lower() for value in interpreted_outputs if _text(value)
+            )) or ["text"]
+            # Keep every step on the same allow-list. The room denies execution,
+            # but it does not remove or replace the output types Interpretation chose.
             for item in sequence:
-                item["output_types"] = [
-                    _text(value).lower() for value in (item.get("output_types") or [])
-                    if _text(value).lower() != "video"
-                ] or ["text"]
+                item["output_types"] = list(canonical_outputs)
                 item.pop("video_task", None)
                 item.pop("video_action", None)
             intent["wants_video"] = False
             intent["video_generation_authorized"] = False
-            intent["requested_outputs"] = [
-                _text(value).lower() for value in interpreted_outputs
-                if _text(value).lower() != "video"
-            ] or ["text"]
-            # Keep the provider-facing request envelope synchronized with the
-            # final interpreter decision. Otherwise an earlier generic output
-            # guess can survive in request_structure.output_plan and trigger a
-            # diagram repair even though the billable C_VIDEO action was denied.
             structure = interpretation.get("request_structure")
             if isinstance(structure, dict):
-                structure["output_plan"] = list(intent["requested_outputs"])
+                structure["output_plan"] = list(canonical_outputs)
+                structure["requested_outputs"] = list(canonical_outputs)
                 structure["question_sequence"] = sequence
                 structure["question_search_count"] = len(sequence)
                 presentation = structure.get("presentation_contract")
                 if isinstance(presentation, dict):
-                    presentation["requested_renderers"] = list(intent["requested_outputs"])
+                    presentation["requested_renderers"] = list(canonical_outputs)
                     presentation["video_generation_authorized"] = False
             try:
                 print("[APRIL_VIDEO_INTENT_GATE] " + json.dumps({
@@ -1489,34 +1484,40 @@ def apply_video_intent_contract(
     intent["video_plan"] = dict(plan)
     intent["video_execution_owner"] = "C_VIDEO"
     if action in {"generate", "edit"}:
-        # An input still image can be an initial frame; it is never an image
-        # generation request and must not consume the Free image quota.
+        # An input still image can be an initial frame; it is never, by itself,
+        # permission to create a separate image. Preserve the canonical output
+        # allow-list from Interpretation and derive descriptive flags from it.
         intent["task"] = "generate_video" if action == "generate" else "edit_video"
-        intent["wants_image"] = False
-        intent["image_operation"] = "none"
-        # Do not inherit incidental renderers added by generic visual inference or
-        # a previous dialogue branch. Preserve only separately co-requested outputs.
-        companions = explicit_video_companion_outputs(request_text)
-        intent["requested_outputs"] = list(dict.fromkeys(["text", "video", *companions]))
-        intent["wants_video"] = True
-        intent["video_generation_authorized"] = action in {"generate", "edit"} and plan.get("explicit_user_action") is True
+        canonical_outputs = list(dict.fromkeys(
+            _text(value).lower() for value in intent.get("requested_outputs", [])
+            if _text(value)
+        ))
+        intent["wants_image"] = "image" in canonical_outputs
+        if not intent["wants_image"]:
+            intent["image_operation"] = "none"
+        intent["wants_video"] = "video" in canonical_outputs
+        intent["video_generation_authorized"] = (
+            intent["wants_video"] and action in {"generate", "edit"}
+            and plan.get("explicit_user_action") is True
+        )
         for flag, output in (
-            ("wants_image", "image"), ("wants_diagram", "diagram"),
-            ("wants_graph", "graph"), ("wants_table", "table"),
-            ("wants_formula", "formula"), ("wants_code", "code"),
-            ("wants_file", "file"), ("wants_copy", "copy"),
-            ("wants_links", "link"),
+            ("wants_diagram", "diagram"), ("wants_graph", "graph"),
+            ("wants_table", "table"), ("wants_formula", "formula"),
+            ("wants_code", "code"), ("wants_file", "file"),
+            ("wants_copy", "copy"), ("wants_links", "link"),
         ):
-            intent[flag] = output in companions
-        intent["image_operation"] = "none"
+            intent[flag] = output in canonical_outputs
+        if sequence:
+            sequence[0]["output_types"] = list(canonical_outputs)
     elif action == "analyze":
         intent["task"] = "analyze_video"
-        intent["wants_image"] = False
-        outputs = intent.get("requested_outputs")
-        intent["requested_outputs"] = [
-            _text(value).lower() for value in (outputs if isinstance(outputs, list) else ["text"])
-            if _text(value).lower() not in {"image", "video"}
-        ] or ["text"]
+        canonical_outputs = list(dict.fromkeys(
+            _text(value).lower() for value in intent.get("requested_outputs", [])
+            if _text(value)
+        )) or ["text"]
+        intent["wants_image"] = "image" in canonical_outputs
+        if sequence:
+            sequence[0]["output_types"] = list(canonical_outputs)
 
     interpretation["intent"] = intent
     structure = interpretation.setdefault("request_structure", {})
@@ -1525,7 +1526,7 @@ def apply_video_intent_contract(
     # Intent, decomposition, output plan and presentation policy are one
     # contract. Synchronize all provider-facing copies so an incidental
     # diagram/image guess cannot request another renderer or a repair call.
-    canonical_outputs = list(intent.get("requested_outputs") or ["text", "video"])
+    canonical_outputs = list(intent.get("requested_outputs") or ["text"])
     structure["output_plan"] = canonical_outputs
     structure["requested_outputs"] = canonical_outputs
     presentation = structure.get("presentation_contract")
