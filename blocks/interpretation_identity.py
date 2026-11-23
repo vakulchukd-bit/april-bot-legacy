@@ -537,8 +537,9 @@ def _detect_diagram_drawing_request(text: Any) -> bool:
         return True
 
     drawing_action = (
-        r"нарис\w*|изобраз\w*|рисуй\w*|рисова\w*|draw\w*|depict\w*|"
-        r"sketch\w*|paint\w*|illustrat\w*"
+        r"нарис\w*|изобраз\w*|рисуй\w*|рисова\w*|"
+        r"намал\w*|малюй\w*|зобраз\w*|"
+        r"draw\w*|depict\w*|sketch\w*|paint\w*|illustrat\w*"
     )
     for segment in _output_segments(low):
         match = re.search(
@@ -549,7 +550,7 @@ def _detect_diagram_drawing_request(text: Any) -> bool:
             continue
         tail = segment[match.end():].strip(" ,:—-\t")
         tail = re.sub(
-            r"^(?:(?:мне|нам|пожалуйста|мне\s+пожалуйста|please|me|us|for\s+me|a|an|the)\s+)+",
+            r"^(?:(?:мне|нам|мені|будь\s+ласка|пожалуйста|мне\s+пожалуйста|please|me|us|for\s+me|a|an|the)\s+)+",
             "", tail, flags=re.I,
         )
         subject = re.match(r"([\w\u0080-\uffff-]+(?:\s+[\w\u0080-\uffff-]+){0,5})", tail, re.U)
