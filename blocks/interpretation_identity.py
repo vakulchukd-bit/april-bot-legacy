@@ -252,10 +252,6 @@ _IMAGE_MODIFICATION_MARKERS = {
     "отредактируй фотографию", "отредактируй картинку", "улучши фото",
     "улучши фотографию", "улучши картинку", "улучши изображение", "обработай фото",
     "обработай фотографию", "ретушируй фото", "сделай ретушь",
-    "измени диаграмму", "изменить диаграмму", "измени схему", "изменить схему",
-    "измени чертеж", "изменить чертеж", "переделай диаграмму", "переделай схему",
-    "modify the diagram", "change the diagram", "edit the diagram",
-    "modify the chart", "change the chart", "edit the chart",
 }
 
 # These phrases imply compositing only when an existing/source image is available.
@@ -312,14 +308,16 @@ def _detect_contextual_image_edit(text: str) -> bool:
 
 
 def _detect_image_modification(text: str, *, has_existing_image_reference: bool = False) -> bool:
-    """Detect a request to alter an existing image or diagram.
+    """Detect a request to alter an existing raster image or photo.
 
-    In Free, detected edits are restricted instead of being silently converted
-    into new image generation. Ordinary new-image and new-diagram requests use
-    their existing routes.
+    In Free, raster edits remain restricted instead of being silently converted
+    into new image generation. Vector diagrams and SVG overlays use their own
+    editable SceneContract route and are not classified as photo edits.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low:
+        return False
+    if _detect_diagram_overlay_request(low) or _detect_structured_diagram_modification_request(low):
         return False
     # "Нарисуй картинку к заставке" is a new-image deliverable, not an edit of
     # a missing source image. This direct-object rule intentionally does not
@@ -363,8 +361,7 @@ def _detect_image_modification(text: str, *, has_existing_image_reference: bool 
     # match the same source-image concept; limiting this to `фото` missed the
     # exact phrasing observed in production logs ("измени эту фотку").
     image_noun = (
-        r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?|"
-        r"диаграмм\w*|схем\w*|черт[её]ж\w*|chart\w*|diagram\w*|sketch\w*)"
+        r"(?:фот\w*|картинк\w*|изображени\w*|photo(?:graph)?s?|images?|pictures?)"
     )
     # Direct forms like "измени именно ту фотографию" are missed by simple
     # substring markers because polite/reference words are inserted between the
@@ -435,47 +432,135 @@ def _detect_image_compositing_request(text: str) -> bool:
     return bool(object_placement)
 
 
-def _detect_image_generation_request(text: str) -> bool:
-    """Return True only when the user actually requests a new visual image.
+def _detect_diagram_overlay_request(text: Any) -> bool:
+    """Treat annotations over a screenshot/photo as a vector diagram overlay.
 
-    A noun such as "image" or a discussion of drawing is not an output action.
-    The resolver requires an addressed action/desire and distinguishes technical
-    drawings from artistic image generation.
+    The source image remains an input for visual grounding. Only the overlay is
+    produced as SVG/diagram, so a pointer, label, highlight or measurement never
+    starts the paid raster-image generator.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    source_reference = bool(re.search(
+        r"(?:на|поверх|по|в|к|над)\s+(?:(?:этом|этой|эту|этот|моем|моей|мою|"
+        r"загруженн\w*|прикрепленн\w*|присланн\w*|предыдущ\w*|"
+        r"this|that|the|my|uploaded|attached)\s+)?"
+        r"(?:скриншот\w*|снимк\w*|фот\w*|фотограф\w*|картинк\w*|"
+        r"изображени\w*|screenshot\w*|screen\s*shot\w*|image\w*|photo\w*|picture\w*)",
+        low, re.IGNORECASE,
+    ))
+    if not source_reference:
+        return False
+    annotation_target = bool(re.search(
+        r"(?:стрелк\w*|указател\w*|маркер\w*|метк\w*|кнопк\w*|элемент\w*|"
+        r"подпис\w*|надпис\w*|"
+        r"номер\w*|обводк\w*|контур\w*|рамк\w*|круж\w*|круг\w*|"
+        r"выделенн\w*|подсветк\w*|линия\w*|границ\w*|област\w*|"
+        r"координат\w*|размер\w*|измерен\w*|выноск\w*|"
+        r"arrow\w*|pointer\w*|marker\w*|label\w*|caption\w*|number\w*|"
+        r"outline\w*|circle\w*|highlight\w*|border\w*|callout\w*|measurement\w*)",
+        low, re.IGNORECASE,
+    ))
+    annotation_action = bool(re.search(
+        r"(?:нарис\w*|дорис\w*|добав\w*|нанес\w*|постав\w*|укаж\w*|помет\w*|"
+        r"отмет\w*|выдел\w*|обвед\w*|подсвет\w*|подпиш\w*|обознач\w*|"
+        r"покаж\w*|установ\w*|draw\w*|add\w*|place\w*|put\w*|mark\w*|"
+        r"annotat\w*|highlight\w*|outline\w*|label\w*|point\w*)",
+        low, re.IGNORECASE,
+    ))
+    return annotation_target and annotation_action
+
+
+def _detect_structured_diagram_modification_request(text: Any) -> bool:
+    """Recognize revisions to a vector diagram as diagram work, not photo edits."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    diagram_edit_actions = (
+        r"исправь(?:те)?|исправить|поправь(?:те)?|поправить|измени(?:те)?|изменить|"
+        r"переделай(?:те)?|переделать|перерисуй(?:те)?|перерисовать|"
+        r"отредактируй(?:те)?|отредактировать|редактируй(?:те)?|редактировать|"
+        r"обнови(?:те)?|обновить|переставь(?:те)?|переставить|перемести(?:те)?|переместить|"
+        r"сдвинь(?:те)?|сдвинуть|добавь(?:те)?|добавить|убери(?:те)?|убрать|удали(?:те)?|"
+        r"удалить|замени(?:те)?|заменить|fix|correct|revise|redraw|edit|modify|change|update|move|add|remove|replace"
+    )
+    target_matches = list(re.finditer(_OUTPUT_TARGETS["diagram"], low, re.I))
+    action_matches = list(re.finditer(
+        rf"(?<![\w\u0080-\uffff])(?:{diagram_edit_actions})(?![\w\u0080-\uffff])",
+        low, re.I,
+    ))
+    for action in action_matches:
+        if _OUTPUT_NEGATION_PREFIX.search(low[max(0, action.start() - 96):action.start()].rstrip(" ,:—-\t")):
+            continue
+        if _OUTPUT_EXPLANATION_PREFIX.search(low[max(0, action.start() - 96):action.start()].rstrip(" ,:—-\t")):
+            continue
+        for target in target_matches:
+            if abs(target.start() - action.end()) <= 120 or abs(action.start() - target.end()) <= 70:
+                between = low[min(action.end(), target.end()):max(action.start(), target.start())]
+                if not re.search(r"(?:[.!?;]|\b(?:что\s+такое|как\s+именно|how\s+to)\b)", between, re.I):
+                    return True
+    return False
+
+def _detect_image_generation_request(text: str) -> bool:
+    """Return True only for an explicitly requested raster-image deliverable.
+
+    A generic drawing verb ("нарисуй кота", "draw a cat") is not an image
+    generation authorization. It is routed to the structured diagram renderer.
+    Raster generation requires an addressed image/photo/picture/illustration
+    target or an explicit image-output desire.
     """
     low = _text(text).lower().replace("ё", "е")
     if not low or _is_attachment_tutorial_request(low):
+        return False
+    # Markups on user-provided or referenced screenshots/photos are SVG overlays.
+    if _detect_diagram_overlay_request(low):
         return False
     if _detect_image_modification(low):
         return False
 
     image_target = _OUTPUT_TARGETS["image"]
-    if _OUTPUT_DESIRE_PATTERNS["image"].search(low) or _has_output_action_for_target(low, image_target):
+    return bool(
+        _OUTPUT_DESIRE_PATTERNS["image"].search(low)
+        or _has_output_action_for_target(low, image_target)
+    )
+
+
+def _detect_diagram_drawing_request(text: Any) -> bool:
+    """Recognize ordinary object drawings as editable vector diagrams."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low or _detect_image_generation_request(low):
+        return False
+    if _detect_diagram_overlay_request(low):
+        return True
+    if _has_output_action_for_target(low, _OUTPUT_TARGETS["diagram"]):
         return True
 
-    # A described subject after a drawing/painting verb is a new raster image,
-    # unless the subject belongs to a structured renderer (geometry, schema,
-    # graph, table, formula or code).
-    drawing_action = r"(?:нарис\w*|изобраз\w*|рисуй\w*|draw\w*|illustrat\w*|paint\w*|sketch\w*)"
-    structured_target = "|".join(
-        _OUTPUT_TARGETS[k] for k in ("diagram", "graph", "table", "formula", "code", "file", "link")
+    drawing_action = (
+        r"нарис\w*|изобраз\w*|рисуй\w*|рисова\w*|draw\w*|depict\w*|"
+        r"sketch\w*|paint\w*|illustrat\w*"
     )
     for segment in _output_segments(low):
-        match = re.search(rf"(?<![\w\u0080-\uffff]){drawing_action}(?![\w\u0080-\uffff])", segment, re.I)
+        match = re.search(
+            rf"(?<![\w\u0080-\uffff])(?:{drawing_action})(?![\w\u0080-\uffff])",
+            segment, re.I,
+        )
         if not match or not _output_action_is_requested(segment, match):
             continue
         tail = segment[match.end():].strip(" ,:—-\t")
-        tail = re.sub(r"^(?:мне\s+|нам\s+|пожалуйста\s+|please\s+|a\s+|an\s+|the\s+)", "", tail, flags=re.I)
-        if not tail:
-            continue
-        # A drawing verb must have a real subject, not merely an adverb such as
-        # "красиво" or a generic phrase such as "как-нибудь".
+        tail = re.sub(
+            r"^(?:(?:мне|нам|пожалуйста|мне\s+пожалуйста|please|me|us|for\s+me|a|an|the)\s+)+",
+            "", tail, flags=re.I,
+        )
         subject = re.match(r"([\w\u0080-\uffff-]+(?:\s+[\w\u0080-\uffff-]+){0,5})", tail, re.U)
         if not subject:
             continue
         subject_text = subject.group(1)
-        if re.search(structured_target, subject_text, re.I):
-            continue
-        if re.match(r"(?:красиво|аккуратно|наглядно|понятно|примерно|как-нибудь|beautifully|nicely|clearly)\b", subject_text, re.I):
+        if re.match(
+            r"(?:красиво|аккуратно|наглядно|понятно|примерно|как-нибудь|"
+            r"как\s+именно|что|чтобы|beautifully|nicely|clearly|how|what)\b",
+            subject_text, re.I,
+        ):
             continue
         return True
     return False
@@ -612,10 +697,12 @@ _OUTPUT_TARGETS = {
              r"картинк\w*|изображени\w*|иллюстраци\w*|фот\w*|портрет\w*|рисунок\w*|постер\w*|обложк\w*|макет\w*|логотип\w*|logo\w*)",
     "diagram": r"(?:diagram\w*|schematic\w*|blueprint\w*|flowchart\w*|workflow\w*|architecture\w*|mind\s*map\w*|"
                r"схем\w*|диаграмм\w*|блок[- ]схем\w*|черт[её]ж\w*|креслен\w*|архитектур\w*|процесс\w*|интеллект[- ]?карт\w*|"
+               r"(?:map|карта|карту|карты|картой|маршрутн\w*\s+карт\w*)|"
                r"геометрическ\w*\s+фигур\w*|треугольник\w*|квадрат\w*|прямоугольник\w*|"
                r"параллелограмм\w*|ромб\w*|трапец\w*|многоугольник\w*|окружност\w*|круг\w*|"
                r"эллипс\w*|сфер\w*|шар\w*|куб\w*|пирамид\w*|конус\w*|цилиндр\w*|"
-               r"точк\w*|отрез\w*|угол\w*|вектор\w*|стрелк\w*|сетка\w*|контур\w*)",
+               r"точк\w*|отрез\w*|угол\w*|вектор\w*|стрелк\w*|указател\w*|маркер\w*|метк\w*|"
+               r"подпис\w*|выноск\w*|рамк\w*|област\w*|границ\w*|сетка\w*|контур\w*)",
     "graph": r"(?:graph\w*|chart\w*|plot\w*|curve\w*|график\w*|гистограмм\w*|"
              r"парабол\w*|гипербол\w*|волнов\w*\s+(?:график\w*|функци\w*)|поверхност\w*\s+график\w*)",
     "table": r"(?:table\w*|таблиц\w*|spreadsheet\w*|электронн\w*\s+таблиц\w*)",
@@ -788,6 +875,11 @@ def _infer_text_output_actions(text: Any) -> list[str]:
     )
     if data_visualisation and "graph" not in outputs:
         outputs.append("graph")
+    if (
+        _detect_diagram_drawing_request(low)
+        or _detect_structured_diagram_modification_request(low)
+    ) and "diagram" not in outputs:
+        outputs.append("diagram")
     if _detect_image_generation_request(low) and "image" not in outputs:
         outputs.append("image")
     return outputs
@@ -939,6 +1031,8 @@ def _enhance_requested_outputs(
 ) -> list[str]:
     """Resolve outputs from the request and, when confirmed, the active dialogue."""
     resolved = _detect_requested_outputs(text)
+    if resolved == ["text"] and _is_active_diagram_revision_followup(text, dialogue_context):
+        resolved = ["text", "diagram"]
     if resolved == ["text"]:
         offered = _dialogue_offered_outputs(text, dialogue_context)
         if offered:
@@ -2909,6 +3003,28 @@ def _split_request_sequence(text: str) -> list[str]:
     source = _text(text)
     if not source:
         return []
+    # Spoken requests often start with an address to April ("Эй, Прил,").
+    # Keep the vocative attached to the actual instruction; splitting it into a
+    # separate TOPIC_CONTINUATION creates an empty memory search and can detach
+    # the current task from its immediately preceding answer.
+    if re.match(
+        r"^\s*(?:(?:эй|hey|hi|hello|привет|здравствуй|слушай|послушай)\b[\s,!:—-]*)?"
+        r"(?:април\w*|прил\w*|april)\b\s*[,!:—-]*\s+",
+        source, re.IGNORECASE,
+    ):
+        return [source]
+    # A leading how-to question or an explicit negative instruction is one
+    # semantic unit. Splitting it at a comma can detach the infinitive from its
+    # explanation/negation and falsely authorize an artifact or raster output.
+    if len(_output_segments(source)) == 1 and re.match(
+        r"^\s*(?:как\b|каким\s+образом\b|почему\b|зачем\b|где\b|куда\b|"
+        r"когда\b|объясни\w*\b|расскажи\w*\b|подскажи\w*\b|"
+        r"how\b|why\b|where\b|when\b|what\b|"
+        r"не\b|ни\b|не\s+надо\b|не\s+нужно\b|не\s+хочу\b|"
+        r"don't\b|do\s+not\b|never\b)",
+        source, re.IGNORECASE,
+    ):
+        return [source]
     if _is_feedback_control_help_request(source):
         return [source]
     # Keep several route questions together as one navigation workflow. A separate
@@ -3215,6 +3331,61 @@ def _prior_free_image_edit_notice_count(memory: dict[str, Any]) -> int:
         if has_premium_notice and any(marker.replace("ё", "е") in rendered for marker in refusal_markers):
             count += 1
     return min(count, 5)
+
+
+def _active_branch_has_diagram_artifact(memory: dict[str, Any]) -> bool:
+    """Check the selected same-dialogue branch for a stored vector diagram."""
+    if not isinstance(memory, dict) or _text(memory.get("relation")).upper() != "CONTINUE":
+        return False
+    collections: list[Any] = [memory.get("active_branch_artifact_index")]
+    for pair in _select_continuation_pairs(memory):
+        if not isinstance(pair, dict):
+            continue
+        collections.extend((
+            pair.get("assistant_artifact_index"),
+            (pair.get("branch_digest") or {}).get("artifact_refs") if isinstance(pair.get("branch_digest"), dict) else None,
+            (pair.get("dialogue_state") or {}).get("source_artifact_index") if isinstance(pair.get("dialogue_state"), dict) else None,
+        ))
+        previous_request = _text(
+            pair.get("source_user_text") or pair.get("user_text") or pair.get("user")
+            or pair.get("request") or pair.get("question")
+        )
+        if previous_request and "diagram" in _detect_requested_outputs(previous_request):
+            return True
+    for collection in collections:
+        if not isinstance(collection, list):
+            continue
+        for artifact in collection:
+            if not isinstance(artifact, dict):
+                continue
+            descriptor = " ".join(
+                _text(artifact.get(key)) for key in (
+                    "kind", "type", "artifact_type", "output_type", "renderer",
+                    "viewer", "representation", "mime_type",
+                )
+            ).lower().replace("_", "").replace("-", "")
+            if any(marker in descriptor for marker in (
+                "diagram", "flowchart", "schematic", "svgblock", "navigationmap",
+            )):
+                return True
+    return False
+
+
+def _is_active_diagram_revision_followup(text: Any, memory: Any) -> bool:
+    """Carry the diagram renderer through an elliptical correction of its branch."""
+    low = _text(text).lower().replace("ё", "е")
+    if not low or not isinstance(memory, dict):
+        return False
+    if not _active_branch_has_diagram_artifact(memory):
+        return False
+    return bool(re.match(
+        r"^\s*(?:(?:ну|а|и|теперь|тогда|давай|пожалуйста)\s+)*"
+        r"(?:поправ\w*|исправ\w*|передел\w*|перерис\w*|измен\w*|"
+        r"обнов\w*|добав\w*|убер\w*|перемест\w*|перестав\w*|сдвин\w*|"
+        r"correct\w*|fix\w*|revise\w*|redraw\w*|update\w*|change\w*|"
+        r"move\w*|add\w*|remove\w*)\b",
+        low, re.IGNORECASE,
+    ))
 
 
 def _active_branch_has_code_request(memory: dict[str, Any]) -> bool:
@@ -4630,8 +4801,15 @@ def build_interpretation(
     # described in the current dialogue remains a normal Free generation. An edit
     # request is restricted by default; the executor may authorize this exact edit
     # only after reserving one referral-bonus unit from the Free bonus bucket.
-    image_modification_requested = _detect_image_modification(
-        request_text, has_existing_image_reference=has_existing_image_reference
+    diagram_overlay_requested = _detect_diagram_overlay_request(request_text)
+    diagram_revision_followup = _is_active_diagram_revision_followup(request_text, memory)
+    structured_diagram_modification_requested = _detect_structured_diagram_modification_request(request_text)
+    image_modification_requested = bool(
+        _detect_image_modification(
+            request_text, has_existing_image_reference=has_existing_image_reference
+        )
+        and not diagram_overlay_requested
+        and not structured_diagram_modification_requested
     )
     compositing_requested = _detect_image_compositing_request(request_text)
     # A geometry/technical drawing stays a structured diagram even if the
@@ -4644,8 +4822,13 @@ def build_interpretation(
         r"трапец\w*|многоугольн\w*|окружност\w*|график\w*|"
         r"размер\w*\s+(?:кажд\w*\s+)?сторон\w*|размер\w*|измерен\w*)",
         request_text.lower().replace("ё", "е"),
-    ))
-    contextual_source_edit = bool(has_existing_image_reference and _detect_contextual_image_edit(request_text))
+    ) or diagram_overlay_requested or diagram_revision_followup or structured_diagram_modification_requested)
+    contextual_source_edit = bool(
+        has_existing_image_reference
+        and _detect_contextual_image_edit(request_text)
+        and not diagram_overlay_requested
+        and not structured_diagram_modification_requested
+    )
     image_edit_restricted = bool(
         restrict_image_edits
         and (
@@ -4968,7 +5151,7 @@ def build_interpretation(
                 "Use a structured table for a clear comparison when the answer has comparable attributes.",
                 "Use a diagram for explicit schemas, workflows, arrows, geometry, mathematical figures, points, segments, angles, dimensions, measurements, construction drawings, blueprints, and technical drawings. Keep their exact labels, lengths, units, and angle values in the concrete diagram payload; never switch these requests to raster image generation.",
                 "Use C_APRIL_IMAGES_GENERATOR (Images 2.0) for new artistic/scenic/photorealistic images and complex illustrations. New images requested from the current dialogue are allowed in Free and must not receive an unsolicited package/plan disclaimer. A structured math/technical drawing such as 'нарисуй схему на картинке' must remain a diagram request.",
-                "In Free, an explicit request to alter an existing image, photo, diagram, chart, or drawing is restricted unless the executor has explicitly authorized and reserved one referral bonus operation for this exact request. When no such authorization is present, return a concise, soft localized limitation, do not ask the user to upload the image again, and do not generate a replacement image or diagram. Never set free_image_recreation to bypass this restriction. An executor-authorized referral bonus permits this one edit and consumes one bonus operation; ordinary new image generation and ordinary new diagrams remain enabled.",
+                "In Free, editing an existing raster photo/image remains restricted unless the executor has explicitly authorized and reserved one referral bonus operation for this exact image edit. Native SVG/diagram/map/chart revisions and vector annotations over a screenshot/photo are not raster edits: continue the matched diagram branch and render the revision through C_DIAGRAM_ROOM inside the same SceneContract, preserving source labels and geometry. Do not call the image generator for those vector revisions. Never use free_image_recreation to bypass raster edit restrictions.",
                 "Use a formula renderer for mathematical notation; use a graph only when a function or grounded numeric data can define it.",
                 "For graph requests, follow intent.graph_policy: trends/time-ordered values use line; categorical comparisons use bar; choose only among those 2D types unless explicit 3D intent or real 3D source data supports 3D.",
                 "Never turn 2D x/y data into a 3D chart by inventing a zero z-axis; true 3D requires explicit XYZ values, a real surface grid/function of x and y, or structured spatial objects.",
