@@ -2115,10 +2115,17 @@ def _history_payload(
                     assistant_message[field] = value
             messages.append(assistant_message)
 
+        restored_pair_count = len(full_records)
         return 200, {
             "success": True,
             "user_id": user_id,
             "window_hours": window_hours,
+            # `count` remains the number of durable USER↔APRIL turns, matching
+            # the lightweight history index. `messages` contains two entries
+            # per pair and gets its own explicit count for clients that need it.
+            "count": restored_pair_count,
+            "pair_count": restored_pair_count,
+            "message_count": len(messages),
             "target": {key: target_item[key] for key in (
                 "id", "message_id", "dialog_id", "conversation_id", "title", "created_at"
             )},
@@ -2942,6 +2949,9 @@ class AprilHandler(BaseHTTPRequestHandler):
                         if not latest_message_id:
                             status, payload = 200, {
                                 "success": True,
+                                "count": 0,
+                                "pair_count": 0,
+                                "message_count": 0,
                                 "messages": [],
                                 "restore_reason": "no_saved_dialogue_turn",
                                 "canonical_route": CANONICAL_CHAT_ROUTE,
