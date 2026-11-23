@@ -1434,6 +1434,25 @@ def _is_self_contained_new_subject_request(value: Any) -> bool:
     }
 
 
+def _is_elliptical_diagram_revision_request(current_request: Any) -> bool:
+    """Recognize a short edit command whose object is the active diagram pronoun."""
+    query = _text(current_request).lower().replace("ё", "е").strip()
+    if not query or len(query) > 100:
+        return False
+    action = (
+        r"поправ\w*|исправ\w*|передел\w*|перерис\w*|измен\w*|обнов\w*|"
+        r"добав\w*|убер\w*|удал\w*|перемест\w*|перестав\w*|сдвин\w*|"
+        r"fix\w*|correct\w*|revise\w*|redraw\w*|change\w*|update\w*|"
+        r"add\w*|remove\w*|move\w*"
+    )
+    pronoun = r"(?:ее|его|их|это|этот|эта|эту|эти|it|them|this|that)"
+    return bool(re.match(
+        rf"^\s*(?:(?:а|ну|и|теперь|тогда|пожалуйста|please)\s+)*"
+        rf"(?:{action})(?:\s+[\w\u0080-\uffff-]+){{0,5}}\s+{pronoun}(?:[.!?,;:]|\s|$)",
+        query, re.IGNORECASE,
+    ))
+
+
 def _requires_prior_structured_payload(
     current_request: Any, relation: str = "NEW", history_request: bool = False
 ) -> bool:
@@ -1447,6 +1466,10 @@ def _requires_prior_structured_payload(
     query = _text(current_request).lower().replace("ё", "е")
     if not query:
         return False
+    elliptical_diagram_revision = (
+        _text(relation).upper() == "CONTINUE"
+        and _is_elliptical_diagram_revision_request(current_request)
+    )
     has_data_target = bool(re.search(
         r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|график\w*|диаграмм\w*|схем\w*|"
         r"координат\w*|значени\w*|данн\w*|формул\w*|уравнен\w*|расчет\w*|вычислен\w*|"
@@ -1459,8 +1482,12 @@ def _requires_prior_structured_payload(
         r"\blinks?\b|\burls?\b|\bsources?\b|\bcodes?\b|\bscripts?\b|\bdiagrams?\b|\bschemes?\b|\bimages?\b|\bpictures?\b)",
         query,
     ))
-    if not has_data_target:
+    if not has_data_target and not elliptical_diagram_revision:
         return False
+    if elliptical_diagram_revision:
+        # The active branch was already semantically matched by State Manager.
+        # This pronoun-only correction should reattach only its saved diagram.
+        return True
     has_prior_pointer = bool(re.search(
         r"(?:\bэту\b|\bэтот\b|\bэта\b|\bэти\b|\bту\b|\bтот\b|\bта\b|\bте\b|"
         r"\bтой\b|\bэтой\b|\bпредыдущ\w*\b|\bпрошл\w*\b|\bпрежн\w*\b|\bсохранен\w*\b|"
@@ -1492,6 +1519,8 @@ def _prior_structured_kind_targets(current_request: Any) -> set[str]:
     """Infer source artifact kinds without confusing them with output containers."""
     query = _text(current_request).lower().replace("ё", "е")
     targets: set[str] = set()
+    if _is_elliptical_diagram_revision_request(query):
+        return {"diagram"}
 
     has_table_target = bool(re.search(
         r"(?:таблиц\w*|строк\w*|столб(?:ец|ц)\w*|ряд\w*|\btable\w*|\brows?\b|\bcolumns?\b|\brow\b|\bcolumn\b)",
@@ -1688,8 +1717,12 @@ def _select_protected_structured_data(
         # Exact values stay lossless, but historical renderer payloads must not
         # bypass the prompt budget. Skip oversized structures rather than truncating
         # their values or sending multi-megabyte data URIs to the language model.
-        max_item_chars = 12_000
-        max_batch_chars = 16_000
+        # A vector drawing is the editable source for the next correction. Keep
+        # a somewhat larger bounded SVG than the usual compact tabular payload;
+        # the prompt builder can externalize protected data losslessly if needed.
+        has_diagram_payload = any(_text(item.get("kind")).lower() == "diagram" for item in selected_items)
+        max_item_chars = 24_000 if has_diagram_payload else 12_000
+        max_batch_chars = 26_000 if has_diagram_payload else 16_000
         bounded_items: list[dict[str, Any]] = []
         bounded_chars = 0
         for item in selected_items:
