@@ -132,6 +132,202 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _localized_video_status(language: Any, status: str, **values: Any) -> str:
+    """Static, zero-network localization for video workflow status messages."""
+    key = _text(language).lower().replace("_", "-").split("-", 1)[0]
+    if key == "ua":
+        key = "uk"
+    messages = {
+        "pending": {
+            "es": "Estoy generando el vídeo y preparando el MP4. Esto puede tardar unos minutos.",
+            "de": "Ich erstelle das Video und bereite die MP4-Datei vor. Das kann einige Minuten dauern.",
+            "fr": "Je génère la vidéo et prépare le MP4. Cela peut prendre quelques minutes.",
+            "it": "Sto generando il video e preparando il file MP4. Potrebbero volerci alcuni minuti.",
+            "pl": "Generuję wideo i przygotowuję plik MP4. Może to potrwać kilka minut.",
+            "pt": "Estou a gerar o vídeo e a preparar o MP4. Isto pode demorar alguns minutos.",
+            "nl": "Ik genereer de video en bereid het MP4-bestand voor. Dit kan enkele minuten duren.",
+        },
+        "edit_success": {
+            "es": "Listo: el vídeo original se editó según lo solicitado. El archivo MP4 se guardó en los artefactos de esta conversación.",
+            "de": "Fertig: Das Originalvideo wurde wie gewünscht bearbeitet. Die MP4-Datei wurde in den Artefakten dieses Chats gespeichert.",
+            "fr": "Terminé : la vidéo d’origine a été modifiée comme demandé. Le fichier MP4 est enregistré dans les artefacts de cette conversation.",
+            "it": "Fatto: il video originale è stato modificato come richiesto. Il file MP4 è stato salvato negli artefatti di questa conversazione.",
+            "pl": "Gotowe: oryginalny film został zmodyfikowany zgodnie z prośbą. Plik MP4 zapisano w artefaktach tej rozmowy.",
+            "pt": "Concluído: o vídeo original foi editado conforme solicitado. O ficheiro MP4 foi guardado nos artefactos desta conversa.",
+            "nl": "Klaar: de oorspronkelijke video is aangepast zoals gevraagd. Het MP4-bestand is opgeslagen bij de artefacten van dit gesprek.",
+        },
+        "default_success": {
+            "es": "Listo: el vídeo dura {duration} s. No indicaste una duración, así que usé el valor predeterminado de 3 s. Para el próximo vídeo, indica la duración en tu solicitud, por ejemplo, «crea un vídeo de 15 segundos». El máximo actual es {limit} s.",
+            "de": "Fertig: Das Video dauert {duration} s. Du hast keine Dauer angegeben, daher habe ich den Standardwert von 3 s verwendet. Gib beim nächsten Video die gewünschte Dauer an, zum Beispiel „Erstelle ein 15-Sekunden-Video“. Das aktuelle Maximum beträgt {limit} s.",
+            "fr": "Terminé : la vidéo dure {duration} s. Aucune durée n’était indiquée ; j’ai donc utilisé la valeur par défaut de 3 s. Pour la prochaine vidéo, précise la durée dans ta demande, par exemple « crée une vidéo de 15 secondes ». Le maximum actuel est de {limit} s.",
+            "it": "Fatto: il video dura {duration} s. Non hai indicato una durata, quindi ho usato il valore predefinito di 3 s. Per il prossimo video, specifica la durata nella richiesta, ad esempio «crea un video di 15 secondi». Il limite attuale è {limit} s.",
+            "pl": "Gotowe: film trwa {duration} s. Nie podano czasu trwania, więc użyto domyślnej wartości 3 s. Przy następnym filmie podaj długość w prośbie, na przykład „utwórz film 15-sekundowy”. Obecny limit to {limit} s.",
+            "pt": "Concluído: o vídeo tem {duration} s. Não indicaste a duração, por isso usei o valor predefinido de 3 s. No próximo vídeo, indica a duração no pedido, por exemplo, «cria um vídeo de 15 segundos». O limite atual é {limit} s.",
+            "nl": "Klaar: de video duurt {duration} s. Je had geen duur opgegeven, dus ik heb de standaardduur van 3 s gebruikt. Vermeld bij je volgende video de gewenste duur, bijvoorbeeld ‘maak een video van 15 seconden’. De huidige limiet is {limit} s.",
+        },
+        "success": {
+            "es": "Vídeo creado: {duration} s. El archivo MP4 se ha guardado en los artefactos de esta conversación.",
+            "de": "Video erstellt: {duration} s. Die MP4-Datei wurde in den Artefakten dieses Chats gespeichert.",
+            "fr": "Vidéo créée : {duration} s. Le fichier MP4 est enregistré dans les artefacts de cette conversation.",
+            "it": "Video creato: {duration} s. Il file MP4 è stato salvato negli artefatti di questa conversazione.",
+            "pl": "Wideo zostało utworzone: {duration} s. Plik MP4 zapisano w artefaktach tej rozmowy.",
+            "pt": "Vídeo criado: {duration} s. O ficheiro MP4 foi guardado nos artefactos desta conversa.",
+            "nl": "Video gemaakt: {duration} s. Het MP4-bestand is opgeslagen bij de artefacten van dit gesprek.",
+        },
+        "generic_failure": {
+            "es": "No se pudo completar la operación de vídeo. No se generó ningún archivo MP4, por lo que April no mostrará una tarjeta de descarga ficticia. Comprueba el archivo original o el proveedor de vídeo y vuelve a intentarlo.",
+            "de": "Der Videovorgang ist fehlgeschlagen. Es wurde keine MP4-Datei erstellt, daher zeigt April keine Platzhalter-Downloadkarte an. Prüfe die Quelldatei oder den Videodienst und versuche es erneut.",
+            "fr": "L’opération vidéo a échoué. Aucun fichier MP4 n’a été créé ; April n’affichera donc pas de fausse carte de téléchargement. Vérifiez le fichier source ou le fournisseur vidéo, puis réessayez.",
+            "it": "L’operazione video non è riuscita. Non è stato creato alcun file MP4, quindi April non mostrerà una scheda di download fittizia. Controlla il file sorgente o il provider video e riprova.",
+            "pl": "Operacja wideo nie powiodła się. Nie utworzono pliku MP4, więc April nie pokaże fikcyjnej karty pobierania. Sprawdź plik źródłowy lub dostawcę wideo i spróbuj ponownie.",
+            "pt": "A operação de vídeo falhou. Não foi criado qualquer ficheiro MP4, por isso a April não mostrará um cartão de transferência fictício. Verifica o ficheiro de origem ou o fornecedor de vídeo e tenta novamente.",
+            "nl": "De videoverwerking is mislukt. Er is geen MP4-bestand gemaakt, dus April toont geen fictieve downloadkaart. Controleer het bronbestand of de videoprovider en probeer het opnieuw.",
+        },
+        "wallet_not_enabled": {
+            "es": "Primero activa la cartera de vídeo independiente en tu perfil. No necesitas Premium para hacerlo.",
+            "de": "Aktiviere zuerst das separate Videoguthaben in deinem Profil. Dafür ist Premium nicht erforderlich.",
+            "fr": "Activez d’abord le portefeuille vidéo séparé dans votre profil. Premium n’est pas nécessaire.",
+            "it": "Attiva prima il portafoglio video separato nel tuo profilo. Non serve Premium.",
+            "pl": "Najpierw włącz osobny portfel wideo w swoim profilu. Nie wymaga to Premium.",
+            "pt": "Ativa primeiro a carteira de vídeo separada no teu perfil. Não precisas de Premium.",
+            "nl": "Schakel eerst de afzonderlijke videowallet in je profiel in. Daarvoor is Premium niet nodig.",
+        },
+        "wallet_insufficient": {
+            "es": "No hay fondos suficientes en la cartera de vídeo independiente. Recárgala en tu perfil y vuelve a intentarlo; no necesitas comprar Premium.",
+            "de": "Das separate Videoguthaben reicht nicht aus. Lade es in deinem Profil auf und versuche es erneut; Premium musst du nicht kaufen.",
+            "fr": "Le solde du portefeuille vidéo séparé est insuffisant. Rechargez-le dans votre profil et réessayez ; vous n’avez pas besoin d’acheter Premium.",
+            "it": "Il saldo del portafoglio video separato è insufficiente. Ricaricalo dal profilo e riprova; non devi acquistare Premium.",
+            "pl": "Na osobnym portfelu wideo brakuje środków. Doładuj go w profilu i spróbuj ponownie; nie musisz kupować Premium.",
+            "pt": "O saldo da carteira de vídeo separada é insuficiente. Carrega-a no teu perfil e tenta novamente; não precisas de comprar Premium.",
+            "nl": "Er staat te weinig saldo op de afzonderlijke videowallet. Waardeer deze op in je profiel en probeer het opnieuw; je hoeft geen Premium te kopen.",
+        },
+        "rights_not_confirmed": {
+            "es": "La generación de vídeo no está disponible temporalmente porque el servidor aún no ha confirmado los derechos de uso comercial del proveedor.",
+            "de": "Die Videogenerierung ist vorübergehend nicht verfügbar, da die kommerziellen Nutzungsrechte des Anbieters auf dem Server noch nicht bestätigt wurden.",
+            "fr": "La génération vidéo est temporairement indisponible, car les droits d’utilisation commerciale du fournisseur ne sont pas encore confirmés sur le serveur.",
+            "it": "La generazione video non è temporaneamente disponibile perché il server non ha ancora confermato i diritti di uso commerciale del provider.",
+            "pl": "Generowanie wideo jest tymczasowo niedostępne, ponieważ serwer nie potwierdził jeszcze praw dostawcy do użytku komercyjnego.",
+            "pt": "A geração de vídeo está temporariamente indisponível porque o servidor ainda não confirmou os direitos de utilização comercial do fornecedor.",
+            "nl": "Videogeneratie is tijdelijk niet beschikbaar omdat de server de commerciële gebruiksrechten van de provider nog niet heeft bevestigd.",
+        },
+        "api_key_missing": {
+            "es": "La clave API del proveedor de vídeo no está configurada en el servidor. Recargar el saldo no ayudará hasta que se configure el proveedor.",
+            "de": "Der API-Schlüssel des Videodienstes ist auf dem Server nicht eingerichtet. Eine Aufladung hilft erst, wenn der Anbieter konfiguriert wurde.",
+            "fr": "La clé API du fournisseur vidéo n’est pas configurée sur le serveur. Un rechargement ne servira à rien tant que le fournisseur ne sera pas configuré.",
+            "it": "La chiave API del provider video non è configurata sul server. Ricaricare il saldo non servirà finché il provider non sarà configurato.",
+            "pl": "Klucz API dostawcy wideo nie jest skonfigurowany na serwerze. Doładowanie nie pomoże, dopóki dostawca nie zostanie skonfigurowany.",
+            "pt": "A chave da API do fornecedor de vídeo não está configurada no servidor. Carregar o saldo não ajudará até que o fornecedor seja configurado.",
+            "nl": "De API-sleutel van de videoprovider is niet ingesteld op de server. Opwaarderen helpt niet totdat de provider is geconfigureerd.",
+        },
+        "cost_not_configured": {
+            "es": "El coste de los créditos del proveedor de vídeo no está configurado. La generación se detuvo para evitar un cobro incorrecto.",
+            "de": "Die Kosten der Videocredits sind nicht konfiguriert. Die Erstellung wurde gestoppt, um eine falsche Abbuchung zu vermeiden.",
+            "fr": "Le coût des crédits du fournisseur vidéo n’est pas configuré. La génération a été arrêtée afin d’éviter une facturation incorrecte.",
+            "it": "Il costo dei crediti del provider video non è configurato. La generazione è stata interrotta per evitare un addebito errato.",
+            "pl": "Koszt kredytów dostawcy wideo nie jest skonfigurowany. Generowanie zatrzymano, aby uniknąć błędnego obciążenia.",
+            "pt": "O custo dos créditos do fornecedor de vídeo não está configurado. A geração foi interrompida para evitar uma cobrança incorreta.",
+            "nl": "De kosten van de videoprovidercredits zijn niet ingesteld. Het genereren is gestopt om een onjuiste afschrijving te voorkomen.",
+        },
+        "wallet_auth_required": {
+            "es": "Se necesita una cuenta de April autenticada para comprar y utilizar créditos de vídeo.",
+            "de": "Zum Kaufen und Verwenden von Videocredits ist ein authentifiziertes April-Konto erforderlich.",
+            "fr": "Un compte April authentifié est nécessaire pour acheter et utiliser des crédits vidéo.",
+            "it": "Per acquistare e utilizzare crediti video è necessario un account April autenticato.",
+            "pl": "Do zakupu i wykorzystania kredytów wideo wymagane jest uwierzytelnione konto April.",
+            "pt": "É necessária uma conta April autenticada para comprar e utilizar créditos de vídeo.",
+            "nl": "Je hebt een geverifieerd April-account nodig om videocredits te kopen en te gebruiken.",
+        },
+        "duration_unsupported": {
+            "es": "No pude interpretar con seguridad esa duración. Indica un número y una unidad, por ejemplo, «15 segundos» o «1 minuto». No se envió ningún trabajo de vídeo ni se descontó saldo.",
+            "de": "Ich konnte diese Dauer nicht eindeutig erkennen. Gib bitte eine Zahl mit Einheit an, zum Beispiel „15 Sekunden“ oder „1 Minute“. Es wurde kein Videoauftrag gesendet und kein Guthaben abgezogen.",
+            "fr": "Je n’ai pas pu interpréter cette durée avec certitude. Indiquez un nombre et une unité, par exemple « 15 secondes » ou « 1 minute ». Aucune tâche vidéo n’a été envoyée et aucun solde n’a été débité.",
+            "it": "Non sono riuscita a interpretare con certezza la durata. Indica un numero e un’unità, ad esempio «15 secondi» o «1 minuto». Non è stato inviato alcun lavoro video e non è stato addebitato credito.",
+            "pl": "Nie udało się jednoznacznie odczytać czasu trwania. Podaj liczbę i jednostkę, na przykład „15 sekund” lub „1 minuta”. Nie wysłano zadania wideo ani nie pobrano środków.",
+            "pt": "Não consegui interpretar a duração com segurança. Indica um número e uma unidade, por exemplo, «15 segundos» ou «1 minuto». Não foi enviado nenhum trabalho de vídeo nem foi debitado saldo.",
+            "nl": "Ik kon de opgegeven duur niet betrouwbaar interpreteren. Vermeld een getal en een eenheid, bijvoorbeeld ‘15 seconden’ of ‘1 minuut’. Er is geen video-opdracht verzonden en er is geen saldo afgeschreven.",
+        },
+        "duration_limit": {
+            "es": "La duración solicitada supera el límite actual. Un vídeo puede durar como máximo {limit} s. Elige una duración de {limit} s o menos; la solicitud no se envió al proveedor.",
+            "de": "Die gewünschte Dauer überschreitet das aktuelle Limit. Ein Clip darf höchstens {limit} s lang sein. Wähle {limit} s oder weniger; die Anfrage wurde nicht an den Anbieter gesendet.",
+            "fr": "La durée demandée dépasse la limite actuelle. Une vidéo peut durer au maximum {limit} s. Choisissez une durée de {limit} s ou moins ; la demande n’a pas été envoyée au fournisseur.",
+            "it": "La durata richiesta supera il limite attuale. Un video può durare al massimo {limit} s. Scegli una durata pari o inferiore a {limit} s; la richiesta non è stata inviata al provider.",
+            "pl": "Żądany czas przekracza obecny limit. Film może trwać maksymalnie {limit} s. Wybierz {limit} s lub mniej; żądanie nie zostało wysłane do dostawcy.",
+            "pt": "A duração solicitada excede o limite atual. Um vídeo pode ter no máximo {limit} s. Escolhe {limit} s ou menos; o pedido não foi enviado ao fornecedor.",
+            "nl": "De gevraagde duur overschrijdt de huidige limiet. Een video mag maximaal {limit} s duren. Kies {limit} s of korter; het verzoek is niet naar de provider verzonden.",
+        },
+        "provider_rejected": {
+            "es": "El proveedor de vídeo rechazó la tarea por una restricción del plan o de los parámetros. Una generación fallida no debe consumir el saldo de vídeo.",
+            "de": "Der Videodienst hat den Auftrag wegen einer Tarif- oder Parameterbeschränkung abgelehnt. Ein fehlgeschlagener Vorgang darf das Videoguthaben nicht belasten.",
+            "fr": "Le fournisseur vidéo a refusé la tâche en raison d’une restriction liée au forfait ou aux paramètres. Un échec de génération ne doit pas débiter le solde vidéo.",
+            "it": "Il provider video ha rifiutato il lavoro per una limitazione del piano o dei parametri. Una generazione non riuscita non deve consumare il saldo video.",
+            "pl": "Dostawca wideo odrzucił zadanie z powodu ograniczeń planu lub parametrów. Nieudane generowanie nie powinno obciążać salda wideo.",
+            "pt": "O fornecedor de vídeo rejeitou a tarefa devido a uma restrição do plano ou dos parâmetros. Uma geração falhada não deve consumir o saldo de vídeo.",
+            "nl": "De videoprovider heeft de taak geweigerd vanwege een abonnements- of parameterbeperking. Een mislukte generatie mag geen videogeld kosten.",
+        },
+        "provider_credits_insufficient": {
+            "es": "El saldo del proveedor Magic Hour no tiene créditos suficientes. No se descontará el saldo de vídeo del usuario por una tarea fallida.",
+            "de": "Das Magic-Hour-Anbieterguthaben reicht nicht aus. Bei einem fehlgeschlagenen Auftrag wird dem Nutzer kein Videoguthaben abgezogen.",
+            "fr": "Le solde du fournisseur Magic Hour est insuffisant. Le solde vidéo de l’utilisateur ne sera pas débité pour une tâche échouée.",
+            "it": "Il saldo del provider Magic Hour non ha crediti sufficienti. Il saldo video dell’utente non verrà addebitato per un’attività non riuscita.",
+            "pl": "Saldo dostawcy Magic Hour nie wystarcza. Za nieudane zadanie środki z portfela wideo użytkownika nie zostaną pobrane.",
+            "pt": "O saldo do fornecedor Magic Hour não tem créditos suficientes. O saldo de vídeo do utilizador não será debitado por uma tarefa falhada.",
+            "nl": "Het Magic Hour-providersaldo bevat onvoldoende credits. Bij een mislukte taak wordt geen videogeld van de gebruiker afgeschreven.",
+        },
+        "test_account_not_allowed": {
+            "es": "El modo de prueba de vídeo está activado, pero esta cuenta de April no está en la lista de cuentas de prueba autorizadas.",
+            "de": "Der Video-Testmodus ist aktiviert, aber dieses April-Konto steht nicht auf der Liste der zugelassenen Testkonten.",
+            "fr": "Le mode de test vidéo est activé, mais ce compte April ne figure pas dans la liste des comptes de test autorisés.",
+            "it": "La modalità di test video è attiva, ma questo account April non è nell’elenco degli account di test autorizzati.",
+            "pl": "Tryb testowy wideo jest włączony, ale tego konta April nie ma na liście dozwolonych kont testowych.",
+            "pt": "O modo de teste de vídeo está ativo, mas esta conta April não consta da lista de contas de teste autorizadas.",
+            "nl": "De videotestmodus is ingeschakeld, maar dit April-account staat niet op de lijst met toegestane testaccounts.",
+        },
+        "test_cost_not_configured": {
+            "es": "Falta configurar la tarifa de cálculo de los créditos de vídeo de prueba en el servidor.",
+            "de": "Der Abrechnungssatz für Video-Testcredits ist auf dem Server nicht eingerichtet.",
+            "fr": "Le tarif de calcul des crédits vidéo de test n’est pas configuré sur le serveur.",
+            "it": "Sul server non è configurata la tariffa di calcolo dei crediti video di prova.",
+            "pl": "Na serwerze nie skonfigurowano stawki rozliczeniowej testowych kredytów wideo.",
+            "pt": "A taxa de cálculo dos créditos de vídeo de teste não está configurada no servidor.",
+            "nl": "Het afrekentarief voor videotestcredits is niet ingesteld op de server.",
+        },
+        "task_pending": {
+            "es": "El proveedor aún está procesando la tarea. El importe sigue reservado; no la envíes de nuevo para evitar crear un duplicado.",
+            "de": "Der Anbieter verarbeitet den Auftrag noch. Der Betrag bleibt reserviert; sende den Auftrag nicht erneut, um ein Duplikat zu vermeiden.",
+            "fr": "Le fournisseur traite encore la tâche. Le montant reste réservé ; ne la soumettez pas à nouveau afin d’éviter un doublon.",
+            "it": "Il provider sta ancora elaborando l’attività. L’importo resta riservato; non inviarla di nuovo per evitare un duplicato.",
+            "pl": "Dostawca nadal przetwarza zadanie. Kwota pozostaje zarezerwowana; nie wysyłaj go ponownie, aby uniknąć duplikatu.",
+            "pt": "O fornecedor ainda está a processar a tarefa. O valor permanece reservado; não a envies novamente para evitar uma duplicação.",
+            "nl": "De provider verwerkt de taak nog. Het bedrag blijft gereserveerd; verstuur de taak niet opnieuw om een duplicaat te voorkomen.",
+        },
+        "generation_disabled": {
+            "es": "La generación de vídeo está desactivada actualmente en la configuración del servidor.",
+            "de": "Die Videogenerierung ist derzeit in der Serverkonfiguration deaktiviert.",
+            "fr": "La génération vidéo est actuellement désactivée dans la configuration du serveur.",
+            "it": "La generazione video è attualmente disattivata nella configurazione del server.",
+            "pl": "Generowanie wideo jest obecnie wyłączone w konfiguracji serwera.",
+            "pt": "A geração de vídeo está atualmente desativada na configuração do servidor.",
+            "nl": "Videogeneratie is momenteel uitgeschakeld in de serverconfiguratie.",
+        },
+        "persist_failed": {
+            "es": "El MP4 se generó, pero la base de datos no confirmó que el artefacto se guardara. April no adjuntará un enlace inaccesible. Comprueba la conexión con PostgreSQL y vuelve a intentarlo.",
+            "de": "Die MP4-Datei wurde erstellt, aber die Datenbank hat die Speicherung des Artefakts nicht bestätigt. April hängt keinen nicht verfügbaren Link an. Prüfe die PostgreSQL-Verbindung und versuche es erneut.",
+            "fr": "Le MP4 a été généré, mais la base de données n’a pas confirmé l’enregistrement de l’artefact. April ne joindra pas de lien inaccessible. Vérifiez la connexion PostgreSQL et réessayez.",
+            "it": "Il file MP4 è stato generato, ma il database non ha confermato il salvataggio dell’artefatto. April non allegherà un link non accessibile. Controlla la connessione a PostgreSQL e riprova.",
+            "pl": "Plik MP4 został wygenerowany, ale baza danych nie potwierdziła zapisania artefaktu. April nie dołączy niedostępnego linku. Sprawdź połączenie z PostgreSQL i spróbuj ponownie.",
+            "pt": "O MP4 foi gerado, mas a base de dados não confirmou a gravação do artefacto. A April não anexará uma ligação inacessível. Verifica a ligação ao PostgreSQL e tenta novamente.",
+            "nl": "Het MP4-bestand is gegenereerd, maar de database heeft het opslaan van het artefact niet bevestigd. April voegt geen ontoegankelijke link toe. Controleer de PostgreSQL-verbinding en probeer het opnieuw.",
+        },
+    }
+    template = messages.get(status, {}).get(key, "")
+    if not template:
+        return ""
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError):
+        return template
+
+
 def _localized_free_image_edit_notice(language: Any) -> str:
     key = _text(language).lower().replace("_", "-").split("-", 1)[0]
     if key == "uk":
@@ -4117,7 +4313,15 @@ async def execute(
                     "uk": f"Відео створено. Тривалість — {_duration} с. MP4 збережено в артефактах цього діалогу.",
                     "en": f"Video created — {_duration} seconds. The MP4 is saved in this conversation's artifacts.",
                 }
-            video_answer = video_success_copy.get(language_key, video_success_copy["en"])
+            _success_status = (
+                "edit_success" if _video_operation == "edit"
+                else "default_success" if video_result.get("duration_was_default") is True
+                else "success"
+            )
+            video_answer = (
+                _localized_video_status(language_key, _success_status, duration=_duration, limit=_duration_limit)
+                or video_success_copy.get(language_key, video_success_copy["en"])
+            )
             generated_video_bytes = bytes(video_bytes)
             generated_video_name = _text(video_result.get("filename") or f"april-video-{identity['message_id'][-10:]}.mp4")[:240]
             generated_video_hash = hashlib.sha256(generated_video_bytes).hexdigest()
@@ -4225,9 +4429,20 @@ async def execute(
             error_upper = video_generation_error.upper()
             matched = next((key for key in localized if key in error_upper), "")
             if matched:
-                video_answer = localized[matched].get(language_key, localized[matched]["en"])
+                _status_by_error = {
+                    "VIDEO_WALLET_NOT_ENABLED": "wallet_not_enabled",
+                    "VIDEO_WALLET_INSUFFICIENT_FUNDS": "wallet_insufficient",
+                    "MAGIC_HOUR_COMMERCIAL_RIGHTS_NOT_CONFIRMED": "rights_not_confirmed",
+                    "MAGIC_HOUR_API_KEY_NOT_CONFIGURED": "api_key_missing",
+                    "APRIL_MAGIC_HOUR_COST_NOT_CONFIGURED": "cost_not_configured",
+                    "VIDEO_WALLET_AUTH_REQUIRED": "wallet_auth_required",
+                }
+                video_answer = (
+                    _localized_video_status(language_key, _status_by_error.get(matched, ""))
+                    or localized[matched].get(language_key, localized[matched]["en"])
+                )
             elif "VIDEO_DURATION_EXPRESSION_UNSUPPORTED" in error_upper:
-                video_answer = {
+                video_answer = _localized_video_status(language_key, "duration_unsupported") or {
                     "ru": "Я не смогла однозначно распознать указанную длительность. Напишите её числом и единицей, например: «15 секунд» или «1 минута». Видео не запускалось и видеобаланс не списывался.",
                     "uk": "Я не змогла однозначно розпізнати вказану тривалість. Напишіть її числом і одиницею, наприклад: «15 секунд» або «1 хвилина». Відео не запускалося, відеобаланс не списувався.",
                     "en": "I could not reliably parse that duration. Please write a number and unit, such as ‘15 seconds’ or ‘1 minute’. No video job was submitted and no Video Wallet balance was charged.",
@@ -4235,19 +4450,19 @@ async def execute(
             elif "VIDEO_DURATION_LIMIT_EXCEEDED" in error_upper:
                 _limit_match = re.search(r"max=(\d+)", error_upper)
                 _limit = int(_limit_match.group(1)) if _limit_match else 60
-                video_answer = {
+                video_answer = _localized_video_status(language_key, "duration_limit", limit=_limit) or {
                     "ru": f"Запрошенная длительность превышает лимит текущих настроек. Максимум для одного ролика сейчас — {_limit} с. Укажите длительность до {_limit} с; запрос не был отправлен провайдеру.",
                     "uk": f"Запитана тривалість перевищує ліміт поточних налаштувань. Максимум для одного ролика зараз — {_limit} с. Вкажіть тривалість до {_limit} с; запит не надсилався провайдеру.",
                     "en": f"The requested duration exceeds the current settings. One clip can be up to {_limit} seconds. Choose a duration of {_limit} seconds or less; the request was not sent to the provider.",
                 }.get(language_key, f"The current maximum is {_limit} seconds; the request was not sent to the provider.")
             elif "MAGIC_HOUR_HTTP_402" in error_upper:
-                video_answer = {
+                video_answer = _localized_video_status(language_key, "provider_rejected") or {
                     "ru": "Видеопровайдер отклонил задачу из-за ограничения тарифа или параметров. Неуспешная генерация не должна списывать пользовательский видеобаланс.",
                     "uk": "Відеопровайдер відхилив завдання через обмеження тарифу або параметрів. Невдала генерація не повинна списувати користувацький відеобаланс.",
                     "en": "The video provider rejected this job because of a plan or parameter restriction. A failed generation should not consume the user's video balance.",
                 }.get(language_key, "The video provider rejected this job because of a plan or parameter restriction.")
             else:
-                video_answer = {
+                video_answer = _localized_video_status(language_key, "generic_failure") or {
                     "ru": "Не удалось создать MP4. Карточка видео не будет показана без готового файла. Проверьте видеопровайдера и видеобаланс, затем повторите запрос.",
                     "uk": "Не вдалося створити MP4. Картка відео не відображатиметься без готового файлу. Перевірте відеопровайдера та відеобаланс і повторіть запит.",
                     "en": "The MP4 could not be generated. April will not show a video card without a real file. Check the provider and Video Wallet, then retry.",
@@ -4978,7 +5193,7 @@ async def execute(
             "uk": "MP4 було створено, але база даних не підтвердила збереження відеоартефакту. Тому April не додає недоступну відеокартку. Перевірте підключення PostgreSQL і повторіть запит.",
             "en": "The MP4 was generated, but the database did not confirm video artifact persistence. April will not attach an inaccessible video card. Check PostgreSQL connectivity and retry.",
         }
-        answer = persist_failure_copy.get(language_key, persist_failure_copy["en"])
+        answer = _localized_video_status(language_key, "persist_failed") or persist_failure_copy.get(language_key, persist_failure_copy["en"])
         response.answer = answer
         response.content = answer
         response.summary = answer[:180]
