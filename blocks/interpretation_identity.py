@@ -15,6 +15,177 @@ from typing import Any
 from uuid import uuid4
 import re
 
+# Render-intent aliases for the ten languages offered by the web Settings page.
+# This is a local classifier aid only: the original user text is never changed.
+_MULTILINGUAL_RENDER_ALIASES = (
+    # Ukrainian action verbs and grammatical filler.
+    (r"(?<![\w])(?:намалюй(?:те)?|намалювати|зобрази(?:те)?|зобразити)(?![\w])", "draw"),
+    (r"(?<![\w])(?:покажи(?:те)?|показати|відобрази(?:те)?|відобразити)(?![\w])", "show"),
+    (r"(?<![\w])(?:створи(?:те)?|створити|згенеруй(?:те)?|згенерувати|побудуй(?:те)?|побудувати)(?![\w])", "draw"),
+    (r"(?<![\w])(?:мені|нам)(?![\w])", "me"),
+    (r"(?<![\w])(?:будь\s+ласка)(?![\w])", "please"),
+    (r"(?<![\w])(?:зображення|картинка|картинку|малюнок|фото|фотографія|ілюстрація|портрет)(?![\w])", "image"),
+    (r"(?<![\w])(?:схема|схему|діаграма|діаграму|креслення|блок-схема)(?![\w])", "diagram"),
+    (r"(?<![\w])(?:графік|графіка|графіку|діаграма\s+даних)(?![\w])", "graph"),
+    (r"(?<![\w])(?:таблиця|таблицю|таблиці)(?![\w])", "table"),
+    (r"(?<![\w])(?:формула|формулу|рівняння)(?![\w])", "formula"),
+    (r"(?<![\w])(?:код|скрипт)(?![\w])", "code"),
+    (r"(?<![\w])(?:файл|документ)(?![\w])", "file"),
+    (r"(?<![\w])(?:посилання|лінк)(?![\w])", "link"),
+    # Spanish.
+    (r"(?<![\w])(?:dibuja(?:r)?|ilustra(?:r)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:muestra(?:r)?|visualiza(?:r)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:crea(?:r)?|genera(?:r)?|construye|construir)(?![\w])", "draw"),
+    (r"(?<![\w])(?:para\s+mí|por\s+favor)(?![\w])", "please"),
+    (r"(?<![\w])(?:imagen|imágenes|foto|fotografía|ilustración|dibujo|retrato)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagrama|esquema|flujograma)(?![\w])", "diagram"),
+    (r"(?<![\w])(?:gráfico|gráfica|grafico)(?![\w])", "graph"),
+    (r"(?<![\w])tabla(?![\w])", "table"),
+    (r"(?<![\w])fórmula(?![\w])", "formula"),
+    (r"(?<![\w])código(?![\w])", "code"),
+    (r"(?<![\w])(?:archivo|documento)(?![\w])", "file"),
+    (r"(?<![\w])enlace(?![\w])", "link"),
+    # German.
+    (r"(?<![\w])(?:zeichne(?:n)?|male(?:n)?|skizziere(?:n)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:zeige(?:n)?|visualisiere(?:n)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:erstelle(?:n)?|generiere(?:n)?|baue(?:n)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mir|bitte)(?![\w])", "please"),
+    (r"(?<![\w])(?:ein|eine|einen)(?![\w])", "a"),
+    (r"(?<![\w])(?:bild|bilder|foto|fotografie|illustration|zeichnung|porträt)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagramm|schema|flussdiagramm|schaltplan)(?![\w])", "diagram"),
+    (r"(?<![\w])(?:grafik|graph)(?![\w])", "graph"),
+    (r"(?<![\w])tabelle(?![\w])", "table"),
+    (r"(?<![\w])formel(?![\w])", "formula"),
+    (r"(?<![\w])programmcode(?![\w])", "code"),
+    (r"(?<![\w])(?:datei|dokument)(?![\w])", "file"),
+    (r"(?<![\w])(?:verweis|link)(?![\w])", "link"),
+    # French.
+    (r"(?<![\w])(?:dessine(?:r)?|esquisse(?:r)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:montre(?:r)?|visualise(?:r)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:crée(?:r)?|génère(?:r)?|construis|construire)(?![\w])", "draw"),
+    (r"(?<![\w])(?:moi|s'il\s+vous\s+plaît)(?![\w])", "me"),
+    (r"(?<![\w])(?:un|une)(?![\w])", "a"),
+    (r"(?<![\w])(?:image|photo|photographie|illustration|dessin|portrait)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagramme|schéma|organigramme)(?![\w])", "diagram"),
+    (r"(?<![\w])(?:graphique|courbe)(?![\w])", "graph"),
+    (r"(?<![\w])tableau(?![\w])", "table"),
+    (r"(?<![\w])formule(?![\w])", "formula"),
+    (r"(?<![\w])code(?![\w])", "code"),
+    (r"(?<![\w])(?:fichier|document)(?![\w])", "file"),
+    (r"(?<![\w])lien(?![\w])", "link"),
+    # Italian.
+    (r"(?<![\w])(?:disegna(?:re)?|illustra(?:re)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mostra(?:re)?|visualizza(?:re)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:crea(?:re)?|genera(?:re)?|costruisci|costruire)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mi|per\s+favore)(?![\w])", "me"),
+    (r"(?<![\w])(?:un|una)(?![\w])", "a"),
+    (r"(?<![\w])(?:immagine|foto|fotografia|illustrazione|disegno|ritratto)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagramma|schema)(?![\w])", "diagram"),
+    (r"(?<![\w])(?:grafico|grafica)(?![\w])", "graph"),
+    (r"(?<![\w])tabella(?![\w])", "table"),
+    (r"(?<![\w])formula(?![\w])", "formula"),
+    (r"(?<![\w])codice(?![\w])", "code"),
+    (r"(?<![\w])documento(?![\w])", "file"),
+    (r"(?<![\w])collegamento(?![\w])", "link"),
+    # Polish.
+    (r"(?<![\w])(?:narysuj|narysować|narysujcie)(?![\w])", "draw"),
+    (r"(?<![\w])(?:pokaż|pokazać|pokazcie|wizualizuj|wizualizować)(?![\w])", "show"),
+    (r"(?<![\w])(?:stwórz|stworzyć|wygeneruj|wygenerować|zbuduj|zbudować)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mi|proszę|prosze)(?![\w])", "me"),
+    (r"(?<![\w])(?:jeden|jedna)(?![\w])", "a"),
+    (r"(?<![\w])(?:obraz|zdjęcie|zdjecie|fotografia|ilustracja|rysunek|portret)(?![\w])", "image"),
+    (r"(?<![\w])(?:schemat|diagram|schemat\s+blokowy)(?![\w])", "diagram"),
+    (r"(?<![\w])wykres(?![\w])", "graph"),
+    (r"(?<![\w])tabela(?![\w])", "table"),
+    (r"(?<![\w])(?:wzór|wzor|formuła|formułę|formuły|formula)(?![\w])", "formula"),
+    (r"(?<![\w])kod(?![\w])", "code"),
+    (r"(?<![\w])(?:plik|dokument)(?![\w])", "file"),
+    (r"(?<![\w])łącze(?![\w])", "link"),
+    # Portuguese.
+    (r"(?<![\w])(?:desenha(?:r)?|ilustra(?:r)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mostra(?:r)?|visualiza(?:r)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:crie|criar|gere|gerar|construa|construir)(?![\w])", "draw"),
+    (r"(?<![\w])(?:me|por\s+favor)(?![\w])", "me"),
+    (r"(?<![\w])(?:um|uma)(?![\w])", "a"),
+    (r"(?<![\w])(?:imagem|foto|fotografia|ilustração|desenho|retrato)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagrama|esquema|fluxograma)(?![\w])", "diagram"),
+    (r"(?<![\w])gráfico(?![\w])", "graph"),
+    (r"(?<![\w])tabela(?![\w])", "table"),
+    (r"(?<![\w])fórmula(?![\w])", "formula"),
+    (r"(?<![\w])código(?![\w])", "code"),
+    (r"(?<![\w])(?:arquivo|documento)(?![\w])", "file"),
+    (r"(?<![\w])(?:ligação|link)(?![\w])", "link"),
+    # Dutch.
+    (r"(?<![\w])(?:teken(?:en)?|schets(?:en)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:toon(?:en)?|visualiseer(?:en)?)(?![\w])", "show"),
+    (r"(?<![\w])(?:maak(?:t|te|ten)?|genereer(?:en)?|bouw(?:en)?)(?![\w])", "draw"),
+    (r"(?<![\w])(?:mij|alsjeblieft)(?![\w])", "me"),
+    (r"(?<![\w])een(?![\w])", "a"),
+    (r"(?<![\w])(?:afbeelding|foto|fotografie|illustratie|tekening|portret)(?![\w])", "image"),
+    (r"(?<![\w])(?:diagram|schema|stroomschema)(?![\w])", "diagram"),
+    (r"(?<![\w])grafiek(?![\w])", "graph"),
+    (r"(?<![\w])tabel(?![\w])", "table"),
+    (r"(?<![\w])formule(?![\w])", "formula"),
+    (r"(?<![\w])code(?![\w])", "code"),
+    (r"(?<![\w])(?:bestand|document)(?![\w])", "file"),
+    (r"(?<![\w])(?:verwijzing|link)(?![\w])", "link"),
+    # Common write/send/provide actions, used for code, files, and links.
+    (r"(?<![\w])(?:напиши|написати|напишіть)(?![\w])", "write"),
+    (r"(?<![\w])(?:надішли|надіслати|відправ|відправити)(?![\w])", "send"),
+    (r"(?<![\w])(?:дай|дайте|надай|надайте)(?![\w])", "provide"),
+    (r"(?<![\w])(?:escribe|escribir|escriba)(?![\w])", "write"),
+    (r"(?<![\w])(?:envía|envia|enviar|manda|mandar)(?![\w])", "send"),
+    (r"(?<![\w])(?:proporciona|proporcionar|dame)(?![\w])", "provide"),
+    (r"(?<![\w])(?:schreibe|schreiben)(?![\w])", "write"),
+    (r"(?<![\w])(?:sende|senden|schicke|schicken)(?![\w])", "send"),
+    (r"(?<![\w])(?:gib|geben)(?![\w])", "provide"),
+    (r"(?<![\w])(?:écris|ecris|écrire|ecrire)(?![\w])", "write"),
+    (r"(?<![\w])(?:envoie|envoyer)(?![\w])", "send"),
+    (r"(?<![\w])(?:fournis|fournir)(?![\w])", "provide"),
+    (r"(?<![\w])(?:scrivi|scrivere)(?![\w])", "write"),
+    (r"(?<![\w])(?:invia|inviare|manda|mandare)(?![\w])", "send"),
+    (r"(?<![\w])(?:fornisci|fornire)(?![\w])", "provide"),
+    (r"(?<![\w])(?:napisz|napisać|napisac)(?![\w])", "write"),
+    (r"(?<![\w])(?:wyślij|wysłać|wyslac)(?![\w])", "send"),
+    (r"(?<![\w])(?:podaj|podać|podac)(?![\w])", "provide"),
+    (r"(?<![\w])(?:escreva|escrever)(?![\w])", "write"),
+    (r"(?<![\w])(?:envie|enviar|mande|mandar)(?![\w])", "send"),
+    (r"(?<![\w])(?:forneça|forneca|fornecer)(?![\w])", "provide"),
+    (r"(?<![\w])(?:schrijf|schrijven)(?![\w])", "write"),
+    (r"(?<![\w])(?:stuur|sturen)(?![\w])", "send"),
+    (r"(?<![\w])(?:geef|geven)(?![\w])", "provide"),
+)
+
+
+def _normalize_multilingual_render_terms(value: Any) -> str:
+    """Normalize only high-signal render verbs/nouns for local routing; preserve subject text."""
+    text = str(value or "").lower().replace("ё", "е")
+    # Apostrophes used inside words in French/Italian must not split a noun
+    # after its alias has been recognized (e.g. Italian "un’immagine").
+    text = re.sub(r"(?<=\w)[’'](?=\w)", " ", text)
+    for pattern, replacement in _MULTILINGUAL_RENDER_ALIASES:
+        text = re.sub(pattern, f" {replacement} ", text, flags=re.IGNORECASE | re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+
+
+def _is_multilingual_render_how_to_question(value: Any) -> bool:
+    """Keep instructional questions textual even when their verbs resemble render commands."""
+    low = _normalize_multilingual_render_terms(value)
+    if not low:
+        return False
+    patterns = (
+        r"^(?:how\s+(?:do\s+i|can\s+i|to)|what\s+is|where\s+can\s+i)\b",
+        r"^wie\s+(?:(?:kann\s+ich|draw\s+ich|show\s+ich|make\s+ich|use\s+ich)|(?:erstelle|mache|zeichne|baue)\s+ich)\b",
+        r"^comment\s+(?:créer|creer|faire|dessiner|utiliser|visualiser|draw|show|make|use)\b",
+        r"^(?:cómo|como)\s+(?:puedo|se|crear|hacer|dibujar|utilizar|usar|criar|fazer|desenhar|draw|show|make|use)\b",
+        r"^come\s+(?:posso|si\s+può|creare|fare|disegnare|usare|draw|show|make|use)\b",
+        r"^jak\s+(?:mogę|moge|można|mozna|zrobić|zrobic|stworzyć|stworzyc|narysować|narysowac|draw|show|make|use)\b",
+        r"^hoe\s+(?:kan\s+ik|maak\s+ik|teken\s+ik|gebruik\s+ik|draw\s+ik|show\s+ik|make\s+ik|use\s+ik)\b",
+    )
+    return any(re.search(pattern, low, re.IGNORECASE) for pattern in patterns)
+
 
 # Identity and command semantics live in this existing interpreter module.
 def is_april_identity_question(value: Any) -> bool:
@@ -41,7 +212,7 @@ def is_april_identity_question(value: Any) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
 def is_bare_visual_command(value: Any) -> bool:
-    text = str(value or "").lower().replace("ё", "е").strip(" \t\r\n.,!?;:")
+    text = _normalize_multilingual_render_terms(value).strip(" \t\r\n.,!?;:")
     if not text:
         return False
     return bool(re.fullmatch(
@@ -474,7 +645,7 @@ def _detect_diagram_overlay_request(text: Any) -> bool:
 
 def _detect_structured_diagram_modification_request(text: Any) -> bool:
     """Recognize revisions to a vector diagram as diagram work, not photo edits."""
-    low = _text(text).lower().replace("ё", "е")
+    low = _normalize_multilingual_render_terms(text)
     if not low:
         return False
     diagram_edit_actions = (
@@ -510,8 +681,8 @@ def _detect_image_generation_request(text: str) -> bool:
     Raster generation requires an addressed image/photo/picture/illustration
     target or an explicit image-output desire.
     """
-    low = _text(text).lower().replace("ё", "е")
-    if not low or _is_attachment_tutorial_request(low):
+    low = _normalize_multilingual_render_terms(text)
+    if not low or _is_multilingual_render_how_to_question(low) or _is_attachment_tutorial_request(low):
         return False
     # Markups on user-provided or referenced screenshots/photos are SVG overlays.
     if _detect_diagram_overlay_request(low):
@@ -528,8 +699,8 @@ def _detect_image_generation_request(text: str) -> bool:
 
 def _detect_diagram_drawing_request(text: Any) -> bool:
     """Recognize ordinary object drawings as editable vector diagrams."""
-    low = _text(text).lower().replace("ё", "е")
-    if not low or _detect_image_generation_request(low):
+    low = _normalize_multilingual_render_terms(text)
+    if not low or _is_multilingual_render_how_to_question(low) or _detect_image_generation_request(low):
         return False
     if _detect_diagram_overlay_request(low):
         return True
@@ -537,9 +708,8 @@ def _detect_diagram_drawing_request(text: Any) -> bool:
         return True
 
     drawing_action = (
-        r"нарис\w*|изобраз\w*|рисуй\w*|рисова\w*|"
-        r"намал\w*|малюй\w*|зобраз\w*|"
-        r"draw\w*|depict\w*|sketch\w*|paint\w*|illustrat\w*"
+        r"нарис\w*|изобраз\w*|рисуй\w*|рисова\w*|draw\w*|depict\w*|"
+        r"sketch\w*|paint\w*|illustrat\w*"
     )
     for segment in _output_segments(low):
         match = re.search(
@@ -550,13 +720,20 @@ def _detect_diagram_drawing_request(text: Any) -> bool:
             continue
         tail = segment[match.end():].strip(" ,:—-\t")
         tail = re.sub(
-            r"^(?:(?:мне|нам|мені|будь\s+ласка|пожалуйста|мне\s+пожалуйста|please|me|us|for\s+me|a|an|the)\s+)+",
+            r"^(?:(?:мне|нам|пожалуйста|мне\s+пожалуйста|please|me|us|for\s+me|a|an|the)\s+)+",
             "", tail, flags=re.I,
         )
         subject = re.match(r"([\w\u0080-\uffff-]+(?:\s+[\w\u0080-\uffff-]+){0,5})", tail, re.U)
         if not subject:
             continue
         subject_text = subject.group(1)
+        # A named renderer noun is handled by its own output classifier; it is
+        # not an arbitrary object drawing (e.g. "create a table" is not a diagram).
+        if any(
+            re.match(_OUTPUT_TARGETS[kind], subject_text, re.I)
+            for kind in ("image", "graph", "table", "formula", "code", "file", "link", "copy")
+        ):
+            continue
         if re.match(
             r"(?:красиво|аккуратно|наглядно|понятно|примерно|как-нибудь|"
             r"как\s+именно|что|чтобы|beautifully|nicely|clearly|how|what)\b",
@@ -858,7 +1035,7 @@ def _has_output_action_for_target(
 
 
 def _infer_text_output_actions(text: Any) -> list[str]:
-    low = _text(text).lower().replace("ё", "е")
+    low = _normalize_multilingual_render_terms(text)
     outputs: list[str] = []
     # A distinct copy block is a special presentation request, not a synonym for
     # ordinary copy support on code blocks.
@@ -902,8 +1079,8 @@ def _has_direct_non_ui_output_action(text: Any) -> bool:
 
 def _detect_requested_outputs(text: str) -> list[str]:
     """Resolve current-turn deliverables; mentions and explanations stay textual."""
-    low = _text(text).lower().replace("ё", "е")
-    if not low or is_april_identity_question(low) or is_current_user_name_question(low) or is_bare_visual_command(low):
+    low = _normalize_multilingual_render_terms(text)
+    if not low or _is_multilingual_render_how_to_question(low) or is_april_identity_question(low) or is_current_user_name_question(low) or is_bare_visual_command(low):
         return ["text"]
     video_workflow_help = _is_video_workflow_help_request(low)
     if video_workflow_help and not _has_direct_video_generation_action(low):
