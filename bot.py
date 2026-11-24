@@ -98,7 +98,7 @@ FREE_PROVIDER_TEXT_FILE_CHARS = 2_200
 PREMIUM_PROVIDER_TEXT_FILE_CHARS = 6_000
 CANONICAL_CHAT_ROUTE = "/api/v1/chat"
 CANONICAL_ROUTE_VERSION = "april_web_botru_exkrutor_v2_message_language"
-INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v3_language_resolution"
+INPUT_NORMALIZATION_VERSION = "botru_input_normalization_v4_english_working_bridge"
 
 # The history restore endpoint must distinguish a request that is actively
 # executing in this Bot process from a message that was never accepted or whose
@@ -194,9 +194,23 @@ def _apr_backend_failure_payload(data: Any, exc: BaseException) -> dict[str, Any
         message = "Извини, при обработке произошла техническая ошибка. Сообщение получено, но ответ не сформировался. Отправь запрос ещё раз — мы продолжим с твоей темы."
     elif language == "en":
         message = "Sorry, a technical error interrupted the response. Your message was received, but the answer was not completed. Please send it again and we will continue from your topic."
+    elif language == "es":
+        message = "Lo siento, un error técnico interrumpió la respuesta. Recibí tu mensaje, pero no se pudo completar la respuesta. Vuelve a enviarlo y continuaremos con el mismo tema."
+    elif language == "de":
+        message = "Entschuldigung, ein technischer Fehler hat die Antwort unterbrochen. Deine Nachricht ist eingegangen, aber die Antwort wurde nicht fertiggestellt. Sende sie bitte erneut, dann setzen wir beim selben Thema fort."
+    elif language == "fr":
+        message = "Désolé, une erreur technique a interrompu la réponse. Votre message a bien été reçu, mais la réponse n'a pas pu être terminée. Envoyez-le à nouveau et nous reprendrons le même sujet."
+    elif language == "it":
+        message = "Mi dispiace, un errore tecnico ha interrotto la risposta. Il tuo messaggio è stato ricevuto, ma la risposta non è stata completata. Invialo di nuovo e continueremo sullo stesso argomento."
+    elif language == "pl":
+        message = "Przepraszam, błąd techniczny przerwał przygotowywanie odpowiedzi. Otrzymałem Twoją wiadomość, ale odpowiedź nie została ukończona. Wyślij ją ponownie, a wrócimy do tego samego tematu."
+    elif language == "pt":
+        message = "Desculpe, um erro técnico interrompeu a resposta. Sua mensagem foi recebida, mas a resposta não foi concluída. Envie-a novamente e continuaremos o mesmo assunto."
+    elif language == "nl":
+        message = "Sorry, een technische fout heeft het antwoord onderbroken. Je bericht is ontvangen, maar het antwoord is niet afgerond. Stuur het opnieuw, dan gaan we verder met hetzelfde onderwerp."
     else:
-        # Keep the selected language code intact where possible; Russian text is a
-        # safe fallback only for an unsupported locale, not a translation claim.
+        # Unsupported locales use a clear English fallback; web-supported locales
+        # above always receive their own language.
         message = "Sorry, a technical error interrupted the response. Your message was received, but the answer was not completed. Please try again."
     _apr_timing_log(
         "backend_failure_fallback_ready",
@@ -361,57 +375,70 @@ _LANGUAGE_MARKERS = {
         "puedo": 2, "cómo": 2, "como": 1, "qué": 2, "porque": 1, "porqué": 2,
         "está": 2, "tengo": 2, "usted": 2, "ustedes": 2, "problema": 1,
         "por favor": 2, "buenos días": 3, "no entiendo": 3, "me puedes": 3,
+        "dibuja": 3, "dibujar": 3, "escribe": 3, "envía": 3, "envia": 3, "muestra": 2, "mostrar": 2, "crea": 2, "genera": 2,
         "puedes ayudar": 3, "dime": 2, "ayúdame": 3, "dónde está": 3,
         "quiero saber": 3, "qué significa": 3, "necesito ayuda": 3,
+        "una imagen": 3, "imagen": 2, "tabla": 2, "gráfico": 2, "código": 2,
     },
     "de": {
         "hallo": 3, "danke": 3, "bitte": 2, "ich": 2, "nicht": 2,
         "brauche": 2, "hilfe": 2, "warum": 2, "wie": 1, "kann": 2,
         "möchte": 2, "über": 2, "straße": 3, "guten morgen": 3,
         "ich brauche": 3, "ich möchte": 3, "kannst du": 3, "können sie": 3,
+        "zeichne": 3, "zeichnen": 3, "schreibe": 3, "sende": 3, "zeige": 2, "zeigen": 2, "erstelle": 2,
         "was bedeutet": 3, "sag mir": 2, "hilf mir": 3, "ich verstehe nicht": 3,
-        "wie geht": 2, "was ist": 2,
+        "wie geht": 2, "was ist": 2, "ein bild": 3, "bild": 2, "diagramm": 2, "tabelle": 2, "code": 1,
     },
     "fr": {
         "bonjour": 3, "salut": 3, "merci": 3, "besoin": 2, "aidez": 2,
         "pourquoi": 2, "comment": 1, "avec": 1, "pouvez": 2, "problème": 2,
         "s'il vous plaît": 3, "est-ce": 2, "je suis": 2, "aujourd'hui": 2,
+        "dessine": 3, "dessiner": 3, "écris": 3, "ecris": 3, "envoie": 3, "montre": 2, "montrer": 2, "crée": 2,
         "bonsoir": 3, "je ne": 3, "je voudrais": 3, "j'ai besoin": 3,
         "pouvez-vous": 3, "peux-tu": 3, "aide-moi": 3, "dis-moi": 3,
         "je comprends": 2, "je ne comprends pas": 3, "qu'est-ce": 3,
         "où est": 2, "comment faire": 3, "ça veut dire": 3,
+        "une image": 3, "image": 2, "schéma": 3, "graphique": 2, "tableau": 2, "code": 1,
     },
     "it": {
         "ciao": 3, "grazie": 3, "bisogno": 2, "aiuto": 2, "perché": 2,
         "come": 1, "puoi": 2, "potete": 2, "problema": 1, "per favore": 3,
         "buongiorno": 3, "sono": 1, "ho bisogno": 3, "vorrei": 2,
+        "disegna": 3, "disegnare": 3, "scrivi": 3, "invia": 3, "mostra": 2, "mostrare": 2, "crea": 2,
         "mi puoi": 3, "aiutami": 3, "dimmi": 2, "non capisco": 3,
         "cosa significa": 3, "dove si trova": 3, "come faccio": 3,
         "puoi aiutarmi": 3, "buonasera": 3,
+        "un'immagine": 3, "immagine": 2, "tabella": 2, "grafico": 2, "codice": 2,
     },
     "pl": {
         "cześć": 3, "dzień dobry": 3, "dziękuję": 3, "proszę": 2,
         "potrzebuję": 3, "pomocy": 2, "dlaczego": 2, "jak": 1, "mogę": 2,
         "jestem": 1, "nie": 1, "problem": 1, "czy możesz": 3,
         "nie rozumiem": 3, "pomóż mi": 3, "powiedz mi": 3, "co oznacza": 3,
+        "narysuj": 3, "narysować": 3, "napisz": 3, "wyślij": 3, "pokaż": 2, "pokazać": 2, "stwórz": 2,
         "jak zrobić": 3, "potrzebuję pomocy": 3, "gdzie jest": 2,
         "jak się": 2, "jak to": 2, "dobry wieczór": 3,
+        "obraz": 2, "zdjęcie": 2, "tabela": 2, "wykres": 2, "kod": 1,
     },
     "pt": {
         "olá": 3, "obrigado": 3, "obrigada": 3, "preciso": 2, "ajuda": 2,
         "você": 2, "vocês": 2, "não": 2, "está": 1, "por favor": 2,
         "bom dia": 3, "tudo bem": 3, "não entendo": 3, "pode me ajudar": 3,
+        "desenha": 3, "desenhar": 3, "escreva": 3, "envie": 3, "mostra": 2, "mostrar": 2, "crie": 2,
         "me ajude": 3, "me diga": 3, "quero saber": 3, "o que significa": 3,
         "como faço": 3, "preciso de ajuda": 3, "onde fica": 3,
         "por que": 2, "boa tarde": 3, "boa noite": 3,
+        "uma imagem": 3, "imagem": 2, "tabela": 2, "gráfico": 2, "código": 2,
     },
     "nl": {
         "hallo": 3, "dank je": 3, "bedankt": 3, "alsjeblieft": 3, "ik": 1,
         "niet": 2, "nodig": 2, "hoe": 1, "waarom": 2, "kun je": 2,
         "ik heb": 2, "het is": 2, "wat is": 2, "goedemorgen": 3,
         "ik wil": 3, "ik heb nodig": 3, "help me": 2, "vertaal": 3,
+        "teken": 3, "tekenen": 3, "schrijf": 3, "stuur": 3, "toon": 2, "tonen": 2, "maak": 2,
         "ik begrijp niet": 3, "wat betekent": 3, "vertel me": 3,
         "kun je helpen": 3, "waar is": 2, "goedenavond": 3,
+        "een afbeelding": 3, "afbeelding": 2, "tabel": 2, "grafiek": 2,
     },
     "en": {
         "hello": 3, "hi": 2, "thanks": 3, "please": 2, "how": 1, "what": 1,
@@ -423,6 +450,7 @@ _LANGUAGE_MARKERS = {
         "can you help": 3, "please help": 3, "i don't understand": 3,
         "i do not understand": 3, "translate this": 3, "where can i": 3,
         "could you help": 3, "would you": 2, "is it possible": 3,
+        "draw": 3, "create": 2, "make": 2, "write": 3, "send": 3, "show": 2,
     },
 }
 
@@ -461,7 +489,7 @@ def _detect_message_language(text: str) -> str:
     if re.search(r"[а-яё]", low):
         # Ukrainian messages may not contain ї/є/ґ; use common words as a
         # second signal before defaulting Cyrillic to Russian.
-        ukrainian_markers = {"що", "цей", "ця", "це", "також", "будь ласка", "мені", "можна", "потрібно", "дякую", "допоможи", "чому", "якщо", "зараз"}
+        ukrainian_markers = {"що", "цей", "ця", "це", "також", "будь ласка", "мені", "можна", "потрібно", "дякую", "допоможи", "чому", "якщо", "зараз", "намалюй", "намалювати", "зобрази", "покажи", "побудуй", "створи", "згенеруй", "напиши", "надішли", "відправ"}
         words = set(re.findall(r"[а-яіїєґё]+", low))
         if len(words & ukrainian_markers) >= 1:
             return "uk"
@@ -1249,15 +1277,19 @@ def _handle_payload(
             else "default_en"
         )
         _apr_timing_log("language_resolved", None, language=language, language_source=language_source)
-        # bot.ru owns language negotiation and transport normalization. The model
-        # receives the original-language request (avoiding a paid translation call);
-        # SceneContract localizes every generated fallback label/body separately.
+        # Keep the source utterance byte-for-byte intact for intent detection,
+        # memory matching, protected data and attachments. The existing provider
+        # response performs its English working translation and localized output
+        # in the same call; Bot.ru never makes a separate translation request.
         internal_text = original
         translation = {
             "version": INPUT_NORMALIZATION_VERSION,
             "source_language": language,
-            "internal_language": "multilingual_model_input",
-            "translated": False,
+            "return_language": language,
+            "internal_language": "en",
+            "translation_mode": "same_provider_pass",
+            "translated_before_provider": False,
+            "original_text_preserved": True,
             "language_source": language_source,
             "stage": "bot.ru",
         }
