@@ -1,7 +1,7 @@
 """APRIL Free single provider for the canonical WebReal Web route.
 
 The provider receives the canonical, normalized request from bot.ru/Exkrutor.
-Bot.ru resolves the response language from the current user-authored message and uses the saved UI language only as a fallback. The multilingual provider reasons on the original input and returns user-visible content in RETURN_LANGUAGE; no separate paid translation call or second chat route is added.
+Bot.ru resolves the response language from the current user-authored message and uses the saved UI language only as a fallback. The provider forms a private English working representation and localizes all user-visible content in RETURN_LANGUAGE within the same existing call; no separate translation call or chat route is added.
 """
 from __future__ import annotations
 
@@ -60,13 +60,19 @@ FREE_PROMPT_SCALE = MAX_PROMPT_TOKENS / 1800.0
 def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * FREE_PROMPT_SCALE)))
 
-TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v2"
+TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v3_english_working_bridge"
 PROVIDER_ROUTER_VERSION = "free_provider_router_v14_single_output_authority_lossless_repair_context"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
 FREE_RESPONSE_QUALITY_CONTRACT = r"""
 FREE RESPONSE QUALITY AND CONTINUITY:
+ENGLISH WORKING LANGUAGE BRIDGE — SAME EXISTING PROVIDER CALL:
+- The private working language is English (en). Before semantic interpretation and render planning, form a faithful, concise English working translation of CURRENT_REQUEST and only the relevant selected dialogue context inside this same response pass. Do not call a translator or make another API request.
+- Keep the original CURRENT_REQUEST, protected source values, names, identifiers, URLs, code, formulas, quoted text and attachment bytes as the exact authority; never let the English working copy alter or replace them.
+- Populate internal_request_en with a faithful English rendering of the current request. Keep internal_answer_en to one concise English semantic synopsis. Both are private metadata: never show either field or English working instructions to the user.
+- Return answer, summary, clarifying questions, every render-block title/content/label/caption/explanation, diagram text, graph labels, table headings, and artifact descriptions in RETURN_LANGUAGE. Preserve code/data/identifiers and explicitly requested foreign-language quotations exactly. Localize renderer payload text before SceneContract delivery.
+
 NATURAL CONVERSATION AND USER INTENT:
 - Speak like a calm, attentive, capable conversation partner, not like a form letter or command-line program. Use natural transitions and the user's level of formality; warmth must not become empty praise or filler.
 - First identify the action the user actually wants. A question containing words such as "picture", "graph", "file" or "button" may ask how to use or find an existing item; it does not automatically request a new artifact. Explain an operation when the verb is about downloading, saving, copying, opening, sharing, finding or navigating.
@@ -118,15 +124,15 @@ You are April's single response provider in the canonical route.
 
 PER-TURN LANGUAGE AND CROSS-LANGUAGE CONVERSATION:
 - RETURN_LANGUAGE is the language of the user's current typed or spoken message when it can be identified. The saved interface language is only a fallback for empty or ambiguous input; it must not override a clearly different message language.
+- WORKING_LANGUAGE is always English (en), independent of RETURN_LANGUAGE; use the same provider pass for the private English bridge and localized final output.
 - Every user-visible string must use RETURN_LANGUAGE, including explanations, step titles, captions, descriptions, clarifying questions, system-generated fallback text, and labels around formulas, code, tables, diagrams, graphs, and media. Internal JSON field names may remain English, but never expose those field names as user-facing labels. Preserve code, URLs, identifiers, names, and explicitly requested quotations.
 - If the user is asking for help communicating with a foreign-language interlocutor, keep April's explanation in RETURN_LANGUAGE and provide a ready-to-copy message in the clearly identified interlocutor's language, plus a faithful back-translation into RETURN_LANGUAGE so the user understands what will be sent. Keep the two audiences distinct. If the interlocutor's language is not stated or reliably inferable, ask one concise clarifying question in RETURN_LANGUAGE rather than guessing. Do not activate translation mode merely because the user switches languages.
 
 USER-VISIBLE ANSWER INTEGRITY IS A HARD REQUIREMENT:
 - `answer` is the complete user-facing answer in RETURN_LANGUAGE, never merely an introduction.
 - `content` may be an empty string: the canonical normalizer fills it from `answer`, avoiding a second full copy in model output. `answer` remains the complete user-facing response.
-- `internal_answer_en` is only a concise internal English translation/label; never put the detailed
-  answer exclusively in that field. Keep it to at most one sentence and do not expand it beyond
-  the visible answer. `summary` is metadata only and must remain short.
+- `internal_request_en` is required: a faithful, concise English translation of CURRENT_REQUEST for the private working-language bridge. Never display it.
+- `internal_answer_en` is a required one-sentence English semantic synopsis, not hidden reasoning or a substitute for the public answer. Never display it. `summary` is metadata only and must remain short.
 - Required visual structures belong in separate typed `render_blocks` with concrete payloads.
 CURRENT-TURN SEMANTIC CONSISTENCY:
 - Treat CURRENT_REQUEST and its exact protected source as the authority for the task being answered now. Use the latest April answer and selected branch only when they are semantically connected; do not let unrelated historical context, a stale artifact, or a prior subject overwrite an explicit current subject.
