@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
+from copy import deepcopy
 import base64
 import hashlib
 import json
@@ -2279,11 +2280,22 @@ async def execute(
     # them off the ASGI event loop to avoid delaying unrelated Free conversations.
     db_started = time.perf_counter()
     require_auth = str(os.getenv("APRIL_REQUIRE_AUTH", "1")).lower() not in {"0", "false", "no"}
-    def _bootstrap_and_auth() -> bool:
-        init_db()
-        return (not require_auth) or is_authenticated_user(uid)
-    authenticated = await asyncio.to_thread(_bootstrap_and_auth)
-    _apr_timing_log("db_bootstrap_and_auth", db_started, user_key=_apr_diag_ref(uid), required=require_auth, authenticated=authenticated)
+    gateway_verified_user_id = _text(kwargs.get("_gateway_auth_verified_user_id"))
+    gateway_auth_verified = bool(gateway_verified_user_id and gateway_verified_user_id == uid)
+    if gateway_auth_verified:
+        # bot.py's get_community_profile() has already authenticated this exact ID
+        # against the users row. Do not repeat the same blocking DB read in Free.
+        authenticated = True
+    else:
+        def _bootstrap_and_auth() -> bool:
+            init_db()
+            return (not require_auth) or is_authenticated_user(uid)
+        authenticated = await asyncio.to_thread(_bootstrap_and_auth)
+    _apr_timing_log(
+        "db_bootstrap_and_auth", db_started, user_key=_apr_diag_ref(uid),
+        required=require_auth, authenticated=authenticated,
+        reused_gateway_verification=gateway_auth_verified,
+    )
     if not authenticated:
         raise ValueError("AUTHENTICATED_USER_REQUIRED")
 
@@ -3397,6 +3409,47 @@ async def execute(
     question_sequence = _apply_video_intent_contract(
         interpretation, video_plan, question_sequence, original or current_text,
     )
+    # C.World owns physical-world navigation. Resolve route endpoints before media
+    # quota reservation so a request for a map is never sent to artistic image
+    # generation or the diagram-repair loop. Follow-ups read only selected USER
+    # messages from the active dialogue branch, never prior assistant prose.
+    world_navigation_plan = None
+    try:
+        from blocks.C_WORLD_ROOM import resolve_navigation_plan as _resolve_world_navigation_plan
+        _selected_user_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+        _selected_user_pairs = list(_selected_user_pairs) + [
+            item for item in (dialogue_context.get("recent_exchange_window") or []) if isinstance(item, dict)
+        ]
+        world_navigation_plan = _resolve_world_navigation_plan(original or current_text, _selected_user_pairs)
+        if isinstance(world_navigation_plan, dict):
+            _world_intent = interpretation.setdefault("intent", {})
+            if isinstance(_world_intent, dict):
+                _world_intent["wants_image"] = False
+                _world_intent["wants_diagram"] = False
+                _world_intent["explicit_generation_request"] = False
+                _world_intent["task"] = "answer_request"
+                _world_intent["requested_outputs"] = ["text", "link"]
+                _world_intent["image_generation_blocked"] = True
+                _world_intent["image_output_permission"] = False
+            _world_capabilities = interpretation.get("routing_capabilities")
+            if not isinstance(_world_capabilities, list):
+                _world_capabilities = []
+            for _world_capability in ("maps", "directions", "route_planning", "navigation", "places_search"):
+                if _world_capability not in _world_capabilities:
+                    _world_capabilities.append(_world_capability)
+            interpretation["routing_capabilities"] = _world_capabilities
+            interpretation["requested_outputs"] = ["text", "link"]
+            interpretation["visual"] = {"generation_required": False, "operation": "none", "source": "C_WORLD_ROOM"}
+            _apr_timing_log(
+                "world_navigation_intent_resolved", None,
+                kind=_text(world_navigation_plan.get("kind")),
+                endpoints_present=bool(world_navigation_plan.get("origin") and world_navigation_plan.get("destination")),
+                followup=bool(world_navigation_plan.get("followup")),
+                image_generation_suppressed=True,
+                diagram_repair_suppressed=True,
+            )
+    except Exception as _world_plan_error:
+        _apr_timing_log("world_navigation_intent_unavailable", None, error=type(_world_plan_error).__name__)
     # C_IT_ROOM is the deterministic source for April's own interface map. Do not
     # make navigation depend on the LLM's semantic classifier: force text + diagram
     # whenever the current turn asks how to find/use an April screen.
@@ -3698,6 +3751,22 @@ async def execute(
     except Exception as _room_context_error:
         # Navigation help must never prevent the normal answer path from running.
         _apr_timing_log("room_knowledge_context_unavailable", None, error=type(_room_context_error).__name__)
+    if isinstance(world_navigation_plan, dict):
+        try:
+            from blocks.C_WORLD_ROOM import build_machine_contribution as _build_world_room_contribution
+            _world_contribution = _build_world_room_contribution(request, plan=world_navigation_plan)
+            _world_context = _world_contribution.get("knowledge_context") if isinstance(_world_contribution, dict) else None
+            if isinstance(_world_context, dict):
+                _world_context = dict(_world_context)
+                _world_context["response_guidance"] = list(_world_contribution.get("prompt_fragments") or [])
+                _existing_room_context = request.routing.get("room_knowledge_context")
+                _merged_room_context = dict(_existing_room_context) if isinstance(_existing_room_context, dict) else {}
+                _merged_room_context["world"] = _world_context
+                request.routing["room_knowledge_context"] = _merged_room_context
+                request.routing["world_navigation_requested"] = True
+                request.routing["world_navigation_plan"] = world_navigation_plan
+        except Exception as _world_room_error:
+            _apr_timing_log("world_room_context_unavailable", None, error=type(_world_room_error).__name__)
 
     if _text(video_plan.get("action")).lower() != "none":
         room_context = request.routing.get("room_knowledge_context") if isinstance(request.routing.get("room_knowledge_context"), dict) else {}
@@ -3868,6 +3937,7 @@ async def execute(
                 )
 
     provider_started = time.perf_counter()
+    world_navigation_result = None
     if image_edit_restricted_pre_provider:
         local_notice = _localized_free_image_edit_notice(restriction_language)
         provider_packet = _local_text_provider_packet(
@@ -3964,16 +4034,47 @@ async def execute(
             options=len(pending.get("options") or []), active_topic=topic_name,
             original_request_chars=len(_text(pending.get("original_request"))))
     else:
+        world_fast_response = None
+        if isinstance(world_navigation_plan, dict):
+            try:
+                from blocks.C_WORLD_ROOM import build_navigation_response as _build_world_navigation_response
+                world_fast_response = await asyncio.to_thread(
+                    _build_world_navigation_response,
+                    request,
+                    plan=world_navigation_plan,
+                    language=display_language,
+                )
+                if isinstance(world_fast_response, dict) and world_fast_response.get("handled"):
+                    world_navigation_result = world_fast_response
+                    _world_machine = world_fast_response.get("machine_response")
+                    if isinstance(_world_machine, dict):
+                        _world_metadata = _world_machine.setdefault("metadata", {})
+                        if isinstance(_world_metadata, dict):
+                            _world_metadata["identity"] = identity
+                    provider_packet = {"machine_response": _world_machine if isinstance(_world_machine, dict) else {}}
+                    provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+                    _apr_timing_log(
+                        "world_navigation_fast_path", provider_started,
+                        provider_calls=0,
+                        kind=_text(world_navigation_plan.get("kind")),
+                        route_verified=bool(world_fast_response.get("route_data")),
+                        map_image=bool(world_fast_response.get("map_image_url")),
+                    )
+            except Exception as _world_fast_path_error:
+                _apr_timing_log("world_navigation_fast_path_unavailable", None, error=type(_world_fast_path_error).__name__)
         wallet_fast_response = None
-        try:
-            from blocks.C_IT_ROOM import build_video_wallet_navigation_response
-            wallet_fast_response = build_video_wallet_navigation_response(request)
-        except Exception as _wallet_fast_path_error:
-            _apr_timing_log(
-                "it_room_video_wallet_fast_path_unavailable", None,
-                error=type(_wallet_fast_path_error).__name__,
-            )
-        if isinstance(wallet_fast_response, dict):
+        if not isinstance(world_navigation_result, dict):
+            try:
+                from blocks.C_IT_ROOM import build_video_wallet_navigation_response
+                wallet_fast_response = build_video_wallet_navigation_response(request)
+            except Exception as _wallet_fast_path_error:
+                _apr_timing_log(
+                    "it_room_video_wallet_fast_path_unavailable", None,
+                    error=type(_wallet_fast_path_error).__name__,
+                )
+        if isinstance(world_navigation_result, dict):
+            pass  # provider_packet already contains the deterministic C.World response.
+        elif isinstance(wallet_fast_response, dict):
             provider_packet = {"machine_response": wallet_fast_response}
             provider_ms = 0.0
             _apr_timing_log(
@@ -4119,6 +4220,9 @@ async def execute(
         raw_render_blocks=len(raw_blocks), raw_artifacts=len(raw_artifacts),
         packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
 
+    # C.World already places its provider-backed GalleryBlock in the machine
+    # response. Google serves the image directly to the client; this server does
+    # not download, duplicate, or persist a copy of the map.
     image_result = None
     if (interpretation.get("intent") or {}).get("wants_image"):
         image_started = time.perf_counter()
@@ -4232,25 +4336,40 @@ async def execute(
         if image_result:
             image_artifact = image_result.get("artifact") if isinstance(image_result.get("artifact"), dict) else image_result
             packaged["artifacts"].append(image_artifact)
-            artifact_payload = image_artifact.get("payload") if isinstance(image_artifact.get("payload"), dict) else {}
-            image_items = image_artifact.get("images") if isinstance(image_artifact.get("images"), list) else artifact_payload.get("images", [])
-            image_items = image_items if isinstance(image_items, list) else []
-            visible_image_payload = dict(artifact_payload)
-            if image_items:
-                visible_image_payload["images"] = image_items
-            for key in ("src", "url", "image", "image_data_uri", "image_base64", "title", "alt", "caption", "width", "height", "mime_type"):
-                if key not in visible_image_payload and image_artifact.get(key) not in (None, "", [], {}):
-                    visible_image_payload[key] = image_artifact[key]
-            image_block = {
-                "type": "image",
-                "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
-                "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
-                "content": "",
-                "payload": visible_image_payload,
-                "artifact": image_artifact,
-                "images": image_items,
-            }
-            packaged["render_blocks"].append(image_block)
+            if _text(image_result.get("room_source")) == "C_WORLD_ROOM":
+                # C.World already returns a compact, verified GalleryBlock payload.
+                # Do not repeat its base64 image inside artifact/images aliases.
+                gallery_payload = image_result.get("gallery_payload") if isinstance(image_result.get("gallery_payload"), dict) else {}
+                if gallery_payload.get("images"):
+                    packaged["render_blocks"].append({
+                        "type": "image",
+                        "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
+                        "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
+                        "content": "",
+                        "payload": gallery_payload,
+                    })
+            else:
+                # Preserve the established compatibility-rich payload for all
+                # existing image-generation and image-editing paths.
+                artifact_payload = image_artifact.get("payload") if isinstance(image_artifact.get("payload"), dict) else {}
+                image_items = image_artifact.get("images") if isinstance(image_artifact.get("images"), list) else artifact_payload.get("images", [])
+                image_items = image_items if isinstance(image_items, list) else []
+                visible_image_payload = dict(artifact_payload)
+                if image_items:
+                    visible_image_payload["images"] = image_items
+                for key in ("src", "url", "image", "image_data_uri", "image_base64", "title", "alt", "caption", "width", "height", "mime_type"):
+                    if key not in visible_image_payload and image_artifact.get(key) not in (None, "", [], {}):
+                        visible_image_payload[key] = image_artifact[key]
+                image_block = {
+                    "type": "image",
+                    "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
+                    "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
+                    "content": "",
+                    "payload": visible_image_payload,
+                    "artifact": image_artifact,
+                    "images": image_items,
+                }
+                packaged["render_blocks"].append(image_block)
 
 
     # Free users can purchase C_VIDEO credits without upgrading their dialogue
@@ -5131,23 +5250,60 @@ async def execute(
         "routing": dict(request.routing),
         "constraints": dict(request.constraints),
     })
+    # Google Maps content is returned to the live client only. The dialogue
+    # database retains the user's own query/endpoints and a deep link, not Places
+    # names/addresses/ratings, route instructions, polylines, or the map URL.
+    persisted_answer = response.answer
+    persisted_render_blocks = list(
+        (
+            result.get("scene_contract")
+            if isinstance(result.get("scene_contract"), dict)
+            else {}
+        ).get("render_blocks")
+        or result.get("render_blocks")
+        or response.render_blocks
+        or []
+    )
+    persisted_artifacts = list(response.artifacts or [])
+    persisted_scene_contract = deepcopy(result.get("scene_contract") or {})
+    if isinstance(world_navigation_result, dict):
+        try:
+            from blocks.C_WORLD_ROOM import build_persistence_safe_turn
+            safe_world_turn = build_persistence_safe_turn(world_navigation_result, display_language)
+            persisted_answer = safe_world_turn["answer"]
+            persisted_render_blocks = safe_world_turn["render_blocks"]
+            persisted_artifacts = []
+            if isinstance(persisted_scene_contract, dict):
+                persisted_scene_contract["answer"] = persisted_answer
+                persisted_scene_contract["content"] = persisted_answer
+                persisted_scene_contract["render_blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["artifacts"] = []
+        except Exception as _world_history_sanitize_error:
+            # Fail closed: never persist provider-derived Google content if the
+            # sanitizer itself fails. Keep only a generic history notice.
+            persisted_answer = "Карта или результаты поиска были показаны в сообщении; данные Google Maps не сохраняются в историю."
+            persisted_render_blocks = [{
+                "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+                "content": persisted_answer,
+            }]
+            persisted_artifacts = []
+            if isinstance(persisted_scene_contract, dict):
+                persisted_scene_contract["answer"] = persisted_answer
+                persisted_scene_contract["content"] = persisted_answer
+                persisted_scene_contract["render_blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["artifacts"] = []
+            _apr_timing_log("world_history_sanitize_fallback", None, error=type(_world_history_sanitize_error).__name__)
+
     structured_response = _strip_inline_binary({
-        "answer": response.answer,
-        "content": response.content,
-        "summary": response.summary,
-        "render_blocks": list(
-            (
-                result.get("scene_contract")
-                if isinstance(result.get("scene_contract"), dict)
-                else {}
-            ).get("render_blocks")
-            or result.get("render_blocks")
-            or response.render_blocks
-            or []
-        ),
-        "artifacts": list(response.artifacts or []),
+        "answer": persisted_answer,
+        "content": persisted_answer,
+        "summary": persisted_answer[:180],
+        "render_blocks": persisted_render_blocks,
+        "artifacts": persisted_artifacts,
         "metadata": dict(response.metadata or {}),
-        "scene_contract": result.get("scene_contract") or {},
+        "scene_contract": persisted_scene_contract,
         "generated_asset_saved": generated_asset_saved,
         "asset_refs": {
             "source_inputs": attachment_refs,
@@ -5160,12 +5316,12 @@ async def execute(
     saved = save_dialogue_pair(
         uid,
         original or current_text,
-        answer,
+        persisted_answer,
         created_at=message_created_at,
         retention_hours=12,
         turn_index=turn_index,
         user_en=current_text,
-        april_en=_text(raw.get("internal_answer_en")) or answer,
+        april_en=(persisted_answer if isinstance(world_navigation_result, dict) else (_text(raw.get("internal_answer_en")) or answer)),
         language=display_language,
         relation=_text(dialogue_context.get("relation") or "NEW"),
         dialog_id=identity["dialog_id"],
