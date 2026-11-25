@@ -1020,10 +1020,24 @@ def _handle_payload(
     if not conversation_id and not dialog_id:
         return _error("conversation_id or dialog_id required", 400)
 
-    # Plan is server-authoritative: derive the execution branch only from the
-    # authenticated account's active entitlement in PostgreSQL, never from JSON.
+    # Read the authenticated profile once. It already contains the server-side
+    # entitlement and saved language, so Free can reuse this exact DB result
+    # instead of issuing separate plan/language/authentication reads. Premium
+    # keeps its previous get_user_plan entitlement path unchanged.
     plan_started = time.perf_counter()
-    active_plan = _text(get_user_plan(uid)).lower() or "free"
+    profile_started = time.perf_counter()
+    profile_result = get_community_profile(uid)
+    profile_read_ms = round((time.perf_counter() - profile_started) * 1000, 1)
+    profile_ok = isinstance(profile_result, dict) and profile_result.get("success") is True
+    profile_plan = _text(profile_result.get("plan")).lower() if profile_ok else ""
+    if profile_ok and profile_plan == "free":
+        active_plan = "free"
+        entitlement_source = "authenticated_profile"
+    else:
+        # Preserve the old entitlement resolver for Premium and for any profile
+        # read failure. The client never supplies an authoritative plan value.
+        active_plan = _text(get_user_plan(uid)).lower() or "free"
+        entitlement_source = "get_user_plan"
     is_premium = active_plan == "premium"
     _apr_timing_log(
         "plan_entitlement_resolved",
@@ -1031,13 +1045,17 @@ def _handle_payload(
         user_key=_apr_diag_ref(uid),
         active_plan=active_plan,
         processor="premium" if is_premium else "free",
+        source=entitlement_source,
+        profile_read_ms=profile_read_ms,
     )
     # The language selected in the current April Web Settings is sent with every
     # chat request. Prefer that explicit client preference; fall back to the saved
     # DB value only for older clients that do not send a supported language.
     # Resolve it before quota early-returns so limit/edit notices use the same locale.
+    profile_language = _normalize_language_code(profile_result.get("language")) if profile_ok else ""
     account_language = (
         _normalize_language_code(data.get("language") or data.get("display_language"))
+        or (profile_language if active_plan == "free" else "")
         or get_user_language(uid)
         or "en"
     )
@@ -1298,8 +1316,8 @@ def _handle_payload(
         # Never trust a browser-supplied display name to override the DB value.
         # The Google-authenticated name is only a fallback for accounts whose
         # profile row cannot be read yet.
-        profile_started = time.perf_counter()
-        profile_result = get_community_profile(uid)
+        # The profile was fetched with entitlement at the top of this request;
+        # reuse it here rather than opening a second database connection.
         profile_payload = profile_result.get("profile") if isinstance(profile_result, dict) else None
         stored_display_name = _text(
             profile_payload.get("display_name") if isinstance(profile_payload, dict) else ""
@@ -1308,10 +1326,12 @@ def _handle_payload(
             data.get("display_name") or data.get("user_display_name") or data.get("name")
         )[:80]
         _apr_timing_log(
-            "profile_display_name_resolved", profile_started,
+            "profile_display_name_resolved",
             user_key=_apr_diag_ref(uid),
             name_available=bool(user_display_name),
             name_source="community_profiles" if stored_display_name else "authenticated_fallback" if user_display_name else "unavailable",
+            profile_cached=True,
+            profile_read_ms=profile_read_ms,
         )
 
         executor_started = time.perf_counter()
@@ -1348,6 +1368,16 @@ def _handle_payload(
             "message_created_at": message_created_at,
             "user_utc_offset_minutes": user_utc_offset_minutes,
         }
+        # Free's gateway has just read and authenticated this exact profile row.
+        # Reuse that server-side proof instead of issuing the executor's duplicate
+        # users-table authentication query. Direct executor calls still verify auth.
+        if (
+            active_plan == "free"
+            and isinstance(profile_result, dict)
+            and profile_result.get("success") is True
+            and _text(profile_result.get("user_id")) == _text(uid)
+        ):
+            execution_kwargs["_gateway_auth_verified_user_id"] = _text(uid)
         # Progressive events are a Premium-only extension of the existing executor
         # call. The Free executor continues on its original response path unchanged.
         if is_premium and callable(progress_sink):
@@ -2491,9 +2521,14 @@ class AprilHandler(BaseHTTPRequestHandler):
         # RFC 9110: a 204 response must not advertise/contain a JSON body.  The
         # previous Content-Length: 2 with no bytes desynchronised HTTP/1.1 keep-alive
         # connections; subsequent telemetry JSON was then parsed as a request line.
+        serialization_started = time.perf_counter()
         body = b"" if status == 204 else json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
+        _apr_timing_log(
+            "http_response_json_serialized", serialization_started,
+            status=status, response_body_bytes=len(body),
+        )
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -2503,7 +2538,12 @@ class AprilHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         if status != 204:
+            socket_write_started = time.perf_counter()
             self.wfile.write(body)
+            _apr_timing_log(
+                "http_response_socket_write", socket_write_started,
+                status=status, response_body_bytes=len(body),
+            )
 
     def do_OPTIONS(self) -> None:
         self._send_json(204, {})
