@@ -6489,6 +6489,47 @@ async def execute(
         site_navigation_diagram=bool((interpretation.get("intent") or {}).get("wants_diagram")),
     )
 
+    # C.World is also available to Premium, but the Free-only latency change is
+    # isolated in the Free executor. Physical routes bypass image synthesis here
+    # too: only a provider-verified map polyline may become a map image.
+    world_navigation_plan = None
+    try:
+        from blocks.C_WORLD_ROOM import resolve_navigation_plan as _resolve_world_navigation_plan
+        _selected_user_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+        _selected_user_pairs = list(_selected_user_pairs) + [
+            item for item in (dialogue_context.get("recent_exchange_window") or []) if isinstance(item, dict)
+        ]
+        world_navigation_plan = _resolve_world_navigation_plan(original or current_text, _selected_user_pairs)
+        if isinstance(world_navigation_plan, dict):
+            _world_intent = interpretation.setdefault("intent", {})
+            if isinstance(_world_intent, dict):
+                _world_intent["wants_image"] = False
+                _world_intent["wants_diagram"] = False
+                _world_intent["explicit_generation_request"] = False
+                _world_intent["task"] = "answer_request"
+                _world_intent["requested_outputs"] = ["text", "link"]
+                _world_intent["image_generation_blocked"] = True
+                _world_intent["image_output_permission"] = False
+            _world_capabilities = interpretation.get("routing_capabilities")
+            if not isinstance(_world_capabilities, list):
+                _world_capabilities = []
+            for _world_capability in ("maps", "directions", "route_planning", "navigation", "places_search"):
+                if _world_capability not in _world_capabilities:
+                    _world_capabilities.append(_world_capability)
+            interpretation["routing_capabilities"] = _world_capabilities
+            interpretation["requested_outputs"] = ["text", "link"]
+            interpretation["visual"] = {"generation_required": False, "operation": "none", "source": "C_WORLD_ROOM"}
+            _apr_timing_log(
+                "world_navigation_intent_resolved", None,
+                kind=_text(world_navigation_plan.get("kind")),
+                endpoints_present=bool(world_navigation_plan.get("origin") and world_navigation_plan.get("destination")),
+                followup=bool(world_navigation_plan.get("followup")),
+                image_generation_suppressed=True,
+                diagram_repair_suppressed=True,
+            )
+    except Exception as _world_plan_error:
+        _apr_timing_log("world_navigation_intent_unavailable", None, error=type(_world_plan_error).__name__)
+
     selected_rooms = _select_rooms(interpretation)
     render_plan = _renderer_plan(interpretation, selected_rooms)
 
@@ -6691,6 +6732,25 @@ async def execute(
             "input_modalities": (interpretation.get("input") or {}).get("modalities", []),
         },
     )
+    # Consult C.World beside IT Room; map/place knowledge is additive and does not
+    # replace any other renderer selected for the turn.
+    if isinstance(world_navigation_plan, dict):
+        try:
+            from blocks.C_WORLD_ROOM import build_machine_contribution as _build_world_room_contribution
+            _world_contribution = _build_world_room_contribution(request, plan=world_navigation_plan)
+            _world_context = _world_contribution.get("knowledge_context") if isinstance(_world_contribution, dict) else None
+            if isinstance(_world_context, dict):
+                _world_context = dict(_world_context)
+                _world_context["response_guidance"] = list(_world_contribution.get("prompt_fragments") or [])
+                _existing_room_context = request.routing.get("room_knowledge_context")
+                _merged_room_context = dict(_existing_room_context) if isinstance(_existing_room_context, dict) else {}
+                _merged_room_context["world"] = _world_context
+                request.routing["room_knowledge_context"] = _merged_room_context
+                request.routing["world_navigation_requested"] = True
+                request.routing["world_navigation_plan"] = world_navigation_plan
+        except Exception as _world_room_error:
+            _apr_timing_log("world_room_context_unavailable", None, error=type(_world_room_error).__name__)
+
     # Always consult C_IT_ROOM for the current user turn, even when another render
     # room was selected. Site help is a knowledge lookup, not a mutually exclusive
     # renderer choice; this fixes missing map context for simple voice questions.
@@ -6905,6 +6965,7 @@ async def execute(
         file_content_chars=sum(len(_text(x.get("content"))) for x in (file_contents or []) if isinstance(x, dict)))
 
     provider_started = time.perf_counter()
+    world_navigation_result = None
     time_filter = dialogue_context.get("time_filter") if isinstance(dialogue_context.get("time_filter"), dict) else {}
     time_window = dialogue_context.get("time_window") if isinstance(dialogue_context.get("time_window"), dict) else {}
     temporal_history_lookup = bool(
@@ -7093,168 +7154,198 @@ async def execute(
             answer_chars=len(fallback_answer), provider_calls=0,
         )
     else:
-        try:
-            provider_packet = await generate_text(request)
-        except Exception as exc:
-            # A history search already has authenticated, database-backed evidence.
-            # If only the Provider/compaction layer fails, show that evidence locally
-            # rather than returning HTTP 500 and an empty chat bubble. Ordinary NEW
-            # questions still raise normally; this is not a generic model fallback.
-            selected_history_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
-            selected_branch_is_authenticated = bool(
-                selected_history_pairs
-                and (
-                    _text(dialogue_context.get("relation")).upper() == "CONTINUE"
-                    or dialogue_context.get("hot_work_followup")
-                    or dialogue_context.get("contextual_history_match")
+        if isinstance(world_navigation_plan, dict):
+            try:
+                from blocks.C_WORLD_ROOM import build_navigation_response as _build_world_navigation_response
+                world_navigation_result = await asyncio.to_thread(
+                    _build_world_navigation_response,
+                    request,
+                    plan=world_navigation_plan,
+                    language=display_language,
                 )
-            )
-            history_fallback_allowed = bool(
-                dialogue_context.get("history_request")
-                or dialogue_context.get("contextual_history_match")
-                or selected_branch_is_authenticated
-            )
-            if not history_fallback_allowed:
-                raise
-
-            found_topics = [dict(item) for item in (
-                dialogue_context.get("history_topics") or dialogue_context.get("topic_index") or []
-            ) if isinstance(item, dict)]
-            found_pairs = [dict(item) for item in (dialogue_context.get("selected_pairs") or []) if isinstance(item, dict)]
-            topic_count = int(dialogue_context.get("known_topic_count") or len(found_topics) or 0)
-            explicit_window = dialogue_context.get("time_window") or {}
-            time_filter = dialogue_context.get("time_filter") or {}
-            overview_request = str(semantic_interpretation.get("primary_intent") or "").upper() == "HISTORY_SUMMARY"
-            overview_request = overview_request or bool(semantic_interpretation.get("history_inventory_request"))
-
-            if not found_topics and not found_pairs:
-                if topic_count > 0:
-                    fallback_answer = (
-                        f"В сохранённой истории не нашёл однозначного совпадения по запросу «{current_text[:160]}». "
-                        "Не буду подменять тему случайными записями. Уточни, пожалуйста, одну-две детали темы."
+                if isinstance(world_navigation_result, dict) and world_navigation_result.get("handled"):
+                    _world_machine = world_navigation_result.get("machine_response")
+                    if isinstance(_world_machine, dict):
+                        _world_metadata = _world_machine.setdefault("metadata", {})
+                        if isinstance(_world_metadata, dict):
+                            _world_metadata["identity"] = identity
+                    provider_packet = {"machine_response": _world_machine if isinstance(_world_machine, dict) else {}}
+                    provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+                    _apr_timing_log(
+                        "world_navigation_fast_path", provider_started,
+                        provider_calls=0,
+                        kind=_text(world_navigation_plan.get("kind")),
+                        route_verified=bool(world_navigation_result.get("route_data")),
+                        map_image=bool(world_navigation_result.get("map_image_url")),
                     )
-                    memory_topic = "Поиск темы в истории"
-                    memory_summary = "В сохранённой истории есть записи, но поиск не подтвердил тематическое совпадение."
-                elif bool(time_filter.get("applied")) or bool(explicit_window.get("has_constraint")):
-                    fallback_answer = "В сохранённой истории за указанный период записей не найдено."
-                    memory_topic = "Проверка истории по времени"
-                    memory_summary = "Поиск по сохранённой истории за указанный период выполнен; записей не найдено."
                 else:
-                    fallback_answer = "В сохранённой истории за доступный период записей нет."
-                    memory_topic = "Проверка истории диалога"
-                    memory_summary = "Поиск по сохранённой истории выполнен; записей не найдено."
-            elif overview_request:
-                visible_topics = found_topics[:max(1, min(10, int(dialogue_context.get("requested_topic_count") or 10)))]
-                lines = [f"В доступной истории найдено тем: {len(visible_topics)}."]
-                for index, item in enumerate(visible_topics, 1):
-                    name = str(item.get("topic") or item.get("last_question") or "Тема без названия").strip()
-                    summary = str(item.get("summary") or "").strip()
-                    lines.append(f"{index}. **{name}**" + (f" — {summary}" if summary else ""))
-                if topic_count > len(visible_topics):
-                    lines.append(f"Показано {len(visible_topics)} наиболее релевантных/свежих тем из {topic_count} найденных.")
-                fallback_answer = "\n\n".join(lines)
-                memory_topic = "Обзор сохранённой истории"
-                memory_summary = f"Локально сформирован обзор {len(visible_topics)} тем из сохранённой истории."
-            else:
-                anchor_topic = ""
-                anchor_summary = ""
-                if found_topics:
-                    anchor_topic = str(found_topics[0].get("topic") or found_topics[0].get("last_question") or "").strip()
-                    anchor_summary = str(found_topics[0].get("summary") or "").strip()
-                if found_pairs:
-                    pair = found_pairs[0]
-                    anchor_topic = str(pair.get("topic") or anchor_topic or "Найденная тема").strip()
-                    pair_summary = str(pair.get("memory_summary") or pair.get("summary") or "").strip()
-                    anchor_summary = anchor_summary or pair_summary
-                    user_line = str(pair.get("user") or pair.get("user_text") or "").strip()
-                    # Prefer April's exact saved answer over the compact 440-char
-                    # memory outline. The outline remains a fallback only.
-                    april_line = str(
-                        pair.get("assistant_last_message") or pair.get("april_text")
-                        or pair.get("april") or pair.get("assistant_message") or ""
-                    ).strip()
-                    restored_blocks, restore_stats = _restore_saved_renderer_blocks(
-                        pair,
-                        (interpretation.get("intent") or {}).get("requested_outputs") or request.requested_outputs,
-                        original or current_text,
+                    world_navigation_result = None
+            except Exception as _world_fast_path_error:
+                world_navigation_result = None
+                _apr_timing_log("world_navigation_fast_path_unavailable", None, error=type(_world_fast_path_error).__name__)
+        if not isinstance(world_navigation_result, dict):
+            try:
+                provider_packet = await generate_text(request)
+            except Exception as exc:
+                # A history search already has authenticated, database-backed evidence.
+                # If only the Provider/compaction layer fails, show that evidence locally
+                # rather than returning HTTP 500 and an empty chat bubble. Ordinary NEW
+                # questions still raise normally; this is not a generic model fallback.
+                selected_history_pairs = dialogue_context.get("selected_pairs") if isinstance(dialogue_context.get("selected_pairs"), list) else []
+                selected_branch_is_authenticated = bool(
+                    selected_history_pairs
+                    and (
+                        _text(dialogue_context.get("relation")).upper() == "CONTINUE"
+                        or dialogue_context.get("hot_work_followup")
+                        or dialogue_context.get("contextual_history_match")
                     )
-                    if restored_blocks:
-                        restored_types = restore_stats.get("restored_types") or []
-                        if restore_stats.get("periodic_table_status") == "normalized_118_elements":
-                            fallback_answer = (
-                                "Нашла исходную периодическую таблицу в сохранённой ветке. Проверила, что в ней есть все "
-                                "118 атомных номеров, и разложила элементы по отдельным ячейкам стандартной сетки из "
-                                "18 групп и 7 периодов. В Excel также добавлены листы «Все элементы», «Лантаноиды» и "
-                                "«Актиноиды». Данные взяты из сохранённой таблицы; новые химические сведения не подставляла."
-                            )
+                )
+                history_fallback_allowed = bool(
+                    dialogue_context.get("history_request")
+                    or dialogue_context.get("contextual_history_match")
+                    or selected_branch_is_authenticated
+                )
+                if not history_fallback_allowed:
+                    raise
+
+                found_topics = [dict(item) for item in (
+                    dialogue_context.get("history_topics") or dialogue_context.get("topic_index") or []
+                ) if isinstance(item, dict)]
+                found_pairs = [dict(item) for item in (dialogue_context.get("selected_pairs") or []) if isinstance(item, dict)]
+                topic_count = int(dialogue_context.get("known_topic_count") or len(found_topics) or 0)
+                explicit_window = dialogue_context.get("time_window") or {}
+                time_filter = dialogue_context.get("time_filter") or {}
+                overview_request = str(semantic_interpretation.get("primary_intent") or "").upper() == "HISTORY_SUMMARY"
+                overview_request = overview_request or bool(semantic_interpretation.get("history_inventory_request"))
+
+                if not found_topics and not found_pairs:
+                    if topic_count > 0:
+                        fallback_answer = (
+                            f"В сохранённой истории не нашёл однозначного совпадения по запросу «{current_text[:160]}». "
+                            "Не буду подменять тему случайными записями. Уточни, пожалуйста, одну-две детали темы."
+                        )
+                        memory_topic = "Поиск темы в истории"
+                        memory_summary = "В сохранённой истории есть записи, но поиск не подтвердил тематическое совпадение."
+                    elif bool(time_filter.get("applied")) or bool(explicit_window.get("has_constraint")):
+                        fallback_answer = "В сохранённой истории за указанный период записей не найдено."
+                        memory_topic = "Проверка истории по времени"
+                        memory_summary = "Поиск по сохранённой истории за указанный период выполнен; записей не найдено."
+                    else:
+                        fallback_answer = "В сохранённой истории за доступный период записей нет."
+                        memory_topic = "Проверка истории диалога"
+                        memory_summary = "Поиск по сохранённой истории выполнен; записей не найдено."
+                elif overview_request:
+                    visible_topics = found_topics[:max(1, min(10, int(dialogue_context.get("requested_topic_count") or 10)))]
+                    lines = [f"В доступной истории найдено тем: {len(visible_topics)}."]
+                    for index, item in enumerate(visible_topics, 1):
+                        name = str(item.get("topic") or item.get("last_question") or "Тема без названия").strip()
+                        summary = str(item.get("summary") or "").strip()
+                        lines.append(f"{index}. **{name}**" + (f" — {summary}" if summary else ""))
+                    if topic_count > len(visible_topics):
+                        lines.append(f"Показано {len(visible_topics)} наиболее релевантных/свежих тем из {topic_count} найденных.")
+                    fallback_answer = "\n\n".join(lines)
+                    memory_topic = "Обзор сохранённой истории"
+                    memory_summary = f"Локально сформирован обзор {len(visible_topics)} тем из сохранённой истории."
+                else:
+                    anchor_topic = ""
+                    anchor_summary = ""
+                    if found_topics:
+                        anchor_topic = str(found_topics[0].get("topic") or found_topics[0].get("last_question") or "").strip()
+                        anchor_summary = str(found_topics[0].get("summary") or "").strip()
+                    if found_pairs:
+                        pair = found_pairs[0]
+                        anchor_topic = str(pair.get("topic") or anchor_topic or "Найденная тема").strip()
+                        pair_summary = str(pair.get("memory_summary") or pair.get("summary") or "").strip()
+                        anchor_summary = anchor_summary or pair_summary
+                        user_line = str(pair.get("user") or pair.get("user_text") or "").strip()
+                        # Prefer April's exact saved answer over the compact 440-char
+                        # memory outline. The outline remains a fallback only.
+                        april_line = str(
+                            pair.get("assistant_last_message") or pair.get("april_text")
+                            or pair.get("april") or pair.get("assistant_message") or ""
+                        ).strip()
+                        restored_blocks, restore_stats = _restore_saved_renderer_blocks(
+                            pair,
+                            (interpretation.get("intent") or {}).get("requested_outputs") or request.requested_outputs,
+                            original or current_text,
+                        )
+                        if restored_blocks:
+                            restored_types = restore_stats.get("restored_types") or []
+                            if restore_stats.get("periodic_table_status") == "normalized_118_elements":
+                                fallback_answer = (
+                                    "Нашла исходную периодическую таблицу в сохранённой ветке. Проверила, что в ней есть все "
+                                    "118 атомных номеров, и разложила элементы по отдельным ячейкам стандартной сетки из "
+                                    "18 групп и 7 периодов. В Excel также добавлены листы «Все элементы», «Лантаноиды» и "
+                                    "«Актиноиды». Данные взяты из сохранённой таблицы; новые химические сведения не подставляла."
+                                )
+                            else:
+                                body_parts = [f"Нашла исходный артефакт из сохранённой ветки **{anchor_topic}**."]
+                                if user_line:
+                                    body_parts.append(f"**Исходный запрос:** {user_line}")
+                                body_parts.append(
+                                    "Модель не смогла завершить перестройку в этом запросе. Ниже восстановлена исходная "
+                                    "структура артефакта без изменений; это не новая исправленная версия."
+                                )
+                                fallback_answer = "\n\n".join(body_parts)
                         else:
-                            body_parts = [f"Нашла исходный артефакт из сохранённой ветки **{anchor_topic}**."]
+                            body_parts = [f"Нашёл запись в истории по теме **{anchor_topic}**."]
                             if user_line:
-                                body_parts.append(f"**Исходный запрос:** {user_line}")
-                            body_parts.append(
-                                "Модель не смогла завершить перестройку в этом запросе. Ниже восстановлена исходная "
-                                "структура артефакта без изменений; это не новая исправленная версия."
-                            )
+                                body_parts.append(f"**Твой запрос:** {user_line}")
+                            if april_line:
+                                body_parts.append(f"**Ответ April:** {april_line}")
+                            elif anchor_summary:
+                                body_parts.append(anchor_summary)
                             fallback_answer = "\n\n".join(body_parts)
                     else:
-                        body_parts = [f"Нашёл запись в истории по теме **{anchor_topic}**."]
-                        if user_line:
-                            body_parts.append(f"**Твой запрос:** {user_line}")
-                        if april_line:
-                            body_parts.append(f"**Ответ April:** {april_line}")
-                        elif anchor_summary:
-                            body_parts.append(anchor_summary)
-                        fallback_answer = "\n\n".join(body_parts)
-                else:
-                    fallback_answer = f"Нашёл связанную тему в истории: **{anchor_topic or 'тема без названия'}**."
-                    if anchor_summary:
-                        fallback_answer += f"\n\n{anchor_summary}"
-                memory_topic = (anchor_topic or "Найденная запись истории")[:180]
-                memory_summary = (anchor_summary or fallback_answer)[:500]
+                        fallback_answer = f"Нашёл связанную тему в истории: **{anchor_topic or 'тема без названия'}**."
+                        if anchor_summary:
+                            fallback_answer += f"\n\n{anchor_summary}"
+                    memory_topic = (anchor_topic or "Найденная запись истории")[:180]
+                    memory_summary = (anchor_summary or fallback_answer)[:500]
 
-            provider_packet = {"machine_response": {
-                "answer": fallback_answer,
-                "content": fallback_answer,
-                "summary": fallback_answer[:180],
-                "render_blocks": ([{
-                    "type": "text",
-                    "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
-                    "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                provider_packet = {"machine_response": {
+                    "answer": fallback_answer,
                     "content": fallback_answer,
-                }] + (restored_blocks if found_pairs and "restored_blocks" in locals() else [])),
-                "artifacts": [],
-                "metadata": {
-                    "identity": identity,
-                    "dialogue_memory_record": {
-                        "topic": memory_topic,
-                        "summary": memory_summary,
-                        "sections": [],
-                        "entities": [],
+                    "summary": fallback_answer[:180],
+                    "render_blocks": ([{
+                        "type": "text",
+                        "renderer": get_web_renderer_registration("text").get("renderer", "MessageTextBlock"),
+                        "viewer": get_web_renderer_registration("text").get("viewer", "MessageTextBlock"),
+                        "content": fallback_answer,
+                    }] + (restored_blocks if found_pairs and "restored_blocks" in locals() else [])),
+                    "artifacts": [],
+                    "metadata": {
+                        "identity": identity,
+                        "dialogue_memory_record": {
+                            "topic": memory_topic,
+                            "summary": memory_summary,
+                            "sections": [],
+                            "entities": [],
+                        },
+                        "local_history_fallback": True,
+                        "provider_calls": 0,
+                        "fallback_reason": type(exc).__name__,
+                        "restored_source_message_id": str((found_pairs[0].get("message_id") or found_pairs[0].get("source_message_id") or "") if found_pairs else "")[:120],
+                        "restored_renderer_stats": restore_stats if found_pairs and "restore_stats" in locals() else {},
+                        "local_history_fallback_notice": (
+                            "Сохранённая таблица восстановлена и подготовлена для Excel; исходные 118 элементов разложены по ячейкам."
+                            if found_pairs and "restore_stats" in locals() and restore_stats.get("periodic_table_status") == "normalized_118_elements"
+                            else "Восстановлен исходный артефакт из истории; его содержимое не было изменено, поскольку модель не завершила перестройку."
+                            if found_pairs and "restored_blocks" in locals() and restored_blocks else ""
+                        ),
                     },
-                    "local_history_fallback": True,
-                    "provider_calls": 0,
-                    "fallback_reason": type(exc).__name__,
-                    "restored_source_message_id": str((found_pairs[0].get("message_id") or found_pairs[0].get("source_message_id") or "") if found_pairs else "")[:120],
-                    "restored_renderer_stats": restore_stats if found_pairs and "restore_stats" in locals() else {},
-                    "local_history_fallback_notice": (
-                        "Сохранённая таблица восстановлена и подготовлена для Excel; исходные 118 элементов разложены по ячейкам."
-                        if found_pairs and "restore_stats" in locals() and restore_stats.get("periodic_table_status") == "normalized_118_elements"
-                        else "Восстановлен исходный артефакт из истории; его содержимое не было изменено, поскольку модель не завершила перестройку."
-                        if found_pairs and "restored_blocks" in locals() and restored_blocks else ""
-                    ),
-                },
-                "internal_answer_en": fallback_answer,
-            }}
-            _apr_timing_log(
-                "history_fallback_ready", provider_started,
-                fallback_reason=type(exc).__name__, history_topics=len(found_topics),
-                selected_pairs=len(found_pairs), answer_chars=len(fallback_answer),
-                authenticated_branch_fallback=bool(selected_branch_is_authenticated),
-                restored_render_blocks=len(restored_blocks) if found_pairs and "restored_blocks" in locals() else 0,
-                restored_render_types=restore_stats.get("restored_types", []) if found_pairs and "restore_stats" in locals() else [],
-                periodic_table_status=restore_stats.get("periodic_table_status", "not_applicable") if found_pairs and "restore_stats" in locals() else "not_applicable",
-            )
-        provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
+                    "internal_answer_en": fallback_answer,
+                }}
+                _apr_timing_log(
+                    "history_fallback_ready", provider_started,
+                    fallback_reason=type(exc).__name__, history_topics=len(found_topics),
+                    selected_pairs=len(found_pairs), answer_chars=len(fallback_answer),
+                    authenticated_branch_fallback=bool(selected_branch_is_authenticated),
+                    restored_render_blocks=len(restored_blocks) if found_pairs and "restored_blocks" in locals() else 0,
+                    restored_render_types=restore_stats.get("restored_types", []) if found_pairs and "restore_stats" in locals() else [],
+                    periodic_table_status=restore_stats.get("periodic_table_status", "not_applicable") if found_pairs and "restore_stats" in locals() else "not_applicable",
+                )
+            provider_ms = round((time.perf_counter() - provider_started) * 1000, 1)
     provider_machine = provider_packet.get("machine_response") if isinstance(provider_packet, dict) else {}
     provider_machine = provider_machine if isinstance(provider_machine, dict) else {}
     provider_meta_for_log = provider_machine.get("metadata") if isinstance(provider_machine.get("metadata"), dict) else {}
@@ -7833,6 +7924,10 @@ async def execute(
         except Exception as progress_error:
             _apr_timing_log("progressive_handoff_skipped", None, error=type(progress_error).__name__)
 
+    # C.World already places its provider-backed GalleryBlock in the machine
+    # response. Google serves the image directly to the client; this server does
+    # not download, duplicate, or persist a copy of the map.
+    world_map_image_result = None
     image_result = None
     image_results: list[dict[str, Any]] = []
     image_generation_failed = False
@@ -7847,7 +7942,8 @@ async def execute(
     )
     visual_declined_without_plan = _provider_declined_visual_output(raw) and not _has_safe_alternative_visual_plan(raw)
     image_generation_allowed = bool(
-        image_intent.get("wants_image")
+        world_map_image_result
+        or image_intent.get("wants_image")
         and bool(image_intent.get("image_output_permission", True))
         and not bool(image_intent.get("image_generation_blocked"))
         and not image_task_is_missing_source
@@ -7867,7 +7963,12 @@ async def execute(
     )
     if image_generation_allowed:
         image_started = time.perf_counter()
-        if is_image_edit_operation:
+        if world_map_image_result:
+            # The route raster already came from the verified static-map provider.
+            # Pass it through GalleryBlock; do not call GPT Image for a navigation map.
+            image_result = world_map_image_result
+            _apr_timing_log("world_verified_map_passthrough", None, image_bytes=len(image_result.get("image_bytes") or b""))
+        elif is_image_edit_operation:
             _emit_image_workflow_stage("generating")
             try:
                 image_result = await _edit_image_artifact(interpretation, visual_context or [])
@@ -8026,7 +8127,7 @@ async def execute(
             and image_intent.get("image_operation") != "edit"
             and _text(image_intent.get("task")) != "edit_image"
         )
-        if is_generation and requested_count > 1:
+        if is_generation and requested_count > 1 and not world_map_image_result:
             base_spec = _build_image_spec(raw, interpretation, identity)
             extra_jobs = []
             for variant_index in range(1, requested_count):
@@ -9305,28 +9406,63 @@ async def execute(
         "routing": dict(request.routing),
         "constraints": dict(request.constraints),
     })
+    # Keep Google Maps provider results ephemeral: the live client receives the
+    # GalleryBlock and route/place details, while persistent history stores only
+    # the user's own route/query plus a fresh Google Maps deep link.
+    persisted_answer = response.answer
+    persisted_render_blocks = list(
+        (
+            result.get("scene_contract")
+            if isinstance(result.get("scene_contract"), dict)
+            else {}
+        ).get("render_blocks")
+        or result.get("render_blocks")
+        or response.render_blocks
+        or []
+    )
+    persisted_artifacts = list(response.artifacts or [])
+    persisted_scene_contract = deepcopy(result.get("scene_contract") or {})
+    if isinstance(world_navigation_result, dict):
+        try:
+            from blocks.C_WORLD_ROOM import build_persistence_safe_turn
+            safe_world_turn = build_persistence_safe_turn(world_navigation_result, display_language)
+            persisted_answer = safe_world_turn["answer"]
+            persisted_render_blocks = safe_world_turn["render_blocks"]
+            persisted_artifacts = []
+            if isinstance(persisted_scene_contract, dict):
+                persisted_scene_contract["answer"] = persisted_answer
+                persisted_scene_contract["content"] = persisted_answer
+                persisted_scene_contract["render_blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["artifacts"] = []
+        except Exception as _world_history_sanitize_error:
+            persisted_answer = "Карта или результаты поиска были показаны в сообщении; данные Google Maps не сохраняются в историю."
+            persisted_render_blocks = [{
+                "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
+                "content": persisted_answer,
+            }]
+            persisted_artifacts = []
+            if isinstance(persisted_scene_contract, dict):
+                persisted_scene_contract["answer"] = persisted_answer
+                persisted_scene_contract["content"] = persisted_answer
+                persisted_scene_contract["render_blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["blocks"] = deepcopy(persisted_render_blocks)
+                persisted_scene_contract["artifacts"] = []
+            _apr_timing_log("world_history_sanitize_fallback", None, error=type(_world_history_sanitize_error).__name__)
+
     structured_response = _strip_inline_binary({
-        "answer": response.answer,
-        "content": response.content,
-        "summary": response.summary,
-        "render_blocks": list(
-            (
-                result.get("scene_contract")
-                if isinstance(result.get("scene_contract"), dict)
-                else {}
-            ).get("render_blocks")
-            or result.get("render_blocks")
-            or response.render_blocks
-            or []
-        ),
+        "answer": persisted_answer,
+        "content": persisted_answer,
+        "summary": persisted_answer[:180],
+        "render_blocks": persisted_render_blocks,
         "saved_artifact_sources": (
             build_memory_artifact_sources(source_render_blocks)
             if attached_file_blocks and str(plan_intent.get("file_delivery_mode") or "").lower() == "file_only"
             else []
         ),
-        "artifacts": list(response.artifacts or []),
+        "artifacts": persisted_artifacts,
         "metadata": dict(response.metadata or {}),
-        "scene_contract": result.get("scene_contract") or {},
+        "scene_contract": persisted_scene_contract,
         "generated_asset_saved": generated_asset_saved,
         "asset_refs": {
             "source_inputs": attachment_refs,
@@ -9342,11 +9478,11 @@ async def execute(
     saved = save_dialogue_pair(
         uid,
         original or current_text,
-        answer,
+        persisted_answer,
         created_at=message_created_at,
         turn_index=turn_index,
         user_en=current_text,
-        april_en=_text(raw.get("internal_answer_en")) or answer,
+        april_en=(persisted_answer if isinstance(world_navigation_result, dict) else (_text(raw.get("internal_answer_en")) or answer)),
         language=display_language,
         relation=_text(dialogue_context.get("relation") or "NEW"),
         dialog_id=identity["dialog_id"],
