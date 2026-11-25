@@ -828,6 +828,14 @@ ROOM_REGISTRY: Dict[str, RoomRegistration] = {
         role="software and code analysis",
         capabilities=("software", "code", "git", "analysis", "site_navigation", "april_site_help", "user_guidance", "interface_help", "april_site_navigation", "user_interface_help", "account_guidance"),
     ),
+    "C_WORLD_ROOM": RoomRegistration(
+        room_id="C_WORLD_ROOM",
+        module="blocks.C_WORLD_ROOM",
+        class_name="WorldRoom",
+        room_type="knowledge",
+        role="verified maps, route planning and physical-world places discovery",
+        capabilities=("maps", "directions", "route_planning", "navigation", "restaurants", "bars", "places_search", "map_preview"),
+    ),
     "C_LINK_ROOM": RoomRegistration(
         room_id="LINK_ROOM",
         module="blocks.C_LINK_ROOM",
