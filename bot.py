@@ -487,13 +487,31 @@ def _detect_message_language(text: str) -> str:
     if re.search(r"[іїєґ]", low):
         return "uk"
     if re.search(r"[а-яё]", low):
-        # Ukrainian messages may not contain ї/є/ґ; use common words as a
-        # second signal before defaulting Cyrillic to Russian.
-        ukrainian_markers = {"що", "цей", "ця", "це", "також", "будь ласка", "мені", "можна", "потрібно", "дякую", "допоможи", "чому", "якщо", "зараз", "намалюй", "намалювати", "зобрази", "покажи", "побудуй", "створи", "згенеруй", "напиши", "надішли", "відправ"}
+        # Cyrillic alone is not enough to distinguish Russian from Ukrainian.
+        # Shared imperatives ("покажи", "напиши", etc.) are intentionally
+        # neutral. Score distinctive vocabulary/grammar from the whole message;
+        # if the message is too short or ambiguous, let the saved language
+        # preference decide instead of forcing a language from one word.
         words = set(re.findall(r"[а-яіїєґё]+", low))
-        if len(words & ukrainian_markers) >= 1:
+        ukrainian_markers = {
+            "що", "цей", "ця", "це", "також", "мені", "дякую", "допоможи",
+            "чому", "якщо", "зараз", "потрібен", "потрібна", "потрібні",
+            "можете", "немає", "нема", "звідки", "куди", "чекаю", "від",
+            "вулиця", "вулиці", "місто", "місті", "будь ласка",
+        }
+        russian_markers = {
+            "как", "проехать", "улица", "улицы", "улице", "город", "города",
+            "городе", "мне", "нужно", "надо", "пожалуйста", "сейчас", "почему",
+            "где", "что", "этот", "эта", "это", "спасибо", "можешь", "можно",
+            "автовокзал", "автовокзалу", "расскажи", "нарисуй", "объясни",
+        }
+        uk_evidence = len(words & ukrainian_markers)
+        ru_evidence = len(words & russian_markers)
+        if uk_evidence and uk_evidence > ru_evidence:
             return "uk"
-        return "ru"
+        if ru_evidence:
+            return "ru"
+        return ""
 
     scores = {code: 0 for code in _LANGUAGE_MARKERS}
     for code, markers in _LANGUAGE_MARKERS.items():
