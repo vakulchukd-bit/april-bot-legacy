@@ -1,16 +1,20 @@
-"""C.World — shared OpenStreetMap search/routes and Waze navigation links.
+"""C.World — request-scoped routing, places search and real map artifacts.
 
-The room does not synthesize map pictures or invent road geometry. It creates
-provider URLs and hands them to the existing Scene Contract LinkCard renderer.
-OpenStreetMap is the general-purpose map surface; Waze is offered for driving.
-No Google Cloud key, billing account, new renderer, or image-generation call is
-required for this link-based mode. Provider route calculation happens after the
-user opens the selected map/navigation service.
+The room never fabricates streets or turn-by-turn directions. It requests real
+Routes/Places data with a server-restricted key, then lets GalleryBlock load a
+Static Maps image directly from Google using a separate browser-restricted key.
+Provider map content is not downloaded, cached, or persisted by this service.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import os
 import re
 import urllib.parse
+import urllib.request
 from typing import Any, Dict, Optional
 
 from blocks.C_ARTIFACT_CONTRACT import (
@@ -21,10 +25,12 @@ from blocks.C_ARTIFACT_CONTRACT import (
 )
 
 ROOM_ID = "C_WORLD_ROOM"
-OSM_SEARCH_BASE = "https://www.openstreetmap.org/search"
-OSM_DIRECTIONS_BASE = "https://www.openstreetmap.org/directions"
-WAZE_DEEP_LINK_BASE = "https://waze.com/ul"
-GOOGLE_MAPS_DIRECTIONS_BASE = "https://www.google.com/maps/dir/"
+GOOGLE_API_KEY_ENV_NAMES = ("APRIL_GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_API_KEY")
+STATIC_MAPS_BROWSER_KEY_ENV_NAMES = ("APRIL_GOOGLE_STATIC_MAPS_BROWSER_KEY",)
+STATIC_MAPS_SIGNING_SECRET_ENV = "APRIL_GOOGLE_STATIC_MAPS_URL_SIGNING_SECRET"
+ROUTES_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
+STATIC_MAPS_ENDPOINT = "https://maps.googleapis.com/maps/api/staticmap"
+PLACES_ENDPOINT = "https://places.googleapis.com/v1/places:searchText"
 
 _ROUTE_WORDS = (
     "маршрут", "путь", "проезд", "пройти", "проехать", "добраться", "как попасть",
@@ -35,32 +41,13 @@ _ROUTE_WORDS = (
 )
 _PLACE_WORDS = (
     "ресторан", "рестораны", "кафе", "бар", "бары", "паб", "пабы", "кофейня",
-    "кофейни", "магазин", "магазины", "супермаркет", "рынок", "торговый центр",
-    "больниц", "клиник", "аптек", "поликлиник", "вокзал", "автовокзал",
-    "железнодорожная станция", "железнодорожный вокзал", "аэропорт", "автостанция",
-    "музе", "парк", "отел", "гостиниц", "заправк", "автозаправк", "банкомат",
-    "банк", "почта", "почтовое отделение", "школа", "университет", "достопримечательност",
-    "restaurant", "restaurants", "bar", "bars", "pub", "cafe", "cafes", "coffee shop",
-    "shop", "shops", "store", "supermarket", "market", "shopping mall", "hospital",
-    "clinic", "pharmacy", "railway station", "train station", "bus station", "airport",
-    "museum", "park", "hotel", "gas station", "fuel station", "atm", "bank", "post office",
-    "school", "university", "tourist attraction", "places near", "nearby places",
-    "рядом со мной", "поблизости",
+    "кофейни", "restaurant", "restaurants", "bar", "bars", "pub", "cafe", "cafes",
+    "coffee shop", "places near", "nearby places", "рядом со мной", "поблизости",
+    "автовокзал", "вокзал", "станция", "аэропорт", "больница", "аптека",
+    "магазин", "супермаркет", "музей", "театр", "отель", "гостиница",
+    "train station", "bus station", "airport", "hospital", "pharmacy",
+    "store", "shop", "supermarket", "museum", "theater", "hotel",
 )
-_FOLLOWUP_WORDS = (
-    "этот маршрут", "тот маршрут", "этот путь", "этот проезд", "сделай этот",
-    "покажи его", "на карте изображением", "this route", "that route", "this journey",
-    "make this route", "show it on the map", "same route",
-    # A route link is part of the same active navigation task. These phrases
-    # must restore the previous USER route request even when State Manager
-    # classifies the short correction as a new topic.
-    "где ссылка", "где ссылку", "ссылку не дал", "ты ссылку не дал",
-    "нету ссылки", "нет ссылки", "ссылка пропала", "ссылка исчезла",
-    "ссылка не отображается", "ссылку не видно", "повтори ссылку",
-    "пришли ссылку еще раз", "where is the link", "no link", "link is missing",
-    "link disappeared", "link is not showing",
-)
-
 _STREET_TYPE_RE = (
     r"(?:улиц[аеиуы]|ул\.?|проспект[ае]?|просп\.?|пр-т|"
     r"площад[ьи]|пл\.?|переулк[еа]?|пер\.?|бульвар[е]?|бул\.?|"
@@ -75,12 +62,7 @@ _ROUTE_DESTINATION_ACTION_RE = re.compile(
     r"(?:пройти|дойти|добраться|попасть|доехать)\b",
     re.IGNORECASE,
 )
-_ROUTE_LINK_REPAIR_RE = re.compile(
-    r"(?:где.{0,35}ссылк\w*|ссылк\w*.{0,45}(?:не\s+дал|не\s+вид|пропад\w*|исчез\w*|не\s+появ|не\s+отображ)|"
-    r"(?:нет|нету)\s+ссылк\w*|повтор\w*.{0,25}ссылк\w*|ссылк\w*.{0,25}повтор|"
-    r"where.{0,35}link|no\s+link|link.{0,35}(?:missing|disappeared|not\s+showing))",
-    re.IGNORECASE | re.DOTALL,
-)
+
 
 
 def _text(value: Any) -> str:
@@ -133,7 +115,7 @@ def _selected_user_requests(request: Any) -> list[str]:
 def _extract_city(text: str) -> str:
     """Resolve only an explicitly named, supported city; never infer GPS/IP."""
     city_patterns = (
-        (r"\b(одесса|одессе|одеси|odesa|odessa)\b", "Odesa, Ukraine"),
+        (r"\b(одес\w*|odesa|odessa)\b", "Odesa, Ukraine"),
         (r"\b(киев|києві|kyiv|kiev)\b", "Kyiv, Ukraine"),
         (r"\b(львов|львів|lviv)\b", "Lviv, Ukraine"),
         (r"\b(харьков|харків|kharkiv)\b", "Kharkiv, Ukraine"),
@@ -308,26 +290,52 @@ def _extract_destination_from_natural_text(text: str) -> str:
 
 
 def _parse_route(text: str) -> dict[str, Any]:
-    city = _extract_city(text)
-    normalized = _normalize(text)
-    patterns = (
-        r"(?:^|\s)(?:с|со|из|от|з|із|від|від|from)\s+(.+?)\s+(?:до|к|в|во|на|у|вiд|to|towards)\s+(.+?)\s*$",
-        r"(?:^|\s)(?:от|from)\s+(.+?)\s+(?:до|to)\s+(.+?)\s*$",
-    )
-    match = None
-    for pattern in patterns:
-        match = re.search(pattern, normalized, re.IGNORECASE)
-        if match:
-            break
+    """Extract explicit route endpoints while keeping place and street roles separate.
 
+    This is a structural parser: route endpoints and grammatical relations are
+    the evidence. Generic presentation verbs (show/tell/draw) do not create a
+    navigation task by themselves.
+    """
+    normalized = _normalize(text)
+    # Remove only trailing presentation instructions; they are not address data.
+    normalized = re.sub(
+        r"\s*(?:[.!?]\s*)?(?:покажи|отобрази|изобрази|нарисуй|расскажи|"
+        r"show|display|draw|tell me)\b.*$", "", normalized, flags=re.I,
+    ).strip(" .!?;,")
+    city = _extract_city(text)
+
+    # Explicit from/to structure. The destination may contain both a street
+    # and a named facility: "до улицы N к центральному автовокзалу".
+    patterns = (
+        r"(?:^|\s)(?:с|со|из|от|з|із|від|from)\s+(?P<origin>.+?)\s+"
+        r"(?:до|к|в|во|на|у|to|towards)\s+(?P<destination>.+)$",
+    )
+    match = next((re.search(pattern, normalized, re.I) for pattern in patterns
+                  if re.search(pattern, normalized, re.I)), None)
     if match:
-        origin = _clean_endpoint(match.group(1))
-        destination = _clean_endpoint(match.group(2))
-        # Remove trailing city clauses and common request tails from destination.
-        destination = re.split(r"\s+(?:в\s+городе|в\s+г\.?|городе|одессе|одесса|одеси|odesa|odessa)\b", destination, maxsplit=1, flags=re.I)[0]
-        destination = re.split(r"\s+(?:покажи|нарисуй|сделай|построй|please|show|draw|make)\b", destination, maxsplit=1, flags=re.I)[0]
-        origin = _clean_endpoint(origin)
-        destination = _clean_endpoint(destination)
+        origin_raw = match.group("origin")
+        destination_raw = match.group("destination")
+        # Cut the genitive city tail without losing the destination entity.
+        destination_raw = re.split(
+            r"\s+(?:города|міста|city\s+of)\s+[^,;.!?]+$", destination_raw,
+            maxsplit=1, flags=re.I,
+        )[0]
+        # A street followed by "к <facility>" names both parts of one endpoint.
+        street_part = ""
+        facility_match = re.search(
+            r"(?P<street>(?:улиц[аеиуы]|ул\.?|вулиц[яі]?|вул\.?|проспект[ае]?|"
+            r"просп\.?|переулк[еа]?|пер\.?)\s+.+?)\s+к\s+"
+            r"(?P<facility>(?:центральн\w*|главн\w*)\s+автовокзал\w*|"
+            r"автовокзал\w*|аэропорт\w*|вокзал\w*)\b",
+            destination_raw, re.I,
+        )
+        if facility_match:
+            street_part = _clean_endpoint(facility_match.group("street"))
+            facility_part = _normalize_destination_label(facility_match.group("facility"))
+            destination = f"{facility_part}, улица {street_part}"
+        else:
+            destination = _clean_endpoint(destination_raw)
+        origin = _clean_endpoint(origin_raw)
     else:
         origin = _extract_origin_from_natural_text(normalized)
         destination = _extract_destination_from_natural_text(normalized)
@@ -342,8 +350,6 @@ def _parse_route(text: str) -> dict[str, Any]:
                 origin = endpoint
             else:
                 destination = endpoint
-    # Never infer an origin from device/IP location. A route must have both
-    # explicitly supplied endpoints before C.World can return a directions link.
     return {"origin": origin, "destination": destination, "city": city}
 
 
@@ -363,13 +369,10 @@ def _navigation_intent(text: str) -> tuple[bool, bool]:
     low = normalized.lower()
     route_keyword = any(word in low for word in _ROUTE_WORDS)
     route_action = any(term in low for term in (
-        "покажи", "построй", "проложи", "рассчитай", "сделай маршрут",
-        "нужен маршрут", "дай маршрут", "карта проезда", "карту проезда",
-        "как добраться", "как попасть", "как проехать", "как пройти",
-        "укажи путь", "показать на карте", "покажи на карте", "путь на карте",
-        "navigate", "navigation", "directions", "show me the way", "get to",
-        "how do i get", "how to get", "this route", "that route", "этот маршрут",
-        "тот маршрут", "этот путь", "этот проезд",
+        "рассчитай маршрут", "нужен маршрут", "дай маршрут", "карта проезда",
+        "карту проезда", "как добраться", "как попасть", "как проехать",
+        "как пройти", "укажи путь", "путь на карте", "navigate", "navigation",
+        "directions", "get to", "how do i get", "how to get",
     ))
     has_endpoints = bool(re.search(
         r"\b(?:с|со|из|от|з|із|від|from)\s+.+?\s+(?:до|к|в|во|на|у|to|towards)\s+.+",
@@ -392,13 +395,18 @@ def _navigation_intent(text: str) -> tuple[bool, bool]:
     )
     place_keyword = any(word in low for word in _PLACE_WORDS)
     place_action = any(term in low for term in (
-        "найди", "найти", "покажи", "подскажи", "посоветуй", "рекомендуй",
-        "подбери", "ищу", "где найти", "где есть", "на карте", "рядом",
-        "поблизости", "ближайш", "find", "search", "show", "recommend",
-        "suggest", "best", "nearest", "nearby", "looking for", "on the map",
+        "найди", "найти", "подскажи", "посоветуй", "рекомендуй", "подбери",
+        "ищу", "где найти", "где есть", "рядом", "поблизости", "ближайш",
+        "find", "search", "recommend", "suggest", "best", "nearest",
+        "nearby", "looking for",
     ))
-    place_location_context = bool(_extract_city(text)) or any(
-        term in low for term in ("рядом со мной", "near me", "nearby", "в районе", "в центре", "на карте")
+    # A city name alone does not turn an informational question into a map
+    # search. Spatial intent must be expressed by proximity/area/map context.
+    place_location_context = any(
+        term in low for term in (
+            "рядом со мной", "рядом", "поблизости", "near me", "nearby",
+            "в районе", "в центре", "на карте", "on the map", "near",
+        )
     )
     abstract_place_question = bool(re.search(
         r"^(?:что такое|что означает|объясни|what is|what does|define)\s+(?:a\s+|the\s+)?(?:бар|бары|ресторан|рестораны|кафе|паб|пабов|bar|bars|restaurant|restaurants|cafe|cafes)\b",
@@ -412,19 +420,28 @@ def resolve_navigation_plan(current_text: str, selected_pairs: Optional[list[Any
     """Return a deterministic route/places plan, or None for normal chat."""
     current = _normalize(current_text)
     route_intent, place_intent = _navigation_intent(current)
-    contextual = (
-        any(word in current.lower() for word in _FOLLOWUP_WORDS)
-        or bool(_ROUTE_LINK_REPAIR_RE.search(current))
-    )
+    # Bare visual commands have no independent subject. Reuse a route only
+    # when the existing interpretation layer classifies the utterance as a
+    # bare visual request and the latest selected user turn in this active
+    # dialogue branch is itself a route. "Tell me" and arbitrary short replies
+    # are deliberately left to the normal semantic dialogue engine.
+    try:
+        from blocks.interpretation_identity import is_bare_visual_command
+        contextual_visual_request = bool(is_bare_visual_command(current))
+    except Exception:
+        contextual_visual_request = False
     previous_route = ""
-    if contextual and isinstance(selected_pairs, list):
+    if contextual_visual_request and isinstance(selected_pairs, list):
         for pair in reversed(selected_pairs):
             if not isinstance(pair, dict):
                 continue
             previous_user_text = _normalize(pair.get("user") or pair.get("user_text") or pair.get("user_request") or pair.get("request") or pair.get("input"))
-            if previous_user_text and _navigation_intent(previous_user_text)[0]:
+            if not previous_user_text:
+                continue
+            if _navigation_intent(previous_user_text)[0]:
                 previous_route = previous_user_text
-                break
+            # Never jump over the latest user subject to revive an older route.
+            break
     source_text = current
     parsed = _parse_route(source_text)
     if not (parsed.get("origin") and parsed.get("destination")) and previous_route:
@@ -447,13 +464,13 @@ def resolve_navigation_plan(current_text: str, selected_pairs: Optional[list[Any
                 )) else source_text
             ),
             "followup": bool(previous_route),
-            "needs_map_image": False,
+            "needs_map_image": any(term in current.lower() for term in ("изображен", "фото", "картин", "image", "picture", "photo")),
         }
     if place_intent:
         city = _extract_city(current)
         query = current
-        # Keep the user's full phrase here; the map-link builder strips command
-        # language and the explicit city before sending the search to OSM.
+        # The actual query should describe the desired category and area; leave
+        # full user language intact for Google Places' semantic search.
         return {
             "kind": "places",
             "query": query[:300],
@@ -463,75 +480,187 @@ def resolve_navigation_plan(current_text: str, selected_pairs: Optional[list[Any
     return None
 
 
+def _api_key() -> str:
+    for name in GOOGLE_API_KEY_ENV_NAMES:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+def _static_maps_browser_key() -> str:
+    """A separate key intended for direct client requests to Static Maps.
+
+    This key is public in the image URL by design. Restrict it to the Static
+    Maps API and the application's allowed HTTP referrers. Never reuse the
+    server-side Routes/Places key here.
+    """
+    for name in STATIC_MAPS_BROWSER_KEY_ENV_NAMES:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
-def _clean_places_query(query: str, city: str = "") -> str:
-    """Turn conversational place requests into a concise map-search phrase."""
-    value = _normalize(query)
-    value = re.sub(
-        r"^(?:(?:пожалуйста|будь ласка|please)\s+)?(?:найди(?:те)?|найти|покажи(?:те)?|подскажи(?:те)?|подбери(?:те)?|посоветуй(?:те)?|ищу|find|search for|show me|look for|recommend)\s+",
-        "",
-        value,
-        flags=re.IGNORECASE,
-    )
-    value = re.sub(
-        r"\b(?:мне нужен|мне нужна|мне нужны|нужен|нужна|нужны|ближайш\w*|поблизости|рядом со мной|near me|nearest|nearby)\b",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
-    # A location clause at the end is removed because the canonical city is
-    # appended separately. This avoids queries such as "cafe in Tokyo Tokyo".
-    value = re.sub(
-        r"\s+(?:в городе|в г\.?|у місті|в|у|in|near)\s+(?:центре\s+)?[^,;.!?]+$",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
-    value = re.sub(r"\s+на карте$", "", value, flags=re.IGNORECASE)
-    value = re.sub(r"\s+", " ", value).strip(" ,.;:-")
-    if city and not value:
-        value = "places"
-    return value[:220]
+def _sign_static_maps_url(url: str) -> str:
+    """Optionally sign a direct Static Maps URL using Google's URL secret.
 
-def _osm_search_url(query: str) -> str:
-    """Open an OpenStreetMap search for a user-provided place/query."""
-    clean = _normalize(query)[:400]
-    return OSM_SEARCH_BASE + "?" + urllib.parse.urlencode({"query": clean})
+    The signing secret stays on the server. It is never included in the image
+    URL or in logs. If configured but malformed, fail closed rather than emit
+    a URL that may be rejected by a signed-only Static Maps configuration.
+    """
+    secret = os.getenv(STATIC_MAPS_SIGNING_SECRET_ENV, "").strip()
+    if not secret:
+        return url
+    try:
+        padded_secret = secret + ("=" * ((4 - len(secret) % 4) % 4))
+        decoded_secret = base64.urlsafe_b64decode(padded_secret.encode("ascii"))
+        parts = urllib.parse.urlsplit(url)
+        path_and_query = parts.path + ("?" + parts.query if parts.query else "")
+        digest = hmac.new(decoded_secret, path_and_query.encode("utf-8"), hashlib.sha1).digest()
+        signature = base64.urlsafe_b64encode(digest).decode("ascii")
+        signed_query = parts.query + "&signature=" + urllib.parse.quote(signature, safe="-_= ")
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, signed_query, parts.fragment))
+    except Exception:
+        return ""
 
 
-def _osm_directions_url(origin: str, destination: str, mode: str) -> str:
-    """Open OSM's directions page with both user-provided endpoints filled."""
-    engine_by_mode = {
-        "DRIVE": "fossgis_osrm_car",
-        "WALK": "fossgis_osrm_foot",
-        "BICYCLE": "fossgis_osrm_bike",
+def _http_json(url: str, *, method: str = "GET", headers: Optional[dict[str, str]] = None, body: Optional[dict[str, Any]] = None, timeout: float = 7.0) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read(2 * 1024 * 1024)
+    parsed = json.loads(raw.decode("utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _maps_directions_url(origin: str, destination: str, mode: str) -> str:
+    mode_map = {"DRIVE": "driving", "WALK": "walking", "BICYCLE": "bicycling", "TRANSIT": "transit"}
+    query = urllib.parse.urlencode({
+        "api": "1", "origin": origin, "destination": destination,
+        "travelmode": mode_map.get(mode, "driving"),
+    })
+    return f"https://www.google.com/maps/dir/?{query}"
+
+
+def _maps_search_url(query: str) -> str:
+    return "https://www.google.com/maps/search/?" + urllib.parse.urlencode({"api": "1", "query": query})
+
+
+def _route_api(plan: dict[str, Any], language: str) -> dict[str, Any]:
+    key = _api_key()
+    if not key:
+        return {}
+    mode = plan.get("travel_mode") if plan.get("travel_mode") in {"DRIVE", "WALK", "BICYCLE", "TRANSIT"} else "DRIVE"
+    body = {
+        "origin": {"address": plan["origin"]},
+        "destination": {"address": plan["destination"]},
+        "travelMode": mode,
+        "polylineQuality": "OVERVIEW",
+        "polylineEncoding": "ENCODED_POLYLINE",
+        "languageCode": (language or "ru").split("-")[0],
+        "units": "METRIC",
     }
-    engine = engine_by_mode.get(mode)
-    params = {"from": _normalize(origin), "to": _normalize(destination)}
-    if engine:
-        params["engine"] = engine
-    return OSM_DIRECTIONS_BASE + "?" + urllib.parse.urlencode(params)
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": key,
+        "X-Goog-FieldMask": ",".join((
+            "routes.distanceMeters", "routes.duration", "routes.polyline.encodedPolyline",
+            "routes.legs.steps.navigationInstruction.instructions", "routes.legs.steps.distanceMeters",
+            "routes.legs.steps.staticDuration", "routes.legs.startLocation.latLng",
+            "routes.legs.endLocation.latLng", "routes.legs.steps.endLocation.latLng",
+        )),
+    }
+    try:
+        data = _http_json(ROUTES_ENDPOINT, method="POST", headers=headers, body=body, timeout=8.0)
+        routes = data.get("routes") if isinstance(data.get("routes"), list) else []
+        route = routes[0] if routes and isinstance(routes[0], dict) else {}
+        encoded = _text((route.get("polyline") or {}).get("encodedPolyline"))
+        if not encoded or not route.get("distanceMeters") or not _text(route.get("duration")):
+            return {}
+        return route
+    except Exception:
+        return {}
 
 
-def _waze_directions_url(destination: str) -> str:
-    """Open Waze search/navigation for a destination; Waze uses device location."""
+def _static_map(route: dict[str, Any]) -> str:
+    """Return a direct Google Static Maps URL; never fetch/cache its image."""
+    key = _static_maps_browser_key()
+    polyline = _text((route.get("polyline") or {}).get("encodedPolyline"))
+    legs = route.get("legs") if isinstance(route.get("legs"), list) else []
+    if not key or not polyline or not legs or not isinstance(legs[0], dict):
+        return ""
+    start = ((legs[0].get("startLocation") or {}).get("latLng") or {})
+    end = ((legs[0].get("endLocation") or {}).get("latLng") or {})
+    if not all(start.get(key) is not None for key in ("latitude", "longitude")):
+        return ""
+    if not all(end.get(key) is not None for key in ("latitude", "longitude")):
+        return ""
     params = {
-        "q": _normalize(destination),
-        "utm_source": "april",
+        "size": "640x480", "scale": "2", "format": "png", "maptype": "roadmap",
+        "path": f"color:0x1B70E2FF|weight:6|enc:{polyline}",
+        "markers": [
+            f"color:green|label:A|{start.get('latitude')},{start.get('longitude')}",
+            f"color:red|label:B|{end.get('latitude')},{end.get('longitude')}",
+        ],
+        "key": key,
     }
-    return WAZE_DEEP_LINK_BASE + "?" + urllib.parse.urlencode(params)
+    unsigned_url = STATIC_MAPS_ENDPOINT + "?" + urllib.parse.urlencode(params, doseq=True)
+    return _sign_static_maps_url(unsigned_url)
 
 
-def _google_transit_url(origin: str, destination: str) -> str:
-    """Keyless Google Maps URL used only as an optional public-transport handoff."""
+def _static_places_map(places: list[dict[str, Any]]) -> str:
+    """Return a direct Static Maps URL for verified Places coordinates."""
+    key = _static_maps_browser_key()
+    if not key:
+        return ""
+    markers: list[str] = []
+    for index, place in enumerate(places[:5]):
+        if not isinstance(place, dict):
+            continue
+        location = place.get("location") if isinstance(place.get("location"), dict) else {}
+        lat, lng = location.get("latitude"), location.get("longitude")
+        try:
+            lat_f, lng_f = float(lat), float(lng)
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= lat_f <= 90 and -180 <= lng_f <= 180):
+            continue
+        marker_label = chr(ord("A") + index)
+        markers.append(f"color:blue|label:{marker_label}|{lat_f},{lng_f}")
+    if not markers:
+        return ""
     params = {
-        "api": "1",
-        "origin": _normalize(origin),
-        "destination": _normalize(destination),
-        "travelmode": "transit",
+        "size": "640x480", "scale": "2", "format": "png", "maptype": "roadmap",
+        "markers": markers, "key": key,
     }
-    return GOOGLE_MAPS_DIRECTIONS_BASE + "?" + urllib.parse.urlencode(params)
+    unsigned_url = STATIC_MAPS_ENDPOINT + "?" + urllib.parse.urlencode(params, doseq=True)
+    return _sign_static_maps_url(unsigned_url)
+
+
+def _places_api(plan: dict[str, Any], language: str) -> list[dict[str, Any]]:
+    key = _api_key()
+    if not key:
+        return []
+    query = _text(plan.get("query"))
+    city = _text(plan.get("city"))
+    if city and city.lower() not in query.lower():
+        query = f"{query} in {city}"
+    try:
+        data = _http_json(
+            PLACES_ENDPOINT,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": key,
+                "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.googleMapsUri",
+            },
+            body={"textQuery": query, "languageCode": (language or "ru").split("-")[0], "maxResultCount": 5},
+            timeout=7.0,
+        )
+        places = data.get("places") if isinstance(data.get("places"), list) else []
+        return [item for item in places[:5] if isinstance(item, dict)]
+    except Exception:
+        return []
 
 
 def _localized(language: str, key: str, **values: Any) -> str:
@@ -540,49 +669,54 @@ def _localized(language: str, key: str, **values: Any) -> str:
         lang = "ua"
     table = {
         "route_missing": {
-            "ru": "Чтобы подготовить маршрут, пришлите обе точки: откуда вы отправляетесь и куда нужно попасть. Я не буду угадывать начальную точку или придумывать улицы.",
-            "ua": "Щоб підготувати маршрут, надішліть обидві точки: звідки ви вирушаєте та куди потрібно дістатися. Я не вгадуватиму початкову точку й не вигадуватиму вулиці.",
+            "ru": "Чтобы построить маршрут, пришлите обе точки: откуда вы отправляетесь и куда нужно попасть. Я не буду угадывать начальную точку или рисовать вымышленные улицы.",
+            "ua": "Щоб побудувати маршрут, надішліть обидві точки: звідки ви вирушаєте та куди потрібно дістатися. Я не вгадуватиму початкову точку й не малюватиму вигадані вулиці.",
             "en": "Please provide both endpoints: where you are starting and where you want to go. I will not guess your starting point or invent streets.",
         },
         "route_no_city": {
-            "ru": "Точки маршрута получены, но не указан город или страна. Уточните их, чтобы не открыть маршрут в неправильном месте.",
-            "ua": "Точки маршруту отримано, але не вказано місто або країну. Уточніть їх, щоб не відкрити маршрут у неправильному місці.",
-            "en": "I have both route endpoints, but the city or country is missing. Please specify it so the route opens in the correct place.",
+            "ru": "Точки маршрута получены, но не указан город. Напишите город, чтобы не построить маршрут в неверном месте.",
+            "ua": "Точки маршруту отримано, але не вказано місто. Напишіть місто, щоб не побудувати маршрут у неправильному місці.",
+            "en": "I have both route endpoints, but the city is missing. Please provide the city so I do not route you to the wrong place.",
         },
-        "route_link_ready": {
-            "ru": "Подготовила маршрут в OpenStreetMap. На открывшейся странице проверьте найденные начальную и конечную точки и запустите расчёт пути. April не показывает расстояние или время, пока они не рассчитаны картографическим сервисом.",
-            "ua": "Підготувала маршрут в OpenStreetMap. На відкритій сторінці перевірте знайдені початкову й кінцеву точки та запустіть розрахунок шляху. April не показує відстань або час, доки їх не розрахує картографічний сервіс.",
-            "en": "I prepared an OpenStreetMap route link. Check the selected start and destination on the map page and calculate the route there. April does not claim a distance or duration before the map service calculates it.",
+        "route_fallback": {
+            "ru": "Я подготовила ссылку с указанными начальной и конечной точками. После открытия Google Maps рассчитает актуальный путь и навигацию. Встроенную проверенную карту сейчас получить не удалось, поэтому я не показываю приблизительный рисунок.",
+            "ua": "Я підготувала посилання із зазначеними початковою та кінцевою точками. Після відкриття Google Maps розрахує актуальний шлях і навігацію. Не вдалося отримати перевірену вбудовану карту, тому я не показую приблизний малюнок.",
+            "en": "I prepared a Google Maps link with your supplied start and destination. Google Maps will calculate the current route when you open it. I could not retrieve a verified embedded map, so I am not showing an approximate drawing.",
         },
-        "route_transit_link": {
-            "ru": "Для общественного транспорта подготовила отдельную ссылку на расчёт маршрута. Расписание, пересадки и время будут показаны сервисом после открытия.",
-            "ua": "Для громадського транспорту підготувала окреме посилання для розрахунку маршруту. Розклад, пересадки й час покаже сервіс після відкриття.",
-            "en": "I prepared a separate public-transport directions link. The provider will show schedules, transfers and travel time after you open it.",
-        },
-        "places_found": {
-            "ru": "Открываю поиск объектов в OpenStreetMap. Выберите нужный результат на карте и проверьте адрес и расположение.",
-            "ua": "Відкриваю пошук об'єктів в OpenStreetMap. Виберіть потрібний результат на мапі та перевірте адресу й розташування.",
-            "en": "I am opening an OpenStreetMap place search. Select the correct result on the map and verify its address and location.",
-        },
-        "places_fallback": {
-            "ru": "Не удалось определить город или район. Уточните место поиска, чтобы не показывать случайные объекты из другого региона.",
-            "ua": "Не вдалося визначити місто або район. Уточніть місце пошуку, щоб не показувати випадкові об'єкти з іншого регіону.",
-            "en": "I could not identify the city or area. Please specify it so I do not show unrelated places from another region.",
-        },
-        "places_need_location": {
-            "ru": "Уточните город или район для поиска. Точное местоположение устройства мне недоступно, поэтому я не буду выдавать случайные объекты за ближайшие к вам.",
-            "ua": "Уточніть місто або район для пошуку. Точне місцезнаходження пристрою мені недоступне, тому я не показуватиму випадкові об'єкти як найближчі до вас.",
-            "en": "Please specify a city or area. I do not have your device's precise location, so I will not present random places as nearby.",
+        "route_verified": {
+            "ru": "Нашла маршрут по указанным точкам. Расстояние: {distance}. Время в пути: {duration}. Ниже — карта и основные повороты. Проверьте дорожные условия перед выездом.",
+            "ua": "Знайдено маршрут за вказаними точками. Відстань: {distance}. Час у дорозі: {duration}. Нижче — карта й основні повороти. Перевірте дорожні умови перед виїздом.",
+            "en": "I found a route for the supplied endpoints. Distance: {distance}. Travel time: {duration}. The map and main turns are below. Check road conditions before departure.",
         },
         "route_history_safe": {
-            "ru": "Ссылка на маршрут была показана в предыдущем сообщении. Исходные точки сохранены, поэтому ссылку можно восстановить без сохранения внешних картографических данных.",
-            "ua": "Посилання на маршрут було показано в попередньому повідомленні. Початкові точки збережено, тому посилання можна відновити без збереження зовнішніх картографічних даних.",
-            "en": "The route link was shown in the previous message. The original endpoints are retained so the link can be rebuilt without storing external map data.",
+            "ru": "Карта маршрута была показана в предыдущем сообщении. Данные карты не сохраняются в истории; исходные точки сохранены, поэтому маршрут можно построить заново.",
+            "ua": "Карту маршруту було показано в попередньому повідомленні. Дані карти не зберігаються в історії; початкові точки збережено, тому маршрут можна побудувати знову.",
+            "en": "The route map was shown in the previous message. Map content is not stored in chat history; your original endpoints are retained so the route can be rebuilt.",
         },
         "places_history_safe": {
-            "ru": "Ссылка на поиск мест была показана в предыдущем сообщении. Исходный запрос сохранён, поэтому поиск можно повторить без сохранения результатов внешней карты.",
-            "ua": "Посилання на пошук місць було показано в попередньому повідомленні. Початковий запит збережено, тому пошук можна повторити без збереження результатів зовнішньої мапи.",
-            "en": "The place-search link was shown in the previous message. The original query is retained so it can be repeated without storing external map results.",
+            "ru": "Поиск мест был показан в предыдущем сообщении. Результаты Google Maps не сохраняются в истории; исходный запрос сохранён, поэтому поиск можно повторить.",
+            "ua": "Пошук місць було показано в попередньому повідомленні. Результати Google Maps не зберігаються в історії; початковий запит збережено, тому пошук можна повторити.",
+            "en": "The place search was shown in the previous message. Google Maps results are not stored in chat history; your original query is retained so the search can be repeated.",
+        },
+        "map_unavailable": {
+            "ru": "Встроенную карту получить не удалось, поэтому откройте ссылку Google Maps ниже — там будут карта и навигация.",
+            "ua": "Не вдалося отримати вбудовану мапу, тому відкрийте посилання Google Maps нижче — там будуть мапа й навігація.",
+            "en": "I could not retrieve the embedded map. Open the Google Maps link below to view the map and navigation.",
+        },
+        "places_fallback": {
+            "ru": "Откройте поиск мест на карте по вашему запросу. Без настроенного картографического сервиса я не буду придумывать названия заведений, рейтинги или адреса.",
+            "ua": "Відкрийте пошук місць на карті за вашим запитом. Без налаштованого картографічного сервісу я не вигадуватиму назви закладів, рейтинги чи адреси.",
+            "en": "Open the map search for your request. Without a configured places provider, I will not invent business names, ratings or addresses.",
+        },
+        "places_need_location": {
+            "ru": "Уточните город или район, где искать бары и рестораны. Точное местоположение устройства мне недоступно, поэтому я не буду выдавать случайные заведения из другого города за ближайшие к вам.",
+            "ua": "Уточніть місто або район, де шукати бари й ресторани. Точне місцезнаходження пристрою мені недоступне, тому я не показуватиму випадкові заклади з іншого міста як найближчі до вас.",
+            "en": "Please specify the city or area for bars and restaurants. I do not have your device's precise location, so I will not present random businesses from another city as nearby.",
+        },
+        "places_found": {
+            "ru": "Нашла места по запросу. Ниже — названия, адреса и ссылки на карточки карты. Рейтинги показаны только там, где их вернул сервис.",
+            "ua": "Знайдено місця за запитом. Нижче — назви, адреси та посилання на картки мапи. Рейтинги наведено лише там, де їх повернув сервіс.",
+            "en": "I found places matching your request. Names, addresses and map links are below. Ratings are shown only when returned by the provider.",
         },
     }
     messages = table.get(key, {})
@@ -590,8 +724,28 @@ def _localized(language: str, key: str, **values: Any) -> str:
     return template.format(**values)
 
 
+def _duration_label(value: str) -> str:
+    try:
+        seconds = int(re.sub(r"[^0-9]", "", value or "0"))
+    except (TypeError, ValueError):
+        return "неизвестно"
+    minutes = max(1, round(seconds / 60))
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} ч {minutes} мин" if minutes else f"{hours} ч"
+    return f"{minutes} мин"
+
+
+def _distance_label(meters: Any) -> str:
+    try:
+        number = float(meters)
+    except (TypeError, ValueError):
+        return "неизвестно"
+    return f"{number / 1000:.1f} км" if number >= 1000 else f"{number:.0f} м"
+
+
 def build_navigation_response(request: MachineRequest, *, plan: Optional[dict[str, Any]] = None, language: str = "ru") -> Optional[dict[str, Any]]:
-    """Build a keyless OSM/Waze link response for the shared Free/Premium path."""
+    """Execute the room's bounded fast path; return None for unrelated requests."""
     if plan is None:
         current = _current_query(request)
         memory = getattr(request, "memory", {})
@@ -602,72 +756,105 @@ def build_navigation_response(request: MachineRequest, *, plan: Optional[dict[st
 
     answer = ""
     links: list[dict[str, str]] = []
-    route_mode = ""
-
+    map_url = ""
+    route_data: dict[str, Any] = {}
+    places_verified = False
     if plan.get("kind") == "route":
         origin = _text(plan.get("origin"))
         destination = _text(plan.get("destination"))
         city = _text(plan.get("city"))
-        mode = _text(plan.get("travel_mode") or "DRIVE").upper()
-        route_mode = mode
         if not origin or not destination:
             answer = _localized(language, "route_missing")
-        elif not city and not re.search(
-            r"\b(?:ukraine|poland|germany|romania|moldova|united states|canada|united kingdom|france|italy|spain|turkey|czechia|austria|netherlands|japan|united arab emirates|portugal|greece|hungary|bulgaria|south korea|morocco|egypt|tunisia|algeria)\b",
-            origin + " " + destination,
-            re.I,
-        ):
+        elif not city and not re.search(r"\b(?:ukraine|poland|germany|romania|moldova|united states|canada|united kingdom|france|italy|spain|turkey|czechia|austria|netherlands|japan|united arab emirates|portugal|greece|hungary|bulgaria)\b", origin + " " + destination, re.I):
             answer = _localized(language, "route_no_city")
         else:
-            osm_url = _osm_directions_url(origin, destination, mode)
-            if mode == "TRANSIT":
-                answer = _localized(language, "route_transit_link")
-                transit_url = _google_transit_url(origin, destination)
-                links.append({
-                    "url": transit_url,
-                    "title": "Маршрут общественным транспортом",
-                    "description": f"{origin} → {destination}. Ссылка Google Maps без API-ключа.",
-                })
-                map_url = _osm_search_url(destination)
-                links.append({
-                    "url": map_url,
-                    "title": "Показать пункт назначения в OpenStreetMap",
-                    "description": f"{destination}. Карта и данные: © OpenStreetMap contributors.",
-                })
+            mode = _text(plan.get("travel_mode") or "DRIVE")
+            directions_url = _maps_directions_url(origin, destination, mode)
+            route_data = _route_api(plan, language)
+            if route_data:
+                map_url = _static_map(route_data)
+                if map_url:
+                    answer = _localized(
+                        language, "route_verified",
+                        distance=_distance_label(route_data.get("distanceMeters")),
+                        duration=_duration_label(_text(route_data.get("duration"))),
+                    )
+                    steps: list[str] = []
+                    legs = route_data.get("legs") if isinstance(route_data.get("legs"), list) else []
+                    for leg in legs[:1]:
+                        for step in (leg.get("steps") or [])[:8] if isinstance(leg, dict) else []:
+                            if not isinstance(step, dict):
+                                continue
+                            instruction = _text((step.get("navigationInstruction") or {}).get("instructions"))
+                            if instruction:
+                                steps.append(instruction)
+                    if steps:
+                        answer += "\n\n" + "\n".join(f"{index + 1}. {value}" for index, value in enumerate(steps))
+                else:
+                    # Do not detach Google-derived route facts from their map
+                    # attribution when Static Maps cannot be displayed.
+                    answer = _localized(language, "map_unavailable")
             else:
-                answer = _localized(language, "route_link_ready")
-                mode_label = {"DRIVE": "автомобильный", "WALK": "пешеходный", "BICYCLE": "велосипедный"}.get(mode, "")
-                links.append({
-                    "url": osm_url,
-                    "title": f"Открыть {mode_label} маршрут в OpenStreetMap",
-                    "description": f"{origin} → {destination}. Проверка точек и расчёт пути откроются на карте.",
-                })
-                if mode == "DRIVE":
-                    waze_url = _waze_directions_url(destination)
-                    links.append({
-                        "url": waze_url,
-                        "title": "Найти пункт назначения в Waze",
-                        "description": f"Пункт назначения: {destination}. В Waze можно проверить точку и запустить автомобильную навигацию от текущего местоположения.",
-                    })
+                answer = _localized(language, "route_fallback")
+            # A deep link is built locally from the user's own endpoints. It does
+            # not call Routes/Static Maps and therefore works before API keys are
+            # configured. Keep it both in the canonical answer and as LinkCard;
+            # SceneContract normalizes the duplicate into one dedicated link node.
+            answer += f"\n\n[Открыть маршрут в Google Maps]({directions_url})"
+            links.append({"url": directions_url, "title": "Открыть маршрут в Google Maps", "description": f"{origin} → {destination}"})
     elif plan.get("kind") == "places":
-        raw_query = _text(plan.get("query"))
+        query = _text(plan.get("query"))
         city = _text(plan.get("city"))
-        query = _clean_places_query(raw_query, city)
         if city and city.lower() not in query.lower():
-            query = f"{query} {city}".strip()
-        if not city:
-            answer = _localized(language, "places_need_location")
+            query += f" {city}"
+        search_url = _maps_search_url(query)
+        # Text search without a city/area can return unrelated global results.
+        # Do not infer the user's location from IP or account metadata.
+        places = _places_api(plan, language) if city else []
+        places_verified = bool(places)
+        if places:
+            map_url = _static_places_map(places)
+            if map_url:
+                answer = _localized(language, "places_found")
+                for place in places:
+                    title = _text((place.get("displayName") or {}).get("text")) or "Место на карте"
+                    address = _text(place.get("formattedAddress"))
+                    uri = _text(place.get("googleMapsUri")) or search_url
+                    rating = place.get("rating")
+                    rating_text = f" · рейтинг {rating}" if isinstance(rating, (int, float)) else ""
+                    links.append({"url": uri, "title": title, "description": address + rating_text})
+                    answer += f"\n\n**{title}** — {address}{rating_text}"
+            else:
+                # Place names, addresses and ratings are shown only alongside
+                # the Google Map attribution. Otherwise link directly to Maps.
+                answer = _localized(language, "map_unavailable")
+                links.append({"url": search_url, "title": "Искать места в Google Maps", "description": query})
         else:
-            search_url = _osm_search_url(query)
-            answer = _localized(language, "places_found")
-            links.append({
-                "url": search_url,
-                "title": "Найти места на OpenStreetMap",
-                "description": f"{query}. Карта и данные: © OpenStreetMap contributors.",
-            })
+            answer = _localized(language, "places_need_location" if not city else "places_fallback")
+            links.append({"url": search_url, "title": "Искать места в Google Maps", "description": query})
 
     renderer_text = {"type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock", "content": answer}
     render_blocks: list[dict[str, Any]] = [renderer_text]
+    if map_url:
+        map_alt = (
+            "Verified route map"
+            if plan.get("kind") == "route"
+            else "Map of verified nearby places"
+        )
+        render_blocks.append({
+            "type": "image", "renderer": "GalleryBlock", "viewer": "GalleryBlock",
+            "content": "", "payload": {
+                "title": "Карта маршрута" if plan.get("kind") == "route" else "Места на карте",
+                "images": [{
+                    "src": map_url,
+                    "mime_type": "image/png",
+                    "alt": map_alt,
+                    "width": 1280,
+                    "height": 960,
+                    "caption": "Карта загружается напрямую из Google Maps",
+                }],
+            },
+        })
     for item in links:
         render_blocks.append({
             "type": "link", "renderer": "LinkCard", "viewer": "LinkCard",
@@ -676,24 +863,14 @@ def build_navigation_response(request: MachineRequest, *, plan: Optional[dict[st
                 "links": [{"url": item["url"], "title": item["title"], "description": item["description"]}],
             },
         })
-
     machine_response = {
-        "answer": answer,
-        "content": answer,
-        "summary": answer[:180],
-        "render_blocks": render_blocks,
-        "artifacts": [],
+        "answer": answer, "content": answer, "summary": answer[:180],
+        "render_blocks": render_blocks, "artifacts": [],
         "metadata": {
-            "identity": {},
-            "provider_calls": 0,
-            "world_room": True,
+            "identity": {}, "provider_calls": 0, "world_room": True,
             "world_kind": _text(plan.get("kind")),
-            "route_provider": "OpenStreetMap" if plan.get("kind") == "route" else "",
-            "navigation_provider": "Waze" if route_mode == "DRIVE" else "",
-            "route_verified": False,
-            "places_verified": False,
-            "map_image": False,
-            "image_generation_used": False,
+            "route_verified": bool(route_data),
+            "places_verified": places_verified,
         },
         "internal_answer_en": answer,
     }
@@ -701,83 +878,52 @@ def build_navigation_response(request: MachineRequest, *, plan: Optional[dict[st
         "handled": True,
         "machine_response": machine_response,
         "plan": plan,
-        "route_data": {},
-        "map_image_url": "",
+        "route_data": route_data,
+        "map_image_url": map_url,
     }
 
 
-
 def build_persistence_safe_turn(world_result: dict[str, Any], language: str = "ru") -> dict[str, Any]:
-    """Persist only the user's own endpoints/query and rebuild external links."""
+    """Build a provider-content-free history record for C.World responses.
+
+    Maps-derived distances, instructions, place names, addresses, ratings,
+    encoded polylines and image URLs are intentionally ephemeral. User-supplied
+    endpoints/query are converted to a fresh Google Maps deep link; only that
+    link and a short notice are retained with the dialogue turn.
+    """
     plan = world_result.get("plan") if isinstance(world_result.get("plan"), dict) else {}
-    links: list[dict[str, str]] = []
     if _text(plan.get("kind")) == "route":
         origin = _text(plan.get("origin"))
         destination = _text(plan.get("destination"))
-        mode = _text(plan.get("travel_mode") or "DRIVE").upper()
-        geographic_context = bool(plan.get("city")) or bool(re.search(
-            r"\b(?:ukraine|poland|germany|romania|moldova|united states|canada|united kingdom|france|italy|spain|turkey|czechia|austria|netherlands|japan|united arab emirates|portugal|greece|hungary|bulgaria|south korea|morocco|egypt|tunisia|algeria)\b",
-            origin + " " + destination,
-            re.I,
-        ))
-        if not origin or not destination:
-            safe_answer = _localized(language, "route_missing")
-        elif not geographic_context:
-            safe_answer = _localized(language, "route_no_city")
-        else:
-            safe_answer = _localized(language, "route_history_safe")
-            if mode == "TRANSIT":
-                transit_url = _google_transit_url(origin, destination)
-                links.append({
-                    "url": transit_url,
-                    "title": "Маршрут общественным транспортом",
-                    "description": f"{origin} → {destination}",
-                })
-                map_url = _osm_search_url(destination)
-                links.append({"url": map_url, "title": "Пункт назначения в OpenStreetMap", "description": destination})
-            else:
-                url = _osm_directions_url(origin, destination, mode)
-                links.append({
-                    "url": url,
-                    "title": "Повторить маршрут в OpenStreetMap",
-                    "description": f"{origin} → {destination}",
-                })
-                if mode == "DRIVE":
-                    links.append({
-                        "url": _waze_directions_url(destination),
-                        "title": "Найти пункт назначения в Waze",
-                        "description": f"Пункт назначения: {destination}",
-                    })
+        mode = _text(plan.get("travel_mode") or "DRIVE")
+        url = _maps_directions_url(origin, destination, mode) if origin and destination else ""
+        title = "Открыть маршрут в Google Maps"
+        description = f"{origin} → {destination}" if origin and destination else "Маршрут из сообщения пользователя"
+        safe_answer = _localized(language, "route_history_safe")
     else:
-        raw_query = _text(plan.get("query"))
+        query = _text(plan.get("query"))
         city = _text(plan.get("city"))
-        query = _clean_places_query(raw_query, city)
         if city and city.lower() not in query.lower():
             query = f"{query} {city}".strip()
-        if not city:
-            safe_answer = _localized(language, "places_need_location")
-        else:
-            safe_answer = _localized(language, "places_history_safe")
-            if query:
-                links.append({
-                    "url": _osm_search_url(query),
-                    "title": "Повторить поиск в OpenStreetMap",
-                    "description": query,
-                })
+        url = _maps_search_url(query) if query else ""
+        title = "Повторить поиск в Google Maps"
+        description = query
+        safe_answer = _localized(language, "places_history_safe")
 
     blocks: list[dict[str, Any]] = [{
         "type": "text", "renderer": "MessageTextBlock", "viewer": "MessageTextBlock",
         "content": safe_answer,
     }]
-    for item in links:
+    if url:
         blocks.append({
             "type": "link", "renderer": "LinkCard", "viewer": "LinkCard",
             "content": "", "payload": {
-                "url": item["url"], "title": item["title"], "description": item["description"],
-                "links": [{"url": item["url"], "title": item["title"], "description": item["description"]}],
+                "url": url, "title": title, "description": description,
+                "links": [{"url": url, "title": title, "description": description}],
             },
         })
     return {"answer": safe_answer, "render_blocks": blocks, "artifacts": []}
+
 
 def build_machine_contribution(
     machine_request: MachineRequest,
@@ -802,26 +948,25 @@ def build_machine_contribution(
             "rules": [
                 "Never invent a route, street, address, place name, rating, distance or travel time.",
                 "Use user-supplied origin and destination; retrieve prior endpoints only from selected user messages in the active dialogue branch.",
-                "Use OpenStreetMap search/directions links as the general map surface; these links cover the user's explicitly named location without requiring a Google Cloud key.",
-                "Offer a Waze Deep Link for driving only; it opens a destination search, and the user starts navigation in Waze after confirming the result.",
-                "For public-transport requests, provide a keyless external directions link and state that schedules/transfers are calculated by that provider after opening.",
-                "Do not invent place names, addresses, ratings, road geometry, distance, duration, traffic or turn instructions. Provider results are not verified inside April in link-only mode.",
-                "Persist only user-supplied endpoints/search terms and rebuild links; do not persist external map results.",
+                "For current route geometry and duration, use Google Routes API; render Static Maps directly from Google's URL using a separate referrer-restricted browser key.",
+                "Never download, proxy, cache, or persist Google Maps image/content; persist only the user's own route request and a user-input-derived deep link.",
+                "If map provider data is unavailable, provide a Google Maps deep link and clearly disclose that no verified embedded map was returned.",
+                "For nearby restaurants, bars and other places, use a verified Places result or a Google Maps search link; never fabricate businesses.",
+                "Explain in the user's language and distinguish provider facts from estimates.",
             ],
         },
         "prompt_fragments": [
             "C.World handles physical-world routes and place discovery.",
-            "Use exact user-supplied endpoints and OpenStreetMap directions/search links; never draw invented geography.",
-            "For driving, also offer the official Waze Deep Link; it opens the destination search so the user can confirm the place and start navigation in Waze.",
-            "Do not generate map pictures or diagrams from natural language. Use only the existing LinkCard renderer for map/navigation links.",
-            "Never store external map results; retain only the user's own request and rebuild external links for follow-up turns.",
-            "No Google Cloud key or billing account is required for OpenStreetMap/Waze links. Public-transport link handoff is separate and keyless.",
+            "Use exact endpoints and provider-returned route/place data only; never draw invented geography.",
+            "Render Google Static Maps only via direct client image URLs with the separately restricted browser key; do not fetch or persist map bytes.",
+            "Never store Google Maps route or Places results in the persistent dialogue cache; retain only the user's own request for follow-up resolution.",
+            "When the live map provider is not configured or fails, offer the external Google Maps link and disclose that limitation.",
         ],
-        "artifact_hints": {"text": True, "link": True, "image": False, "diagram": False},
+        "artifact_hints": {"text": True, "link": True, "image": True, "diagram": False},
         "domain": "world_navigation",
         "knowledge_scope": ["maps", "directions", "routes", "restaurants", "bars", "places", "public_transport"],
-        "artifact_outputs": ["text", "link"],
-        "capabilities": ["osm_map_links", "osm_directions_links", "places_search_links", "waze_driving_navigation"],
+        "artifact_outputs": ["text", "link", "image"],
+        "capabilities": ["route_planning", "places_search", "map_preview", "navigation_guidance"],
         "scene_contributions": [], "focus_contributions": [], "memory_contributions": [],
         "trajectory_hints": ["preserve_origin_and_destination_across_route_followups"],
         "scene_hints": ["map_geometry_must_come_from_verified_routing_provider"],
@@ -859,7 +1004,7 @@ class WorldRoom:
             response.artifacts.append(self.execute(request))
             add_room_contribution(response, self.id, {"status": "navigation_context_ready"})
             response.executor_hints["room"] = self.id
-            response.executor_hints["outputs"] = ["text", "link"]
+            response.executor_hints["outputs"] = ["text", "link", "image"]
         else:
             add_room_contribution(response, self.id, {"status": "no_match"})
         return response
