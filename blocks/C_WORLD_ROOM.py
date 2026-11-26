@@ -48,6 +48,35 @@ _FOLLOWUP_WORDS = (
     "этот маршрут", "тот маршрут", "этот путь", "этот проезд", "сделай этот",
     "покажи его", "на карте изображением", "this route", "that route", "this journey",
     "make this route", "show it on the map", "same route",
+    # A route link is part of the same active navigation task. These phrases
+    # must restore the previous USER route request even when State Manager
+    # classifies the short correction as a new topic.
+    "где ссылка", "где ссылку", "ссылку не дал", "ты ссылку не дал",
+    "нету ссылки", "нет ссылки", "ссылка пропала", "ссылка исчезла",
+    "ссылка не отображается", "ссылку не видно", "повтори ссылку",
+    "пришли ссылку еще раз", "where is the link", "no link", "link is missing",
+    "link disappeared", "link is not showing",
+)
+
+_STREET_TYPE_RE = (
+    r"(?:улиц[аеиуы]|ул\.?|проспект[ае]?|просп\.?|пр-т|"
+    r"площад[ьи]|пл\.?|переулк[еа]?|пер\.?|бульвар[е]?|бул\.?|"
+    r"шоссе|набережн[аяе]|проезд[е]?)"
+)
+
+_ROUTE_DESTINATION_ACTION_RE = re.compile(
+    r"\b(?:надо|нужно|необходимо|хочу|мне\s+бы)?\s*"
+    r"(?:пройти|дойти|добраться|попасть|доехать|направиться|поехать|идти|ехать)"
+    r"\s+(?:к|ко|до|в|во|на|по|в\s+сторону)\b|"
+    r"\bкак\s+(?:мне\s+)?(?:к\s+нему\s+|туда\s+)?"
+    r"(?:пройти|дойти|добраться|попасть|доехать)\b",
+    re.IGNORECASE,
+)
+_ROUTE_LINK_REPAIR_RE = re.compile(
+    r"(?:где.{0,35}ссылк\w*|ссылк\w*.{0,45}(?:не\s+дал|не\s+вид|пропад\w*|исчез\w*|не\s+появ|не\s+отображ)|"
+    r"(?:нет|нету)\s+ссылк\w*|повтор\w*.{0,25}ссылк\w*|ссылк\w*.{0,25}повтор|"
+    r"where.{0,35}link|no\s+link|link.{0,35}(?:missing|disappeared|not\s+showing))",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -169,6 +198,112 @@ def _clean_endpoint(value: str) -> str:
     return value[:180]
 
 
+def _extract_street_phrase(text: str) -> str:
+    """Extract a user-stated street/address fragment without inventing a number."""
+    source = _normalize(text)
+    patterns = (
+        rf"\b(?:на|по)\s+{_STREET_TYPE_RE}\s+(?P<value>[^.!?;]{{2,110}})",
+        r"\bпо\s+адресу\s*[:：]?\s*(?P<value>[^.!?;]{2,110})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source, re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group("value")
+        # Stop at the beginning of a new instruction or a relative clause, but
+        # retain a comma followed by the street number (e.g. "Косвенная, 42").
+        value = re.split(
+            r"\s*,?\s*(?:котор\w*|где\s+(?:находится|расположен)|"
+            r"а\s+мне\b|мне\s+(?:надо|нужно|необходимо)\b|"
+            r"я\s+не\s+помню\b|можешь\s+мне\b|покажи\b|укажи\b|"
+            r"как\s+(?:к|до|мне)\b|please\b|show\b|tell\s+me\b)",
+            value,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        value = re.sub(r"^\s*(?:улиц[аеиуы]|ул\.?|проспект[ае]?|просп\.?|пр-т|площад[ьи]|пл\.?)\s+", "", value, flags=re.I)
+        value = _clean_endpoint(value)
+        if value:
+            return value
+    return ""
+
+
+def _extract_origin_from_natural_text(text: str) -> str:
+    """Resolve an origin from statements such as 'я нахожусь ... на улице X'."""
+    source = _normalize(text)
+    anchor = re.search(
+        r"\b(?:я\s+)?(?:сейчас\s+)?(?:нахожусь|стою|пребываю|расположен[ао]?|живу)\b"
+        r"(?P<tail>[^.!?]{0,200})",
+        source,
+        re.IGNORECASE,
+    )
+    if anchor:
+        origin = _extract_street_phrase(anchor.group("tail"))
+        if origin:
+            return origin
+
+    # Also support concise location statements such as "я на улице X, 12".
+    concise = re.search(
+        rf"\bя\s+(?:сейчас\s+)?(?:стою\s+)?(?:на|по)\s+{_STREET_TYPE_RE}\s+(?P<value>[^.!?;]{{2,100}})",
+        source,
+        re.IGNORECASE,
+    )
+    if concise:
+        value = _clean_endpoint(concise.group("value"))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_destination_label(value: str) -> str:
+    """Make common Russian place names searchable while preserving user facts."""
+    label = _clean_endpoint(value)
+    low = label.lower().replace("ё", "е")
+    if re.search(r"\bцентральн\w*\s+автовокзал\w*\b", low):
+        return "Центральный автовокзал"
+    if re.search(r"\bглавн\w*\s+автовокзал\w*\b", low):
+        return "Главный автовокзал"
+    if re.search(r"\bавтовокзал\w*\b", low) and len(low.split()) <= 3:
+        return "Автовокзал"
+    return label
+
+
+def _extract_destination_from_natural_text(text: str) -> str:
+    """Resolve the destination from 'мне надо пройти к ...' constructions."""
+    source = _normalize(text)
+    match = _ROUTE_DESTINATION_ACTION_RE.search(source)
+    if not match:
+        return ""
+    tail = source[match.end():].strip(" \t,.:;—-")
+    if not tail:
+        return ""
+
+    # Keep the named destination, and also keep an explicitly supplied street
+    # clause after phrases like "который находится на улице Колонтаевская".
+    street = _extract_street_phrase(tail)
+    place_part = re.split(
+        r"\s*(?:,\s*)?(?:котор\w*|где\s+(?:находится|расположен)|"
+        r"(?:котор\w*\s+)?(?:находится|расположен[ао]?)\s+на\s+улиц)",
+        tail,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    place_part = re.split(
+        r"\s+(?:я\s+не\s+помню|можешь\s+мне|покажи|укажи|построй|проложи|"
+        r"как\s+(?:к|до)|please|show\s+me|tell\s+me)\b",
+        place_part,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    place = _normalize_destination_label(place_part)
+    if street:
+        street_label = f"улица {street}"
+        if place and street.lower() not in place.lower():
+            return f"{place}, {street_label}"
+        return street_label
+    return place
+
+
 def _parse_route(text: str) -> dict[str, Any]:
     city = _extract_city(text)
     normalized = _normalize(text)
@@ -181,35 +316,37 @@ def _parse_route(text: str) -> dict[str, Any]:
         match = re.search(pattern, normalized, re.IGNORECASE)
         if match:
             break
-    if not match:
-        return {"origin": "", "destination": "", "city": city}
 
-    origin = _clean_endpoint(match.group(1))
-    destination = _clean_endpoint(match.group(2))
-    # Remove trailing city clauses and common request tails from destination.
-    destination = re.split(r"\s+(?:в\s+городе|в\s+г\.?|городе|одессе|одесса|одеси|odesa|odessa)\b", destination, maxsplit=1, flags=re.I)[0]
-    destination = re.split(r"\s+(?:покажи|нарисуй|сделай|построй|please|show|draw|make)\b", destination, maxsplit=1, flags=re.I)[0]
-    origin = _clean_endpoint(origin)
-    destination = _clean_endpoint(destination)
+    if match:
+        origin = _clean_endpoint(match.group(1))
+        destination = _clean_endpoint(match.group(2))
+        # Remove trailing city clauses and common request tails from destination.
+        destination = re.split(r"\s+(?:в\s+городе|в\s+г\.?|городе|одессе|одесса|одеси|odesa|odessa)\b", destination, maxsplit=1, flags=re.I)[0]
+        destination = re.split(r"\s+(?:покажи|нарисуй|сделай|построй|please|show|draw|make)\b", destination, maxsplit=1, flags=re.I)[0]
+        origin = _clean_endpoint(origin)
+        destination = _clean_endpoint(destination)
+    else:
+        origin = _extract_origin_from_natural_text(normalized)
+        destination = _extract_destination_from_natural_text(normalized)
+
     if city:
         city_name = city.split(",", 1)[0]
         for endpoint_name in ("origin", "destination"):
             endpoint = origin if endpoint_name == "origin" else destination
-            if city_name.lower() not in endpoint.lower():
+            if endpoint and city_name.lower() not in endpoint.lower():
                 endpoint = f"{endpoint}, {city}"
             if endpoint_name == "origin":
                 origin = endpoint
             else:
                 destination = endpoint
-    elif origin and destination:
-        # Do not silently assign the user's route to an inferred current city.
-        pass
+    # Never infer an origin from device/IP location. A route must have both
+    # explicitly supplied endpoints before C.World can return a directions link.
     return {"origin": origin, "destination": destination, "city": city}
 
 
 def _travel_mode(text: str) -> str:
     low = text.lower()
-    if any(word in low for word in ("пешком", "пішки", "walk", "walking", "on foot")):
+    if any(word in low for word in ("пешком", "пішки", "пройти", "дойти", "walk", "walking", "on foot")):
         return "WALK"
     if any(word in low for word in ("велосипед", "велосипедом", "bike", "bicycle", "cycling")):
         return "BICYCLE"
@@ -219,21 +356,37 @@ def _travel_mode(text: str) -> str:
 
 
 def _navigation_intent(text: str) -> tuple[bool, bool]:
-    low = text.lower()
+    normalized = _normalize(text)
+    low = normalized.lower()
     route_keyword = any(word in low for word in _ROUTE_WORDS)
     route_action = any(term in low for term in (
         "покажи", "построй", "проложи", "рассчитай", "сделай маршрут",
         "нужен маршрут", "дай маршрут", "карта проезда", "карту проезда",
         "как добраться", "как попасть", "как проехать", "как пройти",
+        "укажи путь", "показать на карте", "покажи на карте", "путь на карте",
         "navigate", "navigation", "directions", "show me the way", "get to",
         "how do i get", "how to get", "this route", "that route", "этот маршрут",
         "тот маршрут", "этот путь", "этот проезд",
     ))
     has_endpoints = bool(re.search(
         r"\b(?:с|со|из|от|з|із|від|from)\s+.+?\s+(?:до|к|в|во|на|у|to|towards)\s+.+",
-        _normalize(text), re.IGNORECASE,
+        normalized, re.IGNORECASE,
     ))
-    route = bool(route_keyword and (route_action or has_endpoints))
+    natural_destination_action = bool(_ROUTE_DESTINATION_ACTION_RE.search(normalized))
+    natural_origin_anchor = bool(re.search(
+        r"\b(?:я\s+)?(?:сейчас\s+)?(?:нахожусь|стою|пребываю|расположен[ао]?|живу)\b|"
+        r"\bя\s+(?:сейчас\s+)?(?:на|по)\s+" + _STREET_TYPE_RE,
+        normalized,
+        re.IGNORECASE,
+    ))
+    # Natural speech often states a starting location and then says "мне надо
+    # пройти к ...". Accept that as navigation without requiring "от X до Y".
+    route = bool(
+        route_keyword
+        and (route_action or has_endpoints or natural_destination_action)
+        or (natural_origin_anchor and natural_destination_action)
+        or (natural_origin_anchor and route_action and any(term in low for term in ("на карте", "карту", "укажи путь")))
+    )
     place_keyword = any(word in low for word in _PLACE_WORDS)
     place_action = any(term in low for term in (
         "найди", "найти", "покажи", "подскажи", "посоветуй", "рекомендуй",
@@ -256,7 +409,10 @@ def resolve_navigation_plan(current_text: str, selected_pairs: Optional[list[Any
     """Return a deterministic route/places plan, or None for normal chat."""
     current = _normalize(current_text)
     route_intent, place_intent = _navigation_intent(current)
-    contextual = any(word in current.lower() for word in _FOLLOWUP_WORDS)
+    contextual = (
+        any(word in current.lower() for word in _FOLLOWUP_WORDS)
+        or bool(_ROUTE_LINK_REPAIR_RE.search(current))
+    )
     previous_route = ""
     if contextual and isinstance(selected_pairs, list):
         for pair in reversed(selected_pairs):
@@ -279,7 +435,14 @@ def resolve_navigation_plan(current_text: str, selected_pairs: Optional[list[Any
             "origin": parsed.get("origin", ""),
             "destination": parsed.get("destination", ""),
             "city": parsed.get("city", ""),
-            "travel_mode": _travel_mode(current or source_text),
+            "travel_mode": _travel_mode(
+                current if any(term in current.lower() for term in (
+                    "пешком", "пішки", "пройти", "дойти", "walk", "walking", "on foot",
+                    "автомобил", "на машине", "на авто", "за рулем", "driving", "by car",
+                    "автобус", "трамва", "троллейбус", "общественн", "transit", "bus", "train", "metro",
+                    "велосипед", "bike", "bicycle", "cycling",
+                )) else source_text
+            ),
             "followup": bool(previous_route),
             "needs_map_image": any(term in current.lower() for term in ("изображен", "фото", "картин", "image", "picture", "photo")),
         }
@@ -613,6 +776,11 @@ def build_navigation_response(request: MachineRequest, *, plan: Optional[dict[st
                     answer = _localized(language, "map_unavailable")
             else:
                 answer = _localized(language, "route_fallback")
+            # A deep link is built locally from the user's own endpoints. It does
+            # not call Routes/Static Maps and therefore works before API keys are
+            # configured. Keep it both in the canonical answer and as LinkCard;
+            # SceneContract normalizes the duplicate into one dedicated link node.
+            answer += f"\n\n[Открыть маршрут в Google Maps]({directions_url})"
             links.append({"url": directions_url, "title": "Открыть маршрут в Google Maps", "description": f"{origin} → {destination}"})
     elif plan.get("kind") == "places":
         query = _text(plan.get("query"))
