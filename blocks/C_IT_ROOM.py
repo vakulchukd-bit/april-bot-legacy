@@ -6,6 +6,7 @@ found in the companion April Web archive and never performs user actions.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import json
 import re
 
 from blocks.C_ARTIFACT_CONTRACT import (
@@ -1741,7 +1742,7 @@ APRIL_UI_SCREEN_EVIDENCE = {
 def _ui_search_terms(value: Any) -> set[str]:
     text = str(value or "").lower().replace("ё", "е")
     tokens = set(re.findall(r"[a-zа-яіїє0-9]{3,}", text, re.I))
-    stop = {"как", "куда", "где", "что", "мне", "тебя", "твой", "твое", "твоем", "это", "для", "или", "and", "the", "with", "where", "what", "how", "you", "your", "into", "from"}
+    stop = {"как", "куда", "где", "что", "мне", "тебя", "твой", "твое", "твоем", "это", "для", "или", "and", "the", "with", "where", "what", "how", "you", "your", "into", "from", "кнопка", "кнопки", "элемент", "элементы", "покажи", "показать", "обозначает", "обозначать", "сказать", "объясни", "объяснить"}
     tokens.difference_update(stop)
     synonyms = {
         "премиум": {"premium", "подписка", "тариф", "оплата", "план"},
@@ -1753,6 +1754,24 @@ def _ui_search_terms(value: Any) -> set[str]:
         "сообщество": {"community", "space", "друзья"},
         "справка": {"help", "information", "support"},
         "скрепка": {"вложение", "файл", "фото", "attachment"},
+        "язык": {"языка", "language", "локаль", "перевод", "выбор", "выбрать"},
+        "языка": {"язык", "language", "локаль", "перевод", "выбор", "выбрать"},
+        "график": {"графике", "graph", "chart", "масштаб", "ракурс"},
+        "графике": {"график", "graph", "chart", "масштаб", "ракурс"},
+        "диаграмма": {"diagram", "svg", "схема"},
+        "увеличить": {"zoom", "приблизить", "scale", "масштаб"},
+        "уменьшить": {"zoom", "отдалить", "scale", "масштаб"},
+        "поддержка": {"поддержку", "поддержке", "support", "ticket", "обращение"},
+        "поддержку": {"поддержка", "поддержке", "support", "ticket", "обращение"},
+        "поддержке": {"поддержка", "поддержку", "support", "ticket", "обращение"},
+        "видеокошелек": {"video", "wallet", "кредиты", "пополнение"},
+        "видеокошелька": {"video", "wallet", "кредиты", "пополнение"},
+        "кошелек": {"кошелька", "wallet", "video", "кредиты"},
+        "пополнить": {"пополнение", "buy", "purchase", "credits", "wallet"},
+        "история": {"историю", "history", "разговоры", "диалоги"},
+        "историю": {"история", "history", "разговоры", "диалоги"},
+        "удалить": {"удаление", "delete"},
+        "аккаунт": {"account", "профиль", "удаление"},
     }
     expanded = set(tokens)
     for token in tuple(tokens):
@@ -2279,13 +2298,2438 @@ APRIL_UI_HELP_PLAYBOOK = {
         "Если причина не видна из исходников, попросить скриншот текущего экрана с кнопкой. Разметку стрелкой/обводкой обещать только после получения реального скриншота.",
         "Не утверждать, что April сама нажала кнопку, изменила настройку, отправила форму или завершила оплату.",
     ],
-    "visual_help": "Если пользователь просит показать, где нажать, и запрос содержит diagram/SVG/flowchart, выдать читаемую схему пути. Если просит реальный скриншот, честно сказать, что архив исходников не является снимком текущего устройства; запросить изображение экрана для точной разметки.",
+    "visual_help": "Если пользователь просит показать, где нажать, выбрать один из режимов APRIL_WEB_VISUAL_GUIDE: настоящий скриншот — только из захваченного браузерного снимка или загруженного пользователем изображения; иллюстративное восстановление интерфейса — когда нужно увидеть компоновку, но реального снимка нет, с заметной пометкой «Схематичное представление, не текущий скриншот»; схема навигации — когда нужно показать последовательность страниц и переходов. Не ставить точные пиксельные стрелки по одному текстовому описанию.",
     "source_limits": [
         "Все элементы подтверждены только предоставленным архивом кода; production-домен и текущая сборка напрямую не проверялись.",
         "Схема по исходникам не является живым скриншотом и не доказывает текущую доступность кнопки на аккаунте пользователя.",
         "В адаптивной верстке позиции относительные, а подписи могут быть локализованы.",
     ],
 }
+
+
+# ---------------------------------------------------------------------------
+# APRIL WEB INTERFACE ATLAS
+# ---------------------------------------------------------------------------
+# Detailed, source-derived documentation for the COMPLETE user-facing Web UI.
+# Each record describes appearance, exact control, effect, navigation and plan
+# constraints.  Relational positions are intentional: the app is responsive and
+# source code does not provide stable pixel coordinates or a complete screenshot set.
+
+APRIL_WEB_INTERFACE_ATLAS = {
+    "schema": "april.web_interface_atlas.v1",
+    "source": "Uploaded aprill-web-main (28).zip source snapshot; all app page routes, visible page components, interaction handlers, renderers, app styles, and relevant API route handlers were statically inspected. Production deployment/live account was not accessed.",
+    "visual_language": {
+        "global_shell": "Dark application shell, near-black navy background (#05060a / #07080d), white primary text, muted zinc secondary text, translucent dark panels, low-opacity white borders, generous rounded cards and mobile-safe bottom padding.",
+        "primary_accent": "Soft neon green (#7dff8f / #b8ffca) for primary actions, selected states, success states and Premium accents.",
+        "secondary_accents": [
+            "Cyan/sky blue for wallet, links, support details and selected technical states.",
+            "Amber/yellow for incoming requests, unread support indicators and caution states.",
+            "Rose/red for destructive actions, errors and report/delete warnings.",
+            "Violet/blue gradients for selected media-picker icons and visual accents."
+        ],
+        "layout_rules": [
+            "The site is responsive. Describe positions in relation to named controls/cards (top bar, left of composer, below USER card), not fixed screen coordinates.",
+            "On wide landscape layouts, the chat can show a left profile panel and a right Premium history panel around the central chat column. The panels can collapse; the history panel only appears when active Premium history is available.",
+            "On narrow/mobile layouts, panels are not guaranteed to remain side-by-side; use the current visible layout as authoritative.",
+            "Cards use rounded borders and dark/translucent fills; a screenshot-style guide must preserve the visible labels and relationships, not invent hidden controls."
+        ],
+        "screenshot_truth": "The source archive contains source files and five historical screen evidence records but no complete actual screenshot library. A visual blueprint can produce a labelled illustrative UI guide; it is not an authentic live screenshot. An authentic screenshot must be captured from the requested deployed build/account or supplied by the user."
+    },
+    "route_screens": [
+        {
+            "id": "chat_home", "route": "/", "page_file": "app/page.tsx", "audience": "Signed-in Free and Premium users; sign-in modal may appear when authentication is needed.",
+            "appearance": "Full-height near-black chat shell. A translucent rounded top pill spans the central column. APRIL gradient wordmark sits at the upper left; a circular broom control is centered; a rounded user/profile control sits at the upper right. The conversation occupies the scrollable center. The fixed bottom composer contains the paperclip, message field, send arrow and microphone. On supported wide landscape screens, profile/history side panels flank the conversation.",
+            "landmarks": [
+                {"name": "Brand / help entry", "position": "top bar, left", "control_id": "chat.logo_help", "visual": "APRIL wordmark with gradient lettering"},
+                {"name": "Clear visible workspace", "position": "top bar, horizontally centered", "control_id": "chat.clear_workspace", "visual": "circular control with broom emoji/icon"},
+                {"name": "User/profile", "position": "top bar, right", "control_id": "chat.open_profile", "visual": "person icon and signed-in first name or login label"},
+                {"name": "Conversation timeline", "position": "center, vertically scrollable", "visual": "user and April message cards with render blocks and response actions"},
+                {"name": "Composer", "position": "fixed at bottom", "visual": "rounded translucent input region; paperclip on left, message input and send arrow, microphone at right"},
+                {"name": "Profile side panel", "position": "left side on supported wide landscape layout", "control_id": "chat.profile_panel_toggle", "visual": "embedded /settings panel; collapsible"},
+                {"name": "History side panel", "position": "right side on supported wide landscape layout", "control_id": "chat.history_panel_toggle", "visual": "embedded /history panel; only when active Premium history is available; collapsible"}
+            ],
+            "controls": [
+                {"id":"chat.logo_help", "labels":["APRIL", "Логотип April"], "where":"upper-left of the top bar", "appearance":"gradient APRIL wordmark", "effect":"opens the April Help & Information page", "next":"/aprill", "plan":"Free and Premium"},
+                {"id":"chat.clear_workspace", "labels":["Broom", "Метла", "Очистить чат"], "where":"center of the top bar", "appearance":"round icon button with broom symbol", "effect":"clears the currently mounted visible chat workspace", "next":"empty/current chat view", "caution":"does not delete the account, stored history or server records"},
+                {"id":"chat.open_profile", "labels":["Profile", "Профиль", "USER"], "where":"upper-right of the top bar", "appearance":"rounded user control with person icon and account label", "effect":"opens the signed-in account profile/settings", "next":"/settings", "plan":"Free and Premium; sign-in may be requested"},
+                {"id":"chat.profile_panel_toggle", "labels":["Profile panel", "Панель профиля"], "where":"left side on supported wide landscape layout", "appearance":"embedded profile panel with collapse/expand control", "effect":"collapses or expands the profile side panel", "next":"same page with changed panel visibility", "limits":"not guaranteed as a side panel on mobile"},
+                {"id":"chat.history_panel_toggle", "labels":["History panel", "Панель истории"], "where":"right side on supported wide landscape layout", "appearance":"embedded conversation-history panel with collapse/expand control", "effect":"collapses or expands available history panel", "next":"same page with changed panel visibility", "limits":"shown only when active Premium history is available; not guaranteed on mobile"},
+                {"id":"chat.composer_input", "labels":["Message April", "Сообщение April", "Поле сообщения"], "where":"fixed bottom composer, central input", "appearance":"rounded translucent multiline text field", "effect":"accepts a text request; Enter sends and Shift+Enter adds a new line", "next":"draft message visible in composer"},
+                {"id":"chat.send_button", "labels":["Send", "Отправить", "Arrow"], "where":"right side of the bottom composer", "appearance":"send-arrow button", "effect":"submits the current text and selected attachments", "next":"message appears in conversation and request processing begins", "limits":"disabled when input/session is not ready or a request is already processing"},
+                {"id":"chat.attach_button", "labels":["Paperclip", "Скрепка", "Add attachment"], "where":"left side of the bottom composer", "appearance":"paperclip icon button", "effect":"opens the attachment picker", "next":"Camera / Photos / Files picker"},
+                {"id":"chat.voice_button", "labels":["Microphone", "Микрофон", "Voice message"], "where":"right edge of the bottom composer", "appearance":"microphone icon button", "effect":"starts browser-based voice capture", "next":"recording state, then selected/transcribed voice input", "limits":"requires browser/device microphone permission and support"},
+                {"id":"chat.pending_attachment_remove", "labels":["Remove attachment", "Убрать вложение", "×"], "where":"on a selected attachment chip above/near the composer", "appearance":"small remove icon on each pending attachment", "effect":"removes that item from the unsent draft", "next":"composer without that attachment"},
+            ],
+            "flows": [
+                "Send text: focus Message April → type text → Enter sends; Shift+Enter inserts a newline → send arrow also submits.",
+                "Send media: paperclip → Camera / Photos (Images) / Files → select item → verify visible pending attachment chip → optionally add instruction → send.",
+                "Voice: microphone → grant browser permission → record speech → stop/confirm according to the recording control state → recognized/transcribed content is sent through the chat flow.",
+                "Open profile: top-right profile button → /settings; if not signed in, authentication is requested first.",
+                "Open help: APRIL wordmark → /aprill.",
+                "Clear workspace: broom → clears the mounted visible chat timeline only; it is not account deletion and not a command to erase the server-side History catalogue.",
+                "Continue: ask a follow-up in the same conversation; April should use the current dialog context rather than asking the user to restate everything."
+            ],
+            "state_notes": [
+                "The send button is disabled when the chat/session is not ready or a request is already in progress.",
+                "Pending attachments are shown above/near the composer and have an individual remove control.",
+                "Up to three composer attachments are accepted in the current Web implementation.",
+                "The attachment modal may show Free media quota, remaining base operations out of six, and bonus operations when quota data is returned by the backend.",
+                "The app displays a visual processing/typing state for responses and media render operations; that display is not proof of provider completion until a final answer/block is received."
+            ],
+            "plan_rules": {
+                "free": "Main chat and supported attachments are available subject to current Free quotas and backend policy. A media quota panel can appear in the attachment picker when the quota endpoint returns data. Image editing can require a referral bonus operation under the current policy.",
+                "premium": "Main chat and supported attachments are available under Premium limits. Premium visual/history enhancements are controlled by the current account entitlement.",
+                "both": ["The same composer controls and visual explanations apply to both plans.", "Do not infer remaining media/video credits from plan name; read the returned quota/wallet state."],
+            },
+            "capture": {"route": "/", "anchors": [".april-responsive-shell", ".april-chat-header", "[data-april-scroll-root]", "aside[aria-label='April user profile']"], "states": ["empty chat", "chat with text response", "chat with an image/video/render block", "attachment picker open"], "requires_auth": True}
+        },
+        {
+            "id": "chat_attachment_picker", "route": "overlay on /", "page_file": "app/page.tsx", "audience": "User in main chat",
+            "appearance": "Bottom-sheet on narrow mobile displays and centered rounded modal on wider screens. Dark translucent overlay dims the chat. Header contains a small APRIL label, title Add an attachment and subtitle. Three equal columns show large colored icon tiles for camera, photos/images and files. A close X sits at the top right. If Free quota data exists, a usage panel/progress bar appears above the choices.",
+            "controls": [
+                {"id": "attachment.camera", "labels": ["Camera", "Камера"], "where": "first picker tile", "effect": "Opens camera capture input for taking a new photo", "next": "returns selected image to chat draft", "limits": "Requires device/browser camera availability and permission"},
+                {"id": "attachment.photos", "labels": ["Photos", "Images", "Фото", "Изображения"], "where": "middle picker tile", "effect": "Opens image selection input; supports multiple images in the current source", "next": "returns selected images to chat draft", "limits": "Current composer supports at most three total attachments"},
+                {"id": "attachment.files", "labels": ["Files", "Файлы"], "where": "third picker tile", "effect": "Opens document/file picker for supported file extensions", "next": "returns selected document(s) to chat draft", "limits": "The picker has an explicit accepted-extension list; do not claim every file type is supported"},
+                {"id": "attachment.close", "labels": ["Close", "Cancel", "×"], "where": "modal header, top right", "effect": "Closes picker without sending anything", "next": "main chat"},
+                {"id": "attachment.remove_pending", "labels": ["×", "Remove attachment"], "where": "on each pending attachment chip above composer", "effect": "Removes that selected file from the draft", "next": "main chat draft without that item"}
+            ],
+            "flow": ["Open / → paperclip → choose one of the three source tiles → select/capture → inspect pending attachment chip → write task → send arrow."],
+            "capture": {"route": "/", "state": "attachment picker open", "anchors": ["#april-attachment-title", "role=dialog[aria-labelledby='april-attachment-title']"], "requires_auth": True}
+        },
+        {
+            "id": "settings_profile", "route": "/settings", "page_file": "app/settings/page.tsx", "audience": "Signed-in Free and Premium users",
+            "appearance": "Dark profile page built from vertically stacked rounded cards. Top card shows Google identity and email with Google mark, account-connected hint and Sign out action. Next card shows APRIL ID and optional PREMIUM ID with a Copy button. USER card contains display-name field and Edit/Save action. CURRENT PLAN card follows, with plan badge, status/time remaining and feature rows. Separate support card/link, cyan APRIL · C_VIDEO WALLET card, language selector, and destructive Delete account section appear further down. Layout can wrap for mobile.",
+            "landmarks": [
+                {"name":"Google account card","position":"top of profile","details":"Provider label, Google account name/email, connected status, unread support indicator when applicable, Sign out"},
+                {"name":"APRIL ID / PREMIUM ID","position":"below Google card","details":"APRIL ID always when resolved; PREMIUM ID only when present. Copy copies one or both IDs joined by a separator."},
+                {"name":"USER / Name in chat space","position":"below ID card","details":"Display-name label, editable text input, explanatory text, Edit then Save button and save/error status"},
+                {"name":"CURRENT PLAN","position":"below USER card","details":"Current Free/Premium badge, description, Premium remaining time and active package details when active; feature links and conditional package buttons"},
+                {"name":"APRIL · C_VIDEO WALLET","position":"separate cyan card in profile; not part of CURRENT PLAN","details":"Wallet title, balance/status/loading/error, connection action and credit purchase/checkout controls where configured"},
+                {"name":"LANGUAGE","position":"lower profile section","details":"Current language choices and Choose another language modal/list"},
+                {"name":"Delete account","position":"destructive account card near bottom","details":"Link to /account-deletion, separate from Sign out"}
+            ],
+            "controls": [
+                {"id":"profile.logout","labels":["Sign out","Log out","Выйти"],"where":"Google account card, top/right of card","effect":"Ends April Google session and returns to an unauthenticated state","next":"main page/sign-in state","caution":"Not the same as deleting the April account"},
+                {"id":"profile.copy_ids","labels":["Copy","Copied"],"where":"top of APRIL ID card","effect":"Copies APRIL ID and, when present, PREMIUM ID","next":"clipboard confirmation","caution":"Treat copied IDs as account identifiers; do not post publicly"},
+                {"id":"profile.display_name.edit_save","labels":["Edit","Save"],"where":"USER → Name in chat space","effect":"Enters edit mode or saves the display name","next":"saved status / updated visible name","limits":"Maximum 32 characters; does not change Google name or April ID"},
+                {"id":"profile.plan.history","labels":["Dialog history","История диалогов"],"where":"feature row in CURRENT PLAN","effect":"Premium opens /history; Free displays the row disabled and labelled PREMIUM","next":"/history if active entitlement"},
+                {"id":"profile.plan.support","labels":["Support","Contact support","Техподдержка"],"where":"feature row in CURRENT PLAN","effect":"Active Premium opens /insights?room=support; Free sees disabled Premium indicator","next":"support room when entitled","limits":"New ticket submission has a 24-hour cooldown in this source snapshot"},
+                {"id":"profile.plan.community","labels":["Community","Сообщество"],"where":"feature row in CURRENT PLAN","effect":"Opens /space","next":"Community feed"},
+                {"id":"profile.plan.chat","labels":["Chat with April"],"where":"feature row in CURRENT PLAN","effect":"Opens help/article route /aprill in current component; do not assume it links to / chat","next":"/aprill"},
+                {"id":"profile.plan.package_7d","labels":["7 days · $12","7 дней · $12"],"where":"CURRENT PLAN lower package controls when visible","effect":"Starts one-time 7-day Premium checkout","next":"payment modal or gateway handoff","limits":"Hidden in Google Play distribution; only selectable if actually rendered"},
+                {"id":"profile.plan.package_28d","labels":["28 days · $25","28 дней · $25"],"where":"CURRENT PLAN lower package controls when visible","effect":"Starts one-time 28-day Premium checkout","next":"payment modal or gateway handoff","limits":"Hidden in Google Play distribution; only selectable if actually rendered"},
+                {"id":"profile.plan.package_12h","labels":["12 hours · $3","12 часов · $3"],"where":"CURRENT PLAN lower package controls when visible","effect":"Starts one-time 12-hour Premium checkout","next":"payment modal or gateway handoff","limits":"Hidden in Google Play distribution; only selectable if actually rendered"},
+                {"id":"profile.plan.retry","labels":["Retry verification","Повторить проверку"],"where":"CURRENT PLAN error state","effect":"Re-requests subscription status from server","next":"updated plan state or another error"},
+                {"id":"profile.payment.pay_cancel","labels":["Pay","Cancel"],"where":"Premium checkout modal after package selection","effect":"Pay submits the payment form; Cancel closes checkout if not processing","next":"gateway/payment confirmation flow","caution":"Never tell user payment succeeded until server/gateway confirms it"},
+                {"id":"profile.video_wallet.connect","labels":["Подключить видеокошелёк","Connect video wallet"],"where":"inside separate APRIL · C_VIDEO WALLET card","effect":"Connects/opens the independent Video Wallet checkout flow","next":"wallet activation or checkout result","caution":"This is not a Premium subscription purchase"},
+                {"id":"profile.video_wallet.purchase","labels":["Buy credits","Купить кредиты","Пополнить"],"where":"inside wallet card/modal when backend offers packages","effect":"Creates a wallet checkout order with the currently displayed amount and credit quantity","next":"LiqPay/gateway checkout and server verification","limits":"Price and credit count are dynamic: read the specific order; do not hardcode examples"},
+                {"id":"profile.language.open_more","labels":["Choose another language","More languages","Выбрать другой язык"],"where":"LANGUAGE section","effect":"Opens the language selection modal/list","next":"list of supported languages"},
+                {"id":"profile.language.select","labels":["English","Українська","Русский","Français","…"],"aliases":["язык","языка","language","выбор языка","сменить язык","изменить язык","язык интерфейса"],"where":"language options in profile or modal","effect":"Changes and persists the account's language; language sync event updates other pages","next":"profile and UI labels update to selected locale"},
+                {"id":"profile.delete_account_link","labels":["Delete account","Удалить аккаунт"],"where":"destructive card near bottom of profile","effect":"Opens /account-deletion; it does not immediately delete the account","next":"deletion explanation/confirmation page"}
+            ],
+            "plan_rules": {
+                "free": ["Main chat, profile, language, Community and help are available.", "Dialog history feature is visibly disabled/marked PREMIUM in the current source snapshot.", "Support entry is visibly disabled/marked PREMIUM in the current source snapshot.", "Free media quotas and referral bonuses must be read from live quota state, not inferred."],
+                "premium": ["Premium status and expiration are loaded from the server; the page displays remaining term and active package when available.", "Dialog history and Contact Support become available only while current Premium entitlement is valid.", "Renewal package controls appear based on remaining time and distribution build; renewal is not always immediately available."],
+                "both": ["Video Wallet is a distinct wallet, separate from Premium status.", "Community is available to Free and Premium.", "If current plan metadata is missing, explain both branches or ask the user to check CURRENT PLAN; never guess the user's tier."]
+            },
+            "capture": {"route":"/settings", "anchors":["#april-user-block-title","#april-display-name","#april-video-wallet-title","#april-payment-title"], "states":["Free account", "active Premium account", "Premium checkout modal", "Video Wallet card"], "requires_auth":True}
+        },
+        {
+            "id":"help_information", "route":"/aprill", "page_file":"app/aprill/page.tsx", "audience":"Public; Free and Premium",
+            "appearance":"Dark help page with April branding and a list of large rounded topic cards. Each card has a small icon tile at left, title and summary in the middle, and a right arrow. Accent is soft green. Selecting a topic replaces the topic list with a long-form article card. Articles show an updated label, intro, paragraphs, optional bullet lists, FAQ accordions and contextual action links. Footer shows April copyright.",
+            "topics":[
+                {"id":"help-center","title":"Help Center","purpose":"Frequently asked questions and answers; each FAQ is an expandable details/summary row."},
+                {"id":"how-to-use","title":"How to Use April","purpose":"Instructions for using the main chat, voice, attachments, saved history and related flows. Contains links to open chat, history and memory path; memory page is currently a placeholder."},
+                {"id":"privacy-policy","title":"Privacy Policy","purpose":"In-page explanation plus Open full Privacy Policy → /privacy-policy and link to deletion."},
+                {"id":"terms-of-service","title":"Terms of Service","purpose":"In-page explanation plus Open full Terms of Service → /terms-of-service."},
+                {"id":"plans-payments","title":"Plans & Payments","purpose":"Informational comparison cards for Free, Lite and Premium and billing note; this is not a purchase form."},
+                {"id":"account-deletion","title":"Account & Data Deletion","purpose":"Explains account data deletion and links to /account-deletion and /settings."},
+                {"id":"contact-support","title":"Contact Support","purpose":"Explains support and links back to /settings, where eligible Premium users can open support."}
+            ],
+            "controls":[
+                {"id":"help.topic_card","labels":["Help Center","How to Use April","Privacy Policy","Terms of Service","Plans & Payments","Account & Data Deletion","Contact Support"],"where":"vertical topic list on /aprill","effect":"Opens selected article in the same /aprill route using internal state","next":"selected article; not a separate URL for most topic cards"},
+                {"id":"help.faq_toggle","labels":["FAQ question row","＋"],"where":"inside Help Center article","effect":"Expands/collapses the answer under the selected question","next":"inline answer shown/hidden"},
+                {"id":"help.open_chat","labels":["Open chat"],"where":"How to Use April article","effect":"Opens /","next":"main chat"},
+                {"id":"help.open_history","labels":["Open history"],"where":"How to Use April article","effect":"Opens /history","next":"Premium-protected history page"},
+                {"id":"help.open_memory","labels":["Open Memory"],"where":"How to Use April article","effect":"Navigates to /memory","next":"empty placeholder in this source snapshot; do not describe as a working memory management screen"},
+                {"id":"help.open_deletion","labels":["Open deletion","Account & Data Deletion"],"where":"Privacy/Deletion article","effect":"Opens /account-deletion","next":"April account deletion page"},
+                {"id":"help.open_settings","labels":["Open settings"],"where":"Deletion article","effect":"Opens /settings","next":"profile page"},
+                {"id":"help.open_support","labels":["Open support"],"where":"Contact Support article","effect":"Opens /settings","next":"profile; only eligible Premium user sees active support row"},
+                {"id":"help.open_full_policy","labels":["Open full Privacy Policy"],"where":"Privacy Policy article","effect":"Opens /privacy-policy","next":"full privacy document"},
+                {"id":"help.open_full_terms","labels":["Open full Terms of Service"],"where":"Terms article","effect":"Opens /terms-of-service","next":"full terms document"},
+                {"id":"help.back_to_topics","labels":["All topics","Back to topics","←"],"where":"bottom of currently opened article","effect":"Returns to topic-card list without leaving /aprill","next":"topic list"},
+                {"id":"help.back_to_april","labels":["Back to April"],"where":"page header","effect":"Returns to main chat /","next":"main chat"}
+            ],
+            "plan_rules":{"free":"Help page and articles are public; History link destination remains Premium-protected.","premium":"Same help material; History destination is available while entitlement remains active.","both":"Plans & Payments article is explanatory only. The actual Premium package choices are in /settings → CURRENT PLAN, and Video Wallet is separate."},
+            "capture":{"route":"/aprill","anchors":["main", "article", "[aria-label]"],"states":["topic list", "Help Center with one FAQ expanded", "Plans & Payments article", "How to Use April article"],"requires_auth":False}
+        },
+        {
+            "id":"history_list", "route":"/history", "page_file":"app/history/page.tsx", "audience":"Authenticated user with active Premium entitlement",
+            "appearance":"Dark page with header/back control and a vertical list of rounded conversation cards. Cards show conversation date/time and a text excerpt; selecting/continuing is distinct from returning to chat. Loading, empty, error and Premium lock states are handled. The list has no standalone search input in source.",
+            "controls":[
+                {"id":"history.back","labels":["Back to April","←"],"where":"header top-left","effect":"Returns to / without choosing a conversation","next":"main chat"},
+                {"id":"history.conversation_card","labels":["conversation card","date/time + excerpt"],"where":"vertical list","effect":"Selects/opens a saved conversation entry for continuation workflow","next":"selected conversation state"},
+                {"id":"history.continue","labels":["Continue this dialogue","Продолжить этот диалог"],"where":"inside saved conversation card","effect":"Restores the selected conversation and returns to / with that dialogue context","next":"main chat with restored dialogue"}
+            ],
+            "states":["loading", "loaded list", "empty history with plan-specific retention-window message", "temporary transport error", "Premium required/locked"],
+            "plan_rules":{"free":"Backend rejects history access without Premium; show this restriction and link to /settings, not a fake search box.","premium":"History access is validated by the protected backend endpoint; entries are returned for the current account. The retention window in the payload is 12 or 24 hours according to backend data.","both":"There is no text search field in this page. Ask April to find a previous topic semantically or by time in the chat; do not confuse that with a page search control."},
+            "capture":{"route":"/history","anchors":["main", "button[aria-label='Back to April']"],"states":["Premium list with several entries", "empty history", "Free lock state"],"requires_auth":True,"requires_premium_for_list":True}
+        },
+        {
+            "id":"community_feed", "route":"/space", "page_file":"app/space/page.tsx", "audience":"Authenticated Free and Premium",
+            "appearance":"Dark Community page with a page title/subtitle at the top. Personal profile is a collapsible/expandable card. The profile area contains nickname editing, invitation controls, incoming friend requests, friends and contacts. Public feed cards sit below. A sticky bottom composer contains a text area, file attachment and Send arrow/button. Accent colors include green and amber; user messages and actions are separated in rounded cards.",
+            "sections":["Community heading and subtitle", "Personal profile / Your community nickname", "Invite a friend", "Friend requests", "Friends / Contacts", "Search friends", "Public post feed", "Bottom publication composer"],
+            "controls":[
+                {"id":"community.back_to_profile","labels":["Back to profile","Назад в профиль"],"where":"top/upper profile context","effect":"Returns to profile/settings route where linked","next":"/settings"},
+                {"id":"community.personal_profile_toggle","labels":["Personal profile","Личный профиль"],"where":"card below title","effect":"Expands/collapses the personal profile controls"},
+                {"id":"community.nickname_input","labels":["Your community nickname","Введите ник"],"where":"inside Personal profile","effect":"Edits the Community display nickname, 2–32 characters"},
+                {"id":"community.nickname_save","labels":["Save nickname","Сохранить ник"],"where":"below nickname input","effect":"Saves nickname on server; displays saved/error status"},
+                {"id":"community.invite","labels":["Invite a friend","Пригласить друга"],"where":"inside Personal profile","effect":"Creates/shares invitation link and can copy it to clipboard"},
+                {"id":"community.requests","labels":["Friend requests","Запросы в друзья"],"where":"inside profile section","effect":"Shows incoming friend requests; Accept adds the user to contacts"},
+                {"id":"community.accept_friend","labels":["Accept","Принять","Add friend"],"where":"incoming request/member card","effect":"Accepts an incoming friendship request or sends an add-friend request depending on relation state"},
+                {"id":"community.search_friends","labels":["Search friends","Поиск друзей"],"where":"members/friends area","effect":"Searches Community members only; it is not global site search"},
+                {"id":"community.open_direct","labels":["Private chat","Личный диалог"],"where":"friend/contact card","effect":"Opens /space/direct/[friendId] for the selected contact"},
+                {"id":"community.block_member","labels":["Block","Unblock","Блокировать","Разблокировать"],"where":"member/post context action","effect":"Hides/shows that member's public messages after confirmation; not a platform-wide account ban"},
+                {"id":"community.public_composer","labels":["Ask a question or share a solution…","Опишите вопрос или поделитесь решением…"],"where":"sticky bottom composer","effect":"Creates a public Community post"},
+                {"id":"community.attach_file","labels":["Attach a file","Прикрепить файл"],"where":"left side of bottom composer","effect":"Selects a document/source file for a public post"},
+                {"id":"community.send_post","labels":["Send","Отправить"],"where":"right side of bottom composer","effect":"Publishes the composed message and optional supported file into public feed"},
+                {"id":"community.download_file","labels":["Download file","Скачать файл"],"where":"file attachment within a public post","effect":"Downloads the attached document"},
+                {"id":"community.report_post","labels":["Report","Пожаловаться"],"where":"post actions","effect":"Submits report on the selected public post"},
+                {"id":"community.delete_post","labels":["Delete your message","Удалить своё сообщение"],"where":"own post actions","effect":"Deletes own public post and associated attachment after confirmation"}
+            ],
+            "rules":["Community is public to its members: messages and attached files are visible to other members.","File attachments are limited to 3 MiB each and 30 MiB total active attachments per user in this source snapshot.","Executable files are blocked.","Photo/video media file types are not accepted as ordinary public Community file attachments.","Posting is rate-limited; the UI may ask the user to wait about one minute.","Never advise posting passwords, API keys, access tokens or personal data."],
+            "plan_rules":{"free":"Community is listed for Free and Premium. The page is authenticated and identifies each author's Free/Premium plan badge.","premium":"Same Community controls; no special paid-only public feed control is evidenced.","both":"Search is only for members; it does not search all site pages or historic April chats."},
+            "capture":{"route":"/space","anchors":["#community-message", "#community-nickname", "main"],"states":["profile expanded", "member search", "friend request", "feed with post attachment", "bottom composer"],"requires_auth":True}
+        },
+        {
+            "id":"direct_chat", "route":"/space/direct/[friendId]", "page_file":"app/space/direct/[friendId]/page.tsx", "audience":"Authenticated user with an allowed friend/contact relationship",
+            "appearance":"Dark private conversation page. Header includes Back to Community and the selected person's display name; a Share control may appear. Messages occupy the central scroll area; each message card is styled differently for own vs peer messages. Attached files show name, size and Download. Fixed bottom composer has Attach file, Message your friend… field and Send.",
+            "controls":[
+                {"id":"direct.back","labels":["Back to Community","Назад в сообщество"],"where":"header upper left","effect":"Returns to /space"},
+                {"id":"direct.share_app","labels":["Share","↗"],"where":"header near contact title","effect":"Opens the app/share workflow"},
+                {"id":"direct.attach_file","labels":["Attach file","Прикрепить файл"],"where":"left of composer","effect":"Selects file for private message"},
+                {"id":"direct.remove_attachment","labels":["Remove file","×"],"where":"selected-file chip above composer","effect":"Removes pending file from draft"},
+                {"id":"direct.send","labels":["Send","Отправить"],"where":"right of composer","effect":"Sends text and/or file to selected friend"},
+                {"id":"direct.download","labels":["Download","Скачать"],"where":"file card inside a message","effect":"Downloads the received/sent file"},
+                {"id":"direct.delete_message","labels":["Delete","Удалить"],"where":"own message or admin-authorized message action","effect":"Deletes an eligible message after server action"}
+            ],
+            "limits":["The [friendId] part of the route is a selected contact identifier; users should not type it manually.","This is private correspondence, not a public Community post.","An unauthenticated user sees the sign-in prompt and link back to chat."],
+            "capture":{"route":"/space/direct/[friendId]","anchors":["#direct-message","main"],"requires_auth":True,"requires_friend_context":True}
+        },
+        {
+            "id":"support_room", "route":"/insights?room=support", "page_file":"app/insights/page.tsx", "audience":"Premium user with active entitlement or authorized admin",
+            "appearance":"Dark support workspace. A list of support conversation/ticket cards appears in one section; selecting a card opens a detail area with date, message text, optional image and replies. Below is the new-request form when the user has active Premium and is outside the 24-hour cooldown. A large text field, image attachment control and Send action are shown. Unread/new-reply markers use amber/green/cyan highlights.",
+            "controls":[
+                {"id":"support.select_ticket","labels":["History card","support message date"],"where":"support history list","effect":"Loads the selected support ticket detail"},
+                {"id":"support.new_request_text","labels":["Describe the issue…","Опишите проблему…"],"where":"new request section","effect":"Accepts support issue text, up to 4000 characters"},
+                {"id":"support.attach_screenshot","labels":["Image","Screenshot","Скриншот"],"where":"below new request field","effect":"Attaches a single PNG/JPG/JPEG/WebP image, up to 12 MiB"},
+                {"id":"support.remove_image","labels":["Remove","Удалить"],"where":"selected support screenshot preview","effect":"Removes the pending image from support draft"},
+                {"id":"support.send_request","labels":["Send","Send message","Отправить сообщение"],"where":"below support text/image","effect":"Sends support request when active Premium, cooldown expired, and content meets minimum length"},
+                {"id":"support.reply_history","labels":["Support reply","Answer","Ответ поддержки"],"where":"inside selected ticket detail","effect":"Displays support response; original and translated versions may be expandable"}
+            ],
+            "access_rules":{"free":"The current source blocks new ticket creation unless backend reports active Premium. Show Premium requirement; do not imply Free can submit.","premium":"Active Premium can submit at most one new support request per 24 hours in this source snapshot. Existing ticket history/detail may still be shown according to authenticated API response.","admin":"Admin path can show incoming user tickets and reply controls; those are not normal user controls."},
+            "limits":["Description maximum 4000 characters.","One image attachment, PNG/JPG/JPEG/WebP, up to 12 MiB.","If an existing request is open, selecting the card is needed to see the full detail and reply.","Do not confuse /insights home with the explicit ?room=support mode."],
+            "capture":{"route":"/insights?room=support","anchors":["main", "textarea", "input[type='file']"],"states":["Premium no cooldown", "Premium cooldown", "selected ticket detail", "Free Premium-required message"],"requires_auth":True,"requires_premium_for_new_request":True}
+        },
+        {
+            "id":"account_deletion", "route":"/account-deletion", "page_file":"app/account-deletion/page.tsx", "audience":"Public explanation; deletion action requires recognized April account/session",
+            "appearance":"Standalone dark page with centered rounded content card and large title. Separate content blocks explain what April deletes and what is not deleted (especially Google account and Google Play subscriptions). An external Google Play subscriptions link is shown. Destructive Delete account button appears only for eligible identified user; Sign in with Google may appear when identity is missing.",
+            "controls":[
+                {"id":"deletion.google_sign_in","labels":["Sign in with Google","Войти через Google"],"where":"account action area when no April session/ID is recognized","effect":"Authenticates Google and returns to /account-deletion; does not delete anything"},
+                {"id":"deletion.google_play_subscriptions","labels":["Google Play subscriptions","Manage subscriptions"],"where":"billing explanation section","effect":"Opens external Google Play subscription management"},
+                {"id":"deletion.confirm_delete","labels":["Delete account","Удалить аккаунт"],"where":"bottom destructive action area","effect":"Calls April account deletion endpoint and clears local April visual cache after successful deletion","caution":"Irreversible/destructive; only use after user explicitly decides to delete April account"}
+            ],
+            "rules":["Deletes the April account data described on the page; it does not delete the user's Google account.","It does not automatically cancel externally managed Google Play subscriptions; manage those separately in Google Play.","Sign out is a different action and should be used when the user only wants to leave the session."],
+            "capture":{"route":"/account-deletion","anchors":["main", "button"],"states":["signed out", "signed in before confirmation"],"requires_auth_for_delete":True}
+        },
+        {
+            "id":"legal_documents", "route":"/privacy-policy and /terms-of-service", "page_file":"app/privacy-policy/page.tsx; app/terms-of-service/page.tsx", "audience":"Public",
+            "appearance":"Static dark legal documents with readable text columns and internal/external links. There are no interactive product controls beyond navigation links.",
+            "controls":[{"id":"legal.policy_terms_links","labels":["Privacy Policy","Terms of Service"],"where":"document links/footer/help page","effect":"Opens the corresponding public legal document"}],
+            "limits":["These documents are legal information, not account-setting panels.","Do not provide individualized legal advice as if it were an official interpretation."],
+            "capture":{"routes":["/privacy-policy","/terms-of-service"],"requires_auth":False}
+        },
+        {
+            "id":"memory_placeholder", "route":"/memory", "page_file":"app/memory/page.tsx", "audience":"Not implemented in inspected source snapshot",
+            "appearance":"The page file contains only a null render; no visible controls or working memory screen are defined.",
+            "controls":[], "limits":["Do not describe a working Memory page or invent buttons. Use actual conversation/history functionality where available."],
+            "capture":{"route":"/memory","state":"source placeholder","requires_auth":False}
+        },
+        {
+            "id":"tools_placeholder", "route":"/tools", "page_file":"app/tools/page.tsx", "audience":"Not implemented in inspected source snapshot",
+            "appearance":"The page file contains only a null render; no visible tools dashboard is defined.",
+            "controls":[], "limits":["Do not describe a working Tools dashboard or invent generator tiles. Users perform supported tasks from the main chat."],
+            "capture":{"route":"/tools","state":"source placeholder","requires_auth":False}
+        },
+        {
+            "id":"admin_profile", "route":"/Admin-profile", "page_file":"app/Admin-profile/page.tsx", "audience":"Administrator only",
+            "appearance":"Administrative dark dashboard headed Aprill Core, with tabs/sections for Users, Premium user messages/support and AI response reports. It is not a normal user profile page.",
+            "controls":[
+                {"id":"admin.users","labels":["Пользователи","Users"],"where":"admin tab/navigation","effect":"Opens admin user-management/list section"},
+                {"id":"admin.premium_messages","labels":["Сообщения пользователей Premium","Premium messages"],"where":"admin tab/navigation","effect":"Shows incoming Premium support messages; allows admin-side inspection/reply when authorized"},
+                {"id":"admin.reports","labels":["Жалобы на ответы April","AI response reports"],"where":"admin tab/navigation","effect":"Shows user reports about assistant responses"}
+            ],
+            "limits":["Admin route access is server-controlled.","Never give ordinary users instructions to bypass authorization or expose another user's support data."],
+            "capture":{"route":"/Admin-profile","requires_admin":True}
+        },
+        {
+            "id":"google_auth_modal", "route":"modal on protected entry", "page_file":"app/Component/AuthModal.tsx", "audience":"Unauthenticated user when protected action requires sign-in",
+            "appearance":"Centered dark modal over a dimmed current page, with Continue with Google primary button, close X and Terms/Privacy links.",
+            "controls":[
+                {"id":"auth.continue_google","labels":["Continue with Google","Войти через Google"],"where":"main modal button","effect":"Starts Google OAuth authentication; after success the app returns to requested callback path"},
+                {"id":"auth.close","labels":["Close","×"],"where":"modal top-right","effect":"Closes modal without authenticating"},
+                {"id":"auth.terms_privacy","labels":["Terms of Service","Privacy Policy"],"where":"modal lower area","effect":"Opens public legal documents"}
+            ],
+            "limits":["Showing the Google dialog is not proof that authentication is complete.","A successful return to the app and resolved profile/session confirms sign-in."],
+            "capture":{"route":"current protected page with auth modal","requires_auth":False}
+        }
+    ],
+    "render_blocks": [
+        {"id":"render.text_markdown","files":["app/Component/renderers/MessageTextBlock.tsx","MarkdownBlock.tsx"],"appearance":"Text/markdown card within April's answer; formatted paragraphs, lists, code/math and safe links may appear.","controls":["Text action menu Download/Share when handler is present", "Interactive SVG opens enlarged view only when interactive is enabled", "Close exits enlarged SVG view"],"limits":"Do not promise menu actions or SVG expand for every text block."},
+        {"id":"render.image_gallery","files":["app/Component/renderers/GalleryBlock.tsx"],"appearance":"One or more image tiles/cards inside the answer, responsive and contained within the message width.","controls":["Tap/click image to open full-screen image view", "Close X returns to chat", "Download or share image menu when handler is present"],"limits":"Viewing an image does not start a new generation. Download/share are only present when callbacks/assets exist."},
+        {"id":"render.video","files":["app/Component/renderers/VideoBlock.tsx"],"appearance":"Video/media card inside an answer, rendered with native media playback controls and optional action menu.","controls":["Native play/pause, timeline, volume/fullscreen according to browser support", "Download or share file menu where handler is present"],"limits":"Browser-native controls vary by device. A media card does not itself identify generation duration or credit cost."},
+        {"id":"render.graph","files":["app/Component/renderers/GraphBlock.tsx"],"appearance":"Graph card with plotted data, axis labels/legend and optional explanation. Plot can be 2D or 3D, and some supported models can animate.","controls":["− zoom out", "+ zoom in", "Left/Right/Back/Top/Side/3D view presets when 3D camera controls are available", "Reset view", "Pause/Resume only for an animatable wave", "Show description and data toggle only for the supported line graph mode", "Download/share graph or diagram menu"],"limits":"Control availability depends on graph type and props; never promise every graph has 3D, animation or the same view buttons."},
+        {"id":"render.table","files":["app/Component/renderers/TableBlock.tsx"],"appearance":"Structured table card with headers and rows; some headers are sortable.","controls":["Click sortable column header to change visible row order", "Download/share table menu when available"],"limits":"Sorting is a display operation; it does not edit the original user file or database."},
+        {"id":"render.code_copy","files":["app/Component/renderers/CodeBlock.tsx","CopyBlock.tsx"],"appearance":"Monospaced code panel with language indication and a Copy action; outer action menu may also appear.","controls":["Copy copies code to clipboard", "Download/share code menu if handler exists"],"limits":"Copy does not execute code."},
+        {"id":"render.file_delivery","files":["app/Component/renderers/FileDeliveryBlock.tsx"],"appearance":"File delivery card showing a filename/downloadable asset and optional action menu.","controls":["Download/share file menu when provided"],"limits":"File appearing in chat does not mean it has been saved to the phone; user must download/open it."},
+        {"id":"render.link_card","files":["app/Component/renderers/LinkCard.tsx"],"appearance":"External link card showing title/domain/preview metadata depending on block payload.","controls":["Click verified link/card to open destination", "Download/share link menu where provided"],"limits":"The destination is an external website; April cannot guarantee its uptime/content."},
+        {"id":"render.diagram","files":["app/Component/renderers/MessageTextBlock.tsx","MarkdownBlock.tsx"],"appearance":"SVG/diagram rendered in the answer card; interactive variants can open in a larger overlay.","controls":["Click diagram only if renderer marks it interactive", "Close X in expanded view", "Download/share menu where available"],"limits":"A static diagram may not be clickable; a route flow diagram is not a screenshot of the user's live page."}
+    ],
+    "navigation_edges": [
+        {"from":"/", "control":"APRIL wordmark", "to":"/aprill", "meaning":"open Help & Information"},
+        {"from":"/", "control":"profile/user button", "to":"/settings", "meaning":"open account profile/settings"},
+        {"from":"/", "control":"broom", "to":"/ (same page)", "meaning":"clear visible workspace only"},
+        {"from":"/settings", "control":"CURRENT PLAN → Dialog history", "to":"/history", "condition":"active Premium"},
+        {"from":"/settings", "control":"CURRENT PLAN → Support", "to":"/insights?room=support", "condition":"active Premium"},
+        {"from":"/settings", "control":"Community", "to":"/space", "condition":"authenticated"},
+        {"from":"/settings", "control":"Delete account", "to":"/account-deletion", "condition":"explicitly requested destructive flow"},
+        {"from":"/aprill", "control":"Open full Privacy Policy", "to":"/privacy-policy"},
+        {"from":"/aprill", "control":"Open full Terms of Service", "to":"/terms-of-service"},
+        {"from":"/aprill", "control":"Open History", "to":"/history", "condition":"Premium required"},
+        {"from":"/aprill", "control":"Open Memory", "to":"/memory", "condition":"placeholder only in audited snapshot"},
+        {"from":"/space", "control":"Private chat on friend/contact", "to":"/space/direct/[friendId]", "condition":"valid selected friend/contact"},
+        {"from":"/space/direct/[friendId]", "control":"Back to Community", "to":"/space"},
+        {"from":"/account-deletion", "control":"Google Play subscriptions", "to":"external Google Play subscriptions management"}
+    ],
+    "plan_matrix": {
+        "free": {
+            "available_routes": ["/", "/settings", "/aprill", "/space", "/privacy-policy", "/terms-of-service", "/account-deletion"],
+            "restricted": ["/history list (Premium check)", "new support request (active Premium required)"],
+            "other_conditions": ["Free media operations have quotas returned by backend; current chat picker can show base quota 0–6 and referral bonus remaining.", "Source policy says image edit can require referral bonus operations; the actual reservation result from backend is authoritative.", "Video Wallet is separately displayed and must not be confused with Premium subscription."]
+        },
+        "premium": {
+            "available_routes": ["Free routes plus /history and /insights?room=support while active Premium entitlement is valid"],
+            "other_conditions": ["Current plan status/expiry is loaded from server; do not rely solely on a stale browser/JWT display.", "Support request cooldown is 24 hours in the audited source snapshot.", "History retention window is returned by backend as 12 or 24 hours; explain the value in the current response, not as a generic promise.", "Premium does not imply unlimited Video Wallet credits; wallet balance and order pricing are separate."]
+        },
+        "unresolved_without_runtime_identity": "This room can store both plan branches, but a personalized Free/Premium answer requires the request to carry an authenticated current plan. The current MachineRequest schema has fiber.identity.subscription (default 'Free'), but the inspected Free/Premium request construction does not reliably assign the verified current plan before the IT room is called. Until that field is populated from the backend entitlement, do not trust the default; report plan-specific branches or mark the plan unknown."
+    },
+    "capture_catalog": {
+        "method": "Playwright or equivalent browser capture on the deployed build, with authenticated test accounts. Capture mobile portrait and desktop/wide layouts, including each important modal/expanded/empty/locked state.",
+        "verified_dom_anchors": {
+            "/": [".april-responsive-shell", ".april-chat-header", "[data-april-scroll-root]", "aside[aria-label='April user profile']", "iframe[title='April user profile']", "iframe[title='April conversation history']", "#april-attachment-title"],
+            "/settings": ["#april-user-block-title", "#april-display-name", "#april-payment-title", "#april-video-wallet-title"],
+            "/space": ["#community-message", "#community-nickname"],
+            "/space/direct/[friendId]": ["#direct-message"],
+            "/account-deletion": ["main", "button"],
+            "/aprill": ["main", "article", "FAQ details/summary"],
+            "/history": ["main", "button[aria-label='Back to April']"],
+            "/insights?room=support": ["main", "textarea", "input[type='file']"]
+        },
+        "capture_states": [
+            "main chat empty", "main chat with one user/assistant exchange", "chat attachment modal", "chat pending attachment chip", "profile Free", "profile Premium", "Premium checkout modal", "Video Wallet card idle/loading/checkout", "language chooser open", "help topic list", "each help article including one FAQ expanded", "History populated/empty/locked", "Community profile expanded", "Community friend request/member result", "Community feed and composer", "private chat with attachment", "support Premium form", "support cooldown", "support ticket detail with reply", "account deletion explanation before confirmation", "Google auth modal", "gallery fullscreen", "graph with each supported control type", "table with sortable header", "code block", "file delivery card", "video block"
+        ],
+        "pixel_annotation_policy": "Use stored authentic screenshot for exact arrows/circles/coordinates. If no screenshot asset exists, build a labelled schematic from this atlas and label it 'Схема интерфейса по исходникам — не скриншот'. Do not invent pixel positions or fabricate a live screen capture."
+    },
+    "source_limits": [
+        "This atlas is based on uploaded source snapshot, not live production DOM or a signed-in user session.",
+        "Some labels are localized at runtime across Russian, Ukrainian, English and other configured languages; aliases are included, while the actual screen label wins.",
+        "Responsive layout changes positions. Use relative landmarks, not fixed pixel coordinates, until an actual screenshot is captured.",
+        "Some controls are conditional on backend response, browser features, plan, account status, feature flags or payment configuration.",
+        "Internal API routes, Python rooms, provider names and admin tools are not user-visible navigation controls."
+    ]
+}
+
+# The catalogue below makes individual UI elements addressable without requiring
+# the model to infer a button from a whole-page paragraph.
+APRIL_WEB_CONTROL_CATALOG = []
+for _screen in APRIL_WEB_INTERFACE_ATLAS["route_screens"]:
+    for _control in _screen.get("controls", []):
+        _row = dict(_control)
+        _row["screen_id"] = _screen.get("id")
+        _row["route"] = _screen.get("route")
+        _row["screen_title"] = _screen.get("id")
+        APRIL_WEB_CONTROL_CATALOG.append(_row)
+
+# Controls inside generated answer blocks are also part of the user's web UI.
+# Convert them to individually searchable records (rather than free-form lists).
+APRIL_WEB_RENDER_CONTROL_CATALOG = []
+for _render_block in APRIL_WEB_INTERFACE_ATLAS.get("render_blocks", []):
+    _block_id = str(_render_block.get("id", "render.unknown"))
+    _block_controls = _render_block.get("controls", [])
+    _render_aliases = {
+        "render.text_markdown": ["текстовый ответ", "форматированный текст", "markdown", "список", "ссылка в ответе"],
+        "render.image_gallery": ["изображение", "фото", "картинка", "галерея", "полноэкранный просмотр", "скачать изображение"],
+        "render.video": ["видео", "видеоплеер", "воспроизведение", "перемотка", "громкость", "полный экран"],
+        "render.graph": ["график", "диаграмма", "масштаб", "увеличить", "уменьшить", "приблизить", "отдалить", "ракурс", "3d", "объемный", "объёмный", "пауза", "анимация", "показать описание", "данные графика"],
+        "render.table": ["таблица", "столбец", "строка", "сортировка", "сортировать", "скачать таблицу"],
+        "render.code_copy": ["код", "скопировать код", "копировать", "кнопка copy"],
+        "render.file_delivery": ["файл", "скачать файл", "загрузка файла", "вложение"],
+        "render.link_card": ["ссылка", "ссылка на сайт", "открыть сайт", "внешний сайт"],
+        "render.diagram": ["схема", "диаграмма", "svg", "увеличить схему", "развернуть схему", "закрыть схему"],
+    }.get(_block_id, [])
+    for _index, _description in enumerate(_block_controls, start=1):
+        _description = str(_description)
+        _slug = re.sub(r"[^a-z0-9]+", "_", _description.lower()).strip("_")[:48] or f"control_{_index}"
+        APRIL_WEB_RENDER_CONTROL_CATALOG.append({
+            "id": f"{_block_id}.{_slug}",
+            "labels": [_description],
+            "aliases": _render_aliases,
+            "where": _render_block.get("appearance", "inside the corresponding rendered answer block"),
+            "effect": _description,
+            "next": "the same answer block updates or opens its supported viewer/action",
+            "limits": _render_block.get("limits", "Control presence depends on the actual rendered block and available handler."),
+            "screen_id": _block_id,
+            "route": "inside an answer on /",
+            "screen_title": _block_id,
+            "evidence": "source_component_inventory",
+        })
+APRIL_WEB_CONTROL_CATALOG.extend(APRIL_WEB_RENDER_CONTROL_CATALOG)
+
+# Stable semantic page/feature keys for the future remote IT ROOM API.
+# These are public identifiers, not secret credentials or environment variables.
+APRIL_WEB_SEMANTIC_KEY_REGISTRY = {
+    "schema": "april.web_semantic_keys.v1",
+    "page_keys": [
+        {"key": "WEB_CHAT", "target_type": "screen", "target_id": "chat_home", "route": "/", "aliases": ["главный чат", "чат April"]},
+        {"key": "WEB_ATTACHMENT_PICKER", "target_type": "screen", "target_id": "chat_attachment_picker", "route": "/", "aliases": ["вложения", "скрепка", "прикрепить файл"]},
+        {"key": "WEB_PROFILE", "target_type": "screen", "target_id": "settings_profile", "route": "/settings", "aliases": ["кабинет", "профиль"]},
+        {"key": "WEB_SETTINGS", "target_type": "screen", "target_id": "settings_profile", "route": "/settings", "aliases": ["настройки", "параметры профиля"]},
+        {"key": "WEB_HELP", "target_type": "screen", "target_id": "help_information", "route": "/aprill", "aliases": ["справка", "центр помощи", "описание April"]},
+        {"key": "WEB_HISTORY", "target_type": "screen", "target_id": "history_list", "route": "/history", "aliases": ["история", "старые диалоги"]},
+        {"key": "WEB_COMMUNITY", "target_type": "screen", "target_id": "community_feed", "route": "/space", "aliases": ["сообщество", "лента сообщества"]},
+        {"key": "WEB_DIRECT_CHAT", "target_type": "screen", "target_id": "direct_chat", "route": "/space/direct/[friendId]", "aliases": ["личные сообщения", "личный чат"]},
+        {"key": "WEB_SUPPORT", "target_type": "screen", "target_id": "support_room", "route": "/insights?room=support", "aliases": ["поддержка", "обращение в поддержку"]},
+        {"key": "WEB_ACCOUNT_DELETION", "target_type": "screen", "target_id": "account_deletion", "route": "/account-deletion", "aliases": ["удаление April аккаунта"]},
+        {"key": "WEB_LEGAL", "target_type": "screen", "target_id": "legal_documents", "route": "/privacy-policy", "aliases": ["политика конфиденциальности", "условия использования"]},
+        {"key": "WEB_MEMORY", "target_type": "screen", "target_id": "memory_placeholder", "route": "/memory", "aliases": ["память", "раздел памяти", "страница-заглушка"]},
+        {"key": "WEB_TOOLS", "target_type": "screen", "target_id": "tools_placeholder", "route": "/tools", "aliases": ["инструменты", "страница-заглушка"]},
+        {"key": "WEB_ADMIN", "target_type": "screen", "target_id": "admin_profile", "route": "/Admin-profile", "aliases": ["административная панель", "только администратор"]},
+        {"key": "WEB_GOOGLE_AUTH", "target_type": "screen", "target_id": "google_auth_modal", "route": "modal on /", "aliases": ["вход Google", "авторизация"]}
+    ],
+    "feature_keys": [
+        {"key": "WEB_VIDEO_WALLET", "target_type": "control_group", "screen_id": "settings_profile", "control_ids": ["profile.video_wallet.connect", "profile.video_wallet.purchase", "legacy_function.settings_video_wallet"], "aliases": ["видеокошелёк", "видеокредиты", "пополнить баланс"]},
+        {"key": "WEB_FREE", "target_type": "plan", "plan_id": "free", "aliases": ["Free", "бесплатный тариф"]},
+        {"key": "WEB_PREMIUM", "target_type": "plan", "plan_id": "premium", "aliases": ["Premium", "премиум"]},
+        {"key": "WEB_IMAGE", "target_type": "render_block", "target_id": "render.image_gallery", "aliases": ["изображение", "фотография", "галерея"]},
+        {"key": "WEB_VIDEO", "target_type": "render_block", "target_id": "render.video", "aliases": ["видеоплеер", "видеоблок"]},
+        {"key": "WEB_GRAPH", "target_type": "render_block", "target_id": "render.graph", "aliases": ["график", "диаграмма"]},
+        {"key": "WEB_TABLE", "target_type": "render_block", "target_id": "render.table", "aliases": ["таблица", "сортировка таблицы"]},
+        {"key": "WEB_CODE", "target_type": "render_block", "target_id": "render.code_copy", "aliases": ["код", "копирование кода"]},
+        {"key": "WEB_FILE", "target_type": "render_block", "target_id": "render.file_delivery", "aliases": ["файл", "скачивание файла"]},
+        {"key": "WEB_LINK", "target_type": "render_block", "target_id": "render.link_card", "aliases": ["ссылка", "внешний сайт"]},
+        {"key": "WEB_DIAGRAM", "target_type": "render_block", "target_id": "render.diagram", "aliases": ["схема", "SVG"]},
+        {"key": "WEB_TEXT", "target_type": "render_block", "target_id": "render.text_markdown", "aliases": ["текстовый ответ", "форматированный текст"]}
+    ],
+    "lookup_rule": "Resolve the semantic key first, then resolve the exact screen/control/render record. The authenticated plan selects access metadata, never a different page identity."
+}
+
+# Preserve and normalize the established 64-function C_IT_ROOM catalogue as
+# first-class searchable entries in the complete Web control atlas.
+_LEGACY_AREA_ROUTE = {
+    "chat": ("chat_home", "/"), "attachments": ("chat_attachment_picker", "/"),
+    "settings": ("settings_profile", "/settings"), "profile": ("settings_profile", "/settings"),
+    "history": ("history_list", "/history"), "guide": ("help_information", "/aprill"),
+    "help-center": ("help_information", "/aprill"), "how-to-use": ("help_information", "/aprill"),
+    "space": ("community_feed", "/space"), "community": ("community_feed", "/space"),
+    "direct": ("direct_chat", "/space/direct/[friendId]"), "support": ("support_room", "/insights?room=support"),
+    "deletion": ("account_deletion", "/account-deletion"), "privacy": ("legal_documents", "/privacy-policy"),
+    "terms": ("legal_documents", "/terms-of-service"), "image-controls": ("chat_home", "inside an answer on /"),
+    "graph-controls": ("chat_home", "inside an answer on /"), "response-feedback": ("chat_home", "/"),
+    "plans": ("settings_profile", "/settings"), "memory": ("memory_placeholder", "/memory"),
+    "tools": ("tools_placeholder", "/tools"),
+}
+_LEGACY_NORMALIZED_IDS = {str(_row.get("function_id") or _row.get("id")) for _row in APRIL_WEB_CONTROL_CATALOG}
+for _legacy_function in APRIL_UI_FUNCTION_CATALOG.get("functions", []):
+    if not isinstance(_legacy_function, dict):
+        continue
+    _legacy_id = str(_legacy_function.get("id") or "").strip()
+    if not _legacy_id or _legacy_id in _LEGACY_NORMALIZED_IDS:
+        continue
+    _areas = _legacy_function.get("areas", []) if isinstance(_legacy_function.get("areas"), list) else []
+    _primary_area = next((area for area in _areas if area in _LEGACY_AREA_ROUTE), "chat")
+    _legacy_screen, _legacy_route = _LEGACY_AREA_ROUTE.get(_primary_area, ("chat_home", "/"))
+    _legacy_control_label = str(_legacy_function.get("control") or _legacy_function.get("id"))
+    _legacy_search_label = re.sub(r"\([^)]{0,100}\)", "", _legacy_control_label).strip(" .;,")
+    _legacy_labels = [_legacy_search_label or _legacy_id]
+    _legacy_aliases = list(_legacy_function.get("aliases", [])) if isinstance(_legacy_function.get("aliases"), list) else []
+    APRIL_WEB_CONTROL_CATALOG.append({
+        "id": f"legacy_function.{_legacy_id}",
+        "function_id": _legacy_id,
+        "labels": _legacy_labels,
+        "aliases": _legacy_aliases,
+        "where": _legacy_function.get("position", "as described in the original C_IT_ROOM function catalogue"),
+        "appearance": _legacy_search_label,
+        "purpose": _legacy_function.get("does", ""),
+        "effect": _legacy_function.get("does", ""),
+        "steps": list(_legacy_function.get("how_to_use", [])) if isinstance(_legacy_function.get("how_to_use"), list) else [],
+        "next": _legacy_function.get("result", ""),
+        "plan": _legacy_function.get("availability", ""),
+        "limits": _legacy_function.get("limits", ""),
+        "screen_id": _legacy_screen,
+        "route": _legacy_route,
+        "screen_title": _legacy_function.get("screen", _legacy_screen),
+        "evidence": "existing_C_IT_ROOM_function_catalogue",
+        "source_function_id": _legacy_id,
+    })
+    _LEGACY_NORMALIZED_IDS.add(_legacy_id)
+
+APRIL_WEB_HELP_COPY = json.loads(r'''{
+  "en": {
+    "title": "Help & Information",
+    "subtitle": "Guides, account information and service policies",
+    "overviewTitle": "How can we help?",
+    "overviewText": "Choose a topic to open its own page section. Public guides and policies are available to everyone.",
+    "topicsLabel": "Topics",
+    "backToChat": "Back to April",
+    "backToTopics": "All topics",
+    "articleLabel": "INFORMATION",
+    "updatedLabel": "Working draft · 22 October 2026",
+    "noticeLabel": "Please note",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "$0",
+    "lite": "Lite",
+    "litePrice": "US$12 / 24 hours (future test format)",
+    "liteDuration": "Future test format: 24 hours for US$12. Not available yet; features and limits will be announced when it launches.",
+    "premiumPrice": "US$25 / 28 days or US$3 / 12 hours",
+    "memoryFree": "Up to 12 hours of dialogue memory",
+    "memoryPremium": "Up to 24 hours of dialogue memory",
+    "billingNote": "Premium is offered as two one-time prepaid packages: US$25 for 28 days or US$3 for 12 hours, with no automatic renewal or recurring charge. Free stays free and can be used at any time. Lite is a future test format for 24 hours at US$12 and is not available yet. The renewal option appears during the final 24 hours of Premium. If you do not renew before expiry, access automatically returns to Free. Website Google Pay checkout is displayed only after the merchant and payment gateway are configured, enabled and approved. An app distributed through Google Play must use Google Play Billing instead.",
+    "openChat": "Open chat",
+    "openHistory": "Open dialogue history",
+    "openMemory": "Open memory",
+    "openSettings": "Open profile and settings",
+    "openDeletion": "Open account deletion page",
+    "openSupport": "Open profile and support",
+    "faqTitle": "Frequently asked questions",
+    "faqs": [
+      {
+        "question": "Does April always remember previous messages?",
+        "answer": "No. Memory supports continuity within the available memory window, but it does not guarantee that every detail will be recalled."
+      },
+      {
+        "question": "How long does memory last?",
+        "answer": "The intended dialogue-memory window is up to 12 hours on Free and up to 24 hours on Premium. Other records can have different retention periods."
+      },
+      {
+        "question": "Can Free users ask questions in the Help Center?",
+        "answer": "Free users can read public guides and FAQs. Asking questions directly in the Help Center is a Premium feature."
+      },
+      {
+        "question": "Can Free users contact technical support?",
+        "answer": "Technical-support requests are available to Premium members only, subject to the current request limit."
+      },
+      {
+        "question": "Does deleting April delete my Google account?",
+        "answer": "No. Only the April account and April-side data are affected. The planned Premium offer is prepaid and does not renew automatically, so you do not need to cancel it to prevent another charge. Manage any other Google Play subscription in Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Help Center",
+        "summary": "Common questions and answers about using April."
+      },
+      "how-to-use": {
+        "title": "How to Use April",
+        "summary": "Text, voice, images, dialogue history and memory."
+      },
+      "privacy-policy": {
+        "title": "Privacy Policy",
+        "summary": "What information April processes and how to request deletion."
+      },
+      "terms-of-service": {
+        "title": "Terms of Service",
+        "summary": "Rules for using April and important AI limitations."
+      },
+      "plans-payments": {
+        "title": "Plans & Payments",
+        "summary": "Free, Lite and Premium access, planned prices, memory windows and manual renewal."
+      },
+      "account-deletion": {
+        "title": "Account & Data Deletion",
+        "summary": "Delete your April account and review what the action affects."
+      },
+      "contact-support": {
+        "title": "Contact Support",
+        "summary": "Technical support is available to Premium members."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Browse the public guides and frequently asked questions below. The published guides can be read on every plan.",
+        "paragraphs": [
+          "Personalized questions sent directly to the Help Center are a Premium feature. The Free plan can read the public instructions and FAQs, but cannot submit questions to the Help Center."
+        ],
+        "notice": "Help Center questions and technical-support requests are Premium-only. Public information remains available to Free users."
+      },
+      "how-to-use": {
+        "intro": "April can help with questions, writing, explanations, planning, analysis and supported text, voice and image tasks. Available capabilities can depend on your plan and the live service configuration.",
+        "bullets": [
+          "Text: explain what you want to achieve, add useful context and send your message in the April chat.",
+          "Voice: use the voice input when available, speak clearly and check the recognized text when it is shown.",
+          "Images and files: attach a supported item and describe what April should inspect, explain or change.",
+          "History: open Dialogue History to revisit available saved entries. Use Continue this dialogue where it is offered to resume a conversation.",
+          "Memory: memory helps with continuity, but is not a permanent archive and does not guarantee recall of every detail."
+        ],
+        "paragraphs": [
+          "Intended memory window: Free — up to 12 hours; Premium — up to 24 hours. These limits should be confirmed against the current production configuration before public launch."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "This working privacy-policy draft describes the main types of information that may be processed when you use April. The final public policy must be completed with the service operator's legal name and privacy contact details.",
+        "paragraphs": [
+          "Information processed may include account and sign-in information; the messages and dialogue content you submit; audio, images and files you choose to upload; technical and security records needed to operate the service; and plan or transaction records where payments are enabled.",
+          "Information is used to provide responses and requested features, maintain account access and dialogue continuity, apply plan limits, respond to support requests where available, protect the service and meet applicable legal obligations.",
+          "The content needed to answer a request may be processed by the AI, hosting, authentication and other service providers used to operate April. Before public release, the operator must identify the actual providers, relevant data categories and links to their privacy information.",
+          "The intended dialogue-memory window is up to 12 hours on Free and up to 24 hours on Premium. This is not a promise that every database entry, technical log, support message or transaction record is deleted after that window; their actual retention periods must be documented separately.",
+          "You can request deletion of your April account from Settings or from the public account-deletion page. Deleting April does not delete your Google account, Gmail or Google Drive. The planned April Premium is prepaid and does not renew automatically, so no cancellation is needed to prevent another charge. Manage any other Google Play subscription in Google Play."
+        ],
+        "bullets": [
+          "Before publication, add the responsible legal entity and a working privacy contact.",
+          "Verify all data categories, processors, locations, retention periods and deletion behavior against the deployed Web and Bot services."
+        ],
+        "notice": "This is a draft, not a completed legal policy. It must be reviewed and completed before it is used for Google Play submission or presented as the final policy."
+      },
+      "terms-of-service": {
+        "intro": "These draft terms explain the basic expectations for using April. They must be completed with the responsible operator's details and reviewed for the applicable jurisdiction before publication.",
+        "bullets": [
+          "April is an AI-powered service. Features, availability and limits may vary by plan and may change over time.",
+          "AI responses may be inaccurate, incomplete or outdated. Review important information before relying on it, especially for legal, medical, financial or safety decisions.",
+          "Do not use April to violate laws or others' rights, attempt unauthorized access, disrupt the service or submit content you are not permitted to share.",
+          "Keep access to your account secure. Plan features and support access are determined by the plan currently assigned to your account.",
+          "Premium pricing, billing period, renewal, cancellation and refund conditions must be displayed clearly before real payments are enabled.",
+          "You may stop using April and request deletion of your April account. The planned April Premium is prepaid and does not renew automatically, so no cancellation is needed to prevent another charge. Manage any other Google Play subscription in Google Play."
+        ],
+        "notice": "Working draft. Add the operator's legal name, contact details, governing-law and dispute provisions, consumer-rights information and any other terms required for the actual service before public release."
+      },
+      "plans-payments": {
+        "intro": "This page describes the intended plans. Prices below are planning values only; a purchase is not available until the Google Play billing flow is implemented and verified.",
+        "bullets": [
+          "Free — US$0. Public guides and FAQs are available; chat and rendering features remain subject to the limits applied by the service. Dialogue-memory window: up to 12 hours.",
+          "Lite — future test format: US$12 for 24 hours. It is not available yet; features and limits will be announced when it launches.",
+          "Premium — US$25 for 28 days or US$3 for 12 hours. Available features depend on the active Premium configuration and may include up to 24 hours of dialogue memory, a higher input limit, supported image editing and Premium support.",
+          "Renewal is manual. The planned prepaid plan does not auto-renew: no later payment is taken automatically. To continue after expiry, the user must press the purchase/renewal button and approve a new purchase. After the paid period expires, the account returns to Free."
+        ],
+        "paragraphs": [
+          "Dialogue memory is a context window, not a promise that every history entry, support message, technical log or transaction record is deleted after that interval. Those categories can have separate retention periods."
+        ],
+        "notice": "Real checkout is not active yet. These planned amounts and benefits must not be presented as live purchase offers until the in-app billing and server verification have been implemented and tested."
+      },
+      "account-deletion": {
+        "intro": "You can start account deletion from the red Delete account control in your April profile settings, or open the separate account-deletion page below.",
+        "paragraphs": [
+          "The current deletion page says it removes the April profile and April ID, dialogue history, saved prompts and responses, render metadata, plan or entitlement data, and April's internal payment records associated with the account. The deployed deletion flow must be tested to confirm that it removes the intended records.",
+          "Your Google account and other Google services are not deleted. The planned April Premium is prepaid and does not renew automatically, so no cancellation is needed to prevent another charge. Manage any other Google Play subscription in Google Play."
+        ],
+        "notice": "If deletion reports an error, do not assume that the data has been removed. Follow the status shown by the deletion page."
+      },
+      "contact-support": {
+        "intro": "Technical-support requests are available to Premium members from the April profile settings.",
+        "paragraphs": [
+          "The current intended limit is one support request every 24 hours. The support form and its server-side Premium restriction remain part of the existing service."
+        ],
+        "notice": "Free users can read the public Help Center and guides, but cannot send technical-support requests. Upgrade to Premium to access this feature."
+      }
+    }
+  },
+  "ru": {
+    "title": "Помощь и информация",
+    "subtitle": "Инструкции, сведения об аккаунте и правила сервиса",
+    "overviewTitle": "Чем помочь?",
+    "overviewText": "Выберите тему, чтобы открыть её отдельно. Публичные инструкции и правила доступны всем пользователям.",
+    "topicsLabel": "Разделы",
+    "backToChat": "Вернуться в April",
+    "backToTopics": "Все разделы",
+    "articleLabel": "ИНФОРМАЦИЯ",
+    "updatedLabel": "Рабочий проект · 22 октября 2026 г.",
+    "noticeLabel": "Обратите внимание",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "$0",
+    "lite": "Lite",
+    "litePrice": "$12 США / 24 часа (будущий тестовый формат)",
+    "liteDuration": "Будущий тестовый формат: 24 часа за $12. Пока недоступен; функции и лимиты будут объявлены при запуске.",
+    "premiumPrice": "$25 / 28 дней или $3 / 12 часов",
+    "memoryFree": "Память диалога — до 12 часов",
+    "memoryPremium": "Память диалога — до 24 часов",
+    "billingNote": "Premium доступен как две разовые предоплаченные покупки: $25 за 28 дней или $3 за 12 часов, без автопродления и повторных списаний. Free остаётся бесплатным и доступен в любое время. Lite — будущий тестовый формат на 24 часа за $12, пока недоступен. Продление можно выбрать в последние 24 часа Premium. Если не продлевать доступ, по окончании срока аккаунт возвращается на Free. Оплата через Google Pay на сайте отображается после настройки, включения и проверки мерчанта и платёжного оператора. Приложение, распространяемое через Google Play, должно использовать Google Play Billing.",
+    "openChat": "Открыть чат",
+    "openHistory": "Открыть историю диалогов",
+    "openMemory": "Открыть память",
+    "openSettings": "Открыть профиль и настройки",
+    "openDeletion": "Открыть страницу удаления аккаунта",
+    "openSupport": "Открыть профиль и поддержку",
+    "faqTitle": "Частые вопросы",
+    "faqs": [
+      {
+        "question": "April всегда помнит предыдущие сообщения?",
+        "answer": "Нет. Память помогает продолжать диалог в пределах доступного окна, но не гарантирует, что будут сохранены все детали."
+      },
+      {
+        "question": "Как долго хранится память?",
+        "answer": "Планируемое окно памяти диалога: до 12 часов на Free и до 24 часов на Premium. Для других записей могут действовать иные сроки хранения."
+      },
+      {
+        "question": "Могут ли пользователи Free задавать вопросы в Центр помощи?",
+        "answer": "Пользователи Free могут читать общедоступные инструкции и FAQ. Задавать вопросы непосредственно в Центр помощи могут только пользователи Premium."
+      },
+      {
+        "question": "Могут ли пользователи Free обращаться в техподдержку?",
+        "answer": "Технические обращения доступны только Premium с учётом действующего ограничения по частоте."
+      },
+      {
+        "question": "Удаление April удаляет мой аккаунт Google?",
+        "answer": "Нет. Удаляются только аккаунт April и данные на стороне April. Планируемый Premium — предоплаченный и не продлевается автоматически, поэтому отменять его ради предотвращения нового списания не нужно. Другие подписки Google Play нужно проверять и настраивать в Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Центр помощи",
+        "summary": "Частые вопросы и ответы об использовании April."
+      },
+      "how-to-use": {
+        "title": "Как пользоваться April",
+        "summary": "Текст, голос, изображения, история диалогов и память."
+      },
+      "privacy-policy": {
+        "title": "Политика конфиденциальности",
+        "summary": "Какие данные обрабатывает April и как запросить удаление."
+      },
+      "terms-of-service": {
+        "title": "Условия использования",
+        "summary": "Правила использования April и ограничения AI."
+      },
+      "plans-payments": {
+        "title": "Тарифы и платежи",
+        "summary": "Тарифы Free, Lite и Premium, планируемые цены, окно памяти и ручное продление."
+      },
+      "account-deletion": {
+        "title": "Удаление аккаунта и данных",
+        "summary": "Как удалить аккаунт April и что затрагивает удаление."
+      },
+      "contact-support": {
+        "title": "Техническая поддержка",
+        "summary": "Технические обращения доступны пользователям Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Здесь собраны общедоступные инструкции и ответы на частые вопросы. Читать опубликованные материалы могут пользователи любого тарифа.",
+        "paragraphs": [
+          "Персональные вопросы непосредственно в Центр помощи — функция Premium. Пользователи Free могут читать открытые инструкции и FAQ, но не могут отправлять вопросы в Центр помощи."
+        ],
+        "notice": "Вопросы в Центр помощи и обращения в техническую поддержку доступны только Premium. Публичная справка остаётся доступной пользователям Free."
+      },
+      "how-to-use": {
+        "intro": "April помогает с вопросами, текстами, объяснениями, планированием, анализом и поддерживаемыми задачами с текстом, голосом и изображениями. Возможности могут зависеть от тарифа и текущей конфигурации сервиса.",
+        "bullets": [
+          "Текст: опишите, чего хотите добиться, добавьте контекст и отправьте сообщение в чате April.",
+          "Голос: используйте голосовой ввод, если он доступен, говорите чётко и проверьте распознанный текст, если он отображается.",
+          "Изображения и файлы: приложите поддерживаемый файл и объясните, что нужно изучить, описать или изменить.",
+          "История: откройте историю диалогов, чтобы просмотреть доступные сохранённые записи. Используйте «Продолжить диалог», если такая команда доступна.",
+          "Память: помогает сохранять контекст разговора, но не является постоянным архивом и не гарантирует воспоминание каждой детали."
+        ],
+        "paragraphs": [
+          "Планируемое окно памяти: Free — до 12 часов; Premium — до 24 часов. Перед публикацией эти значения необходимо подтвердить в рабочей конфигурации сервера."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Этот рабочий проект политики описывает основные типы информации, которая может обрабатываться при использовании April. Перед публикацией необходимо указать юридическое наименование оператора и контакт для вопросов конфиденциальности.",
+        "paragraphs": [
+          "Обрабатываемая информация может включать данные аккаунта и входа; сообщения и содержание диалогов; аудио, изображения и файлы, которые вы загружаете; технические записи и сведения безопасности, необходимые для работы сервиса; сведения о тарифе и транзакциях, если платежи включены.",
+          "Информация используется для ответов и запрошенных функций, работы аккаунта и контекста диалога, применения ограничений тарифа, обработки обращений там, где поддержка доступна, защиты сервиса и выполнения юридических обязательств.",
+          "Для ответа на запрос нужное содержание может обрабатываться AI-провайдерами, хостингом, службами авторизации и другими поставщиками, задействованными в работе April. До публикации необходимо перечислить фактических поставщиков, категории передаваемых данных и ссылки на их политики конфиденциальности.",
+          "Планируемое окно памяти диалога — до 12 часов на Free и до 24 часов на Premium. Это не означает, что все записи базы данных, технические журналы, обращения в поддержку или транзакции удаляются по истечении этого времени; для них необходимо отдельно определить реальные сроки хранения.",
+          "Удалить аккаунт April можно через настройки или отдельную публичную страницу удаления. Это не удаляет аккаунт Google, Gmail или Google Drive. Планируемый Premium April — предоплаченный и не продлевается автоматически, поэтому отменять его ради предотвращения нового списания не нужно. Другие подписки Google Play нужно проверять и настраивать в Google Play."
+        ],
+        "bullets": [
+          "Перед публикацией добавьте ответственное юридическое лицо и действующий контакт по вопросам конфиденциальности.",
+          "Сверьте категории данных, поставщиков услуг, места обработки, сроки хранения и удаление с развёрнутыми сервисами Web и Bot."
+        ],
+        "notice": "Это проект, а не завершённая юридическая политика. Перед отправкой в Google Play и публичной публикацией документ необходимо проверить и дополнить."
+      },
+      "terms-of-service": {
+        "intro": "Эти проектные условия описывают основные правила использования April. Перед публикацией их нужно дополнить сведениями об операторе и проверить с учётом применимого законодательства.",
+        "bullets": [
+          "April — сервис на основе AI. Функции, доступность и ограничения могут различаться по тарифам и меняться со временем.",
+          "Ответы AI могут быть неточными, неполными или устаревшими. Проверяйте важные сведения, особенно при юридических, медицинских, финансовых вопросах и вопросах безопасности.",
+          "Запрещено использовать April для нарушения закона или прав других лиц, несанкционированного доступа, нарушения работы сервиса или передачи материалов, которыми вы не вправе делиться.",
+          "Защищайте доступ к своему аккаунту. Функции и доступ к поддержке определяются тарифом, назначенным вашему аккаунту.",
+          "Цену Premium, период оплаты, продление, отмену и возвраты необходимо ясно показывать до включения реальных платежей.",
+          "Вы можете прекратить пользоваться April и запросить удаление аккаунта. Планируемый Premium April — предоплаченный и не продлевается автоматически, поэтому отменять его ради предотвращения нового списания не нужно. Другие подписки Google Play нужно проверять и настраивать в Google Play."
+        ],
+        "notice": "Рабочий проект. До публикации добавьте юридическое наименование оператора, контакты, применимое право, порядок споров, информацию о правах потребителей и другие необходимые условия."
+      },
+      "plans-payments": {
+        "intro": "Здесь описана планируемая схема тарифов. Цены ниже являются ориентировочными; покупка станет доступна только после подключения и проверки оплаты Google Play.",
+        "bullets": [
+          "Free — $0. Общедоступные инструкции и FAQ доступны всем. Возможности чата и визуализаций ограничены действующими настройками сервиса. Окно памяти диалога — до 12 часов.",
+          "Lite — будущий тестовый формат: $12 за 24 часа. Пока недоступен; функции и лимиты будут объявлены при запуске.",
+          "Premium — $25 за 28 дней или $3 за 12 часов. Возможности зависят от активной конфигурации Premium и могут включать память диалога до 24 часов, увеличенный лимит входных данных, поддерживаемое редактирование изображений и техподдержку Premium.",
+          "Продление ручное. Предполагается предоплаченный план без автоматического продления: повторное списание без действия пользователя не выполняется. Для продолжения после окончания срока пользователь должен нажать кнопку покупки/продления и подтвердить новую покупку. После окончания оплаченного срока аккаунт возвращается на Free."
+        ],
+        "paragraphs": [
+          "Окно памяти — это срок доступности контекста диалога, а не обещание удалить все записи истории, обращения в поддержку, технические журналы или транзакции. Для этих данных могут действовать отдельные сроки хранения."
+        ],
+        "notice": "Реальная оплата пока не подключена. Не показывайте эти планируемые суммы и преимущества как доступное предложение, пока внутренняя покупка Google Play и серверная проверка не будут реализованы и протестированы."
+      },
+      "account-deletion": {
+        "intro": "Запрос на удаление можно начать красной кнопкой «Удалить аккаунт» в настройках профиля April или открыть отдельную страницу удаления ниже.",
+        "paragraphs": [
+          "На текущей странице удаления указано, что удаляются профиль April и April ID, история диалогов, сохранённые запросы и ответы, метаданные рендеринга, сведения о тарифе или правах доступа и внутренние записи April о платежах, связанные с аккаунтом. Рабочий процесс удаления необходимо проверить, чтобы подтвердить очистку нужных записей.",
+          "Аккаунт Google и другие сервисы Google не удаляются. Планируемый Premium April — предоплаченный и не продлевается автоматически, поэтому отменять его ради предотвращения нового списания не нужно. Другие подписки Google Play нужно проверять и настраивать в Google Play."
+        ],
+        "notice": "Если при удалении появляется ошибка, не считайте данные удалёнными. Ориентируйтесь на статус, который показывает страница удаления."
+      },
+      "contact-support": {
+        "intro": "Обращения в техническую поддержку доступны пользователям Premium из профиля April.",
+        "paragraphs": [
+          "Планируемое действующее ограничение — одно обращение каждые 24 часа. Форма поддержки и серверная проверка доступа Premium остаются частью существующего сервиса."
+        ],
+        "notice": "Пользователи Free могут читать открытую справку и инструкции, но не могут отправлять обращения в техподдержку. Для доступа к этой функции нужен Premium."
+      }
+    }
+  },
+  "ua": {
+    "title": "Допомога та інформація",
+    "subtitle": "Інструкції, відомості про обліковий запис і правила сервісу",
+    "overviewTitle": "Чим допомогти?",
+    "overviewText": "Виберіть тему, щоб відкрити її окремо. Публічні інструкції та правила доступні всім користувачам.",
+    "topicsLabel": "Розділи",
+    "backToChat": "Повернутися до April",
+    "backToTopics": "Усі розділи",
+    "articleLabel": "ІНФОРМАЦІЯ",
+    "updatedLabel": "Робочий проєкт · 22 жовтня 2026 р.",
+    "noticeLabel": "Зверніть увагу",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "$0",
+    "lite": "Lite",
+    "litePrice": "$12 США / 24 години (майбутній тестовий формат)",
+    "liteDuration": "Майбутній тестовий формат: 24 години за $12. Поки недоступний; функції та ліміти оголосять під час запуску.",
+    "premiumPrice": "$25 / 28 днів або $3 / 12 годин",
+    "memoryFree": "Пам’ять діалогу — до 12 годин",
+    "memoryPremium": "Пам’ять діалогу — до 24 годин",
+    "billingNote": "Premium доступний як дві разові передплачені покупки: $25 за 28 днів або $3 за 12 годин, без автоподовження та повторних списань. Free залишається безкоштовним і доступним будь-коли. Lite — майбутній тестовий формат на 24 години за $12, поки недоступний. Продовження можна вибрати протягом останніх 24 годин Premium. Якщо не продовжувати доступ, після завершення строку обліковий запис повертається до Free. Оплата через Google Pay на сайті відображається після налаштування, увімкнення та перевірки мерчанта й платіжного оператора. Застосунок, що поширюється через Google Play, має використовувати Google Play Billing.",
+    "openChat": "Відкрити чат",
+    "openHistory": "Відкрити історію діалогів",
+    "openMemory": "Відкрити пам’ять",
+    "openSettings": "Відкрити профіль і налаштування",
+    "openDeletion": "Відкрити сторінку видалення облікового запису",
+    "openSupport": "Відкрити профіль і підтримку",
+    "faqTitle": "Поширені запитання",
+    "faqs": [
+      {
+        "question": "April завжди пам’ятає попередні повідомлення?",
+        "answer": "Ні. Пам’ять допомагає продовжувати діалог у межах доступного вікна, але не гарантує збереження кожної деталі."
+      },
+      {
+        "question": "Як довго зберігається пам’ять?",
+        "answer": "Заплановане вікно пам’яті діалогу — до 12 годин на Free і до 24 годин на Premium. Для інших записів можуть діяти інші строки."
+      },
+      {
+        "question": "Чи можуть користувачі Free ставити запитання в Центр допомоги?",
+        "answer": "Користувачі Free можуть читати загальнодоступні інструкції та FAQ. Ставити запитання безпосередньо в Центр допомоги можуть лише користувачі Premium."
+      },
+      {
+        "question": "Чи можуть користувачі Free звертатися до техпідтримки?",
+        "answer": "Технічні звернення доступні лише Premium з урахуванням чинного обмеження частоти."
+      },
+      {
+        "question": "Чи видалення April видаляє мій обліковий запис Google?",
+        "answer": "Ні. Видаляються лише обліковий запис April і дані на боці April. Запланований Premium — передплачений і не продовжується автоматично, тому скасовувати його, щоб уникнути нового списання, не потрібно. Інші підписки Google Play потрібно перевіряти й налаштовувати в Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Центр допомоги",
+        "summary": "Поширені запитання та відповіді про використання April."
+      },
+      "how-to-use": {
+        "title": "Як користуватися April",
+        "summary": "Текст, голос, зображення, історія діалогів і пам’ять."
+      },
+      "privacy-policy": {
+        "title": "Політика конфіденційності",
+        "summary": "Які дані обробляє April і як подати запит на видалення."
+      },
+      "terms-of-service": {
+        "title": "Умови використання",
+        "summary": "Правила використання April та обмеження AI."
+      },
+      "plans-payments": {
+        "title": "Тарифи й платежі",
+        "summary": "Тарифи Free, Lite та Premium, заплановані ціни, вікно пам’яті й ручне продовження."
+      },
+      "account-deletion": {
+        "title": "Видалення облікового запису й даних",
+        "summary": "Як видалити обліковий запис April і на що впливає видалення."
+      },
+      "contact-support": {
+        "title": "Технічна підтримка",
+        "summary": "Технічні звернення доступні користувачам Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Тут зібрані загальнодоступні інструкції та відповіді на поширені запитання. Читати опубліковані матеріали можуть користувачі будь-якого тарифу.",
+        "paragraphs": [
+          "Персональні запитання безпосередньо до Центру допомоги — функція Premium. Користувачі Free можуть читати відкриті інструкції та FAQ, але не можуть надсилати запитання до Центру допомоги."
+        ],
+        "notice": "Запитання до Центру допомоги й звернення до техпідтримки доступні лише Premium. Публічна довідка доступна користувачам Free."
+      },
+      "how-to-use": {
+        "intro": "April допомагає із запитаннями, текстами, поясненнями, плануванням, аналізом і підтримуваними завданнями з текстом, голосом та зображеннями. Можливості залежать від тарифу й поточної конфігурації сервісу.",
+        "bullets": [
+          "Текст: опишіть мету, додайте контекст і надішліть повідомлення в чаті April.",
+          "Голос: скористайтеся голосовим введенням, якщо воно доступне, говоріть чітко та перевіряйте розпізнаний текст, якщо він показується.",
+          "Зображення й файли: додайте підтримуваний файл і поясніть, що потрібно дослідити, описати або змінити.",
+          "Історія: відкрийте історію діалогів, щоб переглянути доступні збережені записи. Натисніть «Продовжити діалог», якщо ця дія доступна.",
+          "Пам’ять допомагає зберігати контекст розмови, але не є постійним архівом і не гарантує пригадування кожної деталі."
+        ],
+        "paragraphs": [
+          "Заплановане вікно пам’яті: Free — до 12 годин; Premium — до 24 годин. Перед публікацією це потрібно підтвердити в робочій конфігурації сервера."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Цей робочий проєкт політики описує основні типи інформації, яка може оброблятися під час використання April. Перед публікацією потрібно додати юридичну назву оператора та контакт для питань конфіденційності.",
+        "paragraphs": [
+          "Інформація може включати дані облікового запису й входу; повідомлення та вміст діалогів; аудіо, зображення й файли, які ви завантажуєте; технічні записи та дані безпеки, потрібні для роботи сервісу; відомості про тариф і транзакції, якщо платежі ввімкнені.",
+          "Дані використовуються для надання відповідей і функцій, роботи облікового запису та контексту діалогу, застосування тарифних обмежень, обробки звернень там, де підтримка доступна, захисту сервісу й виконання юридичних зобов’язань.",
+          "Для відповіді на запит потрібний вміст може оброблятися AI-провайдерами, хостингом, службами автентифікації та іншими постачальниками, залученими до роботи April. До публікації потрібно вказати фактичних постачальників, категорії переданих даних і посилання на їхні політики конфіденційності.",
+          "Заплановане вікно пам’яті діалогу — до 12 годин на Free і до 24 годин на Premium. Це не означає, що всі записи бази даних, технічні журнали, звернення в підтримку чи транзакції видаляються після цього часу; для них потрібно окремо визначити реальні строки зберігання.",
+          "Видалити обліковий запис April можна в налаштуваннях або на окремій публічній сторінці видалення. Це не видаляє обліковий запис Google, Gmail або Google Drive. Запланований Premium April є передплаченим і не продовжується автоматично, тому скасовувати його, щоб уникнути нового списання, не потрібно. Інші підписки Google Play потрібно налаштовувати в Google Play."
+        ],
+        "bullets": [
+          "Перед публікацією додайте відповідальну юридичну особу та чинний контакт з питань конфіденційності.",
+          "Звірте категорії даних, постачальників, місця обробки, строки зберігання та видалення з розгорнутими сервісами Web і Bot."
+        ],
+        "notice": "Це проєкт, а не завершена юридична політика. Перед поданням до Google Play та публікацією документ потрібно перевірити й доповнити."
+      },
+      "terms-of-service": {
+        "intro": "Ці проєктні умови описують основні правила користування April. Перед публікацією їх потрібно доповнити відомостями про оператора й перевірити з урахуванням застосовного законодавства.",
+        "bullets": [
+          "April — сервіс на основі AI. Функції, доступність та обмеження можуть відрізнятися за тарифами й змінюватися з часом.",
+          "Відповіді AI можуть бути неточними, неповними або застарілими. Перевіряйте важливі відомості, особливо з юридичних, медичних, фінансових питань і питань безпеки.",
+          "Не використовуйте April для порушення закону чи прав інших осіб, несанкціонованого доступу, порушення роботи сервісу або передавання матеріалів, якими ви не маєте права ділитися.",
+          "Захищайте доступ до свого облікового запису. Функції й доступ до підтримки визначаються тарифом, призначеним обліковому запису.",
+          "Ціну Premium, період оплати, продовження, скасування та повернення коштів потрібно чітко показувати до ввімкнення реальних платежів.",
+          "Ви можете припинити користуватися April і подати запит на видалення облікового запису. Запланований Premium April є передплаченим і не продовжується автоматично, тому скасовувати його, щоб уникнути нового списання, не потрібно. Інші підписки Google Play потрібно налаштовувати в Google Play."
+        ],
+        "notice": "Робочий проєкт. До публікації додайте юридичну назву оператора, контакти, застосовне право, порядок вирішення спорів, інформацію про права споживачів та інші потрібні умови."
+      },
+      "plans-payments": {
+        "intro": "Тут описано заплановану схему тарифів. Наведені ціни є орієнтовними; купівля стане доступною лише після підключення та перевірки оплати Google Play.",
+        "bullets": [
+          "Free — $0. Загальнодоступні інструкції та FAQ відкриті для всіх. Можливості чату й візуалізацій обмежені поточними налаштуваннями сервісу. Вікно пам’яті діалогу — до 12 годин.",
+          "Lite — майбутній тестовий формат: $12 за 24 години. Поки недоступний; функції та ліміти оголосять під час запуску.",
+          "Premium — $25 за 28 днів або $3 за 12 годин. Можливості залежать від активної конфігурації Premium та можуть включати пам’ять діалогу до 24 годин, збільшений ліміт вхідних даних, підтримуване редагування зображень і техпідтримку Premium.",
+          "Продовження ручне. План задумано як передплачений, без автоматичного продовження: повторне списання без дії користувача не відбувається. Щоб продовжити доступ після завершення строку, користувач має натиснути кнопку купівлі/продовження та підтвердити нову покупку. Після завершення оплаченого строку обліковий запис повертається на Free."
+        ],
+        "paragraphs": [
+          "Вікно пам’яті — це період доступності контексту діалогу, а не обіцянка видалити всі записи історії, звернення до підтримки, технічні журнали чи транзакції. Для цих даних можуть діяти окремі строки зберігання."
+        ],
+        "notice": "Реальну оплату ще не підключено. Не подавайте ці заплановані суми й переваги як доступну пропозицію, доки внутрішню оплату Google Play і серверну перевірку не буде реалізовано та протестовано."
+      },
+      "account-deletion": {
+        "intro": "Запит на видалення можна почати червоною кнопкою «Видалити обліковий запис» у налаштуваннях профілю April або відкрити окрему сторінку видалення нижче.",
+        "paragraphs": [
+          "На поточній сторінці видалення зазначено, що видаляються профіль April та April ID, історія діалогів, збережені запити й відповіді, метадані рендерингу, відомості про тариф або права доступу та внутрішні записи April про платежі, пов’язані з обліковим записом. Робочий процес треба перевірити, щоб підтвердити очищення потрібних записів.",
+          "Обліковий запис Google та інші сервіси Google не видаляються. Запланований Premium April є передплаченим і не продовжується автоматично, тому скасовувати його, щоб уникнути нового списання, не потрібно. Інші підписки Google Play потрібно налаштовувати в Google Play."
+        ],
+        "notice": "Якщо під час видалення з’являється помилка, не вважайте дані видаленими. Орієнтуйтеся на статус сторінки видалення."
+      },
+      "contact-support": {
+        "intro": "Звернення до технічної підтримки доступні користувачам Premium з профілю April.",
+        "paragraphs": [
+          "Заплановане чинне обмеження — одне звернення кожні 24 години. Форма підтримки й серверна перевірка доступу Premium залишаються частиною наявного сервісу."
+        ],
+        "notice": "Користувачі Free можуть читати відкриту довідку та інструкції, але не можуть надсилати звернення до техпідтримки. Для доступу до цієї функції потрібен Premium."
+      }
+    }
+  },
+  "es": {
+    "title": "Ayuda e información",
+    "subtitle": "Guías, información de la cuenta y políticas del servicio",
+    "overviewTitle": "¿En qué podemos ayudarte?",
+    "overviewText": "Elige un tema para abrirlo por separado. Las guías y políticas públicas están disponibles para todos.",
+    "topicsLabel": "Temas",
+    "backToChat": "Volver a April",
+    "backToTopics": "Todos los temas",
+    "articleLabel": "INFORMACIÓN",
+    "updatedLabel": "Borrador de trabajo · 22 de octubre de 2026",
+    "noticeLabel": "Importante",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "$0",
+    "lite": "Lite",
+    "litePrice": "US$12 / 24 horas (formato de prueba futuro)",
+    "liteDuration": "Formato de prueba futuro: 24 horas por US$12. Aún no está disponible; las funciones y los límites se anunciarán al lanzarlo.",
+    "premiumPrice": "US$25 / 28 días o US$3 / 12 horas",
+    "memoryFree": "Memoria del diálogo: hasta 12 horas",
+    "memoryPremium": "Memoria del diálogo: hasta 24 horas",
+    "billingNote": "Premium se ofrece en dos compras prepagadas únicas: US$25 por 28 días o US$3 por 12 horas, sin renovación automática ni cargos recurrentes. Free sigue siendo gratuito y está disponible en cualquier momento. Lite será un futuro formato de prueba de 24 horas por US$12 y aún no está disponible. La renovación puede elegirse durante las últimas 24 horas de Premium. Si no renuevas, la cuenta vuelve a Free al vencer el acceso. El pago web con Google Pay solo se muestra después de configurar, habilitar y aprobar el comercio y la pasarela. Una aplicación distribuida por Google Play debe usar Google Play Billing.",
+    "openChat": "Abrir chat",
+    "openHistory": "Abrir historial de diálogos",
+    "openMemory": "Abrir memoria",
+    "openSettings": "Abrir perfil y ajustes",
+    "openDeletion": "Abrir página de eliminación de cuenta",
+    "openSupport": "Abrir perfil y soporte",
+    "faqTitle": "Preguntas frecuentes",
+    "faqs": [
+      {
+        "question": "¿April siempre recuerda los mensajes anteriores?",
+        "answer": "No. La memoria ayuda a mantener la continuidad dentro de la ventana disponible, pero no garantiza recordar todos los detalles."
+      },
+      {
+        "question": "¿Cuánto dura la memoria?",
+        "answer": "La ventana prevista es de hasta 12 horas en Free y hasta 24 horas en Premium. Otros registros pueden tener períodos distintos."
+      },
+      {
+        "question": "¿Los usuarios Free pueden hacer preguntas al Centro de ayuda?",
+        "answer": "Los usuarios Free pueden leer las guías públicas y las preguntas frecuentes. Hacer preguntas directamente al Centro de ayuda es una función Premium."
+      },
+      {
+        "question": "¿Los usuarios Free pueden contactar con soporte técnico?",
+        "answer": "Las solicitudes de soporte técnico están disponibles solo para Premium, según el límite vigente."
+      },
+      {
+        "question": "¿Eliminar April elimina mi cuenta de Google?",
+        "answer": "No. Solo se ven afectados la cuenta de April y los datos de April. El Premium previsto es prepago y no se renueva automáticamente, así que no es necesario cancelarlo para evitar otro cobro. Cualquier otra suscripción de Google Play debe gestionarse en Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Centro de ayuda",
+        "summary": "Preguntas y respuestas sobre el uso de April."
+      },
+      "how-to-use": {
+        "title": "Cómo usar April",
+        "summary": "Texto, voz, imágenes, historial y memoria."
+      },
+      "privacy-policy": {
+        "title": "Política de privacidad",
+        "summary": "Qué información procesa April y cómo solicitar su eliminación."
+      },
+      "terms-of-service": {
+        "title": "Condiciones del servicio",
+        "summary": "Reglas de uso y limitaciones importantes de la IA."
+      },
+      "plans-payments": {
+        "title": "Planes y pagos",
+        "summary": "Acceso Free, Lite y Premium, precios previstos, memoria y renovación manual."
+      },
+      "account-deletion": {
+        "title": "Eliminación de cuenta y datos",
+        "summary": "Cómo eliminar la cuenta April y qué implica."
+      },
+      "contact-support": {
+        "title": "Contactar con soporte",
+        "summary": "El soporte técnico está disponible para Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Consulta las guías públicas y las preguntas frecuentes. Todos los planes pueden leer los materiales publicados.",
+        "paragraphs": [
+          "Las preguntas personalizadas enviadas directamente al Centro de ayuda son una función Premium. Free puede leer las guías y las FAQ públicas, pero no enviar preguntas al Centro de ayuda."
+        ],
+        "notice": "Las preguntas al Centro de ayuda y las solicitudes de soporte técnico son exclusivas de Premium."
+      },
+      "how-to-use": {
+        "intro": "April puede ayudar con preguntas, redacción, explicaciones, planificación, análisis y tareas compatibles con texto, voz e imágenes. Las funciones dependen del plan y de la configuración activa.",
+        "bullets": [
+          "Texto: explica tu objetivo, añade contexto y envía el mensaje en el chat.",
+          "Voz: usa la entrada de voz cuando esté disponible, habla con claridad y revisa el texto reconocido si aparece.",
+          "Imágenes y archivos: adjunta un archivo compatible y explica qué debe revisar o cambiar April.",
+          "Historial: abre el historial de diálogos para ver las entradas guardadas disponibles. Usa «Continuar diálogo» cuando aparezca.",
+          "Memoria: ayuda a mantener el contexto, pero no es un archivo permanente ni garantiza recordar todos los detalles."
+        ],
+        "paragraphs": [
+          "Ventana prevista: Free — hasta 12 horas; Premium — hasta 24 horas. Confirma estos valores en la configuración de producción antes de publicarlos."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Este borrador describe los principales tipos de información que pueden procesarse al usar April. Antes de publicarlo, se debe añadir el nombre legal del operador y un contacto de privacidad.",
+        "paragraphs": [
+          "La información puede incluir datos de cuenta e inicio de sesión; mensajes y contenido de diálogos; audio, imágenes y archivos que subas; registros técnicos y de seguridad; y datos de planes o transacciones cuando los pagos estén habilitados.",
+          "La información se utiliza para responder y prestar las funciones solicitadas, mantener el acceso y la continuidad, aplicar límites del plan, atender solicitudes donde exista soporte, proteger el servicio y cumplir obligaciones legales.",
+          "El contenido necesario para responder puede ser procesado por los proveedores de IA, alojamiento, autenticación y otros servicios utilizados por April. Antes de publicar, deben identificarse los proveedores reales, las categorías de datos y los enlaces a sus políticas.",
+          "La ventana prevista de memoria es de hasta 12 horas en Free y 24 horas en Premium. Esto no significa que todos los registros, mensajes de soporte o transacciones se eliminen en ese plazo; los períodos reales deben documentarse por separado.",
+          "Puedes solicitar la eliminación desde Ajustes o desde la página pública de eliminación. Esto no elimina tu cuenta de Google, Gmail ni Google Drive. El Premium previsto de April es prepago y no se renueva automáticamente, por lo que no es necesario cancelarlo para evitar otro cobro. Cualquier otra suscripción de Google Play debe gestionarse en Google Play."
+        ],
+        "bullets": [
+          "Añade antes de publicar la entidad responsable y un contacto de privacidad válido.",
+          "Verifica las categorías de datos, proveedores, ubicaciones, retención y eliminación en los servicios desplegados de Web y Bot."
+        ],
+        "notice": "Este es un borrador, no una política legal terminada. Debe revisarse y completarse antes de publicarse o presentarse a Google Play."
+      },
+      "terms-of-service": {
+        "intro": "Estas condiciones provisionales describen las reglas básicas de uso de April. Deben completarse con los datos del operador y revisarse según la jurisdicción aplicable.",
+        "bullets": [
+          "April es un servicio basado en IA; las funciones, la disponibilidad y los límites pueden variar por plan y cambiar con el tiempo.",
+          "Las respuestas pueden ser inexactas, incompletas o estar desactualizadas. Verifica la información importante, especialmente en asuntos legales, médicos, financieros o de seguridad.",
+          "No uses April para infringir la ley o los derechos de otras personas, obtener acceso no autorizado, interrumpir el servicio o compartir contenido que no tengas derecho a facilitar.",
+          "Protege el acceso a tu cuenta. Las funciones y el soporte dependen del plan asignado.",
+          "El precio, período de facturación, renovación, cancelación y reembolsos de Premium deben mostrarse claramente antes de activar pagos reales.",
+          "Puedes dejar de usar April y solicitar la eliminación de tu cuenta. Esto no cancela automáticamente una suscripción de Google Play."
+        ],
+        "notice": "Borrador de trabajo. Añade la entidad legal, los contactos, la ley aplicable, el proceso de resolución de disputas y la información de derechos del consumidor antes de publicarlo."
+      },
+      "plans-payments": {
+        "intro": "Esta página describe los planes previstos. Los precios son orientativos; las compras no estarán disponibles hasta que se implemente y verifique el pago de Google Play.",
+        "bullets": [
+          "Free — US$0. Las guías públicas y las preguntas frecuentes están disponibles; el chat y las funciones visuales siguen sujetos a los límites del servicio. Memoria de diálogo: hasta 12 horas.",
+          "Lite — formato de prueba futuro: US$12 por 24 horas. Aún no está disponible; las funciones y los límites se anunciarán al lanzarlo.",
+          "Premium — US$25 por 28 días o US$3 por 12 horas. Según la configuración activa, puede incluir hasta 24 horas de memoria de diálogo, un límite de entrada mayor, edición compatible de imágenes y soporte Premium.",
+          "La renovación será manual. El plan prepago previsto no se renueva automáticamente ni realiza nuevos cobros. Para continuar después del vencimiento, el usuario debe pulsar el botón de compra/renovación y aprobar otra compra. Al finalizar el período pagado, la cuenta vuelve a Free."
+        ],
+        "paragraphs": [
+          "La ventana de memoria es un período de contexto, no una promesa de eliminar todo el historial, los mensajes de soporte, los registros técnicos o las transacciones. Cada categoría puede tener un plazo de conservación diferente."
+        ],
+        "notice": "El pago real aún no está activo. No presentes estos importes o beneficios como ofertas disponibles hasta implementar y probar la compra dentro de la aplicación y la verificación del servidor."
+      },
+      "account-deletion": {
+        "intro": "Puedes iniciar la eliminación con el botón rojo Eliminar cuenta en los ajustes del perfil de April o abrir la página específica que aparece abajo.",
+        "paragraphs": [
+          "La página de eliminación actual indica que elimina el perfil April y el April ID, el historial de diálogos, las solicitudes y respuestas guardadas, los metadatos de renderizado, los datos del plan y los registros internos de pagos asociados. El proceso en producción debe probarse para confirmar la eliminación real.",
+          "Tu cuenta de Google y otros servicios de Google no se eliminan. El Premium previsto de April es prepago y no se renueva automáticamente, por lo que no es necesario cancelarlo para evitar otro cobro. Cualquier otra suscripción de Google Play debe gestionarse en Google Play."
+        ],
+        "notice": "Si aparece un error durante la eliminación, no supongas que los datos se han borrado."
+      },
+      "contact-support": {
+        "intro": "Las solicitudes de soporte técnico están disponibles para usuarios Premium desde el perfil de April.",
+        "paragraphs": [
+          "El límite previsto actual es una solicitud cada 24 horas. El formulario y la comprobación del permiso Premium en el servidor forman parte del servicio existente."
+        ],
+        "notice": "Los usuarios Free pueden leer la ayuda pública, pero no enviar solicitudes de soporte técnico. Para acceder a esta función, actualiza a Premium."
+      }
+    }
+  },
+  "de": {
+    "title": "Hilfe und Informationen",
+    "subtitle": "Anleitungen, Kontoinformationen und Servicerichtlinien",
+    "overviewTitle": "Wie können wir helfen?",
+    "overviewText": "Wähle ein Thema, um es separat zu öffnen. Öffentliche Anleitungen und Richtlinien sind für alle verfügbar.",
+    "topicsLabel": "Themen",
+    "backToChat": "Zurück zu April",
+    "backToTopics": "Alle Themen",
+    "articleLabel": "INFORMATIONEN",
+    "updatedLabel": "Arbeitsentwurf · 22. Oktober 2026",
+    "noticeLabel": "Hinweis",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "0 US-Dollar",
+    "lite": "Lite",
+    "litePrice": "12 US$ / 24 Stunden (künftiges Testformat)",
+    "liteDuration": "Künftiges Testformat: 24 Stunden für 12 US$. Noch nicht verfügbar; Funktionen und Limits werden zum Start bekannt gegeben.",
+    "premiumPrice": "25 US$ / 28 Tage oder 3 US$ / 12 Stunden",
+    "memoryFree": "Dialoggedächtnis: bis zu 12 Stunden",
+    "memoryPremium": "Dialoggedächtnis: bis zu 24 Stunden",
+    "billingNote": "Premium wird als zwei einmalige Prepaid-Käufe angeboten: 25 US$ für 28 Tage oder 3 US$ für 12 Stunden, ohne automatische Verlängerung oder wiederkehrende Abbuchung. Free bleibt kostenlos und jederzeit verfügbar. Lite ist ein künftiges Testformat für 24 Stunden für 12 US$ und noch nicht verfügbar. Eine Verlängerung kann während der letzten 24 Stunden von Premium gewählt werden. Ohne Verlängerung wechselt das Konto nach Ablauf zu Free. Die Google-Pay-Webzahlung wird erst angezeigt, nachdem Händler und Zahlungsanbieter eingerichtet, aktiviert und freigegeben wurden. Eine über Google Play vertriebene App muss Google Play Billing verwenden.",
+    "openChat": "Chat öffnen",
+    "openHistory": "Dialogverlauf öffnen",
+    "openMemory": "Gedächtnis öffnen",
+    "openSettings": "Profil und Einstellungen öffnen",
+    "openDeletion": "Seite zur Kontolöschung öffnen",
+    "openSupport": "Profil und Support öffnen",
+    "faqTitle": "Häufige Fragen",
+    "faqs": [
+      {
+        "question": "Erinnert sich April immer an frühere Nachrichten?",
+        "answer": "Nein. Das Gedächtnis unterstützt den Gesprächszusammenhang innerhalb des verfügbaren Zeitfensters, garantiert aber keine Erinnerung an jedes Detail."
+      },
+      {
+        "question": "Wie lange bleibt der Gesprächskontext erhalten?",
+        "answer": "Vorgesehen sind bis zu 12 Stunden bei Free und bis zu 24 Stunden bei Premium. Für andere Datensätze können andere Fristen gelten."
+      },
+      {
+        "question": "Können Free-Nutzer Fragen im Hilfe-Center stellen?",
+        "answer": "Free-Nutzer können öffentliche Anleitungen und FAQs lesen. Direkte Fragen an das Hilfe-Center sind eine Premium-Funktion."
+      },
+      {
+        "question": "Können Free-Nutzer den technischen Support kontaktieren?",
+        "answer": "Technische Supportanfragen sind nur für Premium verfügbar und unterliegen dem aktuellen Limit."
+      },
+      {
+        "question": "Wird durch die Löschung von April mein Google-Konto gelöscht?",
+        "answer": "Nein. Betroffen sind nur das April-Konto und die April-Daten. Das geplante Premium-Angebot ist prepaid und verlängert sich nicht automatisch; eine Kündigung zur Vermeidung einer weiteren Abbuchung ist daher nicht nötig. Andere Google-Play-Abos müssen in Google Play verwaltet werden."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Hilfe-Center",
+        "summary": "Häufige Fragen und Antworten zur Nutzung von April."
+      },
+      "how-to-use": {
+        "title": "April verwenden",
+        "summary": "Text, Sprache, Bilder, Dialogverlauf und Gedächtnis."
+      },
+      "privacy-policy": {
+        "title": "Datenschutzerklärung",
+        "summary": "Welche Informationen April verarbeitet und wie Löschung beantragt wird."
+      },
+      "terms-of-service": {
+        "title": "Nutzungsbedingungen",
+        "summary": "Nutzungsregeln und wichtige Grenzen der KI."
+      },
+      "plans-payments": {
+        "title": "Tarife und Zahlungen",
+        "summary": "Free-, Lite- und Premium-Zugang, geplante Preise, Gedächtnisfenster und manuelle Verlängerung."
+      },
+      "account-deletion": {
+        "title": "Konto- und Datenlöschung",
+        "summary": "April-Konto löschen und Auswirkungen verstehen."
+      },
+      "contact-support": {
+        "title": "Support kontaktieren",
+        "summary": "Technischer Support ist für Premium verfügbar."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Hier findest du öffentliche Anleitungen und häufige Fragen. Veröffentlichte Inhalte können Nutzer aller Tarife lesen.",
+        "paragraphs": [
+          "Individuelle Fragen direkt an das Hilfe-Center zu senden, ist eine Premium-Funktion. Free-Nutzer können öffentliche Anleitungen und FAQs lesen, aber keine Fragen an das Hilfe-Center senden."
+        ],
+        "notice": "Fragen im Hilfe-Center und technische Supportanfragen sind Premium vorbehalten."
+      },
+      "how-to-use": {
+        "intro": "April unterstützt Fragen, Texte, Erklärungen, Planung, Analyse und unterstützte Aufgaben mit Text, Sprache und Bildern. Der Funktionsumfang hängt vom Tarif und der aktuellen Konfiguration ab.",
+        "bullets": [
+          "Text: Beschreibe dein Ziel, ergänze Kontext und sende die Nachricht im April-Chat.",
+          "Sprache: Verwende die Spracheingabe, sofern verfügbar, sprich deutlich und prüfe den erkannten Text, falls er angezeigt wird.",
+          "Bilder und Dateien: Hänge eine unterstützte Datei an und erkläre, was April untersuchen oder ändern soll.",
+          "Verlauf: Öffne den Dialogverlauf, um verfügbare gespeicherte Einträge aufzurufen. Verwende „Dialog fortsetzen“, wenn es angeboten wird.",
+          "Das Gedächtnis unterstützt den Kontext, ist aber kein dauerhaftes Archiv und garantiert nicht, jedes Detail abzurufen."
+        ],
+        "paragraphs": [
+          "Vorgesehenes Gedächtnisfenster: Free — bis zu 12 Stunden; Premium — bis zu 24 Stunden. Bestätige diese Werte vor Veröffentlichung in der Produktionskonfiguration."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Dieser Arbeitsentwurf beschreibt die wichtigsten Informationsarten, die bei der Nutzung von April verarbeitet werden können. Vor der Veröffentlichung müssen der rechtliche Betreibername und ein Datenschutzkontakt ergänzt werden.",
+        "paragraphs": [
+          "Verarbeitet werden können Konto- und Anmeldedaten; Nachrichten und Dialoginhalte; hochgeladene Audiodateien, Bilder und Dateien; technische und sicherheitsrelevante Protokolle; sowie Tarif- oder Transaktionsdaten, falls Zahlungen aktiviert sind.",
+          "Die Informationen dienen dazu, Antworten und angeforderte Funktionen bereitzustellen, Kontozugriff und Dialogkontinuität zu ermöglichen, Tariflimits anzuwenden, verfügbare Supportanfragen zu bearbeiten, den Dienst zu schützen und rechtliche Pflichten zu erfüllen.",
+          "Die zur Beantwortung erforderlichen Inhalte können von den KI-, Hosting-, Authentifizierungs- und anderen Dienstleistern verarbeitet werden, die April betreiben. Vor der Veröffentlichung müssen die tatsächlichen Anbieter, Datenkategorien und Links zu deren Datenschutzhinweisen genannt werden.",
+          "Das vorgesehene Gedächtnisfenster beträgt bis zu 12 Stunden bei Free und bis zu 24 Stunden bei Premium. Daraus folgt nicht, dass sämtliche Datenbankeinträge, technischen Protokolle, Supportnachrichten oder Transaktionsdaten danach gelöscht werden; deren tatsächliche Speicherfristen müssen separat dokumentiert werden.",
+          "Du kannst die Löschung über die Einstellungen oder die öffentliche Kontolöschungsseite beantragen. Dadurch werden dein Google-Konto, Gmail oder Google Drive nicht gelöscht. Das geplante April-Premium ist prepaid und verlängert sich nicht automatisch; eine Kündigung zur Vermeidung einer weiteren Abbuchung ist nicht nötig. Andere Google-Play-Abos müssen in Google Play verwaltet werden."
+        ],
+        "bullets": [
+          "Ergänze vor der Veröffentlichung die verantwortliche juristische Person und einen erreichbaren Datenschutzkontakt.",
+          "Prüfe Datenkategorien, Anbieter, Verarbeitungsorte, Speicherfristen und Löschung anhand der bereitgestellten Web- und Bot-Dienste."
+        ],
+        "notice": "Dies ist ein Entwurf und keine fertige Rechtserklärung. Vor Veröffentlichung oder Einreichung bei Google Play muss er geprüft und vervollständigt werden."
+      },
+      "terms-of-service": {
+        "intro": "Diese vorläufigen Bedingungen beschreiben die grundlegenden Regeln für April. Vor der Veröffentlichung müssen Betreiberangaben ergänzt und die Bedingungen für die geltende Rechtsordnung geprüft werden.",
+        "bullets": [
+          "April ist ein KI-Dienst. Funktionen, Verfügbarkeit und Limits können je nach Tarif variieren und sich ändern.",
+          "KI-Antworten können falsch, unvollständig oder veraltet sein. Prüfe wichtige Angaben, insbesondere bei rechtlichen, medizinischen, finanziellen oder sicherheitsrelevanten Entscheidungen.",
+          "Nutze April nicht zur Verletzung von Gesetzen oder Rechten Dritter, für unbefugten Zugriff, zur Störung des Dienstes oder zum Teilen von Inhalten, die du nicht weitergeben darfst.",
+          "Schütze den Zugang zu deinem Konto. Funktionen und Support richten sich nach dem zugewiesenen Tarif.",
+          "Premium-Preis, Abrechnungszeitraum, Verlängerung, Kündigung und Erstattungen müssen vor Aktivierung realer Zahlungen klar angezeigt werden.",
+          "Du kannst April nicht weiter nutzen und die Kontolöschung beantragen. Dadurch wird ein Google-Play-Abonnement nicht automatisch gekündigt."
+        ],
+        "notice": "Arbeitsentwurf. Ergänze Betreibername, Kontakt, anwendbares Recht, Streitbeilegung, Verbraucherrechte und weitere notwendige Bedingungen vor der Veröffentlichung."
+      },
+      "plans-payments": {
+        "intro": "Diese Seite beschreibt die geplanten Tarife. Die Preise sind vorläufig; Käufe sind erst nach Implementierung und Prüfung der Google-Play-Zahlung möglich.",
+        "bullets": [
+          "Free — 0 US$. Öffentliche Anleitungen und FAQs sind verfügbar; Chat- und Visualisierungsfunktionen unterliegen den aktiven Servicelimits. Dialoggedächtnis: bis zu 12 Stunden.",
+          "Lite — künftiges Testformat: 12 US$ für 24 Stunden. Noch nicht verfügbar; Funktionen und Limits werden zum Start bekannt gegeben.",
+          "Premium — 25 US$ für 28 Tage oder 3 US$ für 12 Stunden. Je nach aktiver Konfiguration sind bis zu 24 Stunden Dialoggedächtnis, ein höheres Eingabelimit, unterstützte Bildbearbeitung und Premium-Support enthalten.",
+          "Die Verlängerung erfolgt manuell. Der geplante Prepaid-Tarif verlängert sich nicht automatisch und löst keine automatische Folgeabbuchung aus. Für weiteren Zugang muss der Nutzer nach Ablauf einen neuen Kauf über die Kauf-/Verlängerungsschaltfläche bestätigen. Danach wechselt das Konto zu Free."
+        ],
+        "paragraphs": [
+          "Das Gedächtnisfenster beschreibt die Verfügbarkeit des Dialogkontexts; es bedeutet nicht, dass Verlaufseinträge, Supportnachrichten, technische Protokolle oder Transaktionen dann gelöscht werden. Dafür können separate Speicherfristen gelten."
+        ],
+        "notice": "Die echte Zahlung ist noch nicht aktiv. Diese Beträge und Vorteile dürfen erst als verfügbar dargestellt werden, wenn In-App-Kauf und serverseitige Prüfung von Google Play implementiert und getestet sind."
+      },
+      "account-deletion": {
+        "intro": "Du kannst die Löschung über die rote Schaltfläche „Konto löschen“ in den April-Profileinstellungen starten oder die separate Löschungsseite unten öffnen.",
+        "paragraphs": [
+          "Die aktuelle Löschungsseite gibt an, dass das April-Profil und die April-ID, der Dialogverlauf, gespeicherte Eingaben und Antworten, Render-Metadaten, Tarif- bzw. Berechtigungsdaten sowie zugehörige interne April-Zahlungsdatensätze gelöscht werden. Der Produktionsablauf muss getestet werden.",
+          "Dein Google-Konto und andere Google-Dienste werden nicht gelöscht. Das Löschen von April kündigt ein Google-Play-Abonnement nicht automatisch."
+        ],
+        "notice": "Wenn beim Löschen ein Fehler angezeigt wird, gehe nicht davon aus, dass die Daten entfernt wurden."
+      },
+      "contact-support": {
+        "intro": "Technische Supportanfragen können Premium-Mitglieder über ihr April-Profil senden.",
+        "paragraphs": [
+          "Das vorgesehene Limit beträgt derzeit eine Anfrage alle 24 Stunden. Das vorhandene Supportformular und die serverseitige Premium-Prüfung bleiben Teil des Dienstes."
+        ],
+        "notice": "Free-Nutzer können öffentliche Hilfeartikel lesen, aber keine technischen Supportanfragen senden. Für diese Funktion ist Premium erforderlich."
+      }
+    }
+  },
+  "fr": {
+    "title": "Aide et informations",
+    "subtitle": "Guides, informations sur le compte et règles du service",
+    "overviewTitle": "Comment pouvons-nous aider ?",
+    "overviewText": "Choisissez un sujet pour l’ouvrir séparément. Les guides et règles publics sont accessibles à tous.",
+    "topicsLabel": "Rubriques",
+    "backToChat": "Retour à April",
+    "backToTopics": "Toutes les rubriques",
+    "articleLabel": "INFORMATIONS",
+    "updatedLabel": "Projet de travail · 22 octobre 2026",
+    "noticeLabel": "À noter",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "0 $ US",
+    "lite": "Lite",
+    "litePrice": "12 $ US / 24 heures (futur format de test)",
+    "liteDuration": "Futur format de test : 24 heures pour 12 $ US. Pas encore disponible ; les fonctions et limites seront annoncées au lancement.",
+    "premiumPrice": "25 $ US / 28 jours ou 3 $ US / 12 heures",
+    "memoryFree": "Mémoire du dialogue : jusqu’à 12 heures",
+    "memoryPremium": "Mémoire du dialogue : jusqu’à 24 heures",
+    "billingNote": "Premium est proposé sous forme de deux achats prépayés uniques : 25 $ US pour 28 jours ou 3 $ US pour 12 heures, sans renouvellement automatique ni prélèvement récurrent. Free reste gratuit et disponible à tout moment. Lite sera un futur format de test de 24 heures à 12 $ US et n’est pas encore disponible. Le renouvellement peut être choisi pendant les dernières 24 heures de Premium. Sans renouvellement, le compte repasse à Free à l’échéance. Le paiement Google Pay sur le site ne s’affiche qu’après la configuration, l’activation et l’approbation du marchand et du prestataire. Une application distribuée par Google Play doit utiliser Google Play Billing.",
+    "openChat": "Ouvrir le chat",
+    "openHistory": "Ouvrir l’historique des dialogues",
+    "openMemory": "Ouvrir la mémoire",
+    "openSettings": "Ouvrir le profil et les paramètres",
+    "openDeletion": "Ouvrir la page de suppression du compte",
+    "openSupport": "Ouvrir le profil et l’assistance",
+    "faqTitle": "Questions fréquentes",
+    "faqs": [
+      {
+        "question": "April se souvient-elle toujours des messages précédents ?",
+        "answer": "Non. La mémoire facilite la continuité dans la fenêtre disponible, mais ne garantit pas le rappel de chaque détail."
+      },
+      {
+        "question": "Combien de temps la mémoire dure-t-elle ?",
+        "answer": "La fenêtre prévue est de 12 heures maximum pour Free et de 24 heures pour Premium. D’autres enregistrements peuvent avoir d’autres durées de conservation."
+      },
+      {
+        "question": "Les utilisateurs Free peuvent-ils poser des questions au Centre d’aide ?",
+        "answer": "Les utilisateurs Free peuvent lire les guides publics et la FAQ. Poser des questions directement au Centre d’aide est réservé à Premium."
+      },
+      {
+        "question": "Les utilisateurs Free peuvent-ils contacter l’assistance technique ?",
+        "answer": "Les demandes d’assistance technique sont réservées à Premium, selon la limite en vigueur."
+      },
+      {
+        "question": "Supprimer April supprime-t-il mon compte Google ?",
+        "answer": "Non. Seuls le compte April et les données April sont concernés. L’offre Premium prévue est prépayée et ne se renouvelle pas automatiquement ; il n’est donc pas nécessaire de la résilier pour éviter un nouveau prélèvement. Toute autre souscription Google Play doit être gérée dans Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Centre d’aide",
+        "summary": "Questions fréquentes et réponses sur l’utilisation d’April."
+      },
+      "how-to-use": {
+        "title": "Utiliser April",
+        "summary": "Texte, voix, images, historique et mémoire."
+      },
+      "privacy-policy": {
+        "title": "Politique de confidentialité",
+        "summary": "Informations traitées par April et demande de suppression."
+      },
+      "terms-of-service": {
+        "title": "Conditions d’utilisation",
+        "summary": "Règles d’utilisation et limites importantes de l’IA."
+      },
+      "plans-payments": {
+        "title": "Offres et paiements",
+        "summary": "Accès Free, Lite et Premium, prix prévus, mémoire et renouvellement manuel."
+      },
+      "account-deletion": {
+        "title": "Suppression du compte et des données",
+        "summary": "Supprimer le compte April et comprendre les effets."
+      },
+      "contact-support": {
+        "title": "Contacter l’assistance",
+        "summary": "L’assistance technique est réservée à Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Consultez les guides publics et les réponses aux questions fréquentes. Tous les utilisateurs peuvent lire les contenus publiés.",
+        "paragraphs": [
+          "Les questions personnalisées envoyées directement au Centre d’aide sont une fonction Premium. Free peut lire les guides et la FAQ publics, mais ne peut pas envoyer de questions au Centre d’aide."
+        ],
+        "notice": "Les questions au Centre d’aide et les demandes d’assistance technique sont réservées à Premium."
+      },
+      "how-to-use": {
+        "intro": "April peut aider pour les questions, la rédaction, les explications, l’organisation, l’analyse et les tâches prises en charge par texte, voix et images. Les fonctions dépendent de l’offre et de la configuration active.",
+        "bullets": [
+          "Texte : expliquez votre objectif, ajoutez du contexte et envoyez le message dans le chat April.",
+          "Voix : utilisez l’entrée vocale lorsqu’elle est disponible, parlez clairement et vérifiez le texte reconnu s’il est affiché.",
+          "Images et fichiers : joignez un fichier pris en charge et précisez ce qu’April doit examiner ou modifier.",
+          "Historique : ouvrez l’historique des dialogues pour retrouver les entrées enregistrées disponibles. Utilisez « Continuer ce dialogue » si l’option est proposée.",
+          "La mémoire aide à maintenir le contexte, mais ne constitue pas une archive permanente et ne garantit pas le rappel de chaque détail."
+        ],
+        "paragraphs": [
+          "Fenêtre prévue : Free — jusqu’à 12 heures ; Premium — jusqu’à 24 heures. Ces valeurs doivent être vérifiées dans la configuration de production avant publication."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Ce projet décrit les principaux types d’informations susceptibles d’être traitées lors de l’utilisation d’April. Avant publication, ajoutez le nom légal de l’exploitant et un contact relatif à la confidentialité.",
+        "paragraphs": [
+          "Les informations peuvent inclure les données de compte et de connexion ; les messages et contenus des dialogues ; les fichiers audio, images et documents envoyés ; les journaux techniques et de sécurité ; ainsi que les informations de forfait ou de transaction si les paiements sont activés.",
+          "Ces informations servent à fournir les réponses et fonctions demandées, maintenir l’accès et la continuité des dialogues, appliquer les limites de l’offre, traiter les demandes d’assistance lorsqu’elle est disponible, protéger le service et respecter les obligations légales.",
+          "Le contenu nécessaire à une réponse peut être traité par les fournisseurs d’IA, d’hébergement, d’authentification et les autres prestataires utilisés pour exploiter April. Avant publication, les prestataires réels, les catégories de données et les liens vers leurs politiques doivent être indiqués.",
+          "La fenêtre prévue de mémoire est de 12 heures maximum pour Free et de 24 heures pour Premium. Cela ne signifie pas que toutes les entrées, journaux techniques, messages d’assistance ou transactions sont supprimés à cette échéance ; leurs durées réelles doivent être documentées séparément.",
+          "Vous pouvez demander la suppression depuis les paramètres ou la page publique de suppression. Cela ne supprime pas votre compte Google, Gmail ou Google Drive. L’offre Premium prévue d’April est prépayée et ne se renouvelle pas automatiquement ; il n’est pas nécessaire de la résilier pour éviter un nouveau prélèvement. Toute autre souscription Google Play doit être gérée dans Google Play."
+        ],
+        "bullets": [
+          "Ajoutez avant publication l’entité responsable et un contact de confidentialité opérationnel.",
+          "Vérifiez les catégories de données, prestataires, lieux de traitement, durées de conservation et mécanismes de suppression dans les services Web et Bot déployés."
+        ],
+        "notice": "Ceci est un brouillon, pas une politique juridique finalisée. Il doit être vérifié et complété avant publication ou soumission à Google Play."
+      },
+      "terms-of-service": {
+        "intro": "Ces conditions provisoires décrivent les règles de base d’utilisation d’April. Elles doivent être complétées par les informations de l’exploitant et vérifiées pour la juridiction applicable.",
+        "bullets": [
+          "April est un service utilisant l’IA. Les fonctions, la disponibilité et les limites peuvent varier selon l’offre et évoluer.",
+          "Les réponses de l’IA peuvent être inexactes, incomplètes ou obsolètes. Vérifiez les informations importantes, notamment en matière juridique, médicale, financière ou de sécurité.",
+          "N’utilisez pas April pour enfreindre la loi ou les droits d’autrui, obtenir un accès non autorisé, perturber le service ou transmettre du contenu que vous n’êtes pas autorisé à partager.",
+          "Protégez l’accès à votre compte. Les fonctions et l’assistance dépendent de l’offre attribuée à votre compte.",
+          "Le prix Premium, la période de facturation, le renouvellement, l’annulation et les remboursements doivent être clairement indiqués avant l’activation des paiements réels.",
+          "Vous pouvez cesser d’utiliser April et demander la suppression de votre compte. Cela n’annule pas automatiquement un abonnement Google Play."
+        ],
+        "notice": "Brouillon de travail. Ajoutez l’entité légale, les coordonnées, le droit applicable, la procédure de litige, les droits des consommateurs et les autres clauses requises avant publication."
+      },
+      "plans-payments": {
+        "intro": "Cette page décrit les forfaits envisagés. Les prix sont indicatifs ; les achats ne seront disponibles qu’après mise en place et vérification du paiement Google Play.",
+        "bullets": [
+          "Free — 0 $ US. Les guides publics et la FAQ sont accessibles ; le chat et les rendus restent soumis aux limites du service. Mémoire de dialogue : jusqu’à 12 heures.",
+          "Lite — futur format de test : 12 $ US pour 24 heures. Pas encore disponible ; les fonctions et limites seront annoncées au lancement.",
+          "Premium — 25 $ US pour 28 jours ou 3 $ US pour 12 heures. Selon la configuration active : mémoire de dialogue jusqu’à 24 heures, limite d’entrée supérieure, modification prise en charge des images et assistance Premium.",
+          "Le renouvellement sera manuel. Le forfait prépayé prévu ne se renouvelle pas automatiquement et ne déclenche aucun nouveau prélèvement. Pour continuer après l’expiration, l’utilisateur doit appuyer sur le bouton d’achat/de renouvellement et confirmer un nouvel achat. Le compte revient ensuite à Free."
+        ],
+        "paragraphs": [
+          "La fenêtre de mémoire correspond à la disponibilité du contexte de dialogue ; elle ne garantit pas la suppression de l’historique, des messages d’assistance, des journaux techniques ou des transactions. Ces éléments peuvent avoir des durées de conservation distinctes."
+        ],
+        "notice": "Le paiement réel n’est pas encore actif. Ne présentez pas ces montants ou avantages comme une offre disponible tant que l’achat intégré et la vérification côté serveur de Google Play n’ont pas été mis en place et testés."
+      },
+      "account-deletion": {
+        "intro": "Vous pouvez commencer la suppression avec le bouton rouge « Supprimer le compte » dans les paramètres du profil April, ou ouvrir la page dédiée ci-dessous.",
+        "paragraphs": [
+          "La page actuelle indique que la suppression concerne le profil April et l’April ID, l’historique des dialogues, les requêtes et réponses enregistrées, les métadonnées de rendu, les données d’offre ou de droits et les enregistrements de paiement internes liés au compte. Le mécanisme doit être testé en production.",
+          "Votre compte Google et les autres services Google ne sont pas supprimés. L’offre Premium prévue d’April est prépayée et ne se renouvelle pas automatiquement ; il n’est pas nécessaire de la résilier pour éviter un nouveau prélèvement. Toute autre souscription Google Play doit être gérée dans Google Play."
+        ],
+        "notice": "Si une erreur apparaît pendant la suppression, ne supposez pas que les données ont été effacées."
+      },
+      "contact-support": {
+        "intro": "Les demandes d’assistance technique sont accessibles aux membres Premium depuis leur profil April.",
+        "paragraphs": [
+          "La limite actuellement prévue est d’une demande toutes les 24 heures. Le formulaire existant et la vérification Premium côté serveur restent utilisés."
+        ],
+        "notice": "Les utilisateurs Free peuvent lire les guides publics, mais ne peuvent pas envoyer de demande d’assistance technique. Premium est nécessaire pour cette fonction."
+      }
+    }
+  },
+  "it": {
+    "title": "Aiuto e informazioni",
+    "subtitle": "Guide, informazioni sull’account e regole del servizio",
+    "overviewTitle": "Come possiamo aiutarti?",
+    "overviewText": "Scegli un argomento per aprirlo separatamente. Le guide e le norme pubbliche sono disponibili a tutti.",
+    "topicsLabel": "Argomenti",
+    "backToChat": "Torna ad April",
+    "backToTopics": "Tutti gli argomenti",
+    "articleLabel": "INFORMAZIONI",
+    "updatedLabel": "Bozza di lavoro · 22 ottobre 2026",
+    "noticeLabel": "Nota bene",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "0 USD",
+    "lite": "Lite",
+    "litePrice": "US$12 / 24 ore (futuro formato di prova)",
+    "liteDuration": "Futuro formato di prova: 24 ore per US$12. Non è ancora disponibile; funzioni e limiti saranno annunciati al lancio.",
+    "premiumPrice": "US$25 / 28 giorni o US$3 / 12 ore",
+    "memoryFree": "Memoria della conversazione: fino a 12 ore",
+    "memoryPremium": "Memoria della conversazione: fino a 24 ore",
+    "billingNote": "Premium è offerto con due acquisti prepagati una tantum: US$25 per 28 giorni oppure US$3 per 12 ore, senza rinnovo automatico né addebiti ricorrenti. Free resta gratuito e sempre disponibile. Lite sarà un futuro formato di prova di 24 ore a US$12 e non è ancora disponibile. Il rinnovo può essere scelto nelle ultime 24 ore di Premium. Senza rinnovo, alla scadenza l’account torna a Free. Il pagamento web con Google Pay viene mostrato solo dopo la configurazione, l’attivazione e l’approvazione del commerciante e del gateway. L’app distribuita tramite Google Play deve usare Google Play Billing.",
+    "openChat": "Apri chat",
+    "openHistory": "Apri cronologia dialoghi",
+    "openMemory": "Apri memoria",
+    "openSettings": "Apri profilo e impostazioni",
+    "openDeletion": "Apri la pagina di eliminazione account",
+    "openSupport": "Apri profilo e assistenza",
+    "faqTitle": "Domande frequenti",
+    "faqs": [
+      {
+        "question": "April ricorda sempre i messaggi precedenti?",
+        "answer": "No. La memoria aiuta a mantenere la continuità entro la finestra disponibile, ma non garantisce di ricordare ogni dettaglio."
+      },
+      {
+        "question": "Quanto dura la memoria?",
+        "answer": "La finestra prevista è fino a 12 ore con Free e fino a 24 ore con Premium. Altri dati possono avere periodi di conservazione diversi."
+      },
+      {
+        "question": "Gli utenti Free possono fare domande all’Centro assistenza?",
+        "answer": "Gli utenti Free possono leggere guide pubbliche e FAQ. Inviare domande direttamente all’Centro assistenza è una funzione Premium."
+      },
+      {
+        "question": "Gli utenti Free possono contattare l’assistenza tecnica?",
+        "answer": "Le richieste di assistenza tecnica sono disponibili solo per Premium, nel rispetto del limite attuale."
+      },
+      {
+        "question": "Eliminare April elimina il mio account Google?",
+        "answer": "No. Sono interessati solo l’account April e i dati April. Il piano Premium previsto è prepagato e non si rinnova automaticamente, quindi non è necessario annullarlo per evitare un nuovo addebito. Gli altri abbonamenti Google Play vanno gestiti in Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Centro assistenza",
+        "summary": "Domande frequenti e risposte sull’uso di April."
+      },
+      "how-to-use": {
+        "title": "Come usare April",
+        "summary": "Testo, voce, immagini, cronologia e memoria."
+      },
+      "privacy-policy": {
+        "title": "Informativa sulla privacy",
+        "summary": "Quali dati tratta April e come richiederne l’eliminazione."
+      },
+      "terms-of-service": {
+        "title": "Termini di servizio",
+        "summary": "Regole d’uso e limiti importanti dell’IA."
+      },
+      "plans-payments": {
+        "title": "Piani e pagamenti",
+        "summary": "Accesso Free, Lite e Premium, prezzi previsti, memoria e rinnovo manuale."
+      },
+      "account-deletion": {
+        "title": "Eliminazione account e dati",
+        "summary": "Elimina l’account April e scopri cosa comporta."
+      },
+      "contact-support": {
+        "title": "Contatta l’assistenza",
+        "summary": "L’assistenza tecnica è disponibile per Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Consulta le guide pubbliche e le risposte alle domande frequenti. I contenuti pubblicati sono disponibili per tutti i piani.",
+        "paragraphs": [
+          "Le domande personalizzate inviate direttamente al Centro assistenza sono una funzione Premium. Free può leggere guide e FAQ pubbliche, ma non inviare domande al Centro assistenza."
+        ],
+        "notice": "Le domande al Centro assistenza e le richieste di assistenza tecnica sono riservate a Premium."
+      },
+      "how-to-use": {
+        "intro": "April può aiutare con domande, scrittura, spiegazioni, pianificazione, analisi e attività supportate con testo, voce e immagini. Le funzioni dipendono dal piano e dalla configurazione attiva.",
+        "bullets": [
+          "Testo: descrivi l’obiettivo, aggiungi il contesto e invia il messaggio nella chat April.",
+          "Voce: usa l’input vocale quando disponibile, parla chiaramente e controlla il testo riconosciuto se viene mostrato.",
+          "Immagini e file: allega un file supportato e spiega cosa April deve esaminare o modificare.",
+          "Cronologia: apri la cronologia dei dialoghi per rivedere le voci salvate disponibili. Usa «Continua dialogo» quando presente.",
+          "La memoria aiuta a mantenere il contesto, ma non è un archivio permanente e non garantisce il ricordo di ogni dettaglio."
+        ],
+        "paragraphs": [
+          "Finestra prevista: Free — fino a 12 ore; Premium — fino a 24 ore. Verifica questi valori nella configurazione di produzione prima di pubblicarli."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Questa bozza descrive i principali tipi di informazioni che possono essere trattati utilizzando April. Prima della pubblicazione occorre aggiungere il nome legale del gestore e un contatto per la privacy.",
+        "paragraphs": [
+          "Le informazioni possono includere dati dell’account e di accesso; messaggi e contenuti dei dialoghi; audio, immagini e file caricati; registri tecnici e di sicurezza; dati del piano o delle transazioni se i pagamenti sono attivi.",
+          "I dati vengono utilizzati per fornire risposte e funzioni richieste, mantenere accesso e continuità delle conversazioni, applicare i limiti del piano, gestire le richieste di assistenza dove disponibile, proteggere il servizio e rispettare gli obblighi di legge.",
+          "I contenuti necessari per rispondere possono essere trattati dai fornitori di IA, hosting, autenticazione e altri servizi utilizzati da April. Prima della pubblicazione devono essere indicati i fornitori effettivi, le categorie di dati e i collegamenti alle loro informative.",
+          "La finestra prevista di memoria è fino a 12 ore per Free e fino a 24 ore per Premium. Ciò non significa che ogni record, registro tecnico, messaggio di assistenza o transazione venga eliminato in quel periodo; i tempi effettivi devono essere documentati separatamente.",
+          "Puoi richiedere l’eliminazione dalle impostazioni o dalla pagina pubblica dedicata. Questo non elimina l’account Google, Gmail o Google Drive. Il Premium previsto di April è prepagato e non si rinnova automaticamente, quindi non è necessario annullarlo per evitare un nuovo addebito. Gli altri abbonamenti Google Play vanno gestiti in Google Play."
+        ],
+        "bullets": [
+          "Aggiungi prima della pubblicazione l’entità responsabile e un contatto privacy funzionante.",
+          "Verifica categorie di dati, fornitori, luoghi di trattamento, conservazione ed eliminazione nei servizi Web e Bot distribuiti."
+        ],
+        "notice": "Questa è una bozza, non un’informativa legale definitiva. Deve essere verificata e completata prima della pubblicazione o della presentazione a Google Play."
+      },
+      "terms-of-service": {
+        "intro": "Questi termini provvisori descrivono le regole di base per usare April. Prima della pubblicazione devono essere completati con i dati del gestore e verificati per la giurisdizione applicabile.",
+        "bullets": [
+          "April è un servizio basato su IA. Funzioni, disponibilità e limiti possono variare in base al piano e cambiare nel tempo.",
+          "Le risposte possono essere inesatte, incomplete o obsolete. Verifica le informazioni importanti, soprattutto per decisioni legali, mediche, finanziarie o di sicurezza.",
+          "Non utilizzare April per violare leggi o diritti altrui, ottenere accesso non autorizzato, interrompere il servizio o inviare contenuti che non sei autorizzato a condividere.",
+          "Proteggi l’accesso al tuo account. Funzioni e assistenza dipendono dal piano assegnato.",
+          "Prezzo Premium, periodo di fatturazione, rinnovo, cancellazione e rimborsi devono essere mostrati chiaramente prima di attivare i pagamenti reali.",
+          "Puoi smettere di usare April e richiedere l’eliminazione dell’account. Questo non annulla automaticamente un abbonamento Google Play."
+        ],
+        "notice": "Bozza di lavoro. Aggiungi entità legale, contatti, legge applicabile, risoluzione delle controversie, diritti dei consumatori e altre clausole richieste prima della pubblicazione."
+      },
+      "plans-payments": {
+        "intro": "Questa pagina descrive i piani previsti. I prezzi sono indicativi; gli acquisti saranno disponibili solo dopo l’implementazione e la verifica del pagamento Google Play.",
+        "bullets": [
+          "Free — US$0. Guide pubbliche e FAQ sono disponibili; chat e funzioni visive restano soggette ai limiti attivi del servizio. Memoria del dialogo: fino a 12 ore.",
+          "Lite — futuro formato di prova: US$12 per 24 ore. Non è ancora disponibile; funzioni e limiti saranno annunciati al lancio.",
+          "Premium — US$25 per 28 giorni oppure US$3 per 12 ore. In base alla configurazione attiva, può includere fino a 24 ore di memoria del dialogo, un limite di input maggiore, modifica supportata delle immagini e supporto Premium.",
+          "Il rinnovo sarà manuale. Il piano prepagato previsto non si rinnova automaticamente e non effettua addebiti successivi automatici. Per continuare dopo la scadenza, l’utente deve premere il pulsante di acquisto/rinnovo e confermare un nuovo acquisto. Alla fine del periodo pagato l’account torna a Free."
+        ],
+        "paragraphs": [
+          "La finestra di memoria descrive il periodo di disponibilità del contesto del dialogo; non garantisce la cancellazione di cronologia, messaggi di supporto, log tecnici o transazioni. Queste categorie possono avere tempi di conservazione separati."
+        ],
+        "notice": "Il pagamento reale non è ancora attivo. Non presentare questi importi o vantaggi come offerte acquistabili finché il pagamento in-app e la verifica server di Google Play non sono implementati e testati."
+      },
+      "account-deletion": {
+        "intro": "Puoi avviare l’eliminazione con il pulsante rosso Elimina account nelle impostazioni del profilo April oppure aprire la pagina dedicata qui sotto.",
+        "paragraphs": [
+          "La pagina di eliminazione attuale indica che vengono rimossi profilo April e April ID, cronologia dei dialoghi, richieste e risposte salvate, metadati di rendering, dati del piano e registri interni di pagamento associati. Il processo deve essere testato in produzione.",
+          "L’account Google e gli altri servizi Google non vengono eliminati. Il Premium previsto di April è prepagato e non si rinnova automaticamente, quindi non è necessario annullarlo per evitare un nuovo addebito. Gli altri abbonamenti Google Play vanno gestiti in Google Play."
+        ],
+        "notice": "Se compare un errore durante l’eliminazione, non presumere che i dati siano stati cancellati."
+      },
+      "contact-support": {
+        "intro": "Le richieste di assistenza tecnica sono disponibili per i membri Premium dal profilo April.",
+        "paragraphs": [
+          "Il limite previsto attuale è una richiesta ogni 24 ore. Il modulo di supporto esistente e il controllo Premium sul server restano parte del servizio."
+        ],
+        "notice": "Gli utenti Free possono leggere l’aiuto pubblico, ma non inviare richieste di supporto tecnico. Per questa funzione serve Premium."
+      }
+    }
+  },
+  "pl": {
+    "title": "Pomoc i informacje",
+    "subtitle": "Instrukcje, informacje o koncie i zasady usługi",
+    "overviewTitle": "W czym możemy pomóc?",
+    "overviewText": "Wybierz temat, aby otworzyć go osobno. Publiczne instrukcje i zasady są dostępne dla wszystkich.",
+    "topicsLabel": "Tematy",
+    "backToChat": "Wróć do April",
+    "backToTopics": "Wszystkie tematy",
+    "articleLabel": "INFORMACJE",
+    "updatedLabel": "Projekt roboczy · 22 października 2026 r.",
+    "noticeLabel": "Uwaga",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "0 USD",
+    "lite": "Lite",
+    "litePrice": "12 USD / 24 godziny (przyszły format testowy)",
+    "liteDuration": "Przyszły format testowy: 24 godziny za 12 USD. Jeszcze niedostępny; funkcje i limity zostaną ogłoszone przy uruchomieniu.",
+    "premiumPrice": "25 USD / 28 dni lub 3 USD / 12 godzin",
+    "memoryFree": "Pamięć dialogu: do 12 godzin",
+    "memoryPremium": "Pamięć dialogu: do 24 godzin",
+    "billingNote": "Premium jest oferowany jako dwa jednorazowe zakupy z góry: 25 USD za 28 dni lub 3 USD za 12 godzin, bez automatycznego odnowienia i cyklicznych obciążeń. Free pozostaje bezpłatny i dostępny w dowolnym momencie. Lite będzie przyszłym formatem testowym na 24 godziny za 12 USD i nie jest jeszcze dostępny. Przedłużenie można wybrać w ostatnich 24 godzinach Premium. Bez przedłużenia po upływie okresu konto wraca do Free. Płatność Google Pay na stronie jest wyświetlana dopiero po skonfigurowaniu, włączeniu i zatwierdzeniu sprzedawcy oraz operatora płatności. Aplikacja dystrybuowana przez Google Play musi używać Google Play Billing.",
+    "openChat": "Otwórz czat",
+    "openHistory": "Otwórz historię dialogów",
+    "openMemory": "Otwórz pamięć",
+    "openSettings": "Otwórz profil i ustawienia",
+    "openDeletion": "Otwórz stronę usuwania konta",
+    "openSupport": "Otwórz profil i pomoc techniczną",
+    "faqTitle": "Często zadawane pytania",
+    "faqs": [
+      {
+        "question": "Czy April zawsze pamięta poprzednie wiadomości?",
+        "answer": "Nie. Pamięć pomaga zachować ciągłość w dostępnym oknie, ale nie gwarantuje zapamiętania każdego szczegółu."
+      },
+      {
+        "question": "Jak długo trwa pamięć?",
+        "answer": "Planowane okno pamięci to do 12 godzin w Free i do 24 godzin w Premium. Inne rekordy mogą mieć inne okresy przechowywania."
+      },
+      {
+        "question": "Czy użytkownicy Free mogą zadawać pytania w Centrum pomocy?",
+        "answer": "Użytkownicy Free mogą czytać publiczne instrukcje i FAQ. Bezpośrednie pytania do Centrum pomocy są funkcją Premium."
+      },
+      {
+        "question": "Czy użytkownicy Free mogą kontaktować się z pomocą techniczną?",
+        "answer": "Zgłoszenia do pomocy technicznej są dostępne tylko dla Premium, zgodnie z aktualnym limitem."
+      },
+      {
+        "question": "Czy usunięcie April usuwa moje konto Google?",
+        "answer": "Nie. Zmiana dotyczy wyłącznie konta April i danych April. Planowany Premium jest przedpłacony i nie odnawia się automatycznie, więc nie trzeba go anulować, aby uniknąć kolejnej opłaty. Inne subskrypcje Google Play należy obsługiwać w Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Centrum pomocy",
+        "summary": "Częste pytania i odpowiedzi dotyczące korzystania z April."
+      },
+      "how-to-use": {
+        "title": "Jak korzystać z April",
+        "summary": "Tekst, głos, obrazy, historia dialogów i pamięć."
+      },
+      "privacy-policy": {
+        "title": "Polityka prywatności",
+        "summary": "Jakie dane przetwarza April i jak poprosić o ich usunięcie."
+      },
+      "terms-of-service": {
+        "title": "Warunki korzystania",
+        "summary": "Zasady korzystania z April i ograniczenia AI."
+      },
+      "plans-payments": {
+        "title": "Plany i płatności",
+        "summary": "Dostęp Free, Lite i Premium, planowane ceny, pamięć i ręczne przedłużenie."
+      },
+      "account-deletion": {
+        "title": "Usuwanie konta i danych",
+        "summary": "Jak usunąć konto April i jakie są skutki."
+      },
+      "contact-support": {
+        "title": "Kontakt z pomocą techniczną",
+        "summary": "Pomoc techniczna jest dostępna dla Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Zapoznaj się z publicznymi instrukcjami i odpowiedziami na częste pytania. Opublikowane materiały są dostępne dla wszystkich planów.",
+        "paragraphs": [
+          "Pytania indywidualne wysyłane bezpośrednio do Centrum pomocy to funkcja Premium. Użytkownicy Free mogą czytać publiczne instrukcje i FAQ, ale nie mogą wysyłać pytań do Centrum pomocy."
+        ],
+        "notice": "Pytania do Centrum pomocy i zgłoszenia do pomocy technicznej są dostępne tylko w Premium."
+      },
+      "how-to-use": {
+        "intro": "April pomaga w pytaniach, pisaniu, wyjaśnieniach, planowaniu, analizie i obsługiwanych zadaniach tekstowych, głosowych i obrazowych. Funkcje zależą od planu i bieżącej konfiguracji.",
+        "bullets": [
+          "Tekst: opisz cel, dodaj kontekst i wyślij wiadomość w czacie April.",
+          "Głos: użyj wejścia głosowego, jeśli jest dostępne, mów wyraźnie i sprawdź rozpoznany tekst, jeśli jest pokazany.",
+          "Obrazy i pliki: dołącz obsługiwany plik i wyjaśnij, co April ma sprawdzić lub zmienić.",
+          "Historia: otwórz historię dialogów, aby zobaczyć dostępne zapisane wpisy. Wybierz „Kontynuuj dialog”, jeśli opcja jest dostępna.",
+          "Pamięć pomaga utrzymać kontekst, ale nie jest trwałym archiwum i nie gwarantuje przypomnienia każdego szczegółu."
+        ],
+        "paragraphs": [
+          "Planowane okno pamięci: Free — do 12 godzin; Premium — do 24 godzin. Przed publikacją potwierdź te wartości w konfiguracji produkcyjnej."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Ten projekt opisuje główne rodzaje informacji, które mogą być przetwarzane podczas korzystania z April. Przed publikacją trzeba dodać nazwę prawną operatora i kontakt ds. prywatności.",
+        "paragraphs": [
+          "Przetwarzane informacje mogą obejmować dane konta i logowania; wiadomości i treść dialogów; przesłane nagrania audio, obrazy i pliki; rejestry techniczne i bezpieczeństwa; a także dane planu lub transakcji, jeśli płatności są włączone.",
+          "Informacje służą do udzielania odpowiedzi i świadczenia funkcji, utrzymania dostępu do konta i ciągłości dialogu, stosowania limitów planu, obsługi zgłoszeń tam, gdzie dostępna jest pomoc, ochrony usługi i spełniania obowiązków prawnych.",
+          "Treści potrzebne do odpowiedzi mogą być przetwarzane przez dostawców AI, hostingu, uwierzytelniania i innych usług używanych przez April. Przed publikacją należy wskazać rzeczywistych dostawców, kategorie danych i linki do ich polityk prywatności.",
+          "Planowane okno pamięci wynosi do 12 godzin w Free i do 24 godzin w Premium. Nie oznacza to, że wszystkie wpisy bazy danych, logi techniczne, wiadomości do pomocy lub transakcje są wtedy usuwane; rzeczywiste okresy przechowywania trzeba opisać osobno.",
+          "Usunięcie konta można zgłosić w ustawieniach lub na publicznej stronie usuwania. Nie usuwa to konta Google, Gmail ani Google Drive. Planowany Premium April jest przedpłacony i nie odnawia się automatycznie, więc nie trzeba go anulować, aby uniknąć kolejnej opłaty. Inne subskrypcje Google Play należy obsługiwać w Google Play."
+        ],
+        "bullets": [
+          "Przed publikacją dodaj odpowiedzialny podmiot prawny i działający kontakt ds. prywatności.",
+          "Sprawdź kategorie danych, dostawców, miejsca przetwarzania, okresy przechowywania i usuwanie w działających usługach Web i Bot."
+        ],
+        "notice": "To projekt, a nie ukończona polityka prawna. Przed publikacją lub zgłoszeniem do Google Play dokument musi zostać sprawdzony i uzupełniony."
+      },
+      "terms-of-service": {
+        "intro": "Te robocze warunki opisują podstawowe zasady korzystania z April. Przed publikacją należy dodać dane operatora i sprawdzić warunki pod kątem właściwej jurysdykcji.",
+        "bullets": [
+          "April to usługa oparta na AI. Funkcje, dostępność i limity mogą różnić się w zależności od planu i zmieniać się w czasie.",
+          "Odpowiedzi AI mogą być nieprawidłowe, niepełne lub nieaktualne. Weryfikuj ważne informacje, zwłaszcza w sprawach prawnych, medycznych, finansowych i bezpieczeństwa.",
+          "Nie używaj April do łamania prawa lub praw innych osób, uzyskiwania nieautoryzowanego dostępu, zakłócania usługi ani udostępniania treści, których nie wolno Ci udostępniać.",
+          "Chroń dostęp do konta. Funkcje i pomoc zależą od planu przypisanego do konta.",
+          "Cena Premium, okres rozliczeniowy, odnowienie, anulowanie i zwroty muszą być jasno pokazane przed uruchomieniem rzeczywistych płatności.",
+          "Możesz przestać korzystać z April i poprosić o usunięcie konta. Nie anuluje to automatycznie subskrypcji Google Play."
+        ],
+        "notice": "Projekt roboczy. Przed publikacją dodaj podmiot prawny, dane kontaktowe, prawo właściwe, procedurę sporów, informacje o prawach konsumenta i inne wymagane warunki."
+      },
+      "plans-payments": {
+        "intro": "Ta strona opisuje planowane pakiety. Ceny są orientacyjne; zakup będzie dostępny dopiero po wdrożeniu i sprawdzeniu płatności Google Play.",
+        "bullets": [
+          "Free — 0 USD. Publiczne instrukcje i FAQ są dostępne; czat i wizualizacje podlegają aktywnym limitom usługi. Pamięć dialogu: do 12 godzin.",
+          "Lite — przyszły format testowy: 12 USD za 24 godziny. Jeszcze niedostępny; funkcje i limity zostaną ogłoszone przy uruchomieniu.",
+          "Premium — 25 USD za 28 dni lub 3 USD za 12 godzin. W zależności od aktywnej konfiguracji może obejmować do 24 godzin pamięci dialogu, większy limit danych wejściowych, obsługiwaną edycję obrazów i pomoc Premium.",
+          "Przedłużenie będzie ręczne. Plan przedpłacony nie odnawia się automatycznie i nie powoduje kolejnych automatycznych opłat. Aby kontynuować po wygaśnięciu, użytkownik musi nacisnąć przycisk zakupu/przedłużenia i potwierdzić nowy zakup. Po upływie opłaconego okresu konto wraca do Free."
+        ],
+        "paragraphs": [
+          "Okno pamięci oznacza okres dostępności kontekstu dialogu, a nie gwarancję usunięcia historii, wiadomości pomocy technicznej, logów lub transakcji. Te kategorie mogą mieć osobne okresy przechowywania."
+        ],
+        "notice": "Płatność nie jest jeszcze aktywna. Nie przedstawiaj tych kwot ani korzyści jako dostępnej oferty, dopóki płatność w aplikacji i weryfikacja serwerowa Google Play nie zostaną wdrożone i przetestowane."
+      },
+      "account-deletion": {
+        "intro": "Usuwanie możesz rozpocząć czerwonym przyciskiem „Usuń konto” w ustawieniach profilu April albo otworzyć osobną stronę usuwania poniżej.",
+        "paragraphs": [
+          "Aktualna strona usuwania informuje, że usuwane są profil April i April ID, historia dialogów, zapisane pytania i odpowiedzi, metadane renderowania, dane planu lub uprawnień oraz powiązane wewnętrzne rekordy płatności April. Proces należy przetestować w produkcji.",
+          "Konto Google i inne usługi Google nie są usuwane. Planowany Premium April jest przedpłacony i nie odnawia się automatycznie, więc nie trzeba go anulować, aby uniknąć kolejnej opłaty. Inne subskrypcje Google Play należy obsługiwać w Google Play."
+        ],
+        "notice": "Jeśli podczas usuwania pojawi się błąd, nie zakładaj, że dane zostały usunięte."
+      },
+      "contact-support": {
+        "intro": "Zgłoszenia do pomocy technicznej są dostępne dla użytkowników Premium z poziomu profilu April.",
+        "paragraphs": [
+          "Planowany obecny limit to jedno zgłoszenie na 24 godziny. Istniejący formularz i serwerowa kontrola dostępu Premium pozostają częścią usługi."
+        ],
+        "notice": "Użytkownicy Free mogą czytać publiczną pomoc, ale nie mogą wysyłać zgłoszeń do pomocy technicznej. Aby korzystać z tej funkcji, potrzebny jest Premium."
+      }
+    }
+  },
+  "pt": {
+    "title": "Ajuda e informações",
+    "subtitle": "Guias, informações da conta e políticas do serviço",
+    "overviewTitle": "Como podemos ajudar?",
+    "overviewText": "Escolha um tópico para abri-lo separadamente. Guias e políticas públicas estão disponíveis para todos.",
+    "topicsLabel": "Tópicos",
+    "backToChat": "Voltar para April",
+    "backToTopics": "Todos os tópicos",
+    "articleLabel": "INFORMAÇÕES",
+    "updatedLabel": "Rascunho de trabalho · 22 de outubro de 2026",
+    "noticeLabel": "Atenção",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "US$ 0",
+    "lite": "Lite",
+    "litePrice": "US$12 / 24 horas (formato de teste futuro)",
+    "liteDuration": "Formato de teste futuro: 24 horas por US$12. Ainda não está disponível; as funções e os limites serão anunciados no lançamento.",
+    "premiumPrice": "US$25 / 28 dias ou US$3 / 12 horas",
+    "memoryFree": "Memória da conversa: até 12 horas",
+    "memoryPremium": "Memória da conversa: até 24 horas",
+    "billingNote": "O Premium é oferecido como duas compras pré-pagas únicas: US$25 por 28 dias ou US$3 por 12 horas, sem renovação automática nem cobranças recorrentes. O Free continua gratuito e disponível a qualquer momento. Lite será um futuro formato de teste de 24 horas por US$12 e ainda não está disponível. A renovação pode ser escolhida nas últimas 24 horas do Premium. Sem renovação, a conta regressa ao Free quando o período termina. O pagamento web pelo Google Pay só aparece depois de o comerciante e o gateway serem configurados, ativados e aprovados. A versão distribuída pelo Google Play deve usar o Google Play Billing.",
+    "openChat": "Abrir conversa",
+    "openHistory": "Abrir histórico de diálogos",
+    "openMemory": "Abrir memória",
+    "openSettings": "Abrir perfil e configurações",
+    "openDeletion": "Abrir página de exclusão da conta",
+    "openSupport": "Abrir perfil e suporte",
+    "faqTitle": "Perguntas frequentes",
+    "faqs": [
+      {
+        "question": "April sempre se lembra das mensagens anteriores?",
+        "answer": "Não. A memória ajuda a manter a continuidade dentro da janela disponível, mas não garante lembrar todos os detalhes."
+      },
+      {
+        "question": "Por quanto tempo a memória dura?",
+        "answer": "A janela prevista é de até 12 horas no Free e até 24 horas no Premium. Outros registros podem ter períodos de retenção diferentes."
+      },
+      {
+        "question": "Usuários Free podem fazer perguntas ao Central de ajuda?",
+        "answer": "Usuários Free podem ler guias públicos e FAQs. Fazer perguntas diretamente ao Central de ajuda é um recurso Premium."
+      },
+      {
+        "question": "Usuários Free podem contactar o suporte técnico?",
+        "answer": "Solicitações de suporte técnico estão disponíveis apenas para Premium, conforme o limite atual."
+      },
+      {
+        "question": "Excluir April exclui minha conta Google?",
+        "answer": "Não. Apenas a conta April e os dados do April são afetados. O Premium previsto é pré-pago e não se renova automaticamente, por isso não é necessário cancelá-lo para evitar outra cobrança. Qualquer outra assinatura do Google Play deve ser gerida no Google Play."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Central de ajuda",
+        "summary": "Perguntas frequentes e respostas sobre o uso do April."
+      },
+      "how-to-use": {
+        "title": "Como usar o April",
+        "summary": "Texto, voz, imagens, histórico de diálogos e memória."
+      },
+      "privacy-policy": {
+        "title": "Política de privacidade",
+        "summary": "Quais dados April processa e como solicitar exclusão."
+      },
+      "terms-of-service": {
+        "title": "Termos de serviço",
+        "summary": "Regras de uso e limitações importantes da IA."
+      },
+      "plans-payments": {
+        "title": "Planos e pagamentos",
+        "summary": "Acesso Free, Lite e Premium, preços previstos, memória e renovação manual."
+      },
+      "account-deletion": {
+        "title": "Exclusão da conta e dos dados",
+        "summary": "Como excluir sua conta April e o que isso afeta."
+      },
+      "contact-support": {
+        "title": "Falar com o suporte",
+        "summary": "Suporte técnico disponível para Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Consulte os guias públicos e as respostas às perguntas frequentes. Os materiais publicados podem ser lidos em qualquer plano.",
+        "paragraphs": [
+          "Perguntas personalizadas enviadas diretamente à Central de ajuda são um recurso Premium. O Free pode ler os guias e FAQs públicos, mas não pode enviar perguntas à Central de ajuda."
+        ],
+        "notice": "Perguntas à Central de ajuda e solicitações de suporte técnico são exclusivas do Premium."
+      },
+      "how-to-use": {
+        "intro": "April pode ajudar com perguntas, escrita, explicações, planejamento, análise e tarefas compatíveis com texto, voz e imagens. Os recursos dependem do plano e da configuração ativa.",
+        "bullets": [
+          "Texto: descreva seu objetivo, acrescente contexto e envie a mensagem no chat do April.",
+          "Voz: use a entrada por voz quando disponível, fale com clareza e confira o texto reconhecido se ele aparecer.",
+          "Imagens e arquivos: anexe um arquivo compatível e explique o que April deve examinar ou alterar.",
+          "Histórico: abra o histórico de diálogos para consultar entradas salvas disponíveis. Use “Continuar este diálogo” quando aparecer.",
+          "A memória ajuda a manter o contexto, mas não é um arquivo permanente e não garante lembrar todos os detalhes."
+        ],
+        "paragraphs": [
+          "Janela prevista: Free — até 12 horas; Premium — até 24 horas. Confirme esses valores na configuração de produção antes de publicá-los."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Este rascunho descreve os principais tipos de informação que podem ser processados ao usar April. Antes da publicação, adicione o nome legal do operador e um contato de privacidade.",
+        "paragraphs": [
+          "As informações podem incluir dados da conta e de autenticação; mensagens e conteúdo dos diálogos; áudio, imagens e arquivos enviados; registros técnicos e de segurança; e dados do plano ou transações quando os pagamentos estiverem habilitados.",
+          "As informações são usadas para fornecer respostas e recursos solicitados, manter acesso à conta e continuidade, aplicar limites de plano, responder a solicitações de suporte onde disponível, proteger o serviço e cumprir obrigações legais.",
+          "O conteúdo necessário para responder pode ser processado por provedores de IA, hospedagem, autenticação e outros serviços usados pelo April. Antes da publicação, os provedores reais, as categorias de dados e os links para suas políticas devem ser identificados.",
+          "A janela prevista de memória é de até 12 horas no Free e até 24 horas no Premium. Isso não significa que todos os registros, logs técnicos, mensagens de suporte ou transações serão excluídos nesse prazo; os períodos reais devem ser documentados separadamente.",
+          "Você pode solicitar a exclusão nas configurações ou na página pública de exclusão. Isso não exclui sua conta Google, Gmail ou Google Drive. O Premium previsto do April é pré-pago e não se renova automaticamente, por isso não é necessário cancelá-lo para evitar outra cobrança. Qualquer outra assinatura do Google Play deve ser gerida no Google Play."
+        ],
+        "bullets": [
+          "Adicione antes da publicação a entidade responsável e um contato de privacidade funcional.",
+          "Verifique categorias de dados, provedores, locais de processamento, retenção e exclusão nos serviços Web e Bot implantados."
+        ],
+        "notice": "Este é um rascunho, não uma política jurídica final. Deve ser revisado e concluído antes da publicação ou do envio ao Google Play."
+      },
+      "terms-of-service": {
+        "intro": "Estes termos provisórios descrevem as regras básicas de uso do April. Devem ser completados com os dados do operador e revisados conforme a jurisdição aplicável antes da publicação.",
+        "bullets": [
+          "April é um serviço baseado em IA. Recursos, disponibilidade e limites podem variar conforme o plano e mudar ao longo do tempo.",
+          "As respostas da IA podem ser imprecisas, incompletas ou desatualizadas. Verifique informações importantes, especialmente em decisões legais, médicas, financeiras ou de segurança.",
+          "Não use April para violar leis ou direitos de terceiros, obter acesso não autorizado, interromper o serviço ou enviar conteúdo que você não tem autorização para compartilhar.",
+          "Proteja o acesso à sua conta. Recursos e suporte dependem do plano atribuído à conta.",
+          "Preço Premium, período de cobrança, renovação, cancelamento e reembolsos devem ser exibidos claramente antes de ativar pagamentos reais.",
+          "Você pode deixar de usar April e solicitar a exclusão da conta. Isso não cancela automaticamente uma assinatura do Google Play."
+        ],
+        "notice": "Rascunho de trabalho. Adicione a entidade legal, contatos, legislação aplicável, resolução de disputas, direitos do consumidor e outras cláusulas necessárias antes da publicação."
+      },
+      "plans-payments": {
+        "intro": "Esta página descreve os planos previstos. Os preços são indicativos; as compras só estarão disponíveis depois de implementar e verificar o pagamento do Google Play.",
+        "bullets": [
+          "Free — US$0. Guias públicas e FAQ disponíveis; o chat e as funções visuais estão sujeitos aos limites ativos do serviço. Memória do diálogo: até 12 horas.",
+          "Lite — formato de teste futuro: US$12 por 24 horas. Ainda não está disponível; as funções e os limites serão anunciados no lançamento.",
+          "Premium — US$25 por 28 dias ou US$3 por 12 horas. Conforme a configuração ativa, pode incluir até 24 horas de memória do diálogo, limite de entrada superior, edição compatível de imagens e suporte Premium.",
+          "A renovação será manual. O plano pré-pago previsto não renova automaticamente nem gera novas cobranças automáticas. Para continuar após o fim do prazo, o utilizador tem de tocar no botão de compra/renovação e confirmar uma nova compra. Após o período pago, a conta regressa ao Free."
+        ],
+        "paragraphs": [
+          "A janela de memória indica por quanto tempo o contexto do diálogo está disponível; não garante a eliminação do histórico, mensagens de suporte, registos técnicos ou transações. Essas categorias podem ter prazos de conservação separados."
+        ],
+        "notice": "O pagamento real ainda não está ativo. Não apresentes estes valores ou benefícios como ofertas disponíveis até o pagamento na aplicação e a verificação do servidor Google Play estarem implementados e testados."
+      },
+      "account-deletion": {
+        "intro": "Você pode iniciar a exclusão pelo botão vermelho Excluir conta nas configurações do perfil April ou abrir a página dedicada abaixo.",
+        "paragraphs": [
+          "A página atual de exclusão informa que remove o perfil April e o April ID, o histórico de diálogos, solicitações e respostas salvas, metadados de renderização, dados do plano e registros internos de pagamento associados. O processo deve ser testado em produção.",
+          "Sua conta Google e outros serviços Google não são excluídos. O Premium previsto do April é pré-pago e não se renova automaticamente, por isso não é necessário cancelá-lo para evitar outra cobrança. Qualquer outra assinatura do Google Play deve ser gerida no Google Play."
+        ],
+        "notice": "Se ocorrer um erro durante a exclusão, não presuma que os dados foram apagados."
+      },
+      "contact-support": {
+        "intro": "Solicitações de suporte técnico estão disponíveis para membros Premium no perfil do April.",
+        "paragraphs": [
+          "O limite previsto atual é uma solicitação a cada 24 horas. O formulário de suporte existente e a verificação Premium no servidor continuam sendo usados."
+        ],
+        "notice": "Usuários Free podem ler a ajuda pública, mas não podem enviar solicitações de suporte técnico. É necessário ter Premium para usar esse recurso."
+      }
+    }
+  },
+  "nl": {
+    "title": "Help en informatie",
+    "subtitle": "Handleidingen, accountinformatie en servicebeleid",
+    "overviewTitle": "Waarmee kunnen we helpen?",
+    "overviewText": "Kies een onderwerp om het apart te openen. Openbare handleidingen en beleidsinformatie zijn voor iedereen beschikbaar.",
+    "topicsLabel": "Onderwerpen",
+    "backToChat": "Terug naar April",
+    "backToTopics": "Alle onderwerpen",
+    "articleLabel": "INFORMATIE",
+    "updatedLabel": "Werkconcept · 22 oktober 2026",
+    "noticeLabel": "Let op",
+    "free": "Free",
+    "premium": "Premium",
+    "freePrice": "US$ 0",
+    "lite": "Lite",
+    "litePrice": "US$ 12 / 24 uur (toekomstig testformaat)",
+    "liteDuration": "Toekomstig testformaat: 24 uur voor US$ 12. Nog niet beschikbaar; functies en limieten worden bij de lancering bekendgemaakt.",
+    "premiumPrice": "US$ 25 / 28 dagen of US$ 3 / 12 uur",
+    "memoryFree": "Dialooggeheugen: maximaal 12 uur",
+    "memoryPremium": "Dialooggeheugen: maximaal 24 uur",
+    "billingNote": "Premium wordt aangeboden als twee eenmalige vooruitbetalingen: US$ 25 voor 28 dagen of US$ 3 voor 12 uur, zonder automatische verlenging of terugkerende afschrijvingen. Free blijft gratis en altijd beschikbaar. Lite wordt een toekomstig testformaat van 24 uur voor US$ 12 en is nog niet beschikbaar. Verlengen kan tijdens de laatste 24 uur van Premium. Zonder verlenging schakelt het account na afloop terug naar Free. Betalen met Google Pay op de website wordt pas getoond nadat de verkoper en betaalprovider zijn ingesteld, geactiveerd en goedgekeurd. Een app die via Google Play wordt verspreid, moet Google Play Billing gebruiken.",
+    "openChat": "Chat openen",
+    "openHistory": "Dialooggeschiedenis openen",
+    "openMemory": "Geheugen openen",
+    "openSettings": "Profiel en instellingen openen",
+    "openDeletion": "Pagina voor accountverwijdering openen",
+    "openSupport": "Profiel en ondersteuning openen",
+    "faqTitle": "Veelgestelde vragen",
+    "faqs": [
+      {
+        "question": "Onthoudt April altijd eerdere berichten?",
+        "answer": "Nee. Geheugen ondersteunt de gesprekscontinuïteit binnen het beschikbare venster, maar garandeert niet dat elk detail wordt onthouden."
+      },
+      {
+        "question": "Hoe lang blijft het geheugen beschikbaar?",
+        "answer": "Het beoogde venster is maximaal 12 uur voor Free en 24 uur voor Premium. Andere gegevens kunnen andere bewaartermijnen hebben."
+      },
+      {
+        "question": "Kunnen Free-gebruikers vragen stellen in het Helpcentrum?",
+        "answer": "Free-gebruikers kunnen openbare handleidingen en FAQ's lezen. Rechtstreeks vragen stellen in het Helpcentrum is een Premium-functie."
+      },
+      {
+        "question": "Kunnen Free-gebruikers contact opnemen met technische ondersteuning?",
+        "answer": "Technische ondersteuningsverzoeken zijn alleen beschikbaar voor Premium, binnen de huidige limiet."
+      },
+      {
+        "question": "Verwijdert het verwijderen van April mijn Google-account?",
+        "answer": "Nee. Alleen het April-account en April-gegevens worden geraakt. Het geplande Premium-pakket is prepaid en wordt niet automatisch verlengd; opzeggen om een volgende afschrijving te voorkomen is dus niet nodig. Andere Google Play-abonnementen moet je in Google Play beheren."
+      }
+    ],
+    "topics": {
+      "help-center": {
+        "title": "Helpcentrum",
+        "summary": "Veelgestelde vragen en antwoorden over het gebruik van April."
+      },
+      "how-to-use": {
+        "title": "April gebruiken",
+        "summary": "Tekst, spraak, afbeeldingen, dialooggeschiedenis en geheugen."
+      },
+      "privacy-policy": {
+        "title": "Privacybeleid",
+        "summary": "Welke gegevens April verwerkt en hoe je verwijdering aanvraagt."
+      },
+      "terms-of-service": {
+        "title": "Gebruiksvoorwaarden",
+        "summary": "Gebruiksregels en belangrijke beperkingen van AI."
+      },
+      "plans-payments": {
+        "title": "Abonnementen en betalingen",
+        "summary": "Free-, Lite- en Premium-toegang, geplande prijzen, geheugen en handmatige verlenging."
+      },
+      "account-deletion": {
+        "title": "Account- en gegevensverwijdering",
+        "summary": "Je April-account verwijderen en de gevolgen begrijpen."
+      },
+      "contact-support": {
+        "title": "Contact met ondersteuning",
+        "summary": "Technische ondersteuning is beschikbaar voor Premium."
+      }
+    },
+    "articles": {
+      "help-center": {
+        "intro": "Bekijk de openbare handleidingen en antwoorden op veelgestelde vragen. Gepubliceerde inhoud is voor alle abonnementen toegankelijk.",
+        "paragraphs": [
+          "Persoonlijke vragen rechtstreeks aan het Helpcentrum stellen is een Premium-functie. Free-gebruikers kunnen openbare handleidingen en FAQ's lezen, maar geen vragen naar het Helpcentrum sturen."
+        ],
+        "notice": "Vragen aan het Helpcentrum en technische ondersteuningsverzoeken zijn alleen beschikbaar voor Premium."
+      },
+      "how-to-use": {
+        "intro": "April kan helpen met vragen, schrijven, uitleg, planning, analyse en ondersteunde tekst-, spraak- en beeldtaken. Functies hangen af van je abonnement en de actieve configuratie.",
+        "bullets": [
+          "Tekst: beschrijf je doel, voeg context toe en verstuur je bericht in de April-chat.",
+          "Spraak: gebruik spraakinvoer als die beschikbaar is, spreek duidelijk en controleer herkende tekst wanneer die wordt getoond.",
+          "Afbeeldingen en bestanden: voeg een ondersteund bestand toe en leg uit wat April moet bekijken of aanpassen.",
+          "Geschiedenis: open de dialooggeschiedenis om beschikbare opgeslagen items te bekijken. Kies 'Dialoog voortzetten' als die optie wordt aangeboden.",
+          "Geheugen helpt de context te bewaren, maar is geen permanent archief en garandeert niet dat elk detail wordt onthouden."
+        ],
+        "paragraphs": [
+          "Beoogd geheugenvenster: Free — maximaal 12 uur; Premium — maximaal 24 uur. Controleer deze waarden in de productieconfiguratie voordat je ze publiceert."
+        ]
+      },
+      "privacy-policy": {
+        "intro": "Dit werkconcept beschrijft de belangrijkste soorten informatie die bij het gebruik van April kunnen worden verwerkt. Voeg vóór publicatie de juridische naam van de aanbieder en een privacycontact toe.",
+        "paragraphs": [
+          "Verwerkte informatie kan bestaan uit account- en aanmeldgegevens; berichten en dialooginhoud; geüploade audio, afbeeldingen en bestanden; technische en beveiligingslogboeken; en abonnements- of transactiegegevens wanneer betalingen zijn ingeschakeld.",
+          "De informatie wordt gebruikt om antwoorden en gevraagde functies te leveren, accounttoegang en dialoogcontinuïteit te ondersteunen, abonnementslimieten toe te passen, beschikbare ondersteuningsverzoeken te behandelen, de dienst te beveiligen en wettelijke verplichtingen na te komen.",
+          "Inhoud die nodig is om een verzoek te beantwoorden kan worden verwerkt door AI-, hosting-, authenticatie- en andere dienstverleners die April gebruikt. Vermeld vóór publicatie de werkelijke aanbieders, gegevenscategorieën en links naar hun privacybeleid.",
+          "Het beoogde geheugenvenster is maximaal 12 uur bij Free en maximaal 24 uur bij Premium. Dit betekent niet dat alle databasegegevens, technische logs, supportberichten of transacties dan worden verwijderd; de werkelijke bewaartermijnen moeten afzonderlijk worden beschreven.",
+          "Je kunt verwijdering aanvragen via Instellingen of de openbare verwijderingspagina. Dit verwijdert je Google-account, Gmail of Google Drive niet. Het geplande April Premium-pakket is prepaid en wordt niet automatisch verlengd; opzeggen om een volgende afschrijving te voorkomen is niet nodig. Andere Google Play-abonnementen moet je in Google Play beheren."
+        ],
+        "bullets": [
+          "Voeg vóór publicatie de verantwoordelijke rechtspersoon en een bereikbaar privacycontact toe.",
+          "Controleer gegevenscategorieën, dienstverleners, verwerkingslocaties, bewaartermijnen en verwijdering in de ingezette Web- en Bot-diensten."
+        ],
+        "notice": "Dit is een concept, geen definitief juridisch privacybeleid. Het moet worden gecontroleerd en aangevuld voordat het wordt gepubliceerd of bij Google Play wordt ingediend."
+      },
+      "terms-of-service": {
+        "intro": "Deze voorlopige voorwaarden beschrijven de basisregels voor het gebruik van April. Vul de gegevens van de aanbieder aan en controleer de voorwaarden voor de toepasselijke jurisdictie vóór publicatie.",
+        "bullets": [
+          "April is een AI-dienst. Functies, beschikbaarheid en limieten kunnen per abonnement verschillen en veranderen.",
+          "AI-antwoorden kunnen onjuist, onvolledig of verouderd zijn. Controleer belangrijke informatie, vooral bij juridische, medische, financiële of veiligheidsbeslissingen.",
+          "Gebruik April niet om wetten of rechten van anderen te schenden, ongeautoriseerde toegang te verkrijgen, de dienst te verstoren of inhoud te delen die je niet mag delen.",
+          "Beveilig de toegang tot je account. Functies en ondersteuning hangen af van het toegewezen abonnement.",
+          "De Premium-prijs, factureringsperiode, verlenging, opzegging en terugbetaling moeten duidelijk worden getoond voordat echte betalingen worden ingeschakeld.",
+          "Je kunt stoppen met April en verwijdering van je account aanvragen. Dit beëindigt een Google Play-abonnement niet automatisch."
+        ],
+        "notice": "Werkconcept. Voeg vóór publicatie de juridische entiteit, contactgegevens, toepasselijk recht, geschillenregeling, consumentenrechten en overige vereiste bepalingen toe."
+      },
+      "plans-payments": {
+        "intro": "Deze pagina beschrijft de geplande pakketten. De prijzen zijn voorlopig; aankopen zijn pas beschikbaar nadat Google Play-betalingen zijn geïmplementeerd en gecontroleerd.",
+        "bullets": [
+          "Free — US$ 0. Openbare handleidingen en FAQ zijn beschikbaar; chat- en visualisatiefuncties zijn onderworpen aan de actieve servicelimieten. Dialooggeheugen: maximaal 12 uur.",
+          "Lite — toekomstig testformaat: US$ 12 voor 24 uur. Nog niet beschikbaar; functies en limieten worden bij de lancering bekendgemaakt.",
+          "Premium — US$ 25 voor 28 dagen of US$ 3 voor 12 uur. Afhankelijk van de actieve configuratie: maximaal 24 uur dialooggeheugen, hogere invoerlimiet, ondersteunde afbeeldingsbewerking en Premium-ondersteuning.",
+          "Verlenging gebeurt handmatig. Het geplande prepaidpakket verlengt niet automatisch en veroorzaakt geen automatische vervolgafschrijving. Om na afloop door te gaan, moet de gebruiker op de koop-/verlengknop drukken en een nieuwe aankoop bevestigen. Daarna keert het account terug naar Free."
+        ],
+        "paragraphs": [
+          "Het geheugenvenster geeft aan hoelang de dialoogcontext beschikbaar is; het garandeert niet dat geschiedenis, supportberichten, technische logs of transacties dan worden verwijderd. Hiervoor kunnen aparte bewaartermijnen gelden."
+        ],
+        "notice": "Echte betalingen zijn nog niet actief. Presenteer deze bedragen of voordelen niet als beschikbare aanbiedingen voordat in-app betalingen en de servercontrole van Google Play zijn geïmplementeerd en getest."
+      },
+      "account-deletion": {
+        "intro": "Je kunt verwijdering starten met de rode knop Account verwijderen in de April-profielinstellingen of de aparte verwijderingspagina hieronder openen.",
+        "paragraphs": [
+          "De huidige verwijderingspagina vermeldt dat het April-profiel en April-ID, de dialooggeschiedenis, opgeslagen prompts en antwoorden, rendermetadata, abonnements- of toegangsgegevens en bijbehorende interne April-betalingsrecords worden verwijderd. Test dit proces in productie.",
+          "Je Google-account en andere Google-diensten worden niet verwijderd. Het geplande April Premium-pakket is prepaid en wordt niet automatisch verlengd; opzeggen om een volgende afschrijving te voorkomen is niet nodig. Andere Google Play-abonnementen moet je in Google Play beheren."
+        ],
+        "notice": "Ga er bij een fout tijdens verwijdering niet van uit dat de gegevens zijn verwijderd."
+      },
+      "contact-support": {
+        "intro": "Technische ondersteuningsverzoeken zijn voor Premium-leden beschikbaar via het April-profiel.",
+        "paragraphs": [
+          "De beoogde huidige limiet is één verzoek per 24 uur. Het bestaande ondersteuningsformulier en de servercontrole van Premium-toegang blijven onderdeel van de dienst."
+        ],
+        "notice": "Free-gebruikers kunnen openbare hulp lezen, maar geen technische ondersteuningsverzoeken indienen. Premium is vereist voor deze functie."
+      }
+    }
+  }
+}''')
+
+APRIL_WEB_INTERFACE_DOCUMENTATION_STANDARD = {
+    "schema": "april.web_interface_documentation_standard.v1",
+    "purpose": "A consistent specification for documenting every current page, card, button, sub-button, field, modal, renderer and navigation transition in April Web.",
+    "screen_record_required_fields": [
+        "screen_id", "visible_title", "route", "source_component", "purpose", "audience", "authentication_requirement",
+        "free_access", "premium_access", "layout_regions", "appearance_and_visual_style", "responsive_behavior",
+        "landmarks_and_relative_positions", "visible_controls", "entry_paths", "exit_paths", "loading_states", "empty_states",
+        "locked_states", "error_states", "success_states", "validation_rules", "data_displayed", "accessibility_labels",
+        "capture_anchors", "capture_viewports", "screenshot_asset_ref", "source_evidence", "last_verified_version"
+    ],
+    "control_record_required_fields": [
+        "control_id", "visible_label_and_aliases", "parent_screen_id", "relative_location", "shape_icon_color_and_visual_cues",
+        "control_type", "purpose", "preconditions", "input_constraints", "click_or_keyboard_sequence", "destination_or_next_state",
+        "success_feedback", "failure_feedback", "loading_behavior", "free_behavior", "premium_behavior", "destructive_or_payment_warning",
+        "mobile_behavior", "accessible_name", "source_evidence"
+    ],
+    "flow_record_required_fields": [
+        "flow_id", "starting_screen", "starting_control", "ordered_steps", "conditional_branches", "destination_screen",
+        "expected_result", "cancel_or_back_path", "plan_conditions", "authentication_conditions", "failure_recovery"
+    ],
+    "screenshot_record_required_fields": [
+        "asset_ref", "source_route", "account_plan", "locale", "viewport_width", "viewport_height", "device_scale_factor",
+        "screen_state", "capture_timestamp", "source_build", "dom_anchor_map", "redaction_status", "screenshot_version"
+    ],
+    "truth_policy": [
+        "A source-derived layout description is not an authentic screenshot.",
+        "Pixel arrows require real screenshot geometry and stable element anchors.",
+        "A missing/placeholder page must be documented as unavailable, not imagined.",
+        "Price, balance, quota, expiry, entitlement and payment success come from live server state, not this static guide.",
+        "Every conditional control must record Free, active Premium, expired Premium, signed-out and admin visibility where source behavior supports it."
+    ],
+}
+
+APRIL_WEB_INTERFACE_AUDIT_MANIFEST = {
+    "schema": "april.web_interface_audit_manifest.v1",
+    "source_basis": "The uploaded April Web and April Bot source archives in this conversation; static source inspection, not a live production crawl.",
+    "live_deployment_verification": {
+        "candidate_urls_from_source_readme": ["https://aprill-web.vercel.app", "https://aprill-web-production.up.railway.app"],
+        "status": "not_verified_from_this_execution_environment",
+        "attempt_result": "Web open was not accessible and direct DNS resolution failed in the execution environment; this does not establish whether production is online or offline.",
+    },
+    "semantic_page_key_count": len(APRIL_WEB_SEMANTIC_KEY_REGISTRY.get("page_keys", [])),
+    "semantic_feature_key_count": len(APRIL_WEB_SEMANTIC_KEY_REGISTRY.get("feature_keys", [])),
+    "route_screen_count": len(APRIL_WEB_INTERFACE_ATLAS.get("route_screens", [])),
+    "route_control_count": sum(len(_screen.get("controls", [])) for _screen in APRIL_WEB_INTERFACE_ATLAS.get("route_screens", [])),
+    "render_block_count": len(APRIL_WEB_INTERFACE_ATLAS.get("render_blocks", [])),
+    "render_control_count": len(APRIL_WEB_RENDER_CONTROL_CATALOG),
+    "legacy_function_count": len(APRIL_UI_FUNCTION_CATALOG.get("functions", [])),
+    "normalized_control_count": len(APRIL_WEB_CONTROL_CATALOG),
+    "help_article_locales": list(APRIL_WEB_HELP_COPY.keys()),
+    "help_article_count_per_locale": len(APRIL_WEB_HELP_COPY.get("ru", {}).get("articles", {})),
+    "faq_count_per_locale": len(APRIL_WEB_HELP_COPY.get("ru", {}).get("faqs", [])),
+    "historical_screen_evidence_record_count": len(APRIL_UI_SCREEN_EVIDENCE.get("screens", [])) if isinstance(APRIL_UI_SCREEN_EVIDENCE, dict) else 0,
+    "covered_areas": ["main chat", "composer and attachments", "profile/settings", "help articles and FAQ", "history", "Community", "private messages", "support", "account deletion", "legal pages", "Google sign-in", "admin-only screens", "answer renderers"],
+    "known_unimplemented_or_empty_pages": ["/memory", "/tools"],
+    "known_access_restricted_areas": ["/history for Free users", "new user support requests for Free users", "admin profile for non-admin users"],
+    "authentic_screenshot_assets_present_in_uploaded_web_archive": False,
+    "next_capture_method": "Run Playwright against the deployed build with verified Free and active Premium test accounts; capture all states and store versioned assets in an authenticated object store.",
+}
+
+APRIL_IT_ROOM_REMOTE_CONFIG = {
+    "schema_version": "april.web_interface_atlas.v1",
+    "semantic_key_registry_schema": "april.web_semantic_keys.v1",
+    "environment_variables": [
+        "APRIL_IT_ROOM_ENABLED",
+        "APRIL_IT_ROOM_URL",
+        "APRIL_IT_ROOM_API_KEY",
+        "APRIL_IT_ROOM_TIMEOUT_SECONDS",
+        "APRIL_IT_ROOM_CACHE_TTL_SECONDS",
+        "APRIL_IT_ROOM_PLAN_SOURCE",
+        "APRIL_IT_ROOM_SCREENSHOT_BASE_URL",
+    ],
+    "integration_status": "reserved_contract_only; no remote HTTP client/server is provisioned by this module",
+    "plan_source_requirement": "The caller must populate routing.authenticated_plan from a server-verified entitlement before requesting a personalized guide. Do not trust a dataclass default value.",
+    "screenshot_requirement": "Provide a real screenshot asset reference captured from the deployed UI or use a clearly labelled illustrative reconstruction.",
+}
+
+APRIL_WEB_VISUAL_GUIDE = {
+    "schema": "april.web_visual_guide.v1",
+    "purpose": "Turn stored source-derived interface descriptions into an image guide, annotated screenshot or deterministic screen map when the user explicitly asks to be shown where/how.",
+    "modes": {
+        "authentic_screenshot": "Use only an actual captured browser screenshot or user-uploaded screenshot. Annotate that real image; preserve its actual labels and geometry.",
+        "illustrative_screen": "When no real capture exists and user asks to see the layout, generate a clearly labelled illustrative reconstruction from screen appearance, landmarks and controls. Never claim it is a live screenshot.",
+        "navigation_diagram": "When user asks for route/sequence, show a compact flow with exact route, control, next screen and result. Do not draw a fake page screenshot if only a route diagram was requested."
+    },
+    "annotation_rules": [
+        "Identify one exact target control and its parent screen before marking it.",
+        "For authentic screenshot annotation, place arrow/circle only using the supplied/captured screenshot geometry; do not estimate pixel coordinates from prose.",
+        "For reconstructed screen, use the stored visual description and relative ordering; label it as illustrative.",
+        "Show a short numbered path next to/under the image: current screen → target control → expected next screen.",
+        "Use current account plan to show disabled Premium labels/active Free controls correctly; if plan is unknown, do not fabricate an account-specific screen.",
+        "Never annotate payment confirmation, account deletion or publishing as complete before the server reports success."
+    ],
+    "minimum_visual_record_fields": ["route", "viewport", "layout_regions", "landmarks", "control_label", "control_location", "appearance", "next_state", "plan_visibility", "evidence_source", "screenshot_asset_ref", "screenshot_version"]
+}
+
+# Use verified plan metadata only. A dataclass default of 'Free' is not enough to
+# prove the current user's live entitlement; the bot must pass authenticated plan.
+def _april_request_mapping(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "__dict__"):
+        try:
+            return vars(value)
+        except Exception:
+            return {}
+    return {}
+
+
+def _april_request_plan(machine_request: Any) -> str:
+    root = _april_request_mapping(machine_request)
+    intent = root.get("intent") if isinstance(root.get("intent"), dict) else {}
+    routing = root.get("routing") if isinstance(root.get("routing"), dict) else {}
+    constraints = root.get("constraints") if isinstance(root.get("constraints"), dict) else {}
+    fiber = root.get("fiber")
+    fiber_map = _april_request_mapping(fiber)
+    identity = _april_request_mapping(fiber_map.get("identity"))
+    # Only explicitly verified/authenticated fields may choose a personalized
+    # plan branch. In particular, identity.subscription is intentionally
+    # excluded because the current dataclass default can be the string "Free".
+    candidates = [
+        root.get("authenticated_plan"),
+        intent.get("authenticated_plan"), intent.get("verified_plan"),
+        routing.get("authenticated_plan"), routing.get("verified_plan"),
+        constraints.get("authenticated_plan"), constraints.get("verified_plan"),
+        identity.get("verified_subscription"), identity.get("verified_plan"),
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip().lower()
+        if value in {"premium", "active_premium", "pro"}:
+            return "premium"
+        if value in {"free", "basic", "inactive", "expired"}:
+            return "free"
+    return "unknown"
+
+
+def _april_request_language(machine_request: Any) -> str:
+    root = _april_request_mapping(machine_request)
+    intent = root.get("intent") if isinstance(root.get("intent"), dict) else {}
+    constraints = root.get("constraints") if isinstance(root.get("constraints"), dict) else {}
+    fiber = _april_request_mapping(root.get("fiber"))
+    identity = _april_request_mapping(fiber.get("identity"))
+    candidates = [
+        constraints.get("display_language"), constraints.get("language"), constraints.get("locale"),
+        intent.get("display_language"), intent.get("language"), intent.get("locale"),
+        identity.get("language"), identity.get("locale"),
+    ]
+    raw = next((str(value).strip().lower() for value in candidates if value), "")
+    if raw:
+        if raw.startswith(("ua", "uk")):
+            return "ua"
+        for locale in ("en", "ru", "es", "de", "fr", "it", "pl", "pt", "nl"):
+            if raw == locale or raw.startswith(locale + "-") or raw.startswith(locale + "_"):
+                return locale
+    query = _current_user_query(machine_request).lower()
+    if re.search(r"[іїєґ]", query):
+        return "ua"
+    if re.search(r"[а-яё]", query):
+        return "ru"
+    return "en"
+
+
+def select_april_web_help_content(machine_request: Any, max_articles: int = 3) -> Dict[str, Any]:
+    """Return exact localized Help & Information copy from app/aprill/page.tsx."""
+    query = _current_user_query(machine_request)
+    low = query.lower().replace("ё", "е")
+    locale = _april_request_language(machine_request)
+    copy = APRIL_WEB_HELP_COPY.get(locale) or APRIL_WEB_HELP_COPY.get("en", {})
+    if not low:
+        selected_ids = list(copy.get("articles", {}).keys())
+    else:
+        selected_ids = []
+        patterns = [
+            ("help-center", r"(?:help center|центр помощи|часты\w* вопрос|faq|вопрос\w* в справк|справк\w*)"),
+            ("how-to-use", r"(?:how to use|как пользовать|как работать с april|голос\w* ввод|прикрепить файл|памят\w* диалог|окно памят|history.{0,15}memory)"),
+            ("privacy-policy", r"(?:privacy|конфиденциаль|персональн\w* данн|обработк\w* данн|политик\w* конфиденц)"),
+            ("terms-of-service", r"(?:terms|услови\w* использ|правил\w* использ|ограничени\w* ai)"),
+            ("plans-payments", r"(?:plans?|payments?|тариф\w*|платеж\w*|оплат\w*|цена|стоимост\w*|lite|premium|free|продлен\w*|покупк\w*)"),
+            ("account-deletion", r"(?:удал\w* аккаунт|удал\w* данн|account.{0,15}delet|delete account|google account)"),
+            ("contact-support", r"(?:техподдерж\w*|поддержк\w*|contact support|support request|обращен\w* в поддержк)"),
+        ]
+        for article_id, pattern in patterns:
+            if re.search(pattern, low, re.I):
+                selected_ids.append(article_id)
+        if re.search(r"(?:все статьи|вся справка|весь help|all help|all articles|все темы помощи)", low, re.I):
+            selected_ids = list(copy.get("articles", {}).keys())
+    selected_ids = list(dict.fromkeys(selected_ids))[:max_articles]
+    articles = {key: copy.get("articles", {}).get(key) for key in selected_ids if key in copy.get("articles", {})}
+    topics = {key: copy.get("topics", {}).get(key) for key in selected_ids if key in copy.get("topics", {})}
+    result = {
+        "schema": "april.web_help_copy.v1",
+        "source_component": "app/aprill/page.tsx",
+        "locale": locale,
+        "available_locales": list(APRIL_WEB_HELP_COPY.keys()),
+        "page_title": copy.get("title"),
+        "page_subtitle": copy.get("subtitle"),
+        "updated_label": copy.get("updatedLabel"),
+        "topics": topics,
+        "articles": articles,
+        "faq_title": copy.get("faqTitle"),
+        "faqs": copy.get("faqs", []) if "help-center" in selected_ids else [],
+        "plan_labels": {key: copy.get(key) for key in ("free", "premium", "lite", "freePrice", "litePrice", "liteDuration", "premiumPrice", "memoryFree", "memoryPremium")},
+        "billing_note": copy.get("billingNote") if "plans-payments" in selected_ids else None,
+        "open_action_labels": {key: copy.get(key) for key in ("openChat", "openHistory", "openMemory", "openSettings", "openDeletion", "openSupport", "backToChat", "backToTopics")},
+        "source_truth": "Exact text copied from the uploaded Web source. Where the text identifies itself as a working draft, planned format, future test format or pre-launch notice, repeat that status and do not present it as an active guarantee.",
+    }
+    return result
+
+
+def _april_ui_match_score(query: str, item: Dict[str, Any]) -> int:
+    haystack_parts = [item.get("id", ""), item.get("route", ""), item.get("screen_title", ""), item.get("name", ""), item.get("appearance", ""), item.get("purpose", ""), item.get("effect", ""), item.get("where", ""), item.get("next", "")]
+    for key in ("labels", "aliases", "landmarks", "flows", "controls"):
+        value = item.get(key)
+        if isinstance(value, list):
+            haystack_parts.extend(str(v) for v in value)
+        elif value:
+            haystack_parts.append(str(value))
+    q_terms = _ui_search_terms(query)
+    item_terms = _ui_search_terms(" ".join(str(v) for v in haystack_parts))
+    return len(q_terms & item_terms)
+
+
+def select_april_web_interface_guide(machine_request: Any, limit: int = 8) -> Dict[str, Any]:
+    """Return focused route/control/visual guidance from the full room atlas."""
+    query = _current_user_query(machine_request)
+    plan = _april_request_plan(machine_request)
+    full_overview = _site_full_interface_overview_requested(query)
+    ranked_controls = []
+    for row in APRIL_WEB_CONTROL_CATALOG:
+        score = _april_ui_match_score(query, row)
+        if score:
+            ranked_controls.append((score, row))
+    ranked_controls.sort(key=lambda pair: pair[0], reverse=True)
+
+    area_scores = _semantic_site_area_scores(query) if query else []
+    if area_scores:
+        top_area_score = area_scores[0][0]
+        # Keep only the best semantic page matches. A two-point margin allows a
+        # genuine entry page plus destination (e.g. Settings -> History), while
+        # excluding unrelated pages hit by generic words in the question.
+        selected_area_ids = [area_id for score, area_id in area_scores if score >= max(1.5, top_area_score - 0.05)]
+    else:
+        selected_area_ids = []
+    area_to_screen = {
+        "chat": "chat_home", "settings": "settings_profile", "profile": "settings_profile",
+        "help": "help_information", "help-center": "help_information", "how-to-use": "help_information",
+        "history": "history_list", "community": "community_feed", "space": "community_feed",
+        "support": "support_room", "direct": "direct_chat", "deletion": "account_deletion",
+        "account_deletion": "account_deletion", "privacy": "legal_documents", "terms": "legal_documents",
+        "graph-controls": "chat_home", "image-controls": "chat_home", "response-feedback": "chat_home",
+        "attachments": "chat_attachment_picker", "plans": "settings_profile", "profile-language": "settings_profile",
+    }
+    selected_ids = list(dict.fromkeys(area_to_screen.get(value, value) for value in selected_area_ids))
+    if "history_list" in selected_ids or "support_room" in selected_ids or "account_deletion" in selected_ids:
+        if "settings_profile" not in selected_ids:
+            selected_ids.append("settings_profile")
+    if "chat_attachment_picker" in selected_ids and "chat_home" not in selected_ids:
+        selected_ids.append("chat_home")
+    if "direct_chat" in selected_ids and "community_feed" not in selected_ids:
+        selected_ids.append("community_feed")
+    high_confidence_screens = []
+    _top_control_score = ranked_controls[0][0] if ranked_controls else 0
+    for _score, _row in ranked_controls:
+        _row_screen = str(_row.get("screen_id", ""))
+        if _score >= 4 and _score >= _top_control_score - 0.5 and _row_screen and not _row_screen.startswith("render.") and _row_screen not in high_confidence_screens:
+            high_confidence_screens.append(_row_screen)
+    if high_confidence_screens:
+        selected_ids = high_confidence_screens[:3]
+    elif not selected_ids:
+        selected_ids = list(dict.fromkeys(row.get("screen_id") for _, row in ranked_controls[:3] if row.get("screen_id")))
+    route_screens = APRIL_WEB_INTERFACE_ATLAS["route_screens"]
+    screen_rows = []
+    for screen in route_screens:
+        score = _april_ui_match_score(query, {**screen, "screen_title": screen.get("id")})
+        if full_overview:
+            score = max(score, 1)
+        elif selected_ids:
+            # When semantic routing identifies a page, do not let generic words
+            # such as "button" pull in unrelated routes.
+            score = max(score, 8) if screen.get("id") in selected_ids else 0
+        if score:
+            screen_rows.append((score, screen))
+    screen_rows.sort(key=lambda pair: pair[0], reverse=True)
+    max_screens = len(route_screens) if full_overview else 3
+    selected_screens = [dict(screen) for _, screen in screen_rows[:max_screens]]
+    selected_screen_ids = {str(row.get("id")) for row in selected_screens}
+    if full_overview:
+        selected_controls = [dict(row) for row in APRIL_WEB_CONTROL_CATALOG]
+    else:
+        # Keep controls inside the resolved page. A render control is included
+        # only when the query also matches that response-block type/action.
+        filtered_controls = []
+        _top_control_score = ranked_controls[0][0] if ranked_controls else 0
+        _minimum_relevance = max(1, _top_control_score - 1.5)
+        for score, row in ranked_controls:
+            if score < _minimum_relevance:
+                continue
+            row_screen = str(row.get("screen_id", ""))
+            if row_screen in selected_screen_ids:
+                filtered_controls.append((score, row))
+            elif row_screen.startswith("render.") and score >= 2:
+                filtered_controls.append((score, row))
+        selected_controls = [dict(row) for _, row in filtered_controls[:max(1, min(limit, 16))]]
+        # A wallet question often asks both where to connect the wallet and how
+        # to add credits. Keep both adjacent actions together in the guide.
+        if _is_video_wallet_purchase_query(query):
+            wallet_rows = [
+                dict(row) for row in APRIL_WEB_CONTROL_CATALOG
+                if str(row.get("screen_id", "")) == "settings_profile"
+                and ("video_wallet" in str(row.get("id", "")) or str(row.get("function_id", "")) == "settings_video_wallet")
+            ]
+            known_wallet_ids = {str(row.get("id", "")) for row in selected_controls}
+            for wallet_row in wallet_rows:
+                if str(wallet_row.get("id", "")) not in known_wallet_ids:
+                    selected_controls.append(wallet_row)
+    selected_render_blocks = []
+    for _block in APRIL_WEB_INTERFACE_ATLAS.get("render_blocks", []):
+        _block_id = str(_block.get("id", ""))
+        _block_aliases = next((row.get("aliases", []) for row in APRIL_WEB_RENDER_CONTROL_CATALOG if row.get("screen_id") == _block_id and row.get("aliases")), [])
+        _score = _april_ui_match_score(query, {"id": _block_id, "appearance": _block.get("appearance"), "controls": _block.get("controls", []), "aliases": _block_aliases})
+        if full_overview or _score:
+            selected_render_blocks.append((max(_score, 1 if full_overview else 0), _block))
+    selected_render_blocks.sort(key=lambda pair: pair[0], reverse=True)
+    if full_overview:
+        selected_render_blocks = [dict(block) for _, block in selected_render_blocks]
+    elif selected_render_blocks:
+        _render_top_score = selected_render_blocks[0][0]
+        selected_render_blocks = [dict(block) for score, block in selected_render_blocks if score >= max(2, _render_top_score - 1.5)][:4]
+        _selected_render_ids = {str(block.get("id")) for block in selected_render_blocks}
+        selected_controls = [row for row in selected_controls if not str(row.get("screen_id", "")).startswith("render.") or str(row.get("screen_id")) in _selected_render_ids]
+
+    # If a question is about a concrete interface action but lexical ranking is
+    # weak, include the already-resolved legacy function records as fallback.
+    legacy_search = search_april_ui(query, limit=4) if query else {"control_matches": [], "screen_matches": []}
+    legacy_ids = [str(row.get("id")) for row in legacy_search.get("control_matches", []) if row.get("id")]
+    legacy_functions = [dict(row) for row in APRIL_UI_FUNCTION_CATALOG.get("functions", []) if row.get("id") in legacy_ids]
+
+    plan_view = APRIL_WEB_INTERFACE_ATLAS["plan_matrix"].get(plan, {}) if plan in {"free", "premium"} else {
+        "status": "unknown",
+        "instruction": "Authenticated current plan is not present in this request. Do not assume Free or Premium; explain both relevant branches or ask the user to check CURRENT PLAN.",
+        "free": APRIL_WEB_INTERFACE_ATLAS["plan_matrix"]["free"],
+        "premium": APRIL_WEB_INTERFACE_ATLAS["plan_matrix"]["premium"],
+    }
+    return {
+        "schema": "april.web_interface_guide_result.v1",
+        "query": query,
+        "plan": plan,
+        "plan_view": plan_view,
+        "full_overview": full_overview,
+        "screens": selected_screens,
+        "controls": selected_controls,
+        "render_blocks": selected_render_blocks,
+        "render_controls": [dict(row) for row in selected_controls if str(row.get("screen_id", "")).startswith("render.")],
+        "remote_config_contract": APRIL_IT_ROOM_REMOTE_CONFIG,
+        "semantic_key_registry": APRIL_WEB_SEMANTIC_KEY_REGISTRY,
+        "documentation_standard": APRIL_WEB_INTERFACE_DOCUMENTATION_STANDARD,
+        "audit_manifest": APRIL_WEB_INTERFACE_AUDIT_MANIFEST,
+        "legacy_function_matches": legacy_functions,
+        "navigation_edges": APRIL_WEB_INTERFACE_ATLAS.get("navigation_edges", []) if full_overview else [edge for edge in APRIL_WEB_INTERFACE_ATLAS.get("navigation_edges", []) if any(str(screen.get("route", "")) in str(edge) for screen in selected_screens)],
+        "visual_guide": APRIL_WEB_VISUAL_GUIDE,
+        "source_limits": APRIL_WEB_INTERFACE_ATLAS["source_limits"],
+        "screenshot_capture": APRIL_WEB_INTERFACE_ATLAS["capture_catalog"],
+    }
+
 
 APRIL_API_ARCHITECTURE = {
     "web_entry": "/api/chat",
@@ -2304,7 +4748,7 @@ APRIL_API_ARCHITECTURE = {
         "Do not expose APRIL_WEB_TO_BOT_TOKEN or any API secret to users; do not advise them to paste secrets into chat.",
         "Do not tell the user to browse /api/v1/chat in order to use a feature; their normal entry point is the Web UI.",
         "The attached repository shows architecture, not live service health, production credentials, or runtime entitlement for a particular account.",
-        "A request for a real current screenshot cannot be fulfilled from source code alone: return a route/control SVG grounded only in APRIL_SITE_MAP and APRIL_UI_FUNCTION_CATALOG; never draw a mock screenshot. Ask for an uploaded screenshot only when pixel-level annotation is requested.",
+        "If no authentic screenshot asset exists, source code alone cannot provide a real current screenshot: when the user asks to see the layout, create only a clearly labelled illustrative reconstruction grounded in APRIL_WEB_INTERFACE_ATLAS and APRIL_WEB_CONTROL_CATALOG; never call it a real/live screenshot. Pixel-accurate arrows require a real captured or user-uploaded screenshot. If the user explicitly requires an authentic current screenshot and no captured asset exists, ask for a screenshot or use the documented Playwright capture process.",
     ],
 }
 
@@ -2918,6 +5362,26 @@ def is_site_help_query(query: str) -> bool:
         r"(?:поддержк\w*|support).{0,65}(?:заявк\w*|обращен\w*|тикет\w*|ticket)", low, re.I,
     ))
     if support_ticket_help:
+        return True
+    # Explain tariff-specific access to April's own features (e.g. why Free
+    # cannot open History or Support). This is a product/UI question even when
+    # the user does not explicitly ask where a button is located.
+    plan_feature_access_help = bool(
+        re.search(r"(?:\bfree\b|\bpremium\b|\blite\b|бесплатн\w*|премиум|лайт)", low, re.I)
+        and re.search(r"(?:доступ\w*|недоступ\w*|огранич\w*|мож\w*|нельзя|не\s+мож\w*|почему|тариф\w*|план\w*|лимит\w*|возможност\w*)", low, re.I)
+        and re.search(r"(?:истори\w*|поддерж\w*|сообществ\w*|community|history|support|памят\w*|кошел\w*|wallet|генерац\w*|вложен\w*|изображен\w*|видео|чат)", low, re.I)
+    )
+    if plan_feature_access_help:
+        return True
+    # Route natural questions about a semantically identified April page or
+    # answer widget into this room even when they omit the word "button".
+    semantic_scores_for_help = _semantic_site_area_scores(low)
+    semantic_target_help = bool(semantic_scores_for_help and semantic_scores_for_help[0][0] >= 2.2)
+    semantic_help_action = bool(re.search(
+        r"(?:где|куда|как|покажи|укажи|найди|найти|открой|открыть|перейти|пройти|пользоваться|использовать|нажать|нажимать|удалить|отправить|пополнить|подключить|объясни|объясните|обозначает|обозначить|значит|что\s+(?:делает|обозначает|значит|это\s+за)|зачем|для\s+чего|where|how|show|find|open|delete|send|top[ -]?up)",
+        low, re.I,
+    ))
+    if semantic_target_help and semantic_help_action:
         return True
     # Entry and billing are first-class interface tasks, even when the user asks
     # naturally without naming a page or a button label.
@@ -5843,6 +8307,9 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         context["site_ui_search"] = search_april_ui(effective_query, limit=5)
         context["site_ui_screenshot_evidence"] = context["site_ui_search"].get("screen_matches", [])
         context["site_ui_screen_registry"] = _select_ui_screen_registry(effective_query, context["site_navigation_map"])
+        context["web_interface_guide"] = select_april_web_interface_guide(machine_request, limit=10)
+        if re.search(r"(?:справк\w*|help|faq|политик\w* конфиденц|privacy|услови\w* использ|terms|тариф\w*|оплат\w*|платеж\w*|lite|premium|free|удал\w* аккаунт|поддержк\w*)", effective_query, re.I):
+            context["web_help_article_content"] = select_april_web_help_content(machine_request, max_articles=4)
         context["site_ui_help_playbook"] = APRIL_UI_HELP_PLAYBOOK
         query = effective_query.lower().replace("ё", "е")
         if _is_video_help_query(query):
@@ -5875,10 +8342,10 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         prompt_fragments.extend([
             "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map, site_function_catalog, site_ui_search and site_ui_screenshot_evidence to resolve the real visible control. The local UI searcher indexes screenshot-observed labels and function handlers. Phrase aliases are fallback only, never a required fixed trigger.",
             "The answer is a user-facing walkthrough of the actual April interface, NOT a directory of rooms, modules, APIs, function IDs or feature lists. Start from the screen the user currently sees; describe the visible page/card, where it sits (top bar, right side, below a named card, bottom composer), the exact label/icon, what that control is for, why the user needs it, what to press in order, and what should appear next.",
-            "Use site_ui_search, site_ui_screen_registry, site_ui_screenshot_evidence and site_function_catalog together. First select the exact current control/function; then use its screen registry entry for the surrounding landmarks and its function record for the click sequence. Do not substitute lexical matches that belong to another page. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
+            "Use site_ui_search, site_ui_screen_registry, site_ui_screenshot_evidence, site_function_catalog and web_interface_guide together. The web_interface_guide contains the source-derived full-page atlas, individually addressable page controls, all normalized legacy function records, response-renderer controls (graph/table/gallery/video/code/file/diagram), navigation edges, responsive appearance landmarks, capture states, the screen/control/flow/screenshot documentation standard and both tariff branches. When web_help_article_content is present, quote/paraphrase only the selected article/FAQ copy and preserve its draft/future/not-yet-available notices. First select the exact current control/function; then use its parent screen and visual landmarks for the surrounding interface and its function record for the click sequence. Do not substitute lexical matches that belong to another page. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
             "For every interface-help answer, follow site_ui_help_playbook.required_answer_order: identify the screen, provide its exact relative link, describe the visible landmark and exact button/icon, explain the action, give numbered steps, state the expected result and next step, then mention only relevant access limits. If the user asks what a button does, explain that control itself before giving navigation.",
             "For a non-responsive/grey/unclickable control, use site_ui_help_playbook.troubleshooting. Resolve the specific control from the current query/active UI context. If it cannot be identified, do not guess: give only safe general checks and ask for one screenshot showing the control and its page. Do not advise repeated clicks on payment, publishing, or account-deletion buttons.",
-            "If the user asks to be shown where to click, provide a clear source-derived step diagram only when diagram/SVG/flowchart was explicitly requested. Otherwise explain in text with exact landmarks. Never claim the source archive is a live screenshot or that you can see the user's current screen.",
+            "If the user asks to be shown where to click, choose the visual mode from web_interface_guide.visual_guide: annotate an authentic captured screenshot only when screenshot_asset_ref and current screenshot geometry exist; otherwise make a clearly labelled illustrative reconstruction or a navigation sequence diagram as requested. The room stores appearance, responsive landmarks and capture states, not a fabricated live screenshot. Never claim the source archive is a live screenshot or that you can see the user's current screen.",
             "For every requested function, explain: exact starting page and how to reach it, relative screen position, visible button/field label, what it does, why the user goes there, ordered click/input steps, expected result, availability/plan conditions and important limits.",
             "Give a clickable Markdown link using the exact relative path, then ordered steps with visible card/button labels. Distinguish opening a page from performing an action inside the page and from sending/sharing content to another person. Never replace the actual page/button instructions with generic words like 'open settings and find the plan'.",
             "When the user asks to be guided or asks what to click, answer with the actual visible April interface and the exact path. Do not output a room/function list, a generic inventory, or backend route names in place of controls. Distinguish purchases: Premium subscription packages are in Profile → CURRENT PLAN, but April video credits are a separate Video Wallet purchase in the profile card labelled APRIL · C_VIDEO WALLET, opened by «Подключить видеокошелёк». For a Video Wallet/April credits query, never route to CURRENT PLAN or describe wallet credits as Premium. Use the video_wallet knowledge context; package amount and credit quantity must come from the actual checkout, and a balance update is complete only after gateway confirmation. The Plans & Payments Help card is informational, not a purchase button.",
@@ -5912,6 +8379,15 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             prompt_fragments.append("For capabilities and Free/Premium comparison, use product_guide exactly, distinguish source-snapshot facts from live-status uncertainty, and state unimplemented/plan-only items openly.")
         if context.get("site_ui_help_playbook"):
             prompt_fragments.append("Treat site_ui_help_playbook as the required interaction protocol. It governs how to explain, troubleshoot and visually guide a user; it never authorizes claiming that an action was performed.")
+        if context.get("web_interface_guide"):
+            prompt_fragments.extend([
+                "Use web_interface_guide as the detailed source-of-truth atlas for the entire April Web interface: page appearance, every listed control, submenu, position, effect, next screen, state and plan rule. Resolve the user's target control before composing the answer; do not infer from a similar label on another screen.",
+                "The atlas is shared by Free and Premium, but access and disabled states must be rendered according to web_interface_guide.plan_view. A personalized plan is valid only when authenticated plan metadata is explicitly present. If plan=unknown, do not treat the MachineRequest default subscription='Free' as proof: explain the relevant Free/Premium differences or ask for CURRENT PLAN status.",
+                "When user asks 'show', 'point', 'where do I click', 'I cannot find it', or explicitly requests an image: select the exact screen/control, use its appearance and landmark data, and create a clear labelled visual guide. Use an authentic screenshot asset only if screenshot_asset_ref exists or user supplied a current screenshot. Otherwise label any reconstructed visual as an illustrative schematic based on the source, never as a real screenshot.",
+                "For pixel-accurate arrows/circles, require a real captured or user-supplied screenshot. Do not invent x/y coordinates from relative prose. For a route-only request, use a navigation diagram, not a fabricated screen. Always pair a visual with the exact route, visible button label, ordered action and expected result.",
+                "The UI atlas is versioned source knowledge. If a control is not present in the selected screen record, do not invent it. If route/state depends on login, plan, payment gateway, feature flag or backend response, explain the condition explicitly.",
+                "Keep Video Wallet separate from CURRENT PLAN and Premium package checkout. Read actual balance, price and credit quantity only from the current wallet/order payload; never reuse example prices or assumed credit amounts.",
+            ])
         if context.get("site_ui_screen_registry"):
             prompt_fragments.append("Use site_ui_screen_registry as the complete verified source-structure inventory for requested screens. It supplements the limited screenshot evidence; do not call source-component landmarks screenshot-observed if there is no screenshot record for that screen.")
         if context.get("web_audit_index"):
@@ -5990,6 +8466,10 @@ class ITRoom:
     @staticmethod
     def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any]:
         return build_machine_contribution(machine_request)
+
+    @staticmethod
+    def select_web_interface_guide(machine_request: MachineRequest, limit: int = 8) -> Dict[str, Any]:
+        return select_april_web_interface_guide(machine_request, limit=limit)
 
     @staticmethod
     def evaluate(machine_request: MachineRequest) -> Dict[str, Any]:
