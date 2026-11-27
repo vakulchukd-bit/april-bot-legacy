@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import json
 import re
+from pathlib import Path
 
 from blocks.C_ARTIFACT_CONTRACT import (
     create_artifact,
@@ -2086,7 +2087,7 @@ APRIL_ROOM_DIRECTORY = {
         {"room": "Premium_state_manager", "role": "Поиск/сбор контекста диалога и истории для Premium-цепочки", "path": "internal"},
     ],
     "creator_identity": "The uploaded source snapshot does not verify a personal creator/legal-operator name. The privacy and terms pages call themselves drafts and explicitly say the legal operator name needs to be added. Do not infer a legal identity from the contact e-mail.",
-    "source_visible_contact": "jmsplatin@gmail.com appears as the contact in the uploaded privacy/terms pages. The pages still mark legal operator details as unfinished.",
+    "source_visible_contact": "A contact email appears in the uploaded privacy/terms pages; it is intentionally not copied into this user-facing UI knowledge record. Confirm the correct public contact before displaying it.",
     "user_vs_internal": "Rooms and renderer names are mostly internal architecture, not buttons in the website. Tell users which visible page/button to open; never ask a normal user to open a Python module, an API route or an admin page.",
 }
 
@@ -4436,16 +4437,16 @@ APRIL_IT_ROOM_REMOTE_CONFIG = {
         "APRIL_IT_ROOM_TIMEOUT_SECONDS",
         "APRIL_IT_ROOM_CACHE_TTL_SECONDS",
         "APRIL_IT_ROOM_PLAN_SOURCE",
-        "APRIL_IT_ROOM_SCREENSHOT_BASE_URL",
     ],
-    "integration_status": "reserved_contract_only; no remote HTTP client/server is provisioned by this module",
+    "integration_status": "local knowledge and visual evidence registry updated; remote HTTP client/server is still not provisioned by this module",
+    "screenshot_assets": "Privacy-sanitized mobile captures are delivered in a separate screenshots/ directory. Do not configure a public base URL until the future IT ROOM service hosts them behind the intended access policy.",
     "plan_source_requirement": "The caller must populate routing.authenticated_plan from a server-verified entitlement before requesting a personalized guide. Do not trust a dataclass default value.",
-    "screenshot_requirement": "Provide a real screenshot asset reference captured from the deployed UI or use a clearly labelled illustrative reconstruction.",
+    "screenshot_requirement": "Resolve one of APRIL_UI_VISUAL_EVIDENCE.asset_manifest assets with resolve_april_ui_screenshot(asset_id); the selection response includes resolved_assets when files are installed. If no file exists, use a clearly labelled illustrative reconstruction. Do not store a screenshot URL in environment variables yet.",
 }
 
 APRIL_WEB_VISUAL_GUIDE = {
     "schema": "april.web_visual_guide.v1",
-    "purpose": "Turn stored source-derived interface descriptions into an image guide, annotated screenshot or deterministic screen map when the user explicitly asks to be shown where/how.",
+    "purpose": "Turn stored source-derived interface descriptions and sanitized user-supplied screenshots in APRIL_UI_VISUAL_EVIDENCE into an image guide, annotated screenshot or deterministic screen map when the user explicitly asks to be shown where/how.",
     "modes": {
         "authentic_screenshot": "Use only an actual captured browser screenshot or user-uploaded screenshot. Annotate that real image; preserve its actual labels and geometry.",
         "illustrative_screen": "When no real capture exists and user asks to see the layout, generate a clearly labelled illustrative reconstruction from screen appearance, landmarks and controls. Never claim it is a live screenshot.",
@@ -4453,7 +4454,10 @@ APRIL_WEB_VISUAL_GUIDE = {
     },
     "annotation_rules": [
         "Identify one exact target control and its parent screen before marking it.",
-        "For authentic screenshot annotation, place arrow/circle only using the supplied/captured screenshot geometry; do not estimate pixel coordinates from prose.",
+        "Prefer APRIL_UI_VISUAL_EVIDENCE.asset_manifest assets when a compatible, privacy-sanitized screenshot is available; image assets are delivered separately under blocks/assets/it_room/screenshots/ and are not yet hosted by a remote URL.",
+        "Before showing or annotating an image, require the asset_id to be present in the plan-filtered resolved_assets list with exists=true.",
+        "For authentic screenshot annotation, require annotation_allowed=true and place arrow/circle only using the supplied/captured screenshot geometry; do not estimate pixel coordinates from prose.",
+        "If annotation_allowed=false or screenshot_use says display-only, the screenshot may be shown as a whole-page reference but must not receive arrows, circles or pixel coordinates; use a clearly labelled schematic for pointing or request a full-width capture.",
         "For reconstructed screen, use the stored visual description and relative ordering; label it as illustrative.",
         "Show a short numbered path next to/under the image: current screen → target control → expected next screen.",
         "Use current account plan to show disabled Premium labels/active Free controls correctly; if plan is unknown, do not fabricate an account-specific screen.",
@@ -4586,6 +4590,140 @@ def _april_ui_match_score(query: str, item: Dict[str, Any]) -> int:
     q_terms = _ui_search_terms(query)
     item_terms = _ui_search_terms(" ".join(str(v) for v in haystack_parts))
     return len(q_terms & item_terms)
+
+
+
+
+def select_april_ui_visual_evidence(query: str, plan: str = "unknown", limit: int = 8) -> Dict[str, Any]:
+    """Select real, privacy-sanitized screenshot references and screen descriptions.
+
+    This is a deterministic lookup over user-supplied evidence. It does not
+    generate screenshots, guess pixel coordinates or authorize a page action.
+    """
+    normalized = str(query or "").strip().lower().replace("ё", "е")
+    normalized = re.sub(r"\s+", " ", normalized)
+    safe_plan = str(plan or "unknown").strip().lower()
+    if safe_plan not in {"free", "premium"}:
+        safe_plan = "unknown"
+
+    full_overview = bool(normalized and _site_full_interface_overview_requested(normalized))
+    selected = []
+    for record in APRIL_UI_VISUAL_EVIDENCE.get("screens", []):
+        aliases = [str(x).lower().replace("ё", "е") for x in record.get("aliases", [])]
+        score = 0
+        if full_overview:
+            score = 1
+        elif normalized:
+            for alias in aliases:
+                alias_norm = re.sub(r"\s+", " ", alias.strip())
+                if alias_norm and alias_norm in normalized:
+                    score = max(score, 5 + min(len(alias_norm), 30) / 30)
+            keyword_groups = {
+                "home.signed_out.mobile": ("главный экран", "стартовая", "войти", "log in", "пустой чат", "метла"),
+                "auth.google.modal.mobile": ("google", "авторизац", "вход", "welcome to april", "continue with google"),
+                "profile.free.mobile": ("профиль", "кабинет", "текущий пакет", "free профиль", "личный кабинет", "видеокошел"),
+                "profile.premium.mobile": ("профиль", "кабинет", "premium профиль", "личный кабинет", "срок подписки", "видеокошел"),
+                "history.premium.mobile": ("истори", "сохранённ", "память", "продолжить диалог", "эпизод"),
+                "support.premium.mobile": ("техподдерж", "обращен", "обращение", "support", "проблема для поддержки"),
+                "history.free_locked.mobile": ("истори", "сохранённ", "память"),
+                "support.free_locked.mobile": ("техподдерж", "обращен", "обращение", "support", "проблема для поддержки"),
+                "community.feed.mobile": ("сообществ", "community", "публикац", "лента"),
+                "direct_chat.mobile": ("личный диалог", "личн сообщ", "сообщение другу", "private message", "к сообществу"),
+                "help.information.mobile": ("помощ", "справк", "информац", "faq", "тарифы и платежи"),
+                "profile.free.wallet_connected.lowres": ("баланс видеокредит", "история операций видеокошелька", "wallet transaction history"),
+            }.get(record.get("id"), ())
+            if any(term in normalized for term in keyword_groups):
+                score = max(score, 4)
+            specific_keyword_groups = {
+                "profile.free.wallet_connected.lowres": (
+                    "подключенный видеокошелек", "подключённый видеокошелек",
+                    "подключенный видеокошелёк", "подключённый видеокошелёк",
+                    "кошелек уже подключен", "кошелёк уже подключён",
+                    "баланс видеокредитов", "история операций видеокошелька",
+                )
+            }
+            if any(term in normalized for term in specific_keyword_groups.get(record.get("id"), ())):
+                score = max(score, 8)
+            if record.get("id") == "profile.free.wallet_connected.lowres" and "видеокош" in normalized and any(
+                token in normalized for token in ("подключ", "баланс", "остат", "истор", "операц")
+            ):
+                score = max(score, 8)
+            if score and not full_overview and score < 4 and len(normalized.split()) > 3:
+                action_present = bool(re.search(
+                    r"(?:где|куда|как|покажи|укажи|найди|найти|открой|перейти|пройти|объясни|что|зачем|пользоваться|нажать|скриншот|изображени|show|where|how)",
+                    normalized, re.I
+                ))
+                if not action_present:
+                    score = 0
+        if not score:
+            continue
+
+        record_plans = [str(x).lower() for x in record.get("plans", [])]
+        if safe_plan != "unknown" and record_plans and safe_plan not in record_plans:
+            continue
+
+        row = json.loads(json.dumps(record, ensure_ascii=False))
+        row["viewer_plan"] = safe_plan
+        row["plan_confirmation_required"] = safe_plan == "unknown"
+        captured_plan = str(row.get("captured_viewer_plan", "")).lower()
+        if row.get("id") in {"community.feed.mobile", "direct_chat.mobile"}:
+            captured_plan = "premium"
+            row["captured_viewer_plan"] = "premium"
+        if safe_plan == "free" and captured_plan == "premium":
+            row["screenshot_use"] = "Use the visual description to create a clearly labelled schematic; do not present the Premium-captured screenshot as the Free user's current screen."
+        elif safe_plan == "unknown" and row.get("id") in {"home.signed_out.mobile", "auth.google.modal.mobile", "help.information.mobile"}:
+            if row.get("screenshot_asset_ref"):
+                row["screenshot_use"] = "Authentic privacy-sanitized public/plan-neutral screenshot; it is not evidence of the viewer's current subscription state."
+            else:
+                row["screenshot_use"] = "No annotation-ready screenshot asset. Use source-based text or a clearly labelled schematic."
+        elif safe_plan == "unknown":
+            row["screenshot_use"] = "Plan not confirmed. Do not label this as the user's current tariff state or use a plan-specific screenshot as personalized guidance."
+        elif row.get("screenshot_asset_ref") and not row.get("annotation_allowed", False):
+            row["screenshot_use"] = "Authentic privacy-sanitized screenshot may be displayed as a whole-screen reference, but exact pixel arrows are not approved for this low-resolution capture; use a labelled schematic or request a full-width capture."
+        elif row.get("screenshot_asset_ref"):
+            row["screenshot_use"] = "Authentic user-uploaded screenshot, privacy-sanitized; annotate only visible controls and only against this asset's actual geometry."
+        else:
+            row["screenshot_use"] = "No annotation-ready screenshot asset. Use source-based text or a clearly labelled schematic."
+        selected.append((score, row))
+
+    selected.sort(key=lambda pair: pair[0], reverse=True)
+    rows = [row for _, row in selected]
+    if not full_overview:
+        rows = rows[:max(1, min(int(limit or 8), 12))]
+    return {
+        "schema": "april.ui_visual_evidence.selection.v1",
+        "query": str(query or ""),
+        "plan": safe_plan,
+        "plan_confirmation_required": safe_plan == "unknown",
+        "full_overview": full_overview,
+        "screens": rows,
+        "asset_manifest": [
+            asset for asset in APRIL_UI_VISUAL_EVIDENCE.get("asset_manifest", [])
+            if any(
+                str(row.get("screenshot_asset_ref", "")) == str(asset.get("asset_id", ""))
+                and str(row.get("screenshot_use", "")).startswith("Authentic")
+                for row in rows
+            )
+        ],
+        "resolved_assets": [
+            resolve_april_ui_screenshot(asset.get("asset_id", ""))
+            for asset in APRIL_UI_VISUAL_EVIDENCE.get("asset_manifest", [])
+            if any(
+                str(row.get("screenshot_asset_ref", "")) == str(asset.get("asset_id", ""))
+                and str(row.get("screenshot_use", "")).startswith("Authentic")
+                for row in rows
+            )
+        ],
+        "plan_presentation_rules": APRIL_UI_VISUAL_EVIDENCE.get("plan_presentation_rules", []),
+        "source_conflicts": APRIL_UI_VISUAL_EVIDENCE.get("source_conflicts", []),
+        "asset_delivery": APRIL_UI_VISUAL_EVIDENCE.get("asset_delivery", {}),
+        "source_limits": [
+            "Screenshots are user-supplied captures from 2026-11-27, not a direct Playwright capture of the deployed production build.",
+            "Profile Premium and connected Free wallet evidence is too low-resolution for pixel-accurate annotation; a fresh normal-width capture is required.",
+            "Account-specific text, counters, identifiers, balances, prices, timestamps and cooldown values are dynamic and must be loaded from current session/server state.",
+        ],
+    }
+
 
 
 def select_april_web_interface_guide(machine_request: Any, limit: int = 8) -> Dict[str, Any]:
@@ -4726,8 +4864,517 @@ def select_april_web_interface_guide(machine_request: Any, limit: int = 8) -> Di
         "legacy_function_matches": legacy_functions,
         "navigation_edges": APRIL_WEB_INTERFACE_ATLAS.get("navigation_edges", []) if full_overview else [edge for edge in APRIL_WEB_INTERFACE_ATLAS.get("navigation_edges", []) if any(str(screen.get("route", "")) in str(edge) for screen in selected_screens)],
         "visual_guide": APRIL_WEB_VISUAL_GUIDE,
+        "visual_evidence": select_april_ui_visual_evidence(query, plan=plan, limit=limit),
         "source_limits": APRIL_WEB_INTERFACE_ATLAS["source_limits"],
         "screenshot_capture": APRIL_WEB_INTERFACE_ATLAS["capture_catalog"],
+    }
+
+
+
+
+# Current user-supplied mobile screenshots (2026-11-27), privacy-sanitized.
+# These are genuine user-provided captures, not reconstructed mockups.
+# Personal names, email addresses, April IDs, private message text, saved route
+# details, balances and transaction-specific values are removed from the assets.
+APRIL_UI_VISUAL_EVIDENCE = {
+    "schema": "april.ui_visual_evidence.v1",
+    "observed_on": "2026-11-27",
+    "source": "User-supplied current mobile screenshots in this conversation, checked against the uploaded aprill-web-main source snapshot.",
+    "asset_delivery": {
+        "status": "assets_delivered_separately_not_hosted",
+        "relative_directory": "blocks/assets/it_room/screenshots/",
+        "resolution_rule": "Resolve screenshot_asset_ref with resolve_april_ui_screenshot(asset_id). The selection response includes resolved_assets with local paths when the PNGs are installed. The bot renderer must attach the file or pass it to its image block; this module does not itself send/render the image. A future HTTP service may serve image bytes or return a signed URL.",
+        "no_environment_variable_yet": "Do not add or populate a screenshot URL environment variable until the asset hosting path exists and has been tested.",
+        "privacy": "Only sanitized copies belong in the IT ROOM store. Never deploy the original screenshots containing personal identifiers, names, email addresses, private messages, saved locations, wallet balances or account-specific transaction history.",
+    },
+    "global_visual_language": {
+        "theme": "dark mobile-first interface",
+        "background": "near-black / deep navy page background",
+        "surfaces": "rounded dark cards with subtle blue, green or amber outlines",
+        "typography": "high-contrast white headings, muted gray descriptions and green action emphasis",
+        "common_navigation": "small circular back control at the upper left on secondary pages",
+        "responsive_note": "The captures are portrait mobile layouts. Desktop and tablet positions can differ; use labels and relative card order rather than fixed pixel coordinates.",
+        "annotation_note": "Use an actual supplied/captured screenshot for pixel-accurate arrows. Low-resolution profile captures are visual evidence only and must not be used for precise coordinates.",
+    },
+    "screens": [
+        {
+            "id": "home.signed_out.mobile",
+            "route": "/",
+            "screen_id": "chat_home",
+            "screen_title": "Главный чат April — без входа",
+            "aliases": ["главный экран", "начальный экран", "стартовая страница", "войти", "log in", "пустой чат"],
+            "auth_state": "signed_out",
+            "plans": ["free", "premium", "unknown"],
+            "screenshot_asset_ref": "april.ui.home.signed_out.mobile.v1",
+            "asset_filename": "08_chat_home_signed_out_mobile.png",
+            "viewport": {"width": 691, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "На почти чёрном фоне сверху расположена длинная округлая панель. Слева логотип APRIL, ближе к центру круглая кнопка с метлой, справа кнопка Log in с иконкой пользователя. В центре экрана крупная фраза Start a conversation with Aprill и более мелкое пояснение о готовности пространства для общения, голоса, изображений и памяти. Нижний композер находится у нижней границы экрана; в этом конкретном снимке он частично перекрыт системной Android-панелью и не подходит для точной разметки.",
+            "landmarks": [
+                {"id": "home.logo", "where": "верхняя панель, слева", "label": "APRIL", "purpose": "Брендинг; в исходниках переход к Help & Information связан с логотипом основного чата."},
+                {"id": "home.clear", "where": "верхняя панель, центральная круглая кнопка", "label": "иконка метлы", "purpose": "Очищает видимое рабочее поле, не удаляет сохранённую историю или April-аккаунт."},
+                {"id": "home.login", "where": "верхняя панель, справа", "label": "Log in", "purpose": "Открывает вход через Google."},
+                {"id": "home.empty_state", "where": "центральная часть страницы", "label": "Start a conversation with Aprill", "purpose": "Поясняет, что чат готов к началу общения."},
+                {"id": "home.composer", "where": "нижняя закреплённая зона; частично видна в снимке", "label": "поле сообщения", "purpose": "Начало ввода запроса; для точного расположения использовать кодовую карту главного чата или новый полный снимок."}
+            ],
+            "transitions": [
+                {"from": "home.login", "to": "auth.google.modal", "result": "Открывается модальное окно входа Google."},
+                {"from": "home.clear", "to": "home.signed_out.mobile", "result": "Рабочее поле остаётся пустым; сохранённая история не удаляется."}
+            ],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "No account identity is visible in the sanitized asset."
+        },
+        {
+            "id": "auth.google.modal.mobile",
+            "route": "modal on /",
+            "screen_id": "google_auth_modal",
+            "screen_title": "Welcome to April — Google sign-in",
+            "aliases": ["вход через google", "авторизация", "welcome to april", "continue with google", "окно входа"],
+            "auth_state": "signed_out_or_auth_required",
+            "plans": ["free", "premium", "unknown"],
+            "screenshot_asset_ref": "april.ui.auth.google_modal.mobile.v1",
+            "asset_filename": "07_google_auth_modal_mobile.png",
+            "viewport": {"width": 691, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Затемнённый фон страницы; по центру крупная тёмная карточка с мягким фиолетово-зелёным свечением. Вверху логотип APRIL и слоган AI · POWER · SIMPLICITY, справа круглая кнопка X. Ниже заголовок Welcome to April, короткий текст о входе с аккаунтом, большая белая кнопка Continue with Google, три небольших маркера Secure / Fast / Private и нижние ссылки Terms of Service и Privacy Policy.",
+            "landmarks": [
+                {"id": "auth.close", "where": "правый верхний угол модальной карточки", "label": "X", "purpose": "Закрывает окно без входа."},
+                {"id": "auth.google", "where": "центр карточки, большая белая кнопка", "label": "Continue with Google", "purpose": "Запускает Google OAuth; вход считается завершённым только после возврата и подтверждения сессии."},
+                {"id": "auth.secure_fast_private", "where": "под кнопкой Google", "label": "Secure · Fast · Private", "purpose": "Информационные маркеры, не интерактивные переключатели."},
+                {"id": "auth.legal", "where": "нижняя часть карточки", "label": "Terms of Service / Privacy Policy", "purpose": "Открывает юридические документы."}
+            ],
+            "transitions": [
+                {"from": "Continue with Google", "to": "Google OAuth and callback", "result": "После успешной авторизации пользователь возвращается к запрошенной странице."},
+                {"from": "X", "to": "previous page", "result": "Модальное окно закрывается; пользователь остаётся без входа."}
+            ],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "No account identity is visible in the screenshot."
+        },
+        {
+            "id": "profile.free.mobile",
+            "route": "/settings",
+            "screen_id": "settings_profile",
+            "screen_title": "Ваш профиль — Free",
+            "aliases": ["профиль free", "профиль бесплатно", "личный кабинет free", "текущий пакет free", "что доступно бесплатно", "видеокошелёк", "видеокошелёк в профиле", "подключить видеокошелёк", "где видеокошелёк"],
+            "auth_state": "signed_in",
+            "plans": ["free"],
+            "screenshot_asset_ref": "april.ui.profile.free.mobile.v1",
+            "asset_filename": "06_profile_free_mobile.png",
+            "viewport": {"width": 275, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "low_resolution_overview_only",
+            "annotation_allowed": False,
+            "appearance": "Вертикальная мобильная страница «Ваш профиль» на тёмном фоне. Снимок шириной 275 px подходит как обзор всего профиля, но не для точной разметки небольших контролов; для указателя на конкретную кнопку нужен полноширинный снимок. Сверху круглая кнопка возврата и подзаголовок об управлении аккаунтом и подпиской. Ниже последовательно идут карточки Google account, APRIL ID с кнопкой «Копировать», USER / «Имя в пространстве» с полем и кнопкой сохранения, CURRENT PLAN с зелёным FREE и бейджем «Бесплатный доступ». Внутри тарифа перечислены функции строками. Затем отдельная карточка APRIL · C_VIDEO WALLET, красноватая карточка удаления аккаунта и блок выбора языка.",
+            "landmarks": [
+                {"id": "profile.google_account", "where": "первая карточка под заголовком", "label": "АККАУНТ GOOGLE", "purpose": "Показывает подключённую Google-учётную запись; кнопка «Выйти» завершает April-сессию, но не удаляет Google-аккаунт."},
+                {"id": "profile.april_id", "where": "карточка под Google account", "label": "APRIL ID / Копировать", "purpose": "Показывает идентификатор April. «Копировать» помещает его в буфер обмена; сам ID не нужно сообщать посторонним."},
+                {"id": "profile.display_name", "where": "карточка USER ниже идентификатора", "label": "Имя в пространстве", "purpose": "Имя, отображаемое рядом с сообщениями пользователя."},
+                {"id": "profile.display_name.save", "where": "под полем имени", "label": "Сохранить имя", "purpose": "Сохраняет новое отображаемое имя; в режиме редактирования может показываться «Изменить»."},
+                {"id": "profile.current_plan.free", "where": "карточка CURRENT PLAN", "label": "FREE / Бесплатный доступ", "purpose": "Показывает базовый тариф и его ограничения. Подпись в снимке указывает окно памяти диалога до 12 часов; остальные лимиты зависят от активной конфигурации сервиса."},
+                {"id": "profile.free.chat", "where": "первая строка функций CURRENT PLAN", "label": "Общение с April", "purpose": "Доступная функция основного чата."},
+                {"id": "profile.free.plan.history_locked", "where": "строка функций CURRENT PLAN", "label": "История диалогов · PREMIUM", "purpose": "Показывает, что полноценная страница истории недоступна Free; это не активная кнопка свободного доступа."},
+                {"id": "profile.free.plan.support_locked", "where": "следующая строка CURRENT PLAN", "label": "Техподдержка · PREMIUM", "purpose": "Показывает ограничение Free на новые обращения в техподдержку."},
+                {"id": "profile.free.community", "where": "следующая строка CURRENT PLAN", "label": "Сообщество", "purpose": "Открывает Community; доступно Free и Premium после входа."},
+                {"id": "profile.free.premium_packages", "where": "нижняя часть CURRENT PLAN", "label": "7 дней · $12 / 28 дней · $25 / 12 часов · $3", "purpose": "На снимке профиля и в settings/page.tsx видны пакеты 7 дней · $12, 28 дней · $25 и 12 часов · $3; app/api/subscription/route.ts принимает коды premium_7d, premium_28d и premium_12h. При этом статья тарифов в app/aprill/page.tsx описывает Premium только как $25/28 дней или $3/12 часов, а Lite $12/24 часа называет будущим и недоступным форматом. Это несогласованность исходников: не называть 7 дней за $12 тарифом Lite и не утверждать актуальность/доступность покупки по статическому тексту. Для ответа пользователю использовать текущие package_options/ответ checkout-сервера; если данных нет, сообщить о расхождении и не обещать цену."},
+                {"id": "profile.video_wallet.free", "where": "отдельная карточка после CURRENT PLAN", "label": "APRIL · C_VIDEO WALLET / Подключить видеокошелёк", "purpose": "Отдельный кошелёк видеокредитов для Free и Premium. Это не Premium-подписка; подключение/покупка кредитов — отдельный путь."},
+                {"id": "profile.delete_account", "where": "красноватая карточка ниже Video Wallet", "label": "Удалить аккаунт", "purpose": "Переходит к отдельному объяснению и подтверждению удаления April-аккаунта; не удаляет Google-аккаунт."},
+                {"id": "profile.language", "where": "нижняя карточка ЯЗЫК", "label": "Русский / English / Українська / Выбрать другой язык", "purpose": "Меняет язык интерфейса. Исходники содержат дополнительные варианты: French, Spanish, German, Italian, Polish, Portuguese и Dutch."}
+            ],
+            "plan_rules": {
+                "free": ["Общение с April доступно.", "Сообщество доступно после авторизации.", "История диалогов помечена PREMIUM.", "Новая заявка в техподдержку требует активного Premium.", "Video Wallet — отдельная функция и по тексту исходников предназначен для Free и Premium."],
+                "dynamic": ["Точные лимиты, остатки, цены, платежная доступность, подключение Video Wallet и пакетные предложения берутся из актуального ответа сервера, не из скриншота."]
+            },
+            "transitions": [
+                {"from": "profile.free.plan.history_locked", "to": "/history", "condition": "При выборе Free должен быть показан Premium-gate/объяснение, а не успешный доступ к списку истории."},
+                {"from": "profile.free.plan.support_locked", "to": "/insights?room=support", "condition": "Новая заявка закрыта без активного Premium; показать требование тарифа."},
+                {"from": "profile.free.community", "to": "/space", "condition": "Пользователь вошёл в аккаунт."},
+                {"from": "profile.video_wallet.free", "to": "Video Wallet connect/checkout", "condition": "Операция доступна только при успешном серверном подключении и доступном платёжном канале."},
+                {"from": "profile.delete_account", "to": "/account-deletion", "condition": "Переход к отдельному экрану; удаление не выполняется одним открытием ссылки."}
+            ],
+            "evidence": ["user_screenshot", "web_source"],
+            "dynamic_fields": ["Google name/email", "April ID", "profile display name", "current plan status", "expiry", "prices", "Video Wallet connection", "credit balance", "language selection"],
+            "privacy": "Sanitized screenshot replaces Google identity, April ID and display name. Never include user-provided identities in the knowledge text."
+        },
+        {
+            "id": "profile.premium.mobile",
+            "route": "/settings",
+            "screen_id": "settings_profile",
+            "screen_title": "Ваш профиль — Premium",
+            "aliases": ["профиль premium", "личный кабинет premium", "тариф premium", "premium id", "срок premium", "видеокошелёк", "видеокошелёк premium", "баланс видеокошелька"],
+            "auth_state": "signed_in",
+            "plans": ["premium"],
+            "screenshot_asset_ref": "april.ui.profile.premium.mobile.v1",
+            "asset_filename": "05_profile_premium_mobile_lowres.png",
+            "viewport": {"width": 185, "height": 1536, "orientation": "portrait"},
+            "source_upload": "user screenshot 1000053866.jpg",
+            "capture_quality": "low_resolution_display_only",
+            "annotation_allowed": False,
+            "appearance": "На присланном узком полном мобильном снимке видна та же вертикальная структура профиля: Google account, идентификаторы April/Premium, карточка USER, зелёная карточка CURRENT PLAN с заголовком PREMIUM, описание и остаток времени, строки доступных функций, отдельная APRIL · C_VIDEO WALLET с бейджем «Подключён», блок доступного баланса, пакеты пополнения и история операций, затем удаление аккаунта и язык. Санитизированный снимок можно показать как общий обзор профиля, но его ширина 185 px не подходит для точных стрелок и пиксельной разметки. Для указателя на конкретную небольшую кнопку попросить новый полноширинный снимок или сделать Playwright-захват.",
+            "landmarks": [
+                {"id": "profile.premium.ids", "where": "под карточкой Google account", "label": "APRIL ID / PREMIUM ID / Копировать", "purpose": "Отображает пользовательские идентификаторы; значения персональны, не включаются в базу знаний."},
+                {"id": "profile.current_plan.premium", "where": "карточка CURRENT PLAN", "label": "PREMIUM", "purpose": "Показывает активный статус подписки, срок окончания/остаток времени и доступные действия."},
+                {"id": "profile.premium.history", "where": "строка функций CURRENT PLAN", "label": "История диалогов", "purpose": "Переход к /history при действующем Premium entitlement."},
+                {"id": "profile.premium.support", "where": "строка функций CURRENT PLAN", "label": "Обратиться в техподдержку", "purpose": "Переход к истории и форме поддержки при действующем Premium entitlement."},
+                {"id": "profile.video_wallet.connected", "where": "отдельная карточка APRIL · C_VIDEO WALLET", "label": "Видеокошелёк / Подключён", "purpose": "Показывает отдельное состояние Video Wallet и доступный кредитный баланс."},
+                {"id": "profile.video_wallet.balance", "where": "внутри Video Wallet", "label": "Доступно / APRIL VIDEO CREDITS", "purpose": "Динамический баланс; число из скриншота не переносить в ответы."},
+                {"id": "profile.video_wallet.topup", "where": "ниже баланса", "label": "Выберите долларовый пакет / Пополнить", "purpose": "Показывает пакеты пополнения Video Wallet; в текущем исходнике UI предусмотрены $5, $10, $20 и $50. Количество кредитов для пакета брать из package_options API; выбор создаёт отдельный checkout."},
+                {"id": "profile.video_wallet.transactions", "where": "ниже пакетов", "label": "История операций", "purpose": "Список пополнений, списаний, возвратов и других событий; каждая сумма и дата — личные динамические данные."}
+            ],
+            "plan_rules": {
+                "premium": ["История диалогов доступна при действующем Premium.", "Техподдержка доступна при действующем Premium; лимит новых обращений — не более одного в 24 часа в проверенном снимке Web.", "Premium может иметь окно памяти 24 часа в текущей конфигурации; срок и статус брать из актуального серверного ответа.", "Video Wallet — отдельный баланс, не равный Premium-подписке."],
+                "dynamic": ["Premium ID, remaining time, balance, transaction history, prices and credits are account-specific and must never be copied from a screenshot."]
+            },
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "No actual Google identity, April ID, Premium ID, balance or operation values are stored as knowledge. The sanitized narrow image is supplied for display-only overview and is not approved for precise pixel annotation."
+        },
+        {
+            "id": "history.premium.mobile",
+            "route": "/history",
+            "screen_id": "history_list",
+            "screen_title": "История — Premium",
+            "aliases": ["история premium", "память и последние события", "сохранённые диалоги", "сохранённый диалог", "продолжить этот диалог", "продолжить диалог", "продолжить сохранённый диалог", "эпизод диалога"],
+            "auth_state": "signed_in",
+            "plans": ["premium"],
+            "screenshot_asset_ref": "april.ui.history.premium.mobile.v1",
+            "asset_filename": "01_history_premium_mobile.png",
+            "viewport": {"width": 719, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Тёмная мобильная страница с заголовком «История» по центру и круглой кнопкой возврата слева. Под заголовком серый подзаголовок «Память и последние события». Первая большая карточка сообщает «Память Premium — 24 часа», справа зелёный бейдж Premium · 24 h; ниже показывается количество сохранённых записей и поле APRIL ID. Следующая карточка «Сохранённые диалоги» содержит счётчик, подсказку о прокрутке списка пальцем и округлые карточки эпизодов. Внутри карточки: дата/время, бейдж «Память», заголовок сохранённого диалога, сокращённый фрагмент и внизу подпись «Эпизод диалога N» с зелёной ссылкой «Продолжить этот диалог →».",
+            "landmarks": [
+                {"id": "history.back", "where": "верхний левый угол", "label": "круглая стрелка назад", "purpose": "Возвращает в основной чат April."},
+                {"id": "history.memory_status", "where": "первая карточка под заголовком", "label": "Память Premium — 24 часа", "purpose": "Показывает тариф и текущее окно хранения/памяти, если так вернул сервер. 24 часа — значение на присланном экране, не постоянная гарантия для всех конфигураций."},
+                {"id": "history.saved_count", "where": "под заголовком карточки памяти", "label": "N сохранённых записей", "purpose": "Динамический счётчик; число берётся из текущей истории."},
+                {"id": "history.april_id", "where": "нижняя часть карточки памяти", "label": "ID ПОЛЬЗОВАТЕЛЯ APRIL", "purpose": "Идентификатор текущего аккаунта; не включать его значение в подсказки или скриншоты."},
+                {"id": "history.saved_list", "where": "карточка «Сохранённые диалоги» ниже", "label": "Сохранённые диалоги", "purpose": "Вертикальный список предыдущих эпизодов; более ранние записи доступны прокруткой пальцем. В проверенном снимке и текущем history/page.tsx отдельного поля поиска по списку нет — не придумывать поисковую кнопку."},
+                {"id": "history.entry", "where": "внутри отдельной карточки", "label": "Дата / Память / заголовок / фрагмент", "purpose": "Помогает узнать нужный эпизод; содержимое и дата персональны."},
+                {"id": "history.continue", "where": "нижняя часть карточки эпизода, справа", "label": "Продолжить этот диалог →", "purpose": "Возвращает выбранный эпизод в основной чат для продолжения контекста."}
+            ],
+            "plan_rules": {
+                "premium": ["Экран списка истории доступен при активном Premium entitlement.", "На снимке указано 24 часа памяти; точное окно получать от текущего backend."],
+                "free": ["В профиле Free строка «История диалогов» помечена PREMIUM. Не обещать Free доступ к списку сохранённых диалогов."],
+                "unknown": ["Не показывать экран истории как доступный пользователю, если подтверждённый тариф неизвестен."]
+            },
+            "navigation": ["Профиль → CURRENT PLAN → История диалогов → /history", "На карточке эпизода → «Продолжить этот диалог» → основной чат с восстановленным эпизодом"],
+            "evidence": ["user_screenshot", "web_source"],
+            "dynamic_fields": ["memory window", "saved record count", "April ID", "dialogue title", "dialogue excerpt", "timestamps"],
+            "privacy": "Sanitized asset hides April ID and all saved-dialogue content/location details."
+        },
+        {
+            "id": "support.premium.mobile",
+            "route": "/insights?room=support",
+            "screen_id": "support_room",
+            "screen_title": "Техподдержка Premium",
+            "aliases": ["техподдержка premium", "отправить в техподдержку", "описать проблему", "добавить скриншот в поддержку", "история обращений"],
+            "auth_state": "signed_in",
+            "plans": ["premium"],
+            "screenshot_asset_ref": "april.ui.support.premium.mobile.v1",
+            "asset_filename": "02_support_premium_mobile.png",
+            "viewport": {"width": 691, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Тёмная страница. Слева вверху круглая стрелка назад, справа/рядом крупный заголовок «Техподдержка Premium». Под ним пояснение: история обращений и ответов; новые обращения — при активном Premium, одно за 24 часа. Далее первая округлая карточка «История обращений» с пустым состоянием «Обращений пока нет». Вторая карточка — форма «Отправить в техподдержку»: большое многострочное поле «Опишите проблему…», счётчик 0/4000, кнопка «Добавить скриншот» и широкая кнопка отправки внизу. В присланном снимке поле пустое, поэтому кнопка отправки визуально выключена.",
+            "landmarks": [
+                {"id": "support.back", "where": "верхний левый угол", "label": "круглая стрелка назад", "purpose": "Возвращает на предыдущую страницу/в профиль."},
+                {"id": "support.history", "where": "первая карточка под заголовком", "label": "История обращений", "purpose": "Показывает отправленные обращения, даты и ответы поддержки; пустое сообщение означает, что история пока пуста."},
+                {"id": "support.description", "where": "вторая карточка", "label": "Опишите проблему…", "purpose": "Поле для описания проблемы; максимум 4000 символов. На текущем /insights?room=support можно отправить текст или изображение; при необходимости текст может быть пустым, если прикреплён скриншот."},
+                {"id": "support.counter", "where": "под полем справа", "label": "0/4000", "purpose": "Счётчик введённых символов и лимита."},
+                {"id": "support.attach_screenshot", "where": "под полем описания", "label": "Добавить скриншот", "purpose": "Открывает выбор изображения PNG/JPEG/WEBP размером до 12 МБ; после выбора изображение сжимается перед отправкой. Появляется предварительный просмотр, изображение можно увеличить нажатием и убрать кнопкой удаления."},
+                {"id": "support.send", "where": "широкая кнопка внизу карточки", "label": "Отправить в техподдержку", "purpose": "Отправляет текст и/или прикреплённое изображение только при подтверждённом active Premium, отсутствии cooldown и разрешённом сервером состоянии. Если cooldown активен, вместо формы показывается обратный отсчёт; одно новое обращение за 24 часа."}
+            ],
+            "plan_rules": {
+                "premium": ["Активный Premium может отправлять не более одного нового обращения за 24 часа в этом снимке/исходном варианте Web.", "До отправки показывается история существующих обращений и ответы."],
+                "free": ["Free не может отправить новое обращение; в профиле строка Техподдержка помечена PREMIUM."],
+                "cooldown": "Статус can_send и next_allowed_at_ms от сервера важнее текстового предположения; кнопка может быть отключена, пока cooldown активен."
+            },
+            "navigation": ["Профиль → CURRENT PLAN → Обратиться в техподдержку → /insights?room=support"],
+            "evidence": ["user_screenshot", "web_source"],
+            "dynamic_fields": ["support ticket history", "text counter", "cooldown", "can_send", "attachment upload state", "unread replies"],
+            "privacy": "The screenshot contains no identifying content. Do not infer an account's actual cooldown from the empty-state example."
+        },
+        {
+            "id": "history.free_locked.mobile",
+            "route": "/settings → CURRENT PLAN",
+            "screen_id": "settings_profile",
+            "screen_title": "История диалогов — недоступна на Free",
+            "aliases": ["free история", "почему нет истории", "история premium метка", "история диалогов заблокирована", "продолжить сохранённый диалог", "не вижу старые диалоги", "где старая переписка"],
+            "auth_state": "signed_in",
+            "plans": ["free"],
+            "screenshot_asset_ref": "april.ui.profile.free.mobile.v1",
+            "asset_filename": "06_profile_free_mobile.png",
+            "viewport": {"width": 275, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "low_resolution_overview_only",
+            "annotation_allowed": False,
+            "appearance": "В карточке CURRENT PLAN на профиле Free строка «История диалогов» отображается приглушённым цветом и сопровождается небольшим красно-розовым бейджем PREMIUM.",
+            "landmarks": [{"id": "profile.free.history_locked", "where": "внутри CURRENT PLAN, между «Общение с April» и «Техподдержка»", "label": "История диалогов · PREMIUM", "purpose": "Обозначает платное ограничение; не утверждать, что эта строка ведёт к доступной Free-истории."}],
+            "plan_rules": {"free": ["История диалогов закрыта для Free в присланном интерфейсе."], "premium": ["Для пользователя с подтверждённым активным Premium маршрут открывает /history."]},
+            "navigation": ["Профиль → CURRENT PLAN → строка История диалогов (PREMIUM) → объяснить требование Premium; не обещать успешный доступ."],
+            "evidence": ["user_screenshot", "web_source"]
+        },
+        {
+            "id": "support.free_locked.mobile",
+            "route": "/settings → CURRENT PLAN",
+            "screen_id": "settings_profile",
+            "screen_title": "Техподдержка — недоступна на Free",
+            "aliases": ["free поддержка", "почему нет техподдержки", "поддержка premium метка", "как обратиться free"],
+            "auth_state": "signed_in",
+            "plans": ["free"],
+            "screenshot_asset_ref": "april.ui.profile.free.mobile.v1",
+            "asset_filename": "06_profile_free_mobile.png",
+            "viewport": {"width": 275, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "low_resolution_overview_only",
+            "annotation_allowed": False,
+            "appearance": "В карточке CURRENT PLAN на профиле Free строка «Техподдержка» приглушена и имеет бейдж PREMIUM. Не путать её с общедоступными статьями Help & Information.",
+            "landmarks": [{"id": "profile.free.support_locked", "where": "внутри CURRENT PLAN, сразу ниже «История диалогов»", "label": "Техподдержка · PREMIUM", "purpose": "Обозначает тарифное ограничение на новые обращения в техподдержку."}],
+            "plan_rules": {"free": ["Новая заявка в техподдержку недоступна без активного Premium."], "premium": ["После подтверждения активного Premium доступен экран /insights?room=support, с лимитом обращений по серверному cooldown."]},
+            "navigation": ["Профиль → CURRENT PLAN → Техподдержка (PREMIUM) → объяснить ограничение; Help & Information остаётся доступной для публичных инструкций."],
+            "evidence": ["user_screenshot", "web_source"]
+        },
+        {
+            "id": "community.feed.mobile",
+            "route": "/space",
+            "screen_id": "community_feed",
+            "screen_title": "April · Сообщество",
+            "aliases": ["сообщество", "community", "лента публикаций", "личный профиль сообщества", "личный диалог из ленты"],
+            "auth_state": "signed_in",
+            "plans": ["free", "premium"],
+            "screenshot_asset_ref": "april.ui.community.feed.mobile.v1",
+            "asset_filename": "04_community_feed_mobile.png",
+            "viewport": {"width": 691, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Вверху узкая округлая шапка «April · Сообщество» и бейдж текущего тарифа. Под ней сворачиваемая карточка «Личный профиль» с круглым аватаром, кратким публичным именем и стрелкой раскрытия. Ниже отдельная секция «April · Сообщество» со счётчиком публикаций и лентой. Публикации показаны округлыми карточками: публичное имя автора, бейдж его тарифа, дата/время, текст и кнопка «Личный диалог». Внизу закреплён композер: скрепка, поле «Опишите вопрос или поделитесь» и круглая стрелка отправки; ниже подсказка про вложения и счётчик 0/4000.",
+            "landmarks": [
+                {"id": "community.header", "where": "самый верх экрана", "label": "April · Сообщество", "purpose": "Заголовок ленты; рядом тарифный бейдж текущего пользователя, который зависит от его сессии."},
+                {"id": "community.profile.toggle", "where": "карточка сразу под шапкой", "label": "Личный профиль / стрелка вниз", "purpose": "Раскрывает/сворачивает профиль участника. В раскрытом виде показывает поле публичного имени/ника (2–32 символа), кнопку сохранения, приглашение друга, запросы в друзья с кнопкой принятия, список друзей с переходом в личный диалог и список контактов с блокировкой/разблокировкой."},
+                {"id": "community.feed", "where": "центральная область", "label": "April · Сообщество", "purpose": "Показывает публикации участников."},
+                {"id": "community.author_plan", "where": "в верхней строке каждой публикации", "label": "FREE / PREMIUM", "purpose": "Тариф автора конкретной публикации, а не обязательно тариф текущего зрителя."},
+                {"id": "community.open_direct", "where": "внутри карточки публикации", "label": "Личный диалог", "purpose": "Открывает личный диалог только при подтверждённой дружбе; если дружбы ещё нет, в карточке доступно действие добавления/принятия друга, а не немедленная переписка."},
+                {"id": "community.attach", "where": "нижняя закреплённая панель, слева", "label": "скрепка", "purpose": "Выбирает файл для публикации. Текущая подсказка Web: до 3 МБ на файл, до 30 МБ активных вложений на пользователя; исполняемые файлы блокируются."},
+                {"id": "community.message", "where": "нижняя панель по центру", "label": "Опишите вопрос или поделитесь", "purpose": "Поле текста новой публикации; лимит 4000 символов по снимку/исходному UI."},
+                {"id": "community.send", "where": "круглая стрелка справа от поля", "label": "стрелка отправки", "purpose": "Публикует текст и/или вложение в общей ленте; пустая форма без текста и файла не отправляется. В исходнике указан rate limit при слишком частой отправке."},
+                {"id": "community.profile.nickname", "where": "раскрытая карточка «Личный профиль»", "label": "Ваш ник в сообществе / Сохранить ник", "purpose": "Публичное имя сообщества: 2–32 символа; сохранение идёт на сервер."},
+                {"id": "community.profile.invite", "where": "раскрытая карточка личного профиля", "label": "Пригласить друга", "purpose": "Создаёт/копирует приглашение в April."},
+                {"id": "community.profile.incoming_requests", "where": "раскрытая карточка личного профиля", "label": "Запросы в друзья / Принять", "purpose": "Показывает входящие запросы и позволяет принять запрос пользователя."},
+                {"id": "community.profile.friends", "where": "раскрытая карточка личного профиля", "label": "Друзья / Личный диалог", "purpose": "Показывает подтверждённых друзей и открывает личный диалог с выбранным другом."},
+                {"id": "community.profile.contacts", "where": "раскрытая карточка личного профиля", "label": "Контакты / Блокировать / Разблокировать", "purpose": "Показывает исходящие запросы и заблокированные контакты; блокировка скрывает публикации пользователя в общей ленте."},
+                {"id": "community.post.report", "where": "действия под чужой публикацией", "label": "Пожаловаться", "purpose": "Открывает подтверждение отправки жалобы на чужую публикацию."},
+                {"id": "community.post.delete", "where": "действия под собственной публикацией", "label": "Удалить своё сообщение", "purpose": "После подтверждения удаляет собственную публикацию и связанное вложение."},
+                {"id": "community.attachment.preview", "where": "миниатюра изображения внутри публикации", "label": "Открыть изображение", "purpose": "Открывает увеличенный просмотр вложения; отдельная кнопка скачивания сохраняет оригинал."}
+            ],
+            "plan_rules": {
+                "free": ["Community доступно после входа.", "В ленте рядом с автором виден его тариф FREE или PREMIUM; это метка автора, не ограничение пользователя."],
+                "premium": ["Тот же общий функционал Community; Premium бейдж в шапке отражает тариф текущего профиля."],
+                "both": ["Возможность открыть личный диалог и отправить публикацию зависит от авторизации/отношения контакта и серверных правил, а не только от названия тарифа."]
+            },
+            "limits": ["Web source snapshot states up to 3 MiB per attachment and 30 MiB aggregate active attachments per user; confirm server response if it changes.", "Do not copy public names, post text, counts or timestamps from example screenshots into help answers."],
+            "navigation": ["Профиль → Сообщество → /space", "Карточка публикации → Личный диалог → /space/direct/[friendId]"],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "Sanitized copy masks the profile and post author names and post text. Plan badges are illustrative and must be interpreted as the author's/current viewer's own state, not the requester."
+        },
+        {
+            "id": "direct_chat.mobile",
+            "route": "/space/direct/[friendId]",
+            "screen_id": "direct_chat",
+            "screen_title": "Личный диалог",
+            "aliases": ["личный диалог", "личные сообщения", "сообщение другу", "удалить своё сообщение", "пригласить в april"],
+            "auth_state": "signed_in_with_friend_context",
+            "plans": ["free", "premium"],
+            "screenshot_asset_ref": "april.ui.direct_chat.mobile.v1",
+            "asset_filename": "03_direct_chat_mobile.png",
+            "viewport": {"width": 691, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Сверху широкая карточка заголовка контакта: ссылка «← К сообществу», публичный профиль выбранного участника, бейдж его тарифа и ссылка «Пригласить в April». Ниже большая область «Личный диалог» со счётчиком сообщений. Сообщения находятся в собственных карточках; у сообщения текущего пользователя зелёная рамка и метка «Вы» с его тарифом, у получателя тариф отображается отдельно. Под текстом собственного сообщения может быть действие «Удалить своё сообщение». Внизу закреплён композер: скрепка, поле «Сообщение другу…», стрелка отправки; под ним подсказка «Файл до 3 МБ. Исполняемые файлы запрещены.» и счётчик 0/4000.",
+            "landmarks": [
+                {"id": "direct.back", "where": "верхний левый угол карточки контакта", "label": "← К сообществу", "purpose": "Возвращает на /space."},
+                {"id": "direct.contact", "where": "верхняя карточка", "label": "публичный профиль / FREE или PREMIUM", "purpose": "Показывает собеседника; его тариф не равен тарифу текущего пользователя. Приватная переписка доступна после подтверждения дружбы с обеих сторон."},
+                {"id": "direct.invite", "where": "справа от данных контакта", "label": "Пригласить в April", "purpose": "Открывает ссылку/процесс приглашения."},
+                {"id": "direct.dialog", "where": "центральная карточка", "label": "Личный диалог", "purpose": "Показывает приватную переписку с выбранным контактом."},
+                {"id": "direct.message.delete", "where": "нижняя часть собственной карточки сообщения", "label": "Удалить своё сообщение", "purpose": "После подтверждения удаляет только собственное сообщение; само по себе это не удаляет весь диалог. У администратора есть отдельное административное действие."},
+                {"id": "direct.attach", "where": "внизу слева от поля", "label": "скрепка", "purpose": "Открывает список разрешённых типов файлов для приватного сообщения; размер — до 3 МБ, исполняемые файлы запрещены. При выборе появляется строка вложения с именем/размером и крестиком удаления до отправки."},
+                {"id": "direct.input", "where": "нижняя закреплённая панель", "label": "Сообщение другу…", "purpose": "Вводит текст сообщения; ограничение 4000 символов в текущем UI."},
+                {"id": "direct.send", "where": "круглая стрелка справа от поля", "label": "стрелка отправки", "purpose": "Отправляет сообщение выбранному контакту."}
+            ],
+            "plan_rules": {
+                "both": ["Общий приватный диалог доступен после авторизации и при допустимом контексте друга/контакта.", "Бейдж над именем собеседника показывает его тариф; бейдж «Вы» показывает тариф отправителя текущего сообщения."]
+            },
+            "limits": ["Attachment size shown in the screenshot: up to 3 MiB.", "Executable files are prohibited.", "Message text limit shown: 4000 characters.", "Never present the example participant identity or message text as reusable product data."],
+            "navigation": ["Сообщество → карточка участника/контакта → Личный диалог → /space/direct/[friendId]", "Личный диалог → ← К сообществу → /space"],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "Sanitized image hides participant names, April IDs and private message text."
+        },
+        {
+            "id": "help.information.mobile",
+            "route": "/aprill",
+            "screen_id": "help_information",
+            "screen_title": "Помощь и информация",
+            "aliases": ["помощь и информация", "центр помощи", "как пользоваться april", "тарифы и платежи", "удаление аккаунта и данных", "faq"],
+            "auth_state": "public",
+            "plans": ["free", "premium", "unknown"],
+            "screenshot_asset_ref": "april.ui.help_information.mobile.v1",
+            "asset_filename": "09_help_information_mobile.png",
+            "viewport": {"width": 351, "height": 1536, "orientation": "portrait"},
+            "capture_quality": "good",
+            "annotation_allowed": True,
+            "appearance": "Тёмная страница Help & Information. Сверху маленький APRIL wordmark, круглая стрелка назад, заголовок «Помощь и информация» и пояснение об инструкциях, сведениях об аккаунте и правилах сервиса. Далее вводная карточка «Чем помочь?» с короткой инструкцией выбрать тему. Под заголовком «РАЗДЕЛЫ» идёт вертикальный список округлых карточек с зелёными иконками слева, названием, описанием и стрелкой справа. Внизу ссылки на политику конфиденциальности, условия использования, удаление аккаунта и Copyright.",
+            "landmarks": [
+                {"id": "help.intro", "where": "первая большая карточка под заголовком", "label": "Чем помочь?", "purpose": "Объясняет, что темы открываются отдельно и публичные инструкции доступны всем пользователям."},
+                {"id": "help.center", "where": "первая карточка списка", "label": "Центр помощи", "purpose": "Открывает FAQ по использованию April."},
+                {"id": "help.howto", "where": "вторая карточка списка", "label": "Как пользоваться April", "purpose": "Открывает статью о тексте, голосе, изображениях, истории диалогов и памяти."},
+                {"id": "help.privacy", "where": "третья карточка", "label": "Политика конфиденциальности", "purpose": "Объясняет обработку данных и запрос на удаление."},
+                {"id": "help.terms", "where": "четвёртая карточка", "label": "Условия использования", "purpose": "Открывает правила использования April и ограничения AI."},
+                {"id": "help.plans", "where": "пятая карточка", "label": "Тарифы и платежи", "purpose": "Открывает справку о Free, Lite, Premium, памяти и оплате. Это справочная статья, не кнопка покупки."},
+                {"id": "help.deletion", "where": "шестая карточка", "label": "Удаление аккаунта и данных", "purpose": "Открывает инструкцию, что именно удаляется."},
+                {"id": "help.support", "where": "седьмая карточка списка", "label": "Техническая поддержка", "purpose": "Показывает информацию/маршрут к техподдержке; создание нового обращения требует Premium."},
+                {"id": "help.footer_policy", "where": "нижний футер", "label": "Политика конфиденциальности", "purpose": "Открывает полный публичный документ."},
+                {"id": "help.footer_terms", "where": "нижний футер", "label": "Условия использования", "purpose": "Открывает полный публичный документ."},
+                {"id": "help.footer_deletion", "where": "нижний футер", "label": "Удаление аккаунта и данных", "purpose": "Переходит к странице удаления аккаунта."}
+            ],
+            "plan_rules": {"both": ["Help & Information — публичный раздел для Free и Premium.", "Публичные инструкции и правила не означают, что все описанные функции доступны Free. Проверять доступ по плану отдельно."]},
+            "navigation": ["Главный чат → логотип APRIL → /aprill", "Карточка темы → подробная статья внутри Help & Information", "Ссылки футера → полные публичные документы/страница удаления"],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "No account-specific data is visible."
+        },
+        {
+            "id": "profile.free.wallet_connected.lowres",
+            "route": "/settings",
+            "screen_id": "settings_profile",
+            "screen_title": "Free — Video Wallet connected state (display-only screenshot)",
+            "aliases": ["free подключён видеокошелёк", "подключённый видеокошелёк free", "подключенный видеокошелек free", "free баланс видеокредитов", "видеокошелёк free подключен"],
+            "auth_state": "signed_in",
+            "plans": ["free"],
+            "screenshot_asset_ref": "april.ui.profile.free.wallet_connected.lowres.v1",
+            "asset_filename": "10_profile_free_wallet_connected_lowres.png",
+            "viewport": {"width": 168, "height": 1536, "orientation": "portrait"},
+            "source_upload": "user screenshot 1000053860.jpg",
+            "capture_quality": "low_resolution_display_only",
+            "annotation_allowed": False,
+            "appearance": "На дополнительном очень узком полном снимке профиля Free видно состояние, когда карточка APRIL · C_VIDEO WALLET имеет бейдж «Подключён», показывает баланс в APRIL VIDEO CREDITS, выбор долларового пакета и историю операций. Ширина оригинала 168 пикселей слишком мала для точной разметки; значения баланса и операции личные и не сохраняются.",
+            "landmarks": [
+                {"id": "profile.free.wallet_connected.status", "where": "верхняя строка карточки APRIL · C_VIDEO WALLET", "label": "Подключён / Подключить видеокошелёк", "purpose": "Показывает состояние отдельного кошелька; статус берётся из актуального серверного ответа."},
+                {"id": "profile.free.wallet_connected.balance", "where": "карточка «Доступно» внутри подключённого кошелька", "label": "APRIL VIDEO CREDITS", "purpose": "Показывает текущий остаток кредитов. Значение персональное и динамическое."},
+                {"id": "profile.free.wallet_connected.packages", "where": "ниже блока баланса", "label": "Выберите долларовый пакет: $5 / $10 / $20 / $50", "purpose": "Варианты сумм видны в текущем исходнике Web. Число кредитов для каждого пакета нужно брать из актуального package_options API, не из старого снимка."},
+                {"id": "profile.free.wallet_connected.topup", "where": "после выбора пакета", "label": "Пополнить · $N", "purpose": "Создаёт отдельный заказ пополнения Video Wallet и переводит пользователя к подтверждению оплаты; подписка Premium при этом не покупается."},
+                {"id": "profile.free.wallet_connected.transactions", "where": "нижняя часть карточки кошелька", "label": "История операций", "purpose": "Показывает динамические пополнения, расходы на генерацию/AI-редактирование и возвраты. Даты, суммы и названия операций персональны."}
+            ],
+            "plan_rules": {"free": ["Экран демонстрирует, что Video Wallet может быть подключён у Free; исходный Web-текст также описывает отдельный кошелёк для Free и Premium."]},
+            "dynamic_fields": ["wallet connection state", "balance", "package_options", "credits_to_issue", "transaction history"],
+            "evidence": ["user_screenshot", "web_source"],
+            "privacy": "Sanitized narrow screenshot is supplied for display-only overview; account-specific values are masked and precise pixel annotation is not allowed."
+        }
+    ],
+    "asset_manifest": [
+        {"asset_id": "april.ui.history.premium.mobile.v1", "file": "screenshots/01_history_premium_mobile.png", "route": "/history", "plan": "premium", "resolution": [719, 1536]},
+        {"asset_id": "april.ui.support.premium.mobile.v1", "file": "screenshots/02_support_premium_mobile.png", "route": "/insights?room=support", "plan": "premium", "resolution": [691, 1536]},
+        {"asset_id": "april.ui.direct_chat.mobile.v1", "file": "screenshots/03_direct_chat_mobile.png", "route": "/space/direct/[friendId]", "plan": "both; captured session was Premium", "resolution": [691, 1536]},
+        {"asset_id": "april.ui.community.feed.mobile.v1", "file": "screenshots/04_community_feed_mobile.png", "route": "/space", "plan": "both; captured session was Premium", "resolution": [691, 1536]},
+        {"asset_id": "april.ui.profile.free.mobile.v1", "file": "screenshots/06_profile_free_mobile.png", "route": "/settings", "plan": "free", "resolution": [275, 1536]},
+        {"asset_id": "april.ui.profile.premium.mobile.v1", "file": "screenshots/05_profile_premium_mobile_lowres.png", "route": "/settings", "plan": "premium", "resolution": [185, 1536], "display_only": True},
+        {"asset_id": "april.ui.profile.free.wallet_connected.lowres.v1", "file": "screenshots/10_profile_free_wallet_connected_lowres.png", "route": "/settings", "plan": "free", "resolution": [168, 1536], "display_only": True},
+        {"asset_id": "april.ui.auth.google_modal.mobile.v1", "file": "screenshots/07_google_auth_modal_mobile.png", "route": "modal on /", "plan": "all", "resolution": [691, 1536]},
+        {"asset_id": "april.ui.home.signed_out.mobile.v1", "file": "screenshots/08_chat_home_signed_out_mobile.png", "route": "/", "plan": "public signed-out state", "resolution": [691, 1536]},
+        {"asset_id": "april.ui.help_information.mobile.v1", "file": "screenshots/09_help_information_mobile.png", "route": "/aprill", "plan": "all", "resolution": [351, 1536]}
+    ],
+    "plan_presentation_rules": [
+        "The profile page is shared, but the CURRENT PLAN card and its feature rows must reflect the authenticated current plan.",
+        "For Free, History and Tech support appear with a PREMIUM badge; do not use the Premium history/support page screenshot as if Free can access it.",
+        "For active Premium, History and Support are available subject to server entitlement/cooldown; the supplied History screenshot shows a 24-hour memory window, and Support states one new request per 24 hours.",
+        "Community is available to authenticated Free and Premium users. A badge on a community post belongs to the post author; the header badge belongs to the current viewer.",
+        "Direct-chat participant badges belong to the respective message author or contact; never confuse another user's FREE/PREMIUM label with the current viewer's plan.",
+        "Video Wallet is a separate credit wallet described in source as available for Free and Premium; never present it as a Premium subscription or assume a connection/balance.",
+        "Account-specific fields (names, email, April ID, Premium ID, memory record count, dialogue text, timestamps, expiry, wallet balance, transaction amounts) must be resolved from the current authenticated data, not the screenshot."
+    ],
+    "source_conflicts": [
+        {
+            "id": "pricing.settings_vs_help_article",
+            "severity": "needs_product_owner_confirmation",
+            "evidence": [
+                "The supplied profile screenshot and app/settings/page.tsx show Premium package buttons for 7 days / $12, 28 days / $25 and 12 hours / $3.",
+                "app/api/subscription/route.ts accepts premium_7d, premium_28d and premium_12h for the create-order path.",
+                "app/aprill/page.tsx describes Premium as $25 / 28 days or $3 / 12 hours, and describes Lite $12 / 24 hours as a future unavailable format."
+            ],
+            "assistant_rule": "Do not call the 7-day $12 package Lite. Do not claim a package is active or inactive based only on static Help copy. Read the current server package_options and checkout response; if unavailable, disclose that the source pages disagree and avoid promising a price."
+        },
+        {
+            "id": "checkout_live_status",
+            "severity": "runtime_only",
+            "evidence": [
+                "The Settings UI contains a LiqPay order-creation flow and the subscription API contains a create_liqpay_order action.",
+                "The Help article contains a notice that real checkout is not active until merchant/gateway configuration and approval are complete."
+            ],
+            "assistant_rule": "Do not infer live payment availability from the presence of UI or API code alone. Check the actual checkout/server response before saying payment can currently be completed."
+        }
+    ]
+}
+
+
+def resolve_april_ui_screenshot(asset_id: str, project_root: Any = None) -> Dict[str, Any]:
+    """Resolve a sanitized IT ROOM screenshot asset to a local file.
+
+    The returned path is intended for the bot's future image/attachment adapter.
+    This helper does not expose the image to a user by itself and does not create
+    a public URL. If no file is installed, it returns ``exists=False`` so the
+    caller can fall back to a clearly labelled schematic.
+    """
+    wanted = str(asset_id or "").strip()
+    asset = next(
+        (row for row in APRIL_UI_VISUAL_EVIDENCE.get("asset_manifest", [])
+         if str(row.get("asset_id", "")).strip() == wanted),
+        None,
+    )
+    if asset is None:
+        return {"asset_id": wanted, "exists": False, "reason": "unknown_asset_id", "path": None}
+
+    filename = Path(str(asset.get("file", ""))).name
+    relative_directory = Path(str(
+        APRIL_UI_VISUAL_EVIDENCE.get("asset_delivery", {}).get(
+            "relative_directory", "blocks/assets/it_room/screenshots/"
+        )
+    ))
+    if not filename or relative_directory.is_absolute() or ".." in relative_directory.parts:
+        return {"asset_id": wanted, "exists": False, "reason": "invalid_asset_manifest_path", "path": None}
+
+    if project_root is not None:
+        roots = [Path(project_root).expanduser().resolve()]
+    else:
+        module_dir = Path(__file__).resolve().parent
+        # Supports both a top-level C_IT_ROOM.py and the usual blocks/C_IT_ROOM.py.
+        roots = [module_dir, *module_dir.parents]
+
+    seen = set()
+    for root in roots:
+        if str(root) in seen:
+            continue
+        seen.add(str(root))
+        asset_dir = (root / relative_directory).resolve()
+        candidate = (asset_dir / filename).resolve()
+        try:
+            candidate.relative_to(asset_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return {
+                "asset_id": wanted,
+                "exists": True,
+                "path": str(candidate),
+                "mime_type": "image/png",
+                "route": asset.get("route"),
+                "plan": asset.get("plan"),
+                "resolution": asset.get("resolution"),
+                "use_note": "Use only with the matching screen record and its plan/capture restrictions.",
+            }
+
+    return {
+        "asset_id": wanted,
+        "exists": False,
+        "path": None,
+        "reason": "asset_file_not_installed",
+        "expected_relative_path": str(relative_directory / filename),
+        "route": asset.get("route"),
+        "plan": asset.get("plan"),
+        "resolution": asset.get("resolution"),
     }
 
 
@@ -8306,6 +8953,7 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
         context["site_ui_search"] = search_april_ui(effective_query, limit=5)
         context["site_ui_screenshot_evidence"] = context["site_ui_search"].get("screen_matches", [])
+        context["site_ui_visual_evidence"] = select_april_ui_visual_evidence(effective_query, plan=_april_request_plan(machine_request), limit=8)
         context["site_ui_screen_registry"] = _select_ui_screen_registry(effective_query, context["site_navigation_map"])
         context["web_interface_guide"] = select_april_web_interface_guide(machine_request, limit=10)
         if re.search(r"(?:справк\w*|help|faq|политик\w* конфиденц|privacy|услови\w* использ|terms|тариф\w*|оплат\w*|платеж\w*|lite|premium|free|удал\w* аккаунт|поддержк\w*)", effective_query, re.I):
@@ -8342,7 +8990,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         prompt_fragments.extend([
             "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map, site_function_catalog, site_ui_search and site_ui_screenshot_evidence to resolve the real visible control. The local UI searcher indexes screenshot-observed labels and function handlers. Phrase aliases are fallback only, never a required fixed trigger.",
             "The answer is a user-facing walkthrough of the actual April interface, NOT a directory of rooms, modules, APIs, function IDs or feature lists. Start from the screen the user currently sees; describe the visible page/card, where it sits (top bar, right side, below a named card, bottom composer), the exact label/icon, what that control is for, why the user needs it, what to press in order, and what should appear next.",
-            "Use site_ui_search, site_ui_screen_registry, site_ui_screenshot_evidence, site_function_catalog and web_interface_guide together. The web_interface_guide contains the source-derived full-page atlas, individually addressable page controls, all normalized legacy function records, response-renderer controls (graph/table/gallery/video/code/file/diagram), navigation edges, responsive appearance landmarks, capture states, the screen/control/flow/screenshot documentation standard and both tariff branches. When web_help_article_content is present, quote/paraphrase only the selected article/FAQ copy and preserve its draft/future/not-yet-available notices. First select the exact current control/function; then use its parent screen and visual landmarks for the surrounding interface and its function record for the click sequence. Do not substitute lexical matches that belong to another page. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
+            "Use site_ui_search, site_ui_screen_registry, site_ui_screenshot_evidence, site_ui_visual_evidence, site_function_catalog and web_interface_guide together. The web_interface_guide contains the source-derived full-page atlas, individually addressable page controls, all normalized legacy function records, response-renderer controls (graph/table/gallery/video/code/file/diagram), navigation edges, responsive appearance landmarks, capture states, the screen/control/flow/screenshot documentation standard and both tariff branches. When web_help_article_content is present, quote/paraphrase only the selected article/FAQ copy and preserve its draft/future/not-yet-available notices. First select the exact current control/function; then use its parent screen and visual landmarks for the surrounding interface and its function record for the click sequence. Do not substitute lexical matches that belong to another page. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
             "For every interface-help answer, follow site_ui_help_playbook.required_answer_order: identify the screen, provide its exact relative link, describe the visible landmark and exact button/icon, explain the action, give numbered steps, state the expected result and next step, then mention only relevant access limits. If the user asks what a button does, explain that control itself before giving navigation.",
             "For a non-responsive/grey/unclickable control, use site_ui_help_playbook.troubleshooting. Resolve the specific control from the current query/active UI context. If it cannot be identified, do not guess: give only safe general checks and ask for one screenshot showing the control and its page. Do not advise repeated clicks on payment, publishing, or account-deletion buttons.",
             "If the user asks to be shown where to click, choose the visual mode from web_interface_guide.visual_guide: annotate an authentic captured screenshot only when screenshot_asset_ref and current screenshot geometry exist; otherwise make a clearly labelled illustrative reconstruction or a navigation sequence diagram as requested. The room stores appearance, responsive landmarks and capture states, not a fabricated live screenshot. Never claim the source archive is a live screenshot or that you can see the user's current screen.",
@@ -8383,7 +9031,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             prompt_fragments.extend([
                 "Use web_interface_guide as the detailed source-of-truth atlas for the entire April Web interface: page appearance, every listed control, submenu, position, effect, next screen, state and plan rule. Resolve the user's target control before composing the answer; do not infer from a similar label on another screen.",
                 "The atlas is shared by Free and Premium, but access and disabled states must be rendered according to web_interface_guide.plan_view. A personalized plan is valid only when authenticated plan metadata is explicitly present. If plan=unknown, do not treat the MachineRequest default subscription='Free' as proof: explain the relevant Free/Premium differences or ask for CURRENT PLAN status.",
-                "When user asks 'show', 'point', 'where do I click', 'I cannot find it', or explicitly requests an image: select the exact screen/control, use its appearance and landmark data, and create a clear labelled visual guide. Use an authentic screenshot asset only if screenshot_asset_ref exists or user supplied a current screenshot. Otherwise label any reconstructed visual as an illustrative schematic based on the source, never as a real screenshot.",
+                "When user asks 'show', 'point', 'where do I click', 'I cannot find it', or explicitly requests an image: select the exact screen/control from site_ui_visual_evidence, use its sanitized screenshot asset and landmark data where available, and create a clear labelled visual guide. The registry includes separate Free locked-state and Premium enabled-state evidence. Never use a Premium-only screenshot as the Free user's current screen. Use an authentic screenshot asset only if screenshot_asset_ref resolves to a delivered asset. For Premium profile or connected Free-wallet states marked low_resolution/too_low_resolution, do not fabricate pixel coordinates; use a clearly labelled schematic or request a fresh screenshot. Otherwise label any reconstructed visual as an illustrative schematic based on the source, never as a real screenshot.",
                 "For pixel-accurate arrows/circles, require a real captured or user-supplied screenshot. Do not invent x/y coordinates from relative prose. For a route-only request, use a navigation diagram, not a fabricated screen. Always pair a visual with the exact route, visible button label, ordered action and expected result.",
                 "The UI atlas is versioned source knowledge. If a control is not present in the selected screen record, do not invent it. If route/state depends on login, plan, payment gateway, feature flag or backend response, explain the condition explicitly.",
                 "Keep Video Wallet separate from CURRENT PLAN and Premium package checkout. Read actual balance, price and credit quantity only from the current wallet/order payload; never reuse example prices or assumed credit amounts.",
@@ -8470,6 +9118,14 @@ class ITRoom:
     @staticmethod
     def select_web_interface_guide(machine_request: MachineRequest, limit: int = 8) -> Dict[str, Any]:
         return select_april_web_interface_guide(machine_request, limit=limit)
+
+    @staticmethod
+    def select_ui_visual_evidence(query: str, plan: str = "unknown", limit: int = 8) -> Dict[str, Any]:
+        return select_april_ui_visual_evidence(query, plan=plan, limit=limit)
+
+    @staticmethod
+    def resolve_ui_screenshot(asset_id: str, project_root: Any = None) -> Dict[str, Any]:
+        return resolve_april_ui_screenshot(asset_id, project_root=project_root)
 
     @staticmethod
     def evaluate(machine_request: MachineRequest) -> Dict[str, Any]:
