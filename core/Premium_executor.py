@@ -27,6 +27,7 @@ import math
 import os
 import re
 import time
+from pathlib import Path
 import uuid
 from html.parser import HTMLParser
 
@@ -84,7 +85,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v16_it_room_context_merge_scene_contract"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v17_it_room_screenshot_scene_contract"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -6755,7 +6756,10 @@ async def execute(
     # room was selected. Site help is a knowledge lookup, not a mutually exclusive
     # renderer choice; this fixes missing map context for simple voice questions.
     try:
-        from blocks.C_IT_ROOM import build_machine_contribution as _build_it_room_contribution
+        from blocks.C_IT_ROOM import (
+            build_machine_contribution as _build_it_room_contribution,
+            select_april_ui_visual_evidence as _select_it_ui_visual_evidence,
+        )
         _it_contribution = _build_it_room_contribution(request)
         _it_context = _it_contribution.get("knowledge_context") if isinstance(_it_contribution, dict) else None
         if isinstance(_it_context, dict) and _it_context.get("site_help_requested"):
@@ -6765,6 +6769,156 @@ async def execute(
             # second active room (for example C_VIDEO) cannot erase the UI manual.
             _it_context = dict(_it_context)
             _it_context["response_guidance"] = list(_it_contribution.get("prompt_fragments") or [])
+
+            # Screenshot follow-ups are visual references to the existing April UI,
+            # not new artwork. The base lexical evidence query can miss a target
+            # inherited from a route/control match (e.g. "show the screenshot" after
+            # asking how to delete the account). Enrich the lookup from the exact
+            # source-derived screen IDs already selected by web_interface_guide.
+            _current_intent_for_screenshot = interpretation.get("intent") if isinstance(interpretation.get("intent"), dict) else {}
+            _site_screenshot_requested = bool(_current_intent_for_screenshot.get("site_screenshot_request"))
+            if _site_screenshot_requested:
+                # Two older generic IT ROOM instructions told the model to fall
+                # back to a schematic/uploaded screenshot even when a real local
+                # asset was already delivered. Remove only those conflicting
+                # fragments for this screenshot-backed Premium turn.
+                _it_context["response_guidance"] = [
+                    _fragment for _fragment in (_it_context.get("response_guidance") or [])
+                    if "If the user asks for the real/current screenshot of a UI" not in str(_fragment)
+                    and "For Premium profile or connected Free-wallet states marked low_resolution/too_low_resolution" not in str(_fragment)
+                ]
+                _guide_for_screenshot = _it_context.get("web_interface_guide") if isinstance(_it_context.get("web_interface_guide"), dict) else {}
+                _guide_screens = _guide_for_screenshot.get("screens") if isinstance(_guide_for_screenshot.get("screens"), list) else []
+                _guide_screen_ids = [
+                    _text(item.get("id")).strip() for item in _guide_screens
+                    if isinstance(item, dict) and _text(item.get("id")).strip()
+                ]
+                _screenshot_query_hints = {
+                    "settings_profile": "профиль личный кабинет premium",
+                    "account_deletion": "профиль личный кабинет premium удаление аккаунта",
+                    "history_list": "история сохранённые диалоги premium",
+                    "support_room": "техподдержка обращения premium",
+                    "community_feed": "сообщество лента публикации",
+                    "direct_chat": "личный диалог сообщение другу",
+                    "help_information": "помощь информация справка april",
+                    "google_auth_modal": "вход google авторизация",
+                    "chat_home": "главный экран april чат",
+                }
+                if "account_deletion" in _guide_screen_ids and "settings_profile" not in _guide_screen_ids:
+                    _guide_screen_ids.insert(0, "settings_profile")
+                _visual_rows_by_id = {}
+                _resolved_by_asset_id = {}
+                _visual_source_queries = []
+                for _screen_id in _guide_screen_ids or ["settings_profile"]:
+                    _hint = _screenshot_query_hints.get(_screen_id, "")
+                    if not _hint:
+                        continue
+                    _visual_query = f"{current_text} {_hint}".strip()
+                    _visual_source_queries.append(_visual_query)
+                    _visual_selection = _select_it_ui_visual_evidence(
+                        _visual_query, plan="premium", limit=4
+                    )
+                    for _visual_row in (_visual_selection.get("screens") or []):
+                        if isinstance(_visual_row, dict):
+                            _visual_rows_by_id.setdefault(_text(_visual_row.get("id")), _visual_row)
+                    for _resolved_asset in (_visual_selection.get("resolved_assets") or []):
+                        if isinstance(_resolved_asset, dict):
+                            _resolved_by_asset_id.setdefault(_text(_resolved_asset.get("asset_id")), _resolved_asset)
+                _selected_visual_rows = list(_visual_rows_by_id.values())
+                _selected_resolved_assets = list(_resolved_by_asset_id.values())
+                _it_context["site_ui_visual_evidence"] = {
+                    **dict(_it_context.get("site_ui_visual_evidence") or {}),
+                    "schema": "april.ui_visual_evidence.selection.v1",
+                    "query": current_text,
+                    "plan": "premium",
+                    "plan_confirmation_required": False,
+                    "screens": _selected_visual_rows,
+                    "resolved_assets": _selected_resolved_assets,
+                    "selection_queries": _visual_source_queries,
+                }
+                _preferred_screenshot = None
+                _preferred_record = None
+                # For the account-deletion entry point, the actual button is on
+                # the bottom of the Premium profile; account-deletion itself is a
+                # separate confirmation page without a supplied screenshot.
+                _preferred_ids = (
+                    ["profile.premium.mobile"] if "settings_profile" in _guide_screen_ids or "account_deletion" in _guide_screen_ids else []
+                )
+                _preferred_ids.extend(
+                    _text(row.get("id")) for row in _selected_visual_rows
+                    if isinstance(row, dict) and _text(row.get("id")) not in _preferred_ids
+                )
+                for _visual_id in _preferred_ids:
+                    _preferred_record = next((
+                        row for row in _selected_visual_rows
+                        if isinstance(row, dict) and _text(row.get("id")) == _visual_id
+                    ), None)
+                    if not isinstance(_preferred_record, dict):
+                        continue
+                    _asset_ref = _text(_preferred_record.get("screenshot_asset_ref"))
+                    _candidate_asset = _resolved_by_asset_id.get(_asset_ref)
+                    if isinstance(_candidate_asset, dict) and _candidate_asset.get("exists") and _candidate_asset.get("path"):
+                        _preferred_screenshot = _candidate_asset
+                        break
+                _guide_controls_for_screenshot = _guide_for_screenshot.get("controls") if isinstance(_guide_for_screenshot.get("controls"), list) else []
+                _screenshot_control_ids = {
+                    "profile.delete_account_link", "deletion.confirm_delete",
+                    "profile.video_wallet.connect", "profile.video_wallet.purchase",
+                }
+                _verified_screenshot_controls = [
+                    {
+                        "id": _text(_control.get("id")),
+                        "labels": list(_control.get("labels") or []),
+                        "where": _text(_control.get("where")),
+                        "effect": _text(_control.get("effect")),
+                        "next": _text(_control.get("next")),
+                        "caution": _text(_control.get("caution")),
+                        "route": _text(_control.get("route")),
+                    }
+                    for _control in _guide_controls_for_screenshot
+                    if isinstance(_control, dict) and _text(_control.get("id")) in _screenshot_control_ids
+                ]
+                _screenshot_delivery = {
+                    "schema": "april.it_room.screenshot_delivery.v1",
+                    "requested": True,
+                    "available": bool(_preferred_screenshot),
+                    "plan": "premium",
+                    "screen_id": _text((_preferred_record or {}).get("screen_id") or (_preferred_record or {}).get("id")),
+                    "screen_title": _text((_preferred_record or {}).get("screen_title") or (_preferred_record or {}).get("title")),
+                    "asset_id": _text((_preferred_screenshot or {}).get("asset_id")),
+                    "path": _text((_preferred_screenshot or {}).get("path")),
+                    "mime_type": _text((_preferred_screenshot or {}).get("mime_type") or "image/png"),
+                    "resolution": list((_preferred_screenshot or {}).get("resolution") or []),
+                    "route": _text((_preferred_screenshot or {}).get("route") or (_preferred_record or {}).get("route")),
+                    "annotation_allowed": bool((_preferred_record or {}).get("annotation_allowed")),
+                    "screenshot_use": _text((_preferred_record or {}).get("screenshot_use")),
+                    "verified_controls": _verified_screenshot_controls,
+                    "selected_screen_ids": _guide_screen_ids,
+                    "caption": (
+                        "Обезличенный снимок профиля Premium. Карточка «Удаление аккаунта» находится ближе к нижней части длинной страницы. Это снимок-ориентир низкого разрешения; точные стрелки и координаты по нему не наносятся."
+                        if _text((_preferred_record or {}).get("id")) == "profile.premium.mobile" else
+                        _text((_preferred_record or {}).get("appearance"))[:420]
+                    ),
+                }
+                request.routing["site_screenshot_delivery"] = _screenshot_delivery
+                _it_context["site_screenshot_delivery"] = _screenshot_delivery
+                _it_context["response_guidance"].append(
+                    "For this current Premium turn the user explicitly requested a screenshot of the April UI. "
+                    + (
+                        "A privacy-sanitized, plan-matched authentic screenshot asset is resolved and will be attached by Premium Executor inside the single SceneContract. Do not say that you cannot show a screenshot; do not generate or imitate an image; explain that this real reference appears below. Respect screenshot_use/annotation_allowed and do not add pixel arrows to a low-resolution asset."
+                        if _screenshot_delivery["available"] else
+                        "No matching screenshot file is installed for this screen. Do not invoke an image generator to imitate the site. Give the verified route and steps; clearly say that this exact screenshot is not yet available and use a source-derived schematic only if the user requests one."
+                    )
+                )
+                _apr_timing_log(
+                    "it_room_screenshot_resolved", None,
+                    requested=True, available=bool(_preferred_screenshot),
+                    plan="premium", screen_id=_screenshot_delivery["screen_id"],
+                    asset_id=_screenshot_delivery["asset_id"],
+                    resolution=_screenshot_delivery["resolution"],
+                    annotation_allowed=_screenshot_delivery["annotation_allowed"],
+                )
+
             _existing_room_context = request.routing.get("room_knowledge_context")
             _merged_room_context = dict(_existing_room_context) if isinstance(_existing_room_context, dict) else {}
             _merged_room_context["it"] = _it_context
@@ -7791,6 +7945,127 @@ async def execute(
         render_blocks=raw_blocks,
         artifacts=raw_artifacts,
     )
+
+    # Attach an already-existing IT ROOM screenshot as a normal image renderer
+    # inside the same canonical SceneContract. This is deliberately separate
+    # from image_result/image_pending, so C_APRIL_IMAGES_GENERATOR is not called.
+    _site_screenshot_delivery = request.routing.get("site_screenshot_delivery") if isinstance(request.routing.get("site_screenshot_delivery"), dict) else {}
+    _site_screenshot_attached = False
+    if _site_screenshot_delivery.get("requested") and _site_screenshot_delivery.get("available"):
+        try:
+            _screenshot_path = Path(_text(_site_screenshot_delivery.get("path"))).expanduser().resolve()
+            _allowed_screenshot_root = (Path(__file__).resolve().parents[1] / "blocks" / "assets" / "it_room" / "screenshots").resolve()
+            _screenshot_path.relative_to(_allowed_screenshot_root)
+            _screenshot_bytes = _screenshot_path.read_bytes()
+            if not _screenshot_bytes.startswith(b"\x89PNG\r\n\x1a\n") or len(_screenshot_bytes) > 8 * 1024 * 1024:
+                raise ValueError("invalid_or_oversized_it_room_png")
+            _screenshot_width = int.from_bytes(_screenshot_bytes[16:20], "big") if len(_screenshot_bytes) >= 24 else 0
+            _screenshot_height = int.from_bytes(_screenshot_bytes[20:24], "big") if len(_screenshot_bytes) >= 24 else 0
+            if _screenshot_width < 1 or _screenshot_height < 1:
+                raise ValueError("invalid_it_room_png_dimensions")
+            _screenshot_data_uri = "data:image/png;base64," + base64.b64encode(_screenshot_bytes).decode("ascii")
+            _screenshot_caption = _text(_site_screenshot_delivery.get("caption") or "Обезличенный снимок интерфейса April из IT ROOM.")[:700]
+            _screenshot_alt = _text(_site_screenshot_delivery.get("screen_title") or "Скриншот интерфейса April")[:180]
+            _screenshot_image = {
+                "src": _screenshot_data_uri,
+                "url": _screenshot_data_uri,
+                "mime_type": "image/png",
+                "width": _screenshot_width,
+                "height": _screenshot_height,
+                "alt": _screenshot_alt,
+                "title": _screenshot_alt,
+                "caption": _screenshot_caption,
+                "generated": False,
+                "source": "C_IT_ROOM_SANITIZED_SCREENSHOT",
+                "asset_id": _text(_site_screenshot_delivery.get("asset_id")),
+            }
+            _screenshot_block = {
+                "type": "image",
+                "artifact_type": "image",
+                "renderer": get_web_renderer_registration("image").get("renderer", "GalleryBlock"),
+                "viewer": get_web_renderer_registration("image").get("viewer", "GalleryBlock"),
+                "content": "",
+                "source_room": "C_IT_ROOM",
+                "source": "sanitized_it_room_screenshot",
+                "step_title": "Скриншот интерфейса April",
+                "final_output": True,
+                "payload": {
+                    "kind": "it_room_screenshot",
+                    "artifact_type": "image",
+                    "mime_type": "image/png",
+                    "width": _screenshot_width,
+                    "height": _screenshot_height,
+                    "images": [_screenshot_image],
+                    "image_count": 1,
+                    "generated": False,
+                    "source": "C_IT_ROOM_SANITIZED_SCREENSHOT",
+                    "asset_id": _text(_site_screenshot_delivery.get("asset_id")),
+                    "caption": _screenshot_caption,
+                },
+            }
+            packaged.setdefault("render_blocks", []).append(_screenshot_block)
+            _site_screenshot_attached = True
+            # Remove only a stale claim that April cannot show the screenshot.
+            # Keep all verified navigation instructions and other answer content.
+            _cleaned_screenshot_answer = answer
+            # Strip stale model prose that contradicts the attached authentic asset
+            # or describes a generated image/schematic that is not in this scene.
+            for _stale_pattern in (
+                r"(?is)(?:^|\n)\s*(?:Дмитрий,?\s*)?(?:настоящий\s+)?скриншот[^.!?\n]{0,220}(?:не могу|не способен|нет доступа)[^.!?\n]*[.!?]\s*",
+                r"(?is)(?:^|\n)\s*(?:я\s+не\s+могу|у\s+меня\s+нет\s+доступа)[^.!?\n]{0,220}(?:скриншот|сайт|интерфейс)[^.!?\n]*[.!?]\s*",
+                r"(?im)^\s*(?:Но\s+)?вот\s+схема[^.!?:\n]*[.!?:]?\s*",
+                r"(?im)^\s*Это\s+ориентир[^.!?:\n]*[.!?:]?\s*",
+                r"(?im)^\s*(?:Изображение|Картинка)\s+(?:создано|сгенерировано|нарисовано)[^.!?\n]*[.!?]\s*",
+            ):
+                _cleaned_screenshot_answer = re.sub(_stale_pattern, "\n", _cleaned_screenshot_answer).strip()
+
+            _selected_ids_for_answer = set(_site_screenshot_delivery.get("selected_screen_ids") or [])
+            _verified_control_ids_for_answer = {
+                _text(item.get("id"))
+                for item in (_site_screenshot_delivery.get("verified_controls") or [])
+                if isinstance(item, dict)
+            }
+            if (
+                "account_deletion" in _selected_ids_for_answer
+                and "settings_profile" in _selected_ids_for_answer
+                and "profile.delete_account_link" in _verified_control_ids_for_answer
+                and "deletion.confirm_delete" in _verified_control_ids_for_answer
+            ):
+                # Deterministic source-grounded walkthrough: the uploaded Premium
+                # profile screenshot shows the entry card, while final confirmation
+                # lives on a separate page without a supplied screenshot.
+                _cleaned_screenshot_answer = (
+                    "Чтобы удалить именно аккаунт April, путь такой:\n\n"
+                    "1. Откройте [Профиль April](/settings). В верхней панели основного чата нажмите на своё имя или значок профиля.\n"
+                    "2. Прокрутите страницу профиля почти до конца и найдите красную карточку «Удаление аккаунта». Нажмите «Удалить аккаунт».\n"
+                    "3. Откроется отдельная страница [Account & Data Deletion](/account-deletion). Само нажатие в профиле аккаунт ещё не удаляет.\n"
+                    "4. На странице удаления прочитайте пояснения. Только если действительно хотите удалить April-аккаунт, выполните окончательное подтверждение в нижней части страницы.\n\n"
+                    "Важно: удаляется аккаунт April и связанные с ним данные; Google-аккаунт не удаляется. Окончательное удаление необратимо.\n\n"
+                    "Ниже приложен настоящий обезличенный снимок профиля Premium из IT ROOM. На нём карточка удаления находится ближе к нижней части длинной страницы. "
+                    "Снимок показывает путь к странице удаления, а не экран окончательного подтверждения; из-за низкого разрешения точные стрелки не нанесены."
+                )
+            elif _cleaned_screenshot_answer:
+                # Preserve source-grounded model guidance for other screens, but
+                # make the use of the authentic screenshot explicit.
+                if not re.search(r"(?:скриншот|снимок\s+экрана)", _cleaned_screenshot_answer, re.I):
+                    _cleaned_screenshot_answer += (
+                        "\n\nНиже приложен настоящий обезличенный снимок соответствующего экрана April из IT ROOM."
+                    )
+
+            if _cleaned_screenshot_answer and _cleaned_screenshot_answer != answer:
+                answer = _cleaned_screenshot_answer
+                _sync_packaged_answer(packaged, answer, answer[:180])
+            _apr_timing_log(
+                "it_room_screenshot_attached", None,
+                attached=True, generated=False, asset_id=_text(_site_screenshot_delivery.get("asset_id")),
+                width=_screenshot_width, height=_screenshot_height, bytes=len(_screenshot_bytes),
+            )
+        except Exception as _screenshot_attach_error:
+            _apr_timing_log(
+                "it_room_screenshot_attach_failed", None,
+                attached=False, error=type(_screenshot_attach_error).__name__,
+            )
+
     _apr_timing_log("response_package_ready", response_package_started, answer_chars=len(answer),
         raw_render_blocks=len(raw_blocks), raw_artifacts=len(raw_artifacts),
         packaged_blocks=len(packaged.get("render_blocks") or []), packaged_artifacts=len(packaged.get("artifacts") or []))
@@ -8699,10 +8974,18 @@ async def execute(
     # Re-enter the one canonical SceneContract after all room-owned operations.
     # These values were previously referenced below without being constructed,
     # causing NameError after C_VIDEO had already returned its controlled failure.
+    _scene_requested_outputs = list(
+        (interpretation.get("intent") or {}).get("requested_outputs") or []
+    )
+    # The screenshot is an existing IT ROOM asset, not an image-generation intent.
+    # Authorize its image renderer only at the final SceneContract boundary; keep
+    # Interpretation.intent.wants_image=False so the paid generator remains off.
+    if _site_screenshot_attached and "image" not in _scene_requested_outputs:
+        _scene_requested_outputs.append("image")
     normalized_blocks = prepare_render_blocks_for_room_dispatch(
         packaged.get("render_blocks") or [],
         answer=answer,
-        requested_outputs=(interpretation.get("intent") or {}).get("requested_outputs") or [],
+        requested_outputs=_scene_requested_outputs,
         graph_policy=graph_policy,
         current_request=_render_request_text,
     )
