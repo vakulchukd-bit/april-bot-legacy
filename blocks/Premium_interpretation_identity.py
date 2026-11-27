@@ -594,6 +594,33 @@ def _contains_marker(text: str, marker: str) -> bool:
     return phrase in low
 
 
+def _is_ui_screenshot_guidance_request(text: Any) -> bool:
+    """Recognize a request to display/point at an existing app screenshot.
+
+    A screenshot of April's own UI is source evidence, not a request to create a
+    new illustration. Require both a screenshot reference and an operational UI
+    goal so ordinary photo/image creation remains untouched.
+    """
+    low = _text(text).lower().replace("ё", "е")
+    if not low:
+        return False
+    screenshot_ref = bool(re.search(
+        r"(?:скриншот\w*|снимок\s+экрана|снимке\s+экрана|screenshot\w*|screen\s*capture)",
+        low, re.I,
+    ))
+    show_or_point = bool(re.search(
+        r"(?:покаж\w*|показ\w*|укаж\w*|отмет\w*|обвед\w*|подсвет\w*|найд\w*|find|show|point\s+out|mark|highlight)",
+        low, re.I,
+    ))
+    ui_operation = bool(re.search(
+        r"(?:куда\s+(?:зайти|перейти|нажать|кликнуть)|как\s+(?:зайти|перейти|найти|открыть|удалить|настроить|подключить)|"
+        r"удал\w*|аккаунт\w*|профил\w*|кабинет\w*|настройк\w*|истори\w*|поддержк\w*|кошел\w*|тариф\w*|"
+        r"where\s+to\s+(?:click|go)|how\s+to\s+(?:delete|open|find|navigate)|account\s+settings|profile\s+settings)",
+        low, re.I,
+    ))
+    return screenshot_ref and show_or_point and ui_operation
+
+
 def _is_ui_instruction_request(text: Any) -> bool:
     """Recognize help operating the existing app/account, not image generation.
 
@@ -603,6 +630,8 @@ def _is_ui_instruction_request(text: Any) -> bool:
     low = _text(text).lower().replace("ё", "е")
     if not low:
         return False
+    if _is_ui_screenshot_guidance_request(low):
+        return True
     media = r"(?:картинк\w*|изображени\w*|фото\b|фотограф\w*|снимк\w*|рисунок\w*|image\w*|picture\w*|photo\w*|visual\w*)"
     operation = r"(?:скача\w*|загруз\w*\s+на\s+устройств\w*|сохран\w*|скопир\w*|встав\w*|откро\w*|увелич\w*|поделит\w*|пересла\w*|download\w*|save\w*|copy\w*|paste\w*|open\w*|share\w*)"
     account_ui = bool(re.search(
@@ -7885,6 +7914,11 @@ def build_interpretation(
     relation = _text(memory.get("relation") or "NEW").upper()
     normalized_visual_request = _text(original or text).lower().replace("ё", "е")
     ui_instruction_request = _is_ui_instruction_request(normalized_visual_request)
+    site_screenshot_request = bool(
+        _is_ui_screenshot_guidance_request(normalized_visual_request)
+        and ui_instruction_request
+        and not dialogue_profile_request
+    )
     if ui_instruction_request:
         requested_outputs = [item for item in requested_outputs if item != "image"]
         for sequence_item in question_sequence:
@@ -8228,6 +8262,52 @@ def build_interpretation(
         presentation_sequence = cleaned_presentation
         image_edit_requested = False
         reuse_saved_image = False
+
+    # A request to show where a control is on April's own screenshot must reuse
+    # the IT ROOM source asset in Premium's SceneContract. It is not permission
+    # to synthesize a replacement screenshot with the paid image generator.
+    if site_screenshot_request:
+        requested_outputs = [
+            _text(name).lower() for name in requested_outputs
+            if _text(name).lower() not in {"image", "gallery", "generated_image"}
+        ]
+        if "text" not in requested_outputs:
+            requested_outputs.insert(0, "text")
+        # A navigation diagram is not implied by the word screenshot. Preserve it
+        # only when the user separately names a diagram/scheme/flowchart.
+        explicit_diagram_request = bool(re.search(
+            r"(?:схем\w*|диаграмм\w*|блок[- ]?схем\w*|flowchart|\bdiagram\b|\bschematic\b)",
+            normalized_visual_request, re.I,
+        ))
+        if not explicit_diagram_request:
+            requested_outputs = [name for name in requested_outputs if name != "diagram"]
+        for sequence_item in question_sequence:
+            if isinstance(sequence_item, dict):
+                child = [
+                    _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                    if _text(name).lower() not in {"image", "gallery", "generated_image"}
+                ]
+                if not explicit_diagram_request:
+                    child = [name for name in child if name != "diagram"]
+                sequence_item["output_types"] = child or ["text"]
+        cleaned_presentation = []
+        for sequence_item in presentation_sequence:
+            if not isinstance(sequence_item, dict):
+                continue
+            child = [
+                _text(name).lower() for name in (sequence_item.get("output_types") or [])
+                if _text(name).lower() not in {"image", "gallery", "generated_image"}
+            ]
+            if not explicit_diagram_request:
+                child = [name for name in child if name != "diagram"]
+            if child:
+                sequence_item["output_types"] = child
+                cleaned_presentation.append(sequence_item)
+        presentation_sequence = cleaned_presentation
+        image_generation_blocked = True
+        image_edit_requested = False
+        reuse_saved_image = False
+
     wants_image = "image" in requested_outputs
     wants_file = "file" in requested_outputs
     file_delivery_mode = _file_delivery_mode(original or text, requested_outputs)
@@ -8374,6 +8454,7 @@ def build_interpretation(
             "requested_outputs": requested_outputs,
             "wants_video": "video" in requested_outputs,
             "wants_image": wants_image,
+            "site_screenshot_request": bool(site_screenshot_request),
             "image_generation_blocked": bool(image_generation_blocked),
             "image_operation": "edit" if (image_edit_requested and source_image_available) else ("request_source" if image_edit_requested else ("reuse" if reuse_saved_image else ("generate" if wants_image else "none"))),
             "image_edit_requested": bool(image_edit_requested),
