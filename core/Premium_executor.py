@@ -85,7 +85,7 @@ from blocks.Premium_state_manager import (
 )
 
 
-PROCESSOR_VERSION = "april_premium_executor_single_route_v17_it_room_screenshot_scene_contract"
+PROCESSOR_VERSION = "april_premium_executor_single_route_v18_context_scene_reconciliation"
 CANONICAL_ROUTE = "/api/v1/chat"
 
 
@@ -103,6 +103,199 @@ for _z in range(72, 87):
     _PERIODIC_GROUPS[_z] = _z - 68
 for _z in range(104, 119):
     _PERIODIC_GROUPS[_z] = _z - 100
+
+
+def _reconcile_with_state_manager_semantics(
+    base: dict[str, Any],
+    effective: Any,
+    *,
+    relation: str,
+    selected_pairs: Any = None,
+    state_manager_context: Any = None,
+) -> dict[str, Any]:
+    """Adopt the State Manager's complete, evidence-backed discourse decision.
+
+    The State Manager returns both an effective interpretation and branch evidence
+    at the outer context level. These can legitimately differ: the nested semantic
+    object may still say NEW_INFORMATION while the authenticated search result has
+    confirmed CONTINUE + previous_answer_reference. Both parts belong to the same
+    search result and must be reconciled before Interpretation/Provider.
+    Explicit user topic switches and history-inventory requests remain protected.
+    """
+    result = dict(base or {})
+    if not isinstance(effective, dict) or not effective:
+        return result
+    context = state_manager_context if isinstance(state_manager_context, dict) else {}
+    route = _text(relation).upper()
+    if route != "CONTINUE" or not (selected_pairs or []):
+        return result
+    if bool(
+        result.get("explicit_topic_switch") or result.get("explicit_topic_introduction")
+        or effective.get("explicit_topic_switch") or effective.get("explicit_topic_introduction")
+        or context.get("explicit_topic_switch")
+        or result.get("history_request") or effective.get("history_request") or context.get("history_request")
+    ):
+        return result
+
+    effective_intent = _text(effective.get("primary_intent")).upper()
+    context_latest = context.get("latest_exchange_analysis") if isinstance(context.get("latest_exchange_analysis"), dict) else {}
+    effective_latest = effective.get("latest_exchange_analysis") if isinstance(effective.get("latest_exchange_analysis"), dict) else {}
+    # CONTINUE alone is not enough. Require branch evidence from either the nested
+    # semantic object or the outer State Manager result (which contains flags that
+    # older versions did not copy into effective_interpretation).
+    strong_branch_evidence = bool(
+        effective.get("previous_answer_reference") or effective.get("active_branch_repair")
+        or context.get("previous_answer_reference") or context.get("active_branch_repair")
+        or context.get("hot_work_followup") or context.get("implicit_latest_branch_resume")
+        or context.get("contextual_history_match")
+        or effective_latest.get("linked") or context_latest.get("linked")
+        or _text(context.get("reason")).lower() in {
+            "explicit_history_resume", "hot_work_branch_first", "active_branch_repair_evidence",
+            "semantic_active_branch_intent", "underspecified_turn_context",
+        }
+    )
+    if effective_intent not in {
+        "TOPIC_CONTINUATION", "PREVIOUS_ANSWER_FOLLOWUP", "ACTIVE_BRANCH_REPAIR",
+    } and not strong_branch_evidence:
+        return result
+
+    # Fold outer search evidence into one semantic object before copying fields.
+    effective = dict(effective)
+    for key in (
+        "previous_answer_reference", "active_branch_repair", "factual_verification_request",
+        "latest_exchange_analysis", "reason", "user_operation", "source_retrieval",
+        "active_work_branch", "hot_work_followup", "implicit_latest_branch_resume",
+        "contextual_history_match",
+    ):
+        if key not in effective or effective.get(key) in (None, "", False, {}, []):
+            if key in context and context.get(key) not in (None, "", False, {}, []):
+                effective[key] = deepcopy(context[key])
+    if context.get("previous_answer_reference"):
+        effective["previous_answer_reference"] = True
+    if context.get("active_branch_repair"):
+        effective["active_branch_repair"] = True
+    if not effective_latest and context_latest:
+        effective["latest_exchange_analysis"] = deepcopy(context_latest)
+
+    semantic_keys = (
+        "primary_intent", "direction", "time_scope", "topic_reference",
+        "requires_memory", "history_request", "history_recall", "search_scope",
+        "relation_hint", "previous_answer_reference", "active_branch_repair",
+        "factual_verification_request", "dialogue_profile_request",
+        "dialogue_history_intent_kind", "dialogue_retrieval_plan", "reason",
+        "speech_act", "communicative_act", "pragmatic_intent", "message_function",
+        "recommended_response_action", "tone", "context_dependent_question",
+        "context_dependent_reaction", "latest_exchange_analysis", "recent_branch_anchor",
+    )
+    for key in semantic_keys:
+        if key in effective:
+            result[key] = deepcopy(effective[key])
+
+    for nested_key in ("features", "pragmatic_features", "dialogue_act_profile"):
+        before = result.get(nested_key) if isinstance(result.get(nested_key), dict) else {}
+        after = effective.get(nested_key) if isinstance(effective.get(nested_key), dict) else {}
+        if before or after:
+            merged = dict(before)
+            merged.update(deepcopy(after))
+            result[nested_key] = merged
+
+    result["primary_intent"] = "TOPIC_CONTINUATION"
+    result["requires_memory"] = True
+    result["history_request"] = False
+    result["relation_hint"] = "CONTINUE"
+    result["previous_answer_reference"] = bool(result.get("previous_answer_reference") or context.get("previous_answer_reference") or strong_branch_evidence)
+    result["active_branch_repair"] = bool(result.get("active_branch_repair") or context.get("active_branch_repair"))
+    merged_features = result.get("features") if isinstance(result.get("features"), dict) else {}
+    if result["previous_answer_reference"]:
+        merged_features["previous_answer_reference"] = True
+        merged_features["context_dependent_question"] = True
+    if result["active_branch_repair"]:
+        merged_features["active_branch_repair"] = True
+    result["features"] = merged_features
+    result["state_manager_semantics_adopted"] = True
+    result["state_manager_relation"] = route
+    result["state_manager_reason"] = _text(context.get("reason") or result.get("reason") or "verified_recent_exchange_semantics")[:100]
+    result["state_manager_relation_confidence"] = context.get("relation_confidence")
+    result["state_manager_matched_message_id"] = _text(
+        (result.get("latest_exchange_analysis") or {}).get("matched_recent_exchange_id")
+        if isinstance(result.get("latest_exchange_analysis"), dict) else ""
+    )[:120]
+    return result
+
+
+def _resolve_premium_it_room_screenshot_variant(resolved_asset: Any) -> dict[str, Any]:
+    """Resolve one manifest screenshot when an exporter added a numeric suffix.
+
+    The lookup is confined to the IT ROOM screenshot directory, matches the
+    exact manifest basename plus an optional ``(N)`` suffix, and requires the
+    exact documented PNG dimensions. Ambiguous or mismatched files are rejected.
+    """
+    result = dict(resolved_asset) if isinstance(resolved_asset, dict) else {}
+    if result.get("exists") or not result.get("expected_relative_path"):
+        return result
+    try:
+        screenshot_root = (Path(__file__).resolve().parents[1] / "blocks" / "assets" / "it_room" / "screenshots").resolve()
+        expected_name = Path(_text(result.get("expected_relative_path"))).name
+        expected_stem = Path(expected_name).stem
+        expected_suffix = Path(expected_name).suffix or ".png"
+        name_pattern = re.compile(
+            rf"^{re.escape(expected_stem)}(?:\s*\(\d+\))?{re.escape(expected_suffix)}$",
+            re.IGNORECASE,
+        )
+        matches: list[Path] = []
+        for candidate in screenshot_root.iterdir():
+            if not candidate.is_file() or not name_pattern.match(candidate.name):
+                continue
+            candidate_path = candidate.resolve()
+            candidate_path.relative_to(screenshot_root)
+            png_head = candidate_path.read_bytes()[:24]
+            if len(png_head) < 24 or not png_head.startswith(b"\x89PNG\r\n\x1a\n"):
+                continue
+            actual_size = [int.from_bytes(png_head[16:20], "big"), int.from_bytes(png_head[20:24], "big")]
+            expected_size = list(result.get("resolution") or [])
+            if len(expected_size) == 2 and actual_size != [int(expected_size[0]), int(expected_size[1])]:
+                continue
+            matches.append(candidate_path)
+        if len(matches) == 1:
+            result.update({
+                "exists": True,
+                "path": str(matches[0]),
+                "mime_type": "image/png",
+                "resolution": list(result.get("resolution") or []),
+                "filename_variant": matches[0].name,
+                "resolution_method": "canonical_manifest_name_with_unique_numbered_suffix",
+            })
+        elif len(matches) > 1:
+            result["reason"] = "ambiguous_numbered_screenshot_files"
+    except Exception as error:
+        result["resolution_error"] = type(error).__name__
+    return result
+
+
+def _apply_reconciled_semantics_to_sequence_item(item: dict[str, Any], semantics: dict[str, Any], relation: str) -> None:
+    """Keep ordered task metadata in agreement without changing render outputs."""
+    if not isinstance(item, dict) or not isinstance(semantics, dict):
+        return
+    outputs = list(item.get("output_types") or ["text"])
+    item["semantic_intent"] = _text(semantics.get("primary_intent") or item.get("semantic_intent"))
+    item["search_direction"] = _text(semantics.get("direction") or item.get("search_direction"))
+    item["topic_reference"] = _text(semantics.get("topic_reference") or item.get("topic_reference"))
+    item["time_scope"] = _text(semantics.get("time_scope") or item.get("time_scope"))
+    item["requires_memory"] = bool(semantics.get("requires_memory"))
+    item["previous_answer_reference"] = bool(semantics.get("previous_answer_reference"))
+    item["active_branch_repair"] = bool(semantics.get("active_branch_repair"))
+    item["relation"] = _text(relation).upper()
+    item["output_types"] = outputs or ["text"]
+    search = dict(item.get("dialogue_search") or {})
+    search.update({
+        "relation": _text(relation).upper(),
+        "semantic_intent": item["semantic_intent"],
+        "search_direction": item["search_direction"],
+        "topic_reference": item["topic_reference"],
+        "previous_answer_reference": item["previous_answer_reference"],
+        "state_manager_semantics_adopted": True,
+    })
+    item["dialogue_search"] = search
 
 
 def _period_for_atomic_number(number: int) -> int:
@@ -5776,6 +5969,32 @@ async def execute(
                     "clarification_prompt": "",
                     "clarification_options": [],
                 }
+            # State Manager returns its contextual interpretation alongside the
+            # chosen branch. Adopt it before the self-contained-new safeguard; this
+            # keeps a correction/reframe linked to April's answer while a genuinely
+            # independent clause still follows the clean-topic path.
+            task_effective_semantics = task_context.get("effective_interpretation") if isinstance(task_context, dict) else None
+            task_relation = _text(task_context.get("relation") or task_search.get("relation")).upper()
+            task_semantics = _reconcile_with_state_manager_semantics(
+                task_semantics, task_effective_semantics,
+                relation=task_relation, selected_pairs=task_context.get("selected_pairs") if isinstance(task_context, dict) else None,
+                state_manager_context=task_context,
+            )
+            question_item.update({
+                "semantic_intent": task_semantics.get("primary_intent", question_item.get("semantic_intent")),
+                "search_direction": task_semantics.get("direction", question_item.get("search_direction")),
+                "topic_reference": task_semantics.get("topic_reference", question_item.get("topic_reference")),
+                "requires_memory": bool(task_semantics.get("requires_memory")),
+                "previous_answer_reference": bool(task_semantics.get("previous_answer_reference")),
+                "active_branch_repair": bool(task_semantics.get("active_branch_repair")),
+                "features": task_semantics.get("features", question_item.get("features", {})),
+                "pragmatic_features": task_semantics.get("pragmatic_features", question_item.get("pragmatic_features", {})),
+            })
+            if task_semantics.get("state_manager_semantics_adopted"):
+                task_search = dict(task_search)
+                task_search["relation"] = task_relation
+                task_search["state_manager_semantics_adopted"] = True
+                question_item["dialogue_search"] = task_search
             # Interpretation is authoritative for whether the current task actually
             # depends on older dialogue. State Manager may surface a plausible
             # historical candidate for a self-contained request; that candidate is
@@ -5975,6 +6194,34 @@ async def execute(
         dialogue_context["pending_clarification"] = {}
         dialogue_context["request_sequence_count"] = len(question_sequence)
 
+    # One canonical semantic state for this turn: State Manager's effective
+    # interpretation (built from the authenticated recent USER↔APRIL exchanges)
+    # must flow into self-audit, transition analysis, Interpretation and Provider.
+    # Previously only dialogue_context.relation changed; the parent semantics and
+    # task sequence remained NEW_INFORMATION, so all later rooms saw contradictory
+    # instructions for the same message.
+    if len(question_sequence) == 1:
+        _effective_semantics = dialogue_context.get("effective_interpretation") if isinstance(dialogue_context, dict) else None
+        _reconciled = _reconcile_with_state_manager_semantics(
+            semantic_interpretation, _effective_semantics,
+            relation=_text(dialogue_context.get("relation")),
+            selected_pairs=dialogue_context.get("selected_pairs"),
+            state_manager_context=dialogue_context,
+        )
+        if _reconciled.get("state_manager_semantics_adopted"):
+            _raw_intent = _text(semantic_interpretation.get("primary_intent"))
+            semantic_interpretation = _reconciled
+            _apply_reconciled_semantics_to_sequence_item(question_sequence[0], semantic_interpretation, "CONTINUE")
+            dialogue_context["effective_interpretation"] = deepcopy(semantic_interpretation)
+            _apr_timing_log(
+                "semantic_context_reconciled", None,
+                raw_intent=_raw_intent,
+                effective_intent=_text(semantic_interpretation.get("primary_intent")),
+                relation=_text(dialogue_context.get("relation")).upper(),
+                matched_message_key=_apr_diag_ref(semantic_interpretation.get("state_manager_matched_message_id")),
+                reason=_text(semantic_interpretation.get("state_manager_reason") or semantic_interpretation.get("reason")),
+                output_types=question_sequence[0].get("output_types", ["text"]),
+            )
     # Synchronous local pre-response self-audit: a strong semantic signal that the
     # user is correcting, extending, or referring to April's latest answer may
     # restore that exact active branch when State Manager returned NEW with no pair.
@@ -6794,7 +7041,7 @@ async def execute(
                     if isinstance(item, dict) and _text(item.get("id")).strip()
                 ]
                 _screenshot_query_hints = {
-                    "settings_profile": "профиль личный кабинет premium",
+                    "settings_profile": "профиль личный кабинет premium видеокошелёк video wallet",
                     "account_deletion": "профиль личный кабинет premium удаление аккаунта",
                     "history_list": "история сохранённые диалоги premium",
                     "support_room": "техподдержка обращения premium",
@@ -6822,8 +7069,10 @@ async def execute(
                         if isinstance(_visual_row, dict):
                             _visual_rows_by_id.setdefault(_text(_visual_row.get("id")), _visual_row)
                     for _resolved_asset in (_visual_selection.get("resolved_assets") or []):
-                        if isinstance(_resolved_asset, dict):
-                            _resolved_by_asset_id.setdefault(_text(_resolved_asset.get("asset_id")), _resolved_asset)
+                        if not isinstance(_resolved_asset, dict):
+                            continue
+                        _asset_resolution = _resolve_premium_it_room_screenshot_variant(_resolved_asset)
+                        _resolved_by_asset_id.setdefault(_text(_asset_resolution.get("asset_id")), _asset_resolution)
                 _selected_visual_rows = list(_visual_rows_by_id.values())
                 _selected_resolved_assets = list(_resolved_by_asset_id.values())
                 _it_context["site_ui_visual_evidence"] = {
@@ -6878,6 +7127,17 @@ async def execute(
                     for _control in _guide_controls_for_screenshot
                     if isinstance(_control, dict) and _text(_control.get("id")) in _screenshot_control_ids
                 ]
+                _wallet_screenshot_target = any(
+                    _text(item.get("id")) in {
+                        "profile.video_wallet.connect", "profile.video_wallet.purchase",
+                        "legacy_function.settings_video_wallet",
+                    }
+                    for item in _verified_screenshot_controls if isinstance(item, dict)
+                ) or bool(re.search(r"(?:кошел\w*|wallet|видеокредит\w*)", current_text, re.I))
+                _deletion_screenshot_target = any(
+                    _text(item.get("id")) in {"profile.delete_account_link", "deletion.confirm_delete"}
+                    for item in _verified_screenshot_controls if isinstance(item, dict)
+                )
                 _screenshot_delivery = {
                     "schema": "april.it_room.screenshot_delivery.v1",
                     "requested": True,
@@ -6895,7 +7155,11 @@ async def execute(
                     "verified_controls": _verified_screenshot_controls,
                     "selected_screen_ids": _guide_screen_ids,
                     "caption": (
+                        "Обезличенный снимок профиля Premium. Отдельная карточка APRIL · C_VIDEO WALLET находится ниже карточки CURRENT PLAN; внутри неё показаны состояние подключения, баланс, пакеты пополнения и история операций. Это общий снимок-ориентир низкого разрешения: точные стрелки и координаты по нему не наносятся."
+                        if _text((_preferred_record or {}).get("id")) == "profile.premium.mobile" and _wallet_screenshot_target else
                         "Обезличенный снимок профиля Premium. Карточка «Удаление аккаунта» находится ближе к нижней части длинной страницы. Это снимок-ориентир низкого разрешения; точные стрелки и координаты по нему не наносятся."
+                        if _text((_preferred_record or {}).get("id")) == "profile.premium.mobile" and _deletion_screenshot_target else
+                        "Обезличенный снимок профиля Premium. Он показывает общую вертикальную структуру страницы; используйте подписи и относительное расположение блоков, а не точные пиксельные координаты."
                         if _text((_preferred_record or {}).get("id")) == "profile.premium.mobile" else
                         _text((_preferred_record or {}).get("appearance"))[:420]
                     ),
@@ -8008,7 +8272,18 @@ async def execute(
             # Remove only a stale claim that April cannot show the screenshot.
             # Keep all verified navigation instructions and other answer content.
             _cleaned_screenshot_answer = answer
-            # Strip stale model prose that contradicts the attached authentic asset
+            # If the authentic asset is attached, remove a stale generic disclaimer
+            # that asks the user to upload the very screenshot already supplied.
+            _answer_paragraphs = re.split(r"\n\s*\n", _cleaned_screenshot_answer)
+            _answer_paragraphs = [
+                _paragraph for _paragraph in _answer_paragraphs
+                if not (
+                    re.search(r"(?:не\s+вижу\s+(?:захват|содержимое|текущий\s+экран)|не\s+могу\s+(?:просмотреть|увидеть)\s+(?:ваш\s+)?экран)", _paragraph, re.I)
+                    and re.search(r"(?:прикрепите|загрузите|отправьте)[^\n]{0,160}(?:скриншот|снимок)", _paragraph, re.I)
+                )
+            ]
+            _cleaned_screenshot_answer = "\n\n".join(_answer_paragraphs).strip()
+            # Strip other stale model prose that contradicts the attached authentic asset
             # or describes a generated image/schematic that is not in this scene.
             for _stale_pattern in (
                 r"(?is)(?:^|\n)\s*(?:Дмитрий,?\s*)?(?:настоящий\s+)?скриншот[^.!?\n]{0,220}(?:не могу|не способен|нет доступа)[^.!?\n]*[.!?]\s*",
