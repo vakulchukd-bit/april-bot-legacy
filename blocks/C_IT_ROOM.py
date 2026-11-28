@@ -2072,24 +2072,42 @@ APRIL_PRODUCT_GUIDE = {
 }
 
 APRIL_ROOM_DIRECTORY = {
+    # The ordinary product overview is a list of places a user can actually see,
+    # not a list of technical rooms or Python components.
+    "title": "Разделы сайта April",
+    "description": "Пользовательские страницы, карточки и действия April — в названиях, понятных человеку, который открыл сайт.",
     "user_facing": [
-        {"room": "Chat / MessageTextBlock", "role": "Понимает текстовый диалог и показывает обычный ответ", "path": "/"},
-        {"room": "Voice / transcription", "role": "Распознаёт голос и передаёт текст по обычной цепочке чата", "path": "/"},
-        {"room": "Attachment / image input", "role": "Принимает исходное фото или поддерживаемый файл", "path": "/"},
-        {"room": "C_TABLE_ROOM / TableBlock", "role": "Отдельный интерактивный блок данных: заголовки, строки, сортировка/скачивание при наличии controls", "path": "/"},
-        {"room": "Diagram / SVG renderer", "role": "Показывает схему или путь с направленными связями; для интерфейса используется карта из исходников", "path": "/"},
-        {"room": "CodeBlock", "role": "Показывает код отдельно от объяснения", "path": "/"},
-        {"room": "GraphBlock / Formula renderer", "role": "Показывают подходящий график или формулу отдельными render-блоками", "path": "/"},
-        {"room": "GalleryBlock / image actions", "role": "Показывает сгенерированное изображение и действия над уже существующим результатом", "path": "/"},
-        {"room": "C_IT_ROOM", "role": "Внутренний слой знаний о реальных страницах/кнопках April; отвечает ссылками и SVG-маршрутами, не выполняет клики", "path": "internal"},
-        {"room": "C_ARTIFACT_CONTRACT / SceneContract", "role": "Упаковывает ответ в renderer-ready блоки и контракт для Web", "path": "internal"},
-        {"room": "Premium_interpretation_identity", "role": "Интерпретирует цель и предпочтительный тип результата; Free-ветку нельзя считать автоматически исправленной этим изменением", "path": "internal"},
-        {"room": "Premium_state_manager", "role": "Поиск/сбор контекста диалога и истории для Premium-цепочки", "path": "internal"},
+        {"section": "Основной чат", "path": "/", "description": "Тёмный экран переписки: сообщения расположены по центру, имя и кнопка профиля — в верхней панели, поле ввода — внизу; рядом находятся вложения, отправка и голосовой ввод."},
+        {"section": "Ваш профиль", "path": "/settings", "description": "Страница с данными аккаунта: Google account, APRIL ID, при наличии PREMIUM ID, имя, язык, текущий план, видеокошелёк и настройки аккаунта."},
+        {"section": "Текущий план", "path": "/settings", "description": "Карточка CURRENT PLAN в профиле. В ней показаны название тарифа, его состояние, срок действия и доступные варианты продления или покупки, если они доступны аккаунту."},
+        {"section": "Видеокошелёк", "path": "/settings", "description": "Отдельная карточка видеокошелька в профиле. В ней находятся подключение кошелька, баланс видеокредитов, варианты пополнения и история операций. Это отдельная оплата, не покупка Premium."},
+        {"section": "История диалогов", "path": "/history", "description": "Список сохранённых разговоров. При действующем доступе Premium можно открыть нужный разговор и продолжить его."},
+        {"section": "Сообщество", "path": "/space", "description": "Страница с публикациями и участниками: поиск людей, приглашения, карточки пользователей и переход к личной переписке."},
+        {"section": "Личная переписка", "description": "Открывается с карточки выбранного взаимного контакта в сообществе. Здесь доступны сообщения, вложения и возврат к списку сообщества."},
+        {"section": "Справка и информация", "path": "/aprill", "description": "Страница с карточками Help Center, How to Use April, Plans & Payments, Privacy Policy, Terms of Service и Account & Data Deletion."},
+        {"section": "Поддержка", "description": "Раздел обращений: создание запроса, просмотр переписки с поддержкой и приложенных материалов. Доступ зависит от состояния аккаунта."},
+        {"section": "Удаление аккаунта April", "path": "/account-deletion", "description": "Страница с объяснением и подтверждением удаления аккаунта и данных April. Google-аккаунт при этом не удаляется."},
+        {"section": "Результаты ответов April", "path": "/", "description": "В самом чате ответы отображаются как текст, изображения, схемы, графики, таблицы, код, видео или файлы — в зависимости от запроса."},
     ],
     "creator_identity": "The uploaded source snapshot does not verify a personal creator/legal-operator name. The privacy and terms pages call themselves drafts and explicitly say the legal operator name needs to be added. Do not infer a legal identity from the contact e-mail.",
     "source_visible_contact": "A contact email appears in the uploaded privacy/terms pages; it is intentionally not copied into this user-facing UI knowledge record. Confirm the correct public contact before displaying it.",
-    "user_vs_internal": "Rooms and renderer names are mostly internal architecture, not buttons in the website. Tell users which visible page/button to open; never ask a normal user to open a Python module, an API route or an admin page.",
+    "user_vs_internal": "For ordinary product help and a site overview, describe these as pages, sections, cards and controls that a signed-in user sees. Do not call them rooms or show Python/module/component names. Technical architecture is a separate answer used only when the developer explicitly asks how April is built.",
 }
+
+# Kept separate from the normal site tour. These labels are implementation details,
+# not destinations a regular April user can open.
+APRIL_INTERNAL_ARCHITECTURE_DIRECTORY = {
+    "title": "Внутренние компоненты April",
+    "items": [
+        {"component": "C_IT_ROOM", "role": "Внутренняя карта пользовательского интерфейса: страницы, элементы, действия, состояния и визуальные ориентиры."},
+        {"component": "C_ARTIFACT_CONTRACT", "role": "Выбирает и упаковывает типы блоков, которые отображаются в ответе April."},
+        {"component": "Premium_executor", "role": "Собирает Premium-запрос, контекст, интерпретацию и выполнение выбранных действий."},
+        {"component": "Premium_state_manager", "role": "Находит предыдущие сообщения, ответы и связанные ветви диалога."},
+        {"component": "C_VIDEO", "role": "Выполняет задачи создания, анализа и редактирования видео."},
+        {"component": "APRIL_IMAGES_GENERATION", "role": "Выполняет генерацию изображений."},
+    ],
+}
+
 
 APRIL_WEB_AUDIT_INDEX = {
     "source_commit": "982432f9f5e61b3ba236d1ebb18e7ba0029c2a67",
@@ -2299,7 +2317,7 @@ APRIL_UI_HELP_PLAYBOOK = {
         "Если причина не видна из исходников, попросить скриншот текущего экрана с кнопкой. Разметку стрелкой/обводкой обещать только после получения реального скриншота.",
         "Не утверждать, что April сама нажала кнопку, изменила настройку, отправила форму или завершила оплату.",
     ],
-    "visual_help": "Если пользователь просит показать, где нажать, выбрать один из режимов APRIL_WEB_VISUAL_GUIDE: настоящий скриншот — только из захваченного браузерного снимка или загруженного пользователем изображения; иллюстративное восстановление интерфейса — когда нужно увидеть компоновку, но реального снимка нет, с заметной пометкой «Схематичное представление, не текущий скриншот»; схема навигации — когда нужно показать последовательность страниц и переходов. Не ставить точные пиксельные стрелки по одному текстовому описанию.",
+    "visual_help": "Внутренние снимки IT Room — только карта для чтения интерфейса: распознавания реальных карточек, видимых подписей, порядка блоков, цветов, относительного расположения и состояний. Не прикладывать эти снимки пользователю как готовый ответ. Формат результата выбирает Interpretation по смыслу и действию текущей реплики с учётом выбранной ветки диалога: diagram/SVG — если выбрана схема; image — если выбрана иллюстративная реконструкция внешнего вида; text — если достаточно объяснения. Слово «скриншот» само по себе не выбирает image и не разрешает выдавать внутренний PNG. Любая сгенерированная реконструкция должна быть обозначена как иллюстрация, а не настоящий снимок. Точные пиксельные стрелки без геометрии реального пользовательского снимка запрещены.",
     "source_limits": [
         "Все элементы подтверждены только предоставленным архивом кода; production-домен и текущая сборка напрямую не проверялись.",
         "Схема по исходникам не является живым скриншотом и не доказывает текущую доступность кнопки на аккаунте пользователя.",
@@ -4439,26 +4457,28 @@ APRIL_IT_ROOM_REMOTE_CONFIG = {
         "APRIL_IT_ROOM_PLAN_SOURCE",
     ],
     "integration_status": "local knowledge and visual evidence registry updated; remote HTTP client/server is still not provisioned by this module",
-    "screenshot_assets": "Privacy-sanitized mobile captures are delivered in a separate screenshots/ directory. Do not configure a public base URL until the future IT ROOM service hosts them behind the intended access policy.",
+    "screenshot_assets": "Privacy-sanitized captures in blocks/assets/it_room/screenshots/ are private visual references for the assistant. They are not user-facing downloads, answer attachments or public screenshot URLs.",
     "plan_source_requirement": "The caller must populate routing.authenticated_plan from a server-verified entitlement before requesting a personalized guide. Do not trust a dataclass default value.",
-    "screenshot_requirement": "Resolve one of APRIL_UI_VISUAL_EVIDENCE.asset_manifest assets with resolve_april_ui_screenshot(asset_id); the selection response includes resolved_assets when files are installed. If no file exists, use a clearly labelled illustrative reconstruction. Do not store a screenshot URL in environment variables yet.",
+    "screenshot_requirement": "Resolve the selected asset with resolve_april_ui_screenshot(asset_id) and pass it only as private vision context. Read the actual page composition, visible labels, card order and relative positions. Never return the source PNG; let the current Interpretation choose text, a screen diagram or a close illustrative screen reconstruction. If no reference exists, use only verified source descriptions and disclose uncertainty.",
 }
 
 APRIL_WEB_VISUAL_GUIDE = {
     "schema": "april.web_visual_guide.v1",
-    "purpose": "Turn stored source-derived interface descriptions and sanitized user-supplied screenshots in APRIL_UI_VISUAL_EVIDENCE into an image guide, annotated screenshot or deterministic screen map when the user explicitly asks to be shown where/how.",
+    "purpose": "Understand the real April interface from its private visual maps and verified control descriptions. Explain it in ordinary user language; create a close screen illustration or a screen/interaction diagram only when the current Interpretation selects that output.",
+    "reference_policy": "Internal screenshots and screen captures are reading references only. They are not answer attachments, not proof of the user's current account state and not permission to copy old personal/dynamic values.",
     "modes": {
-        "authentic_screenshot": "Use only an actual captured browser screenshot or user-uploaded screenshot. Annotate that real image; preserve its actual labels and geometry.",
-        "illustrative_screen": "When no real capture exists and user asks to see the layout, generate a clearly labelled illustrative reconstruction from screen appearance, landmarks and controls. Never claim it is a live screenshot.",
-        "navigation_diagram": "When user asks for route/sequence, show a compact flow with exact route, control, next screen and result. Do not draw a fake page screenshot if only a route diagram was requested."
+        "text_only": "Explain the actual visible page/control in clear user language; do not create a visual block.",
+        "illustrative_screen": "When Interpretation selects image, reconstruct the actual visible layout closely from screen appearance, relative landmarks, visible labels, card hierarchy, controls and visual style. Mark it as an illustrative reconstruction, never as a live screenshot.",
+        "screen_diagram": "When Interpretation selects diagram, show the actual page/card/control structure or the ordered path between controls using readable labels and relationships, not internal module names.",
+        "authentic_screenshot": "Only a current screenshot explicitly supplied by the user or captured from the authorized live build may be shown or annotated. A private IT Room reference image is never itself a user deliverable."
     },
     "annotation_rules": [
         "Identify one exact target control and its parent screen before marking it.",
-        "Prefer APRIL_UI_VISUAL_EVIDENCE.asset_manifest assets when a compatible, privacy-sanitized screenshot is available; image assets are delivered separately under blocks/assets/it_room/screenshots/ and are not yet hosted by a remote URL.",
-        "Before showing or annotating an image, require the asset_id to be present in the plan-filtered resolved_assets list with exists=true.",
-        "For authentic screenshot annotation, require annotation_allowed=true and place arrow/circle only using the supplied/captured screenshot geometry; do not estimate pixel coordinates from prose.",
-        "If annotation_allowed=false or screenshot_use says display-only, the screenshot may be shown as a whole-page reference but must not receive arrows, circles or pixel coordinates; use a clearly labelled schematic for pointing or request a full-width capture.",
-        "For reconstructed screen, use the stored visual description and relative ordering; label it as illustrative.",
+        "Read APRIL_UI_VISUAL_EVIDENCE assets privately to understand page structure, card order, colors, spacing, visible words and visual hierarchy. Do not attach these internal assets to the answer.",
+        "Use the selected screen's visible title, exact labels, relative positions, appearance and action descriptions as grounding for a user-facing reconstruction.",
+        "Do not include internal component names, room IDs, screen IDs, control IDs, Python module names or API implementation labels in generated visuals or normal user-facing explanations.",
+        "For an illustrative screen, reproduce the visible structure and labels closely while replacing personal and dynamic values with neutral placeholders; label it as illustrative.",
+        "For exact arrows/circles, require a current user-supplied or authorized live screenshot with actual geometry; never estimate pixel coordinates from internal low-resolution references.",
         "Show a short numbered path next to/under the image: current screen → target control → expected next screen.",
         "Use current account plan to show disabled Premium labels/active Free controls correctly; if plan is unknown, do not fabricate an account-specific screen.",
         "Never annotate payment confirmation, account deletion or publishing as complete before the server reports success."
@@ -4665,25 +4685,28 @@ def select_april_ui_visual_evidence(query: str, plan: str = "unknown", limit: in
         row = json.loads(json.dumps(record, ensure_ascii=False))
         row["viewer_plan"] = safe_plan
         row["plan_confirmation_required"] = safe_plan == "unknown"
+        # Every stored capture is an internal visual map, never an image to
+        # annotate or deliver. Pixel-level marking requires a current user/live capture.
+        row["annotation_allowed"] = False
+        row["private_visual_reference_only"] = True
         captured_plan = str(row.get("captured_viewer_plan", "")).lower()
-        if row.get("id") in {"community.feed.mobile", "direct_chat.mobile"}:
-            captured_plan = "premium"
-            row["captured_viewer_plan"] = "premium"
-        if safe_plan == "free" and captured_plan == "premium":
-            row["screenshot_use"] = "Use the visual description to create a clearly labelled schematic; do not present the Premium-captured screenshot as the Free user's current screen."
-        elif safe_plan == "unknown" and row.get("id") in {"home.signed_out.mobile", "auth.google.modal.mobile", "help.information.mobile"}:
-            if row.get("screenshot_asset_ref"):
-                row["screenshot_use"] = "Authentic privacy-sanitized public/plan-neutral screenshot; it is not evidence of the viewer's current subscription state."
+        if row.get("screenshot_asset_ref"):
+            if safe_plan == "free" and captured_plan == "premium":
+                row["screenshot_use"] = (
+                    "Private layout reference only. Read common page structure and labels, but do not copy the captured Premium state into a Free user's reconstruction. Never display or attach this PNG."
+                )
+            elif safe_plan == "unknown" and captured_plan in {"free", "premium"}:
+                row["screenshot_use"] = (
+                    "Private layout reference only. Do not infer the viewer's plan or account state from this capture. Never display or attach this PNG."
+                )
             else:
-                row["screenshot_use"] = "No annotation-ready screenshot asset. Use source-based text or a clearly labelled schematic."
-        elif safe_plan == "unknown":
-            row["screenshot_use"] = "Plan not confirmed. Do not label this as the user's current tariff state or use a plan-specific screenshot as personalized guidance."
-        elif row.get("screenshot_asset_ref") and not row.get("annotation_allowed", False):
-            row["screenshot_use"] = "Authentic privacy-sanitized screenshot may be displayed as a whole-screen reference, but exact pixel arrows are not approved for this low-resolution capture; use a labelled schematic or request a full-width capture."
-        elif row.get("screenshot_asset_ref"):
-            row["screenshot_use"] = "Authentic user-uploaded screenshot, privacy-sanitized; annotate only visible controls and only against this asset's actual geometry."
+                row["screenshot_use"] = (
+                    "Private layout-reading reference only: use to understand real card order, labels, colors and relative placement. Never display, attach, edit or deliver this PNG."
+                )
         else:
-            row["screenshot_use"] = "No annotation-ready screenshot asset. Use source-based text or a clearly labelled schematic."
+            row["screenshot_use"] = (
+                "No internal image is installed for this screen. Use the verified written layout map; never invent exact pixel positions."
+            )
         selected.append((score, row))
 
     selected.sort(key=lambda pair: pair[0], reverse=True)
@@ -4701,7 +4724,7 @@ def select_april_ui_visual_evidence(query: str, plan: str = "unknown", limit: in
             asset for asset in APRIL_UI_VISUAL_EVIDENCE.get("asset_manifest", [])
             if any(
                 str(row.get("screenshot_asset_ref", "")) == str(asset.get("asset_id", ""))
-                and str(row.get("screenshot_use", "")).startswith("Authentic")
+                and bool(row.get("screenshot_asset_ref"))
                 for row in rows
             )
         ],
@@ -4710,7 +4733,7 @@ def select_april_ui_visual_evidence(query: str, plan: str = "unknown", limit: in
             for asset in APRIL_UI_VISUAL_EVIDENCE.get("asset_manifest", [])
             if any(
                 str(row.get("screenshot_asset_ref", "")) == str(asset.get("asset_id", ""))
-                and str(row.get("screenshot_use", "")).startswith("Authentic")
+                and bool(row.get("screenshot_asset_ref"))
                 for row in rows
             )
         ],
@@ -4881,9 +4904,9 @@ APRIL_UI_VISUAL_EVIDENCE = {
     "observed_on": "2026-11-27",
     "source": "User-supplied current mobile screenshots in this conversation, checked against the uploaded aprill-web-main source snapshot.",
     "asset_delivery": {
-        "status": "assets_delivered_separately_not_hosted",
+        "status": "private_internal_visual_references",
         "relative_directory": "blocks/assets/it_room/screenshots/",
-        "resolution_rule": "Resolve screenshot_asset_ref with resolve_april_ui_screenshot(asset_id). The selection response includes resolved_assets with local paths when the PNGs are installed. The bot renderer must attach the file or pass it to its image block; this module does not itself send/render the image. A future HTTP service may serve image bytes or return a signed URL.",
+        "resolution_rule": "Resolve screenshot_asset_ref with resolve_april_ui_screenshot(asset_id). The local PNG is supplied only as private vision context so the assistant can read page composition, card order, labels and visual style. Never attach it to the user's answer, gallery, output assets or scene contract. No public URL or environment variable is needed.",
         "no_environment_variable_yet": "Do not add or populate a screenshot URL environment variable until the asset hosting path exists and has been tested.",
         "privacy": "Only sanitized copies belong in the IT ROOM store. Never deploy the original screenshots containing personal identifiers, names, email addresses, private messages, saved locations, wallet balances or account-specific transaction history.",
     },
@@ -4894,7 +4917,7 @@ APRIL_UI_VISUAL_EVIDENCE = {
         "typography": "high-contrast white headings, muted gray descriptions and green action emphasis",
         "common_navigation": "small circular back control at the upper left on secondary pages",
         "responsive_note": "The captures are portrait mobile layouts. Desktop and tablet positions can differ; use labels and relative card order rather than fixed pixel coordinates.",
-        "annotation_note": "Use an actual supplied/captured screenshot for pixel-accurate arrows. Low-resolution profile captures are visual evidence only and must not be used for precise coordinates.",
+        "annotation_note": "Internal captures are private layout-reading references. Low-resolution captures support page hierarchy, labels and approximate relative positions only; they do not provide pixel coordinates for arrows.",
     },
     "screens": [
         {
@@ -5311,12 +5334,11 @@ APRIL_UI_VISUAL_EVIDENCE = {
 
 
 def resolve_april_ui_screenshot(asset_id: str, project_root: Any = None) -> Dict[str, Any]:
-    """Resolve a sanitized IT ROOM screenshot asset to a local file.
+    """Resolve a sanitized IT Room capture for private model vision context.
 
-    The returned path is intended for the bot's future image/attachment adapter.
-    This helper does not expose the image to a user by itself and does not create
-    a public URL. If no file is installed, it returns ``exists=False`` so the
-    caller can fall back to a clearly labelled schematic.
+    The returned local path is for reading the interface layout only. It must not
+    be attached to an answer, used as an edit source, or saved as a user asset.
+    No public URL is created. If missing, the caller uses the written interface map.
     """
     wanted = str(asset_id or "").strip()
     asset = next(
@@ -5363,7 +5385,55 @@ def resolve_april_ui_screenshot(asset_id: str, project_root: Any = None) -> Dict
                 "route": asset.get("route"),
                 "plan": asset.get("plan"),
                 "resolution": asset.get("resolution"),
-                "use_note": "Use only with the matching screen record and its plan/capture restrictions.",
+                "use_note": "Private internal visual reference only; never attach to a user answer.",
+            }
+
+        if not asset_dir.is_dir():
+            continue
+
+        # File uploaders may add a numbered suffix such as '(1)' while the
+        # manifest keeps the canonical filename. Resolve only that exact basename
+        # plus an optional numeric suffix, validate PNG signature and dimensions,
+        # and reject ambiguous matches.
+        expected_stem = Path(filename).stem
+        expected_suffix = Path(filename).suffix or ".png"
+        name_pattern = re.compile(
+            rf"^{re.escape(expected_stem)}(?:\s*\(\d+\))?{re.escape(expected_suffix)}$",
+            re.IGNORECASE,
+        )
+        matches = []
+        expected_resolution = list(asset.get("resolution") or [])
+        for alternative in asset_dir.iterdir():
+            if not alternative.is_file() or not name_pattern.match(alternative.name):
+                continue
+            alternative_path = alternative.resolve()
+            try:
+                alternative_path.relative_to(asset_dir)
+                header = alternative_path.read_bytes()[:24]
+            except (OSError, ValueError):
+                continue
+            if len(header) < 24 or not header.startswith(b"\x89PNG\r\n\x1a\n"):
+                continue
+            actual_resolution = [
+                int.from_bytes(header[16:20], "big"),
+                int.from_bytes(header[20:24], "big"),
+            ]
+            if len(expected_resolution) == 2 and actual_resolution != [int(expected_resolution[0]), int(expected_resolution[1])]:
+                continue
+            matches.append((alternative_path, actual_resolution))
+        if len(matches) == 1:
+            alternative_path, actual_resolution = matches[0]
+            return {
+                "asset_id": wanted,
+                "exists": True,
+                "path": str(alternative_path),
+                "mime_type": "image/png",
+                "route": asset.get("route"),
+                "plan": asset.get("plan"),
+                "resolution": actual_resolution,
+                "filename_variant": alternative_path.name,
+                "resolution_method": "canonical_name_with_unique_numbered_suffix",
+                "use_note": "Private internal visual reference only; never attach to a user answer.",
             }
 
     return {
@@ -5395,7 +5465,7 @@ APRIL_API_ARCHITECTURE = {
         "Do not expose APRIL_WEB_TO_BOT_TOKEN or any API secret to users; do not advise them to paste secrets into chat.",
         "Do not tell the user to browse /api/v1/chat in order to use a feature; their normal entry point is the Web UI.",
         "The attached repository shows architecture, not live service health, production credentials, or runtime entitlement for a particular account.",
-        "If no authentic screenshot asset exists, source code alone cannot provide a real current screenshot: when the user asks to see the layout, create only a clearly labelled illustrative reconstruction grounded in APRIL_WEB_INTERFACE_ATLAS and APRIL_WEB_CONTROL_CATALOG; never call it a real/live screenshot. Pixel-accurate arrows require a real captured or user-uploaded screenshot. If the user explicitly requires an authentic current screenshot and no captured asset exists, ask for a screenshot or use the documented Playwright capture process.",
+        "Internal IT Room captures are private visual references for reading the real interface. They are never answer attachments. When Interpretation selects image, create a close illustrative reconstruction grounded in the selected screen and controls; when it selects diagram, show the actual screen structure or navigation; when it selects text, answer in words only. Never call a reconstruction a real/live screenshot. Exact pixel annotations require a current user-supplied or authorized live capture.",
     ],
 }
 
@@ -6488,19 +6558,19 @@ def _site_navigation_visual_brief(query: str, referenced_area_ids: Any = None) -
         if len(controls) >= 18:
             break
     return {
-        "visual_kind": "SOURCE_DERIVED_CONTROL_MAP",
+        "visual_kind": "SOURCE_GROUNDED_APRIL_INTERFACE_MAP",
         "not_a_screenshot": True,
-        "source": "APRIL_SITE_MAP + APRIL_UI_FUNCTION_CATALOG, both audited against uploaded aprill-web-main components/routes/handlers",
-        "purpose": "Show the actual route and interaction sequence using only verified controls. Never draw or imply a screenshot, mock screen, invented navigation panel or pixel layout.",
+        "source": "Verified April page structure, UI controls and sanitized internal visual references",
+        "purpose": "Give the assistant a truthful map of what the user actually sees: page layout, visible labels, control locations and resulting states. Interpretation decides whether this becomes text, a close illustrative screen or a diagram.",
         "selected_area_ids": ids[:8],
         "verified_routes": route_rows,
         "verified_controls": controls,
         "visual_rules": [
-            "Render a simple route/control flowchart, not a page mockup or screenshot imitation.",
-            "Use only the exact labels, relative positions, paths and actions present in verified_controls and verified_routes.",
-            "Describe position relationally (under the answer, beside the field, in the profile section); never invent pixel coordinates or unverified screen regions.",
-            "Label the SVG: 'Схема по исходникам April — не снимок экрана'.",
-            "If the source does not verify a control or its current production availability, say that it is not verified instead of filling the gap.",
+            "If Interpretation selects image, reconstruct the visible mobile page using the actual internal visual reference, card order, exact labels, relative proportions and colors; label it as an illustrative reconstruction.",
+            "If Interpretation selects diagram, show either the real page/card/control structure or the navigation path, depending on the user's intended action.",
+            "Use only exact visible labels, relative positions, verified paths and actions from the interface atlas.",
+            "Internal reference images are never answer attachments and are never treated as the user's live account screen.",
+            "Never invent pixel coordinates or unverified screen regions. If a control or current availability is not verified, state that clearly.",
         ],
     }
 
@@ -8939,23 +9009,189 @@ def ensure_site_navigation_response(decoded: Dict[str, Any], machine_request: An
     return decoded
 
 
-def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) -> Dict[str, Any]:
-    context: Dict[str, Any] = {
-        "room": ROOM_ID,
-        "competency": IT_COMPETENCY,
-        "providers": IT_PROVIDERS,
-        "libraries": IT_LIBRARY_STATUS,
-        "site_help_requested": _site_help_requested(machine_request),
+
+def build_user_visible_interface_guide(
+    machine_request: Any,
+    source_guide: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build a compact interface description in the vocabulary a site user sees.
+
+    Internal identifiers are deliberately omitted. Routing keeps its machine IDs
+    elsewhere; this guide is for natural-language answers and visual reconstruction.
+    """
+    guide = source_guide if isinstance(source_guide, dict) else select_april_web_interface_guide(machine_request, limit=8)
+    raw_screens = guide.get("screens") if isinstance(guide.get("screens"), list) else []
+    raw_controls = guide.get("controls") if isinstance(guide.get("controls"), list) else []
+    visual = guide.get("visual_evidence") if isinstance(guide.get("visual_evidence"), dict) else {}
+    visual_rows = visual.get("screens") if isinstance(visual.get("screens"), list) else []
+
+    def _labels(row: Dict[str, Any]) -> list[str]:
+        values = row.get("labels") if isinstance(row.get("labels"), list) else []
+        label = _text(row.get("label"))
+        result = ([label] if label else []) + [_text(value) for value in values]
+        return list(dict.fromkeys(value[:140] for value in result if value))[:6]
+
+    screens_out: list[Dict[str, Any]] = []
+    for screen in raw_screens[:4]:
+        if not isinstance(screen, dict):
+            continue
+        screen_id = _text(screen.get("id"))
+        title = _text(screen.get("title") or screen.get("screen_title"))
+        if not title:
+            title_by_id = {
+                "chat_home": "Основной чат April",
+                "settings_profile": "Ваш профиль",
+                "history_list": "История диалогов",
+                "community_feed": "Сообщество",
+                "direct_chat": "Личный диалог",
+                "support_room": "Техническая поддержка",
+                "help_information": "Справка и информация",
+                "account_deletion": "Удаление аккаунта April",
+            }
+            title = title_by_id.get(screen_id, "Раздел April")
+        public_route = _text(screen.get("route"))
+        # Dynamic IDs and internal query parameters are navigation plumbing, not
+        # labels a person sees in the interface. Explain the entry point instead.
+        if "[" in public_route or "]" in public_route or "room=support" in public_route:
+            public_route = ""
+        row_out: Dict[str, Any] = {
+            "название_экрана": title[:180],
+            "адрес_страницы_если_он_прямой": public_route[:120],
+            "как_выглядит": _text(screen.get("appearance"))[:2000],
+        }
+        raw_landmarks = screen.get("landmarks") if isinstance(screen.get("landmarks"), list) else []
+        landmarks_out = []
+        for landmark in raw_landmarks[:14]:
+            if not isinstance(landmark, dict):
+                continue
+            where = _text(landmark.get("position") or landmark.get("where") or landmark.get("name"))
+            label = _text(landmark.get("label") or landmark.get("name"))
+            meaning = _text(landmark.get("details") or landmark.get("purpose") or landmark.get("effect"))
+            item = {"где_находится": where[:180], "видимая_надпись": label[:160], "что_означает": meaning[:280]}
+            item = {key: value for key, value in item.items() if value}
+            if item:
+                landmarks_out.append(item)
+        if landmarks_out:
+            row_out["части_экрана_по_порядку"] = landmarks_out
+        screen_controls = []
+        for control in raw_controls:
+            if not isinstance(control, dict) or _text(control.get("screen_id")) != screen_id:
+                continue
+            labels = _labels(control)
+            item = {
+                "надпись_кнопки_или_поля": " / ".join(labels),
+                "расположение": _text(control.get("where") or control.get("position"))[:200],
+                "внешний_вид": _text(control.get("appearance") or control.get("control"))[:220],
+                "действие": _text(control.get("purpose") or control.get("effect") or control.get("does"))[:300],
+                "результат": _text(control.get("next") or control.get("destination"))[:180],
+                "условие_доступа": _text(control.get("limits") or control.get("caution") or control.get("plan"))[:220],
+            }
+            item = {key: value for key, value in item.items() if value}
+            if item and item not in screen_controls:
+                screen_controls.append(item)
+            if len(screen_controls) >= 12:
+                break
+        if screen_controls:
+            row_out["видимые_элементы_управления"] = screen_controls
+        screens_out.append(row_out)
+
+    visual_out = []
+    for row in visual_rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        title = _text(row.get("screen_title") or row.get("title"))
+        appearance = _text(row.get("appearance"))
+        landmarks = row.get("landmarks") if isinstance(row.get("landmarks"), list) else []
+        item = {
+            "название_экрана": title[:180],
+            "внешний_вид_по_внутренней_карте": appearance[:1800],
+            "ориентиры": [
+                {
+                    "где": _text(point.get("where") or point.get("position"))[:180],
+                    "видимая_надпись": _text(point.get("label"))[:150],
+                    "назначение": _text(point.get("purpose"))[:240],
+                }
+                for point in landmarks[:12] if isinstance(point, dict)
+            ],
+            "это_внутренний_источник_понимания": True,
+        }
+        visual_out.append({key: value for key, value in item.items() if value not in (None, "", [])})
+
+    global_style = APRIL_UI_VISUAL_EVIDENCE.get("global_visual_language", {}) if isinstance(APRIL_UI_VISUAL_EVIDENCE, dict) else {}
+    authenticated_plan = _text(guide.get("plan")).lower()
+    if authenticated_plan == "premium":
+        plan_label = "Premium"
+        plan_note = "В этом запросе тариф Premium подтверждён серверными данными. Конкретный срок действия и доступные операции следует брать из текущего состояния профиля."
+    elif authenticated_plan == "free":
+        plan_label = "Free"
+        plan_note = "В этом запросе тариф Free подтверждён серверными данными. Не показывать пользователю элементы или возможности, доступные только активному Premium."
+    else:
+        plan_label = "Не подтверждён"
+        plan_note = "Текущий тариф не подтверждён в запросе. Не угадывать Free или Premium; предложить проверить карточку CURRENT PLAN в профиле."
+    plan_view_for_user = {
+        "подтверждённый_тариф": plan_label,
+        "где_посмотреть": "Ваш профиль → CURRENT PLAN",
+        "что_показывает_карточка": [
+            "название текущего тарифа",
+            "состояние и срок действия тарифа, если эти данные доступны",
+            "доступные варианты покупки или продления, если они разрешены аккаунту",
+        ],
+        "важные_различия": [
+            "Подписка Premium и видеокошелёк — разные вещи.",
+            "Баланс видеокредитов и стоимость пополнения показываются отдельно в карточке видеокошелька.",
+            "Доступ к истории диалогов и поддержке зависит от действующего доступа аккаунта.",
+        ],
+        "пояснение_состояния": plan_note,
     }
-    if context["site_help_requested"]:
+    return {
+        "purpose": "Карта пользовательского интерфейса April: описывает страницы, карточки, надписи и действия так, как их видит обычный пользователь. Это не список внутренних комнат или программных модулей.",
+        "current_plan_view": plan_view_for_user,
+        "visible_screens": screens_out,
+        "private_visual_map": visual_out,
+        "visual_style": global_style if isinstance(global_style, dict) else {},
+        "visual_output_rule": "Формат выбирает Interpretation: text — объяснение; diagram — схема настоящего расположения элементов или пути; image — близкая иллюстративная реконструкция экрана. Внутренний PNG используется только для считывания интерфейса и никогда не выдаётся пользователю.",
+        "truth_rule": "Сохранять реальные надписи, порядок карточек, взаимное расположение и действия. Не выдумывать кнопки, маршруты или состояние тарифа; динамические значения брать только из текущего ответа сервера.",
+    }
+
+
+def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) -> Dict[str, Any]:
+    site_help_requested = _site_help_requested(machine_request)
+    context: Dict[str, Any] = {
+        # `room` remains a machine-routing tag. The model-facing description is
+        # deliberately the name of the product knowledge it contains.
+        "room": ROOM_ID,
+        "site_help_requested": site_help_requested,
+    }
+    if site_help_requested:
+        context["knowledge_source_label"] = "Карта интерфейса April"
+        context["knowledge_source_description"] = (
+            "Справочник пользовательских экранов April: реальные заголовки страниц, "
+            "видимые карточки, подписи кнопок, расположение элементов, их назначение "
+            "и следующий экран после действия. Внутренние программные компоненты "
+            "не являются страницами или кнопками сайта."
+        )
         context["site_navigation_map"] = _select_site_map_excerpt(machine_request)
         context["site_function_catalog"] = _select_ui_function_catalog(machine_request, context["site_navigation_map"])
         effective_query, _removed_negative_clause = _effective_site_help_query(_current_user_query(machine_request))
         context["site_ui_search"] = search_april_ui(effective_query, limit=5)
-        context["site_ui_screenshot_evidence"] = context["site_ui_search"].get("screen_matches", [])
+        context["site_ui_screenshot_evidence"] = []
+        for _screen_evidence in context["site_ui_search"].get("screen_matches", []):
+            if not isinstance(_screen_evidence, dict):
+                continue
+            _private_screen_evidence = dict(_screen_evidence)
+            _private_screen_evidence["annotation_allowed"] = False
+            _private_screen_evidence["private_visual_reference_only"] = True
+            _private_screen_evidence["use_note"] = (
+                "Только внутренний визуальный ориентир для чтения интерфейса. "
+                "Не прикладывать и не показывать пользователю."
+            )
+            context["site_ui_screenshot_evidence"].append(_private_screen_evidence)
         context["site_ui_visual_evidence"] = select_april_ui_visual_evidence(effective_query, plan=_april_request_plan(machine_request), limit=8)
         context["site_ui_screen_registry"] = _select_ui_screen_registry(effective_query, context["site_navigation_map"])
         context["web_interface_guide"] = select_april_web_interface_guide(machine_request, limit=10)
+        context["user_visible_interface_guide"] = build_user_visible_interface_guide(
+            machine_request, source_guide=context["web_interface_guide"]
+        )
         if re.search(r"(?:справк\w*|help|faq|политик\w* конфиденц|privacy|услови\w* использ|terms|тариф\w*|оплат\w*|платеж\w*|lite|premium|free|удал\w* аккаунт|поддержк\w*)", effective_query, re.I):
             context["web_help_article_content"] = select_april_web_help_content(machine_request, max_articles=4)
         context["site_ui_help_playbook"] = APRIL_UI_HELP_PLAYBOOK
@@ -8965,8 +9201,12 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
         full_interface_overview = _site_full_interface_overview_requested(query)
         # Keep the user-facing site walkthrough separate from internal architecture.
         # A full tour of buttons/pages does not implicitly request room internals or API routes.
-        if _SITE_GUIDE_TOPIC_RE.search(query) or re.search(r"(?:какие комнаты|список комнат|внутренн\w* комнат|room directory|что есть внутри april|структур\w* april)", query, re.I):
+        if _SITE_GUIDE_TOPIC_RE.search(query) or re.search(r"(?:какие комнаты|список комнат|какие разделы|список разделов|обзор сайта|что есть внутри april|структур\w* сайта april)", query, re.I):
+            # Even when the user colloquially says "rooms", show the real product
+            # pages/sections. Technical room names are not part of this overview.
             context["room_directory"] = APRIL_ROOM_DIRECTORY
+        if re.search(r"(?:C_IT_ROOM|C_ARTIFACT_CONTRACT|Premium_executor|Premium_state_manager|C_VIDEO|APRIL_IMAGES_GENERATION|внутренн\w* комнат|внутренн\w* компонент|назван\w* модул\w*|какие модул\w*|архитектур\w*|цепочк\w*|пайплайн|как проходит запрос|откуда приходит ответ|откуда ответ)", query, re.I):
+            context["internal_architecture_directory"] = APRIL_INTERNAL_ARCHITECTURE_DIRECTORY
         if re.search(r"(?:api|endpoint|route|маршрут api|api-?шлюз|архитектур\w*|цепочк\w*|пайплайн|как проходит запрос|откуда приходит ответ|откуда ответ)", query, re.I):
             context["api_architecture"] = APRIL_API_ARCHITECTURE
         if re.search(r"(?:создател\w*|кто создал|разработчик\w*|кто автор|автор april|кто владелец)", query, re.I):
@@ -8976,6 +9216,12 @@ def get_context(machine_request: MachineRequest | Dict[str, Any] | None = None) 
             context["product_guide"] = APRIL_PRODUCT_GUIDE
         if full_interface_overview:
             context["web_audit_index"] = APRIL_WEB_AUDIT_INDEX
+    else:
+        # General engineering questions receive the IT competency catalogue.
+        # Ordinary interface-help requests do not need this technical inventory.
+        context["competency"] = IT_COMPETENCY
+        context["providers"] = IT_PROVIDERS
+        context["libraries"] = IT_LIBRARY_STATUS
     return context
 
 
@@ -8990,6 +9236,8 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         prompt_fragments.extend([
             "Treat the current Interpretation action_contract (domain=april_ui) and its structured operation/target as the primary routing signal. For a CONTINUE turn, preserve the active UI referent only when current semantic interpretation marks a context-dependent question/previous-answer reference and the selected active branch contains a prior April UI-help exchange; never inherit UI help for a bare acknowledgement or unrelated topic. Use site_navigation_map, site_function_catalog, site_ui_search and site_ui_screenshot_evidence to resolve the real visible control. The local UI searcher indexes screenshot-observed labels and function handlers. Phrase aliases are fallback only, never a required fixed trigger.",
             "The answer is a user-facing walkthrough of the actual April interface, NOT a directory of rooms, modules, APIs, function IDs or feature lists. Start from the screen the user currently sees; describe the visible page/card, where it sits (top bar, right side, below a named card, bottom composer), the exact label/icon, what that control is for, why the user needs it, what to press in order, and what should appear next.",
+            "Use user_visible_interface_guide as the preferred vocabulary and compact visual specification. It describes the actual interface in terms the user recognizes: page title, visible card names, button/field labels, appearance, relative location, action and next state. Preserve the on-screen labels exactly where useful, but never expose internal room/module names or IDs in a normal product-help answer or generated visual. The full web_interface_guide and screen registry are internal evidence; translate their findings into plain descriptions of what appears on the user's screen.",
+            "The private screenshot collection is not a gallery for users. Read it as an internal visual map to reconstruct the page. For image output, create a close illustrative UI mockup using the source-derived layout and visible labels; for diagram output, show real page sections and controls in their actual order; for text output, explain without drawing. Never choose a renderer from the word 'screenshot' alone: follow the current Interpretation output/action contract and selected dialogue branch.",
             "Use site_ui_search, site_ui_screen_registry, site_ui_screenshot_evidence, site_ui_visual_evidence, site_function_catalog and web_interface_guide together. The web_interface_guide contains the source-derived full-page atlas, individually addressable page controls, all normalized legacy function records, response-renderer controls (graph/table/gallery/video/code/file/diagram), navigation edges, responsive appearance landmarks, capture states, the screen/control/flow/screenshot documentation standard and both tariff branches. When web_help_article_content is present, quote/paraphrase only the selected article/FAQ copy and preserve its draft/future/not-yet-available notices. First select the exact current control/function; then use its parent screen and visual landmarks for the surrounding interface and its function record for the click sequence. Do not substitute lexical matches that belong to another page. Include only the controls needed for this request; never list unrelated sections just because they share a page.",
             "For every interface-help answer, follow site_ui_help_playbook.required_answer_order: identify the screen, provide its exact relative link, describe the visible landmark and exact button/icon, explain the action, give numbered steps, state the expected result and next step, then mention only relevant access limits. If the user asks what a button does, explain that control itself before giving navigation.",
             "For a non-responsive/grey/unclickable control, use site_ui_help_playbook.troubleshooting. Resolve the specific control from the current query/active UI context. If it cannot be identified, do not guess: give only safe general checks and ask for one screenshot showing the control and its page. Do not advise repeated clicks on payment, publishing, or account-deletion buttons.",
@@ -9003,7 +9251,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             "If a page is marked empty/unimplemented, state that limitation and offer the verified fallback route.",
             "Explain the complete user path: starting screen, exact visible control/card, click action, expected next screen, and what to do next. Keep each step short and numbered; describe back-navigation if the user gets lost.",
             "Handle every sub-request in a multi-part user message separately and in the order asked; keep its target, action, constraints and expected result together.",
-            "If the user asks for the real/current screenshot of a UI, do not claim that a screenshot was captured and do not invoke a raster image generator to imitate it. Provide the deterministic SVG navigation scheme, mark it as a source-derived scheme rather than screenshot, and ask for an uploaded live screenshot for exact arrow annotations.",
+            "Internal IT Room captures are private reading references, never user attachments. Follow the current Interpretation output: image creates a close illustrative reconstruction of the actual visible interface; diagram creates a screen-layout or navigation diagram; text stays text-only. Never claim a reconstruction is a real screenshot. Only an explicit request for an authentic live capture requires a real authorized capture or a user-supplied image.",
             "When asked about API, clearly separate the user-facing page (/) from internal transport endpoints (/api/chat and canonical /api/v1/chat); never instruct a user to click an API endpoint and never expose service tokens.",
             "When asked who created April, report only what the repository confirms: the policy/terms archive lists a contact email but explicitly says the legal operator name is still missing. Do not invent an individual or company.",
             "Use the query catalogue to resolve colloquial/inflected phrasing, but do not expose the thousands-case catalogue to the model or claim every route was verified in production.",
@@ -9020,7 +9268,9 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
                 "If the requested duration exceeds the active model/resolution maximum, state the exact limit and ask for a shorter duration. Never silently shorten the requested clip or submit an over-limit provider job. The profile limit is not a guarantee of account entitlement: provider plan/rights can impose an additional restriction, which must be reported honestly.",
             ])
         if context.get("room_directory"):
-            prompt_fragments.append("For room/function inventory, use the supplied room_directory. Label internal rooms as internal implementation details, not visible user buttons.")
+            prompt_fragments.append("For a normal April site overview, use room_directory as a directory of pages and sections the user can actually see. Present these as 'разделы сайта', 'страницы', 'карточки' or 'элементы интерфейса' — never as internal rooms. Explain each in plain language using visible labels and what the user can do there. Do not mention Python files, room IDs, component names or API routes.")
+        if context.get("internal_architecture_directory"):
+            prompt_fragments.append("The user explicitly asked about April's internal architecture. Use internal_architecture_directory for technical component explanations, clearly distinguish these components from visible pages/buttons, and keep this internal terminology out of any user-facing navigation instructions.")
         if context.get("api_architecture"):
             prompt_fragments.append("For API questions, use api_architecture; describe /api/chat as Web proxy and /api/v1/chat as the canonical bot endpoint. These are internal endpoints, not UI controls. Do not reveal tokens/secrets.")
         if context.get("product_guide"):
@@ -9031,13 +9281,15 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
             prompt_fragments.extend([
                 "Use web_interface_guide as the detailed source-of-truth atlas for the entire April Web interface: page appearance, every listed control, submenu, position, effect, next screen, state and plan rule. Resolve the user's target control before composing the answer; do not infer from a similar label on another screen.",
                 "The atlas is shared by Free and Premium, but access and disabled states must be rendered according to web_interface_guide.plan_view. A personalized plan is valid only when authenticated plan metadata is explicitly present. If plan=unknown, do not treat the MachineRequest default subscription='Free' as proof: explain the relevant Free/Premium differences or ask for CURRENT PLAN status.",
-                "When user asks 'show', 'point', 'where do I click', 'I cannot find it', or explicitly requests an image: select the exact screen/control from site_ui_visual_evidence, use its sanitized screenshot asset and landmark data where available, and create a clear labelled visual guide. The registry includes separate Free locked-state and Premium enabled-state evidence. Never use a Premium-only screenshot as the Free user's current screen. Use an authentic screenshot asset only if screenshot_asset_ref resolves to a delivered asset. For Premium profile or connected Free-wallet states marked low_resolution/too_low_resolution, do not fabricate pixel coordinates; use a clearly labelled schematic or request a fresh screenshot. Otherwise label any reconstructed visual as an illustrative schematic based on the source, never as a real screenshot.",
+                "When the user asks to see or understand a place in April, resolve the exact page and control from the interface atlas. Use the selected internal capture only as private visual input for reading layout, labels, card order and style; never attach or display that source PNG. Follow Interpretation: image means a close illustrative screen reconstruction, diagram means a screen-structure or navigation diagram, text means words only. The registry contains distinct Free and Premium states: never copy the wrong plan state into a reconstruction. Low-resolution captures support layout understanding, not exact pixel coordinates. Label generated screens as illustrative, never as real screenshots.",
                 "For pixel-accurate arrows/circles, require a real captured or user-supplied screenshot. Do not invent x/y coordinates from relative prose. For a route-only request, use a navigation diagram, not a fabricated screen. Always pair a visual with the exact route, visible button label, ordered action and expected result.",
                 "The UI atlas is versioned source knowledge. If a control is not present in the selected screen record, do not invent it. If route/state depends on login, plan, payment gateway, feature flag or backend response, explain the condition explicitly.",
                 "Keep Video Wallet separate from CURRENT PLAN and Premium package checkout. Read actual balance, price and credit quantity only from the current wallet/order payload; never reuse example prices or assumed credit amounts.",
             ])
+        if context.get("user_visible_interface_guide"):
+            prompt_fragments.append("Use user_visible_interface_guide for all user-facing descriptions and close visual reconstructions. Use visible page/card/button names, actual labels and relative positions; keep internal IDs and implementation details out of the answer.")
         if context.get("site_ui_screen_registry"):
-            prompt_fragments.append("Use site_ui_screen_registry as the complete verified source-structure inventory for requested screens. It supplements the limited screenshot evidence; do not call source-component landmarks screenshot-observed if there is no screenshot record for that screen.")
+            prompt_fragments.append("Use site_ui_screen_registry as the verified source-structure inventory for requested screens. It supplements screenshot-derived visual evidence; do not call source-component landmarks screenshot-observed if there is no screenshot record for that screen.")
         if context.get("web_audit_index"):
             prompt_fragments.append("For a complete interface audit, use web_audit_index for the exact inspected routes and renderer controls. Separate user-facing pages from API routes and admin-only controls; never claim live production inspection.")
         if context.get("creator_identity_status"):
@@ -9046,7 +9298,7 @@ def build_machine_contribution(machine_request: MachineRequest) -> Dict[str, Any
         requested_outputs = _requested_outputs_from_machine_request(machine_request)
         if _site_should_render_diagram(effective_query, requested_outputs):
             prompt_fragments.extend([
-                "Complement site-navigation help with a clearly labelled source-derived April UI route flowchart built from verified page handlers and function catalog. Do not draw a fake screenshot or a mock screen panel: use sequential flowchart nodes/edges only, label it 'Схема по исходникам April — не скриншот', show the actual starting route, visible control label, ordered action and expected result. Keep written instructions primary.",
+                "When Interpretation selects a diagram, use the user intent to choose its structure: a navigation request gets an ordered path between verified screens and controls; a request to see a page gets a layout diagram with real card order, visible labels and relative placement. Do not force every diagram into a route-only flowchart. Clearly distinguish a diagram from an authentic screenshot.",
                 "Use one portrait/mobile SVG for a short path; for a long procedure use two ordered, non-repeating diagrams that continue the route. Keep visible card/button labels and exact verified relative paths.",
                 "A source-image edit request takes precedence over a route diagram. Never replace an image-edit task with a generic map. Empty SVG/diagram shells must be dropped before SceneContract.",
             ])
