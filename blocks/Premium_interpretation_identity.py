@@ -614,8 +614,9 @@ def _is_ui_screenshot_guidance_request(text: Any) -> bool:
     ))
     ui_operation = bool(re.search(
         r"(?:куда\s+(?:зайти|перейти|нажать|кликнуть)|как\s+(?:зайти|перейти|найти|открыть|удалить|настроить|подключить)|"
-        r"удал\w*|аккаунт\w*|профил\w*|кабинет\w*|настройк\w*|истори\w*|поддержк\w*|кошел\w*|тариф\w*|"
-        r"where\s+to\s+(?:click|go)|how\s+to\s+(?:delete|open|find|navigate)|account\s+settings|profile\s+settings)",
+        r"где\s+(?:это|он|она|находится|расположен\w*)|в\s+каком\s+месте|где\s+расположен\w*|"
+        r"удал\w*|аккаунт\w*|профил\w*|кабинет\w*|интерфейс\w*|экран\w*|настройк\w*|истори\w*|поддержк\w*|кошел\w*|тариф\w*|"
+        r"where\s+(?:is\s+it|is\s+that|exactly)|where\s+to\s+(?:click|go)|how\s+to\s+(?:delete|open|find|navigate)|account\s+settings|profile\s+settings)",
         low, re.I,
     ))
     return screenshot_ref and show_or_point and ui_operation
@@ -4809,6 +4810,28 @@ def interpret_request_in_context(
             low, re.IGNORECASE,
         )
         and not profile.get("explicit_topic_switch")
+        and not profile.get("explicit_topic_introduction")
+        and not profile.get("history_request")
+    )
+    # A user may correct April's interpretation without repeating the subject:
+    # "Я имею ввиду, как и где оплатить...". This is discourse-level evidence
+    # that the new wording reframes the immediately preceding answer, not a
+    # keyword trigger. It is accepted only when a real prior answer exists and
+    # the message does not explicitly introduce/switch to another topic.
+    clarification_reframe_of_previous_answer = bool(
+        previous_answer
+        and re.match(
+            r"^\s*(?:(?:нет|точнее|я\s+же)\s*[,;:]?\s*)?"
+            r"(?:(?:я\s+)?(?:имею\s+в\s+виду|имею\s+ввиду|"
+            r"имел\w*\s+в\s+виду|имел\w*\s+ввиду|"
+            r"говорю\s+(?:о|об|про)|говорил\w*\s+(?:о|об|про)|"
+            r"про\s+это|речь\s+о)|I\s+mean|what\s+I\s+meant|I\s+meant)\b",
+            low, re.IGNORECASE,
+        )
+        and bool(user_common or answer_common)
+        and not profile.get("explicit_topic_switch")
+        and not profile.get("explicit_topic_introduction")
+        and not _has_explicit_topic_introduction(source)
         and not profile.get("history_request")
     )
     # A clarification answer can also be an imperative with a concrete object:
@@ -5186,6 +5209,7 @@ def interpret_request_in_context(
             or contextual_visual_revision
             or visual_continuation_link
             or clarification_pointer_reply
+            or clarification_reframe_of_previous_answer
             or clarification_visual_action_reply
             or latest_exchange_subject_match
             or linked_by_user_turn
@@ -5217,6 +5241,7 @@ def interpret_request_in_context(
             "semantic_link_to_previous_april_answer" if linked_by_answer else
             "explicit_april_reference_to_latest_exchange" if latest_exchange_link and direct_april_reference else
             "visual_continuation_to_prior_subject" if visual_continuation_link and latest_exchange_link else
+            "clarification_reframe_of_previous_answer" if clarification_reframe_of_previous_answer and latest_exchange_link else
             "answer_to_assistant_clarification" if (clarification_pointer_reply or clarification_visual_action_reply) and latest_exchange_link else
             "contextual_reference_validated_against_latest_exchange" if latest_exchange_link else
             "self_contained_or_unmatched_request"
@@ -5233,6 +5258,7 @@ def interpret_request_in_context(
         "previous_visual_output": bool(previous_visual_output),
         "contextual_visual_revision": bool(contextual_visual_revision),
         "clarification_pointer_reply": bool(clarification_pointer_reply),
+        "clarification_reframe_of_previous_answer": bool(clarification_reframe_of_previous_answer),
         "clarification_visual_action_reply": bool(clarification_visual_action_reply),
         "assistant_requested_clarification": bool(assistant_requested_clarification),
         "failure_status_followup": bool(failure_status_followup),
@@ -5271,8 +5297,9 @@ def interpret_request_in_context(
             "latest_exchange_link": True,
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback),
-            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer or clarification_reframe_of_previous_answer),
+            "clarification_reframe_of_previous_answer": bool(clarification_reframe_of_previous_answer),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation or clarification_reframe_of_previous_answer),
             "artifact_action_request": bool(contextual_artifact_revision or artifact_history_reactivation),
             "artifact_delivery_followup": bool(artifact_delivery_followup),
         })
@@ -5281,15 +5308,16 @@ def interpret_request_in_context(
             "latest_exchange_link": True,
             "previous_answer_reference": True,
             "context_dependent_reaction": bool(short_social_only or contextual_reaction or assistant_repetition_feedback),
-            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer),
-            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation),
+            "context_dependent_question": bool(contextual_question or linked_by_user_turn or linked_by_answer or clarification_reframe_of_previous_answer),
+            "clarification_reframe_of_previous_answer": bool(clarification_reframe_of_previous_answer),
+            "active_branch_repair": bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation or clarification_reframe_of_previous_answer),
             "artifact_action_request": bool(contextual_artifact_revision or artifact_history_reactivation),
             "artifact_delivery_followup": bool(artifact_delivery_followup),
         })
         profile["pragmatic_features"] = signals
         profile["context_dependent_reaction"] = bool(short_social_only or short_continuation_action or contextual_reaction or assistant_repetition_feedback)
         profile["previous_answer_reference"] = True
-        profile["active_branch_repair"] = bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation or profile.get("active_branch_repair"))
+        profile["active_branch_repair"] = bool(assistant_repetition_feedback or assistant_output_feedback or disagreement or dissatisfaction or unfulfilled_image_contract or contextual_visual_revision or contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup or artifact_history_reactivation or clarification_reframe_of_previous_answer or profile.get("active_branch_repair"))
         if contextual_artifact_revision or unfulfilled_artifact_contract or artifact_delivery_followup:
             candidate_families = artifact_contract_requested or previous_artifact_families
             if len(candidate_families) == 1:
