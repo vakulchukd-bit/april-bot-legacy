@@ -57,7 +57,7 @@ def _scaled_prompt_tokens(base_tokens: int) -> int:
     return max(1, int(round(int(base_tokens) * PREMIUM_PROMPT_SCALE)))
 
 TRANSLATION_ROUTE_VERSION = "botru_embedded_language_negotiation_v3_english_working_bridge"
-PROVIDER_ROUTER_VERSION = "premium_provider_router_v12_site_navigation_preserved_scene_contract"
+PROVIDER_ROUTER_VERSION = "premium_provider_router_v13_context_room_scene_contract"
 
 # Shared rules are appended to all three prompt sizes so quality does not disappear
 # when the structured input has to fall back to compact/minimal mode.
@@ -3631,6 +3631,36 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
                 ) if key in work
             }
 
+        # Keep the compact, current-turn room facts even in the absolute prompt
+        # floor. In particular, preserve the April Video Wallet rules and the
+        # actual C_VIDEO execution owner; otherwise Provider may deny capabilities
+        # while the executor still launches the corresponding room.
+        raw_rooms = source.get("ROOM_KNOWLEDGE_CONTEXT") if isinstance(source.get("ROOM_KNOWLEDGE_CONTEXT"), dict) else {}
+        ultra_rooms: dict[str, Any] = {}
+        for room_key, room_value in raw_rooms.items():
+            if not isinstance(room_value, dict):
+                continue
+            room_name = _text(room_key).strip()
+            if room_name.upper() == "C_VIDEO":
+                raw_contract = room_value.get("video_scene_contract") if isinstance(room_value.get("video_scene_contract"), dict) else {}
+                ultra_rooms["C_VIDEO"] = {
+                    "action": _text(room_value.get("action"))[:24],
+                    "execution_owner": "C_VIDEO",
+                    "required_renderer": _text(room_value.get("required_renderer"))[:48],
+                    "generation_guidance": _text(room_value.get("generation_guidance"))[:420],
+                    "video_scene_contract": {
+                        key: raw_contract.get(key)
+                        for key in ("version", "room", "action", "execution_owner", "required_renderer", "render_contract", "billing_owner")
+                        if raw_contract.get(key) not in (None, "", [], {})
+                    },
+                }
+            elif room_name.lower() == "it":
+                compact_it = _compact_site_navigation_room(room_name, room_value)
+                if compact_it:
+                    ultra_rooms["it"] = compact_it
+        if ultra_rooms:
+            ultra["ROOM_KNOWLEDGE_CONTEXT"] = ultra_rooms
+
         modalities = source.get("INPUT_MODALITIES")
         attachment_rows = source.get("ATTACHMENT_INDEX")
         if isinstance(attachment_rows, list) and attachment_rows:
@@ -3654,10 +3684,30 @@ def _fit_structured_prompt(structured: dict[str, Any], reserved_prompt_tokens: i
             "First compare the request with April's latest saved answer; use a matching branch only. "
             "If it is a different self-contained request, answer it as a new topic. "
         )
+        room_system_guidance = ""
+        ultra_it = ultra_rooms.get("it") if isinstance(ultra_rooms.get("it"), dict) else {}
+        ultra_video = ultra_it.get("video_usage_guide") if isinstance(ultra_it.get("video_usage_guide"), dict) else {}
+        if ultra_it.get("site_help_requested") or ultra_it.get("site_navigation_available"):
+            room_system_guidance += (
+                " APRIL UI: use ROOM_KNOWLEDGE_CONTEXT.it as the verified interface manual; identify the current target control, exact relative route and visible label. Do not guess or route Video Wallet to CURRENT PLAN. "
+            )
+        if ultra_video:
+            room_system_guidance += (
+                " VIDEO WALLET: use video_usage_guide for April's own generation, wallet, USD package, credit, limit and payment-mode facts. Video Wallet is separate from Premium and available under the stated Free/Premium policy. Do not claim real production payment/crediting unless the guide confirms the live gateway; never initiate paid generation for a how-to question. "
+            )
+        if "C_VIDEO" in ultra_rooms:
+            room_system_guidance += (
+                " C_VIDEO owns actual video analysis/generation/editing when the current interpreted task requests it; preserve its SceneContract and do not fabricate completion. "
+            )
+        if room_system_guidance:
+            room_system_guidance += (
+                " Treat room evidence as factual context, not an output trigger. Keep all requested text and renderer blocks together in one SceneContract; preserve every explicitly requested output and do not add unrequested visuals."
+            )
         system = (
             "April: answer CURRENT_REQUEST in RETURN_LANGUAGE. Keep REQUEST_SEQUENCE order and preserve all protected source values. "
             + history_guidance
-            + "Use authenticated identity only when natural. Return valid JSON with answer, content, render_blocks, artifacts and dialogue_memory_record."
+            + room_system_guidance
+            + " Use authenticated identity only when natural. Return valid JSON with answer, content, render_blocks, artifacts and dialogue_memory_record."
         )
         minimal = ultra
         card = _json_card(minimal)
@@ -3999,62 +4049,359 @@ def _compact_room_prompt_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def _compact_site_navigation_room(room_key: str, room_value: dict[str, Any]) -> dict[str, Any]:
-    """Retain the actionable IT map, guidance and UI evidence without copying the full room."""
-    raw_map = room_value.get("site_navigation_map")
-    raw_map = raw_map if isinstance(raw_map, dict) else {}
-    compact_areas: list[dict[str, Any]] = []
-    area_keys = (
-        "id", "path", "route", "label", "title", "purpose", "steps", "related",
-        "parent_path", "direct_url", "screen_id", "screen_name", "breadcrumbs",
-        "controls", "buttons", "actions", "search_terms", "evidence",
-    )
-    for area in (raw_map.get("areas") or [])[:4]:
-        if not isinstance(area, dict):
-            continue
-        compact_area: dict[str, Any] = {}
-        for key in area_keys:
-            if key not in area or area.get(key) in (None, "", [], {}):
+    """Keep only current-task IT Room evidence under Premium prompt budgets.
+
+    The room's full knowledge base is useful to the local resolver, but should not
+    be copied into Provider wholesale. This compact view preserves the exact
+    controls, screenshot provenance and C_VIDEO wallet facts needed for this turn.
+    """
+    def _clip(value: Any, limit: int = 220) -> str:
+        return _text(value).strip()[:limit]
+
+    def _records(values: Any, limit: int, keys: tuple[str, ...], text_limit: int = 180) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in list(values or [])[:max(0, limit)] if isinstance(values, (list, tuple)) else []:
+            if not isinstance(item, dict):
                 continue
-            value = area[key]
-            if key == "steps" and isinstance(value, list):
-                compact_area[key] = [_text(step)[:180] for step in value[:3] if _text(step)]
-            else:
-                compact_area[key] = _compact_room_prompt_value(value)
-        if compact_area:
-            compact_areas.append(compact_area)
+            row: dict[str, Any] = {}
+            for key in keys:
+                value = item.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                if isinstance(value, str):
+                    row[key] = value[:text_limit]
+                elif isinstance(value, (bool, int, float)):
+                    row[key] = value
+                elif isinstance(value, list):
+                    row[key] = [
+                        _clip(entry, text_limit)
+                        for entry in value[:3] if entry not in (None, "", [], {})
+                    ]
+            if row:
+                rows.append(row)
+        return rows
+
+    raw_map = room_value.get("site_navigation_map") if isinstance(room_value.get("site_navigation_map"), dict) else {}
+    site_search = room_value.get("site_ui_search") if isinstance(room_value.get("site_ui_search"), dict) else {}
+    web_guide = room_value.get("web_interface_guide") if isinstance(room_value.get("web_interface_guide"), dict) else {}
+    function_catalog = room_value.get("site_function_catalog") if isinstance(room_value.get("site_function_catalog"), dict) else {}
+    visual_evidence = room_value.get("site_ui_visual_evidence") if isinstance(room_value.get("site_ui_visual_evidence"), dict) else {}
+    screenshot_delivery = room_value.get("site_screenshot_delivery") if isinstance(room_value.get("site_screenshot_delivery"), dict) else {}
+    screenshot_control_ids = {
+        _text(item.get("id")).lower()
+        for item in (screenshot_delivery.get("verified_controls") or [])
+        if isinstance(item, dict) and _text(item.get("id"))
+    }
+    screenshot_targets_wallet = bool(screenshot_control_ids.intersection({
+        "profile.video_wallet.connect", "profile.video_wallet.purchase",
+        "legacy_function.settings_video_wallet",
+    }))
+
+    # Request semantics must be read from the user's actual query, not from the
+    # broad function/control catalog. The latter can contain wallet/video IDs
+    # during unrelated profile tasks and must not reclassify those requests.
+    primary_query_text = " ".join((
+        _text(site_search.get("query")), _text(web_guide.get("query")),
+    )).lower().replace("ё", "е")
+    query_text = " ".join((
+        primary_query_text, _text(site_search.get("focused_intent")),
+        " ".join(_text(item) for item in (function_catalog.get("semantic_targets") or [])),
+        " ".join(_text(item) for item in (site_search.get("candidate_function_ids") or [])),
+        " ".join(_text(item) for item in (site_search.get("matched_area_ids") or [])),
+    )).lower().replace("ё", "е")
+    has_wallet_target = screenshot_targets_wallet or bool(re.search(
+        r"(?:video.?wallet|video_wallet|кошел|видеокредит|пополн|"
+        r"подключ\w*.{0,35}видео|видео.{0,35}подключ\w*|"
+        r"оплат\w*.{0,45}видео|видео.{0,45}оплат\w*|покуп\w*.{0,35}видео)",
+        primary_query_text, re.I,
+    ))
+    has_video_target = has_wallet_target or bool(re.search(r"(?:\bvideo\b|видео|оживи|видеогенерац)", primary_query_text, re.I))
+    # Any authenticated help question about April video generation needs the
+    # separate wallet surface as context, even when the user has not yet asked
+    # explicitly about payment. This does not request a payment or launch video.
+    has_wallet_ui_context = bool(has_wallet_target or (has_video_target and room_value.get("site_help_requested")))
+    screenshot_requested = bool(screenshot_delivery.get("requested"))
+
+    def _semantic_tokens_for_room(value: str) -> list[str]:
+        return [token for token in re.findall(r"[a-zа-я0-9]{3,}", _text(value).lower().replace("ё", "е")) if token not in {"это", "как", "для", "the", "and", "you"}]
 
     result: dict[str, Any] = {
         "site_help_requested": bool(room_value.get("site_help_requested")),
         "site_navigation_available": bool(raw_map or room_value.get("site_navigation_available")),
     }
-    if raw_map:
-        raw_policy = raw_map.get("navigation_policy")
-        policy_items = raw_policy if isinstance(raw_policy, list) else ([raw_policy] if isinstance(raw_policy, str) else [])
+
+    if raw_map and not has_wallet_ui_context:
+        # The generic navigation map can be limited to chat/attachments even when
+        # the semantic UI search has already found the dedicated Video Wallet
+        # profile screen. Do not let that generic map contradict the exact match.
+        raw_areas = [item for item in (raw_map.get("areas") or []) if isinstance(item, dict)]
+        def _area_score(item: dict[str, Any]) -> int:
+            text = " ".join(_text(item.get(key)) for key in ("id", "label", "title", "purpose", "path", "related")).lower()
+            score = 0
+            if has_wallet_target and any(word in text for word in ("settings", "profile", "wallet", "видео", "кошел", "профил")):
+                score += 8
+            if any(word in query_text for word in ("истори", "history")) and any(word in text for word in ("history", "истори")):
+                score += 8
+            if any(word in query_text for word in ("support", "поддерж")) and any(word in text for word in ("support", "поддерж")):
+                score += 8
+            return score
+        selected_areas = sorted(raw_areas, key=_area_score, reverse=True)[:2]
+        compact_areas = []
+        for area in selected_areas:
+            row = {key: _clip(area.get(key), 180) for key in ("id", "path", "route", "label", "title", "purpose") if area.get(key)}
+            steps = area.get("steps") if isinstance(area.get("steps"), list) else []
+            if steps:
+                row["steps"] = [_clip(step, 130) for step in steps[:2] if _text(step)]
+            if row:
+                compact_areas.append(row)
         result["site_navigation_map"] = {
-            "schema": _text(raw_map.get("schema"))[:60],
-            "source": _text(raw_map.get("source"))[:140],
+            "schema": _clip(raw_map.get("schema"), 60),
+            "source": _clip(raw_map.get("source"), 100),
             "areas": compact_areas,
-            "navigation_policy": [_text(item)[:180] for item in policy_items[:4] if _text(item)],
-            "map_area_count": raw_map.get("map_area_count", len(compact_areas)),
+            "navigation_policy": _clip((raw_map.get("navigation_policy") or [""])[0] if isinstance(raw_map.get("navigation_policy"), list) else raw_map.get("navigation_policy"), 180),
         }
 
     guidance = room_value.get("response_guidance")
     if isinstance(guidance, list):
-        result["response_guidance"] = [
-            _text(item)[:380] if not isinstance(item, dict) else _compact_room_prompt_value(item)
-            for item in guidance[:6] if item not in (None, "", [], {})
-        ]
+        def _guidance_score(value: Any) -> int:
+            text = _text(value).lower().replace("ё", "е")
+            score = 0
+            if has_wallet_ui_context:
+                for marker, weight in (
+                    ("video wallet", 20), ("видеокош", 20), ("отдельный", 5),
+                    ("current plan", 8), ("платеж", 10), ("payment", 10),
+                    ("test", 7), ("тест", 7), ("не обещ", 7),
+                ):
+                    if marker in text:
+                        score += weight
+            if has_video_target:
+                for marker, weight in (("video_usage_guide", 16), ("видео", 9), ("duration", 5), ("3-second", 5)):
+                    if marker in text:
+                        score += weight
+            if screenshot_requested and any(marker in text for marker in ("screenshot", "скриншот", "annotation_allowed")):
+                score += 16
+            if any(marker in text for marker in ("do not invent", "не выдум", "не обещ", "source-derived", "verified")):
+                score += 4
+            if any(marker in text for marker in ("scenecontract", "scene contract", "renderers complement")):
+                score += 3
+            return score
+        ranked = sorted(enumerate(guidance), key=lambda pair: (_guidance_score(pair[1]), -pair[0]), reverse=True)
+        guidance_limit = 3 if has_wallet_ui_context else 4
+        selected = [item for _index, item in ranked[:guidance_limit] if _text(item)]
+        result["response_guidance"] = [_clip(item, 230) for item in selected]
     elif guidance not in (None, "", {}, []):
-        result["response_guidance"] = _compact_room_prompt_value(guidance)
+        result["response_guidance"] = _clip(guidance, 300)
 
-    for key in (
-        "site_ui_help_playbook", "site_ui_screen_registry",
-        "site_ui_search", "site_ui_screenshot_evidence",
-    ):
-        if room_value.get(key) not in (None, "", [], {}):
-            result[key] = _compact_room_prompt_value(room_value[key])
+    # Keep visual/screenshot provenance only when a screenshot is actually being
+    # delivered. A how-to answer should not pay for every screenshot record.
+    if screenshot_requested and visual_evidence:
+        screens = _records(visual_evidence.get("screens"), 1, (
+            "id", "screen_id", "screen_title", "title", "route", "screenshot_asset_ref",
+            "capture_quality", "annotation_allowed", "screenshot_use",
+        ), 180)
+        for row, original in zip(screens, (visual_evidence.get("screens") or [])[:1]):
+            if isinstance(original, dict) and original.get("appearance"):
+                row["appearance"] = _clip(original.get("appearance"), 260)
+            landmarks = _records(original.get("landmarks") if isinstance(original, dict) else [], 3,
+                                 ("id", "where", "label", "purpose"), 140)
+            if landmarks:
+                row["landmarks"] = landmarks
+        assets = _records(visual_evidence.get("resolved_assets"), 2, (
+            "asset_id", "exists", "resolution", "mime_type", "route", "display_only", "annotation_allowed", "plan",
+        ), 120)
+        result["site_ui_visual_evidence"] = {
+            "schema": _clip(visual_evidence.get("schema"), 60),
+            "screens": screens,
+            "resolved_assets": assets,
+            "limits": _clip((visual_evidence.get("source_limits") or [""])[0] if isinstance(visual_evidence.get("source_limits"), list) else visual_evidence.get("source_limits"), 220),
+        }
 
-    return result
+    if web_guide:
+        guide_screens = _records(web_guide.get("screens"), 2, (
+            "id", "route", "title", "position", "visible_labels", "screenshot_asset_ref",
+            "annotation_allowed", "capture_quality",
+        ), 180)
+        guide_controls_raw = [item for item in (web_guide.get("controls") or []) if isinstance(item, dict)]
+        def _control_score(item: dict[str, Any]) -> int:
+            text = " ".join(_text(item.get(key)) for key in ("id", "function_id", "label", "labels", "where", "purpose", "effect")).lower()
+            score = 0
+            if has_wallet_ui_context and any(word in text for word in ("wallet", "video", "кошел", "видео", "кредит")):
+                score += 12
+            if screenshot_requested and any(word in text for word in ("wallet", "delete", "кошел", "удал")):
+                score += 5
+            if any(word in text for word in ("profile", "settings", "профил", "настройк")):
+                score += 2
+            return score
+        ranked_controls = sorted(guide_controls_raw, key=lambda item: _control_score(item), reverse=True)
+        guide_controls = _records(ranked_controls, 2 if has_wallet_ui_context else (3 if screenshot_requested else 2), (
+            "id", "function_id", "screen_id", "route", "label", "labels", "position", "where", "control", "purpose", "effect", "next", "caution",
+        ), 160)
+        result["web_interface_guide"] = {
+            "schema": _clip(web_guide.get("schema"), 60),
+            "query": _clip(web_guide.get("query"), 140),
+            "plan": _clip(web_guide.get("plan"), 16),
+            "screens": guide_screens,
+            "controls": guide_controls,
+            "source_limits": [_clip(item, 160) for item in (web_guide.get("source_limits") or [])[:1] if _text(item)],
+        }
+
+    if function_catalog and not has_wallet_ui_context:
+        functions = _records(function_catalog.get("functions"), 3, (
+            "id", "screen", "entry", "position", "control", "does", "how_to_use", "availability",
+        ), 125)
+        if functions:
+            result["site_function_catalog"] = {
+                "selected_areas": list(function_catalog.get("selected_areas") or [])[:2],
+                "semantic_targets": list(function_catalog.get("semantic_targets") or [])[:3],
+                "functions": functions,
+            }
+
+    if isinstance(site_search, dict):
+        screen_rows = [item for item in (site_search.get("screen_matches") or []) if isinstance(item, dict)]
+        def _screen_score(item: dict[str, Any]) -> int:
+            text = " ".join(_text(item.get(key)) for key in ("id", "title", "route", "position"))
+            text += " " + " ".join(_text(label) for label in (item.get("visible_labels") or []))
+            text = text.lower()
+            score = 0
+            if not has_wallet_ui_context and "video_wallet" in _text(item.get("id")).lower():
+                score -= 30
+            if has_wallet_ui_context and any(word in text for word in ("wallet", "video", "кошел", "видео", "кредит")):
+                score += 20
+            if screenshot_requested and any(word in text for word in ("profile", "settings", "профил", "настройк")):
+                score += 8
+            if not has_wallet_target and not screenshot_requested:
+                score += sum(2 for term in _semantic_tokens_for_room(query_text) if term and term in text)
+            return score
+        ranked_screen_matches = sorted(screen_rows, key=_screen_score, reverse=True)
+        if not has_wallet_ui_context:
+            ranked_screen_matches = [
+                item for item in ranked_screen_matches
+                if "video_wallet" not in _text(item.get("id")).lower()
+            ]
+        if has_wallet_ui_context:
+            ranked_screen_matches = [
+                item for item in ranked_screen_matches
+                if "video_wallet" in _text(item.get("id")).lower()
+            ] or ranked_screen_matches
+        selected_screen_matches = ranked_screen_matches[:2]
+        compact_screen_matches: list[dict[str, Any]] = []
+        for screen in selected_screen_matches:
+            row = {key: _clip(screen.get(key), 190) for key in ("id", "route", "title", "position") if screen.get(key)}
+            labels = [_clip(item, 90) for item in (screen.get("visible_labels") or [])[:4] if _text(item)]
+            if labels:
+                row["visible_labels"] = labels
+            controls = _records(screen.get("controls"), 4, ("label", "position", "purpose"), 120)
+            if controls:
+                row["controls"] = controls
+            if row:
+                compact_screen_matches.append(row)
+        if has_wallet_ui_context and not any("wallet" in _text(row.get("id")).lower() for row in compact_screen_matches):
+            wallet_controls = [
+                item for item in (web_guide.get("controls") or [])
+                if isinstance(item, dict) and _text(item.get("id")).lower() in {
+                    "profile.video_wallet.connect", "profile.video_wallet.purchase",
+                    "legacy_function.settings_video_wallet",
+                }
+            ]
+            if wallet_controls:
+                first_wallet_control = wallet_controls[0]
+                wallet_labels = []
+                for item in wallet_controls:
+                    for label in (item.get("labels") or []):
+                        if _text(label) and _text(label) not in wallet_labels:
+                            wallet_labels.append(_text(label))
+                compact_screen_matches.insert(0, {
+                    "id": "profile_video_wallet",
+                    "route": _clip(first_wallet_control.get("route") or "/settings", 100),
+                    "title": "Your profile · APRIL · C_VIDEO WALLET",
+                    "position": _clip(first_wallet_control.get("where") or first_wallet_control.get("purpose") or "Отдельная карточка Video Wallet в профиле.", 180),
+                    "visible_labels": wallet_labels[:4],
+                    "controls": _records(wallet_controls, 3, ("id", "labels", "where", "effect", "next", "caution", "route"), 120),
+                })
+                compact_screen_matches = compact_screen_matches[:2]
+        if has_wallet_ui_context:
+            compact_screen_matches = [
+                row for row in compact_screen_matches
+                if "wallet" in _text(row.get("id")).lower()
+            ][:2]
+        result["site_ui_search"] = {
+            "schema": _clip(site_search.get("schema"), 50),
+            "query": _clip(site_search.get("query"), 140),
+            "domain": _clip(site_search.get("domain"), 24),
+            "focused_intent": _clip(site_search.get("focused_intent"), 48),
+            "screen_matches": compact_screen_matches,
+            "candidate_function_ids": list(site_search.get("candidate_function_ids") or [])[:3] if not has_wallet_ui_context else [],
+            "matched_area_ids": list(site_search.get("matched_area_ids") or [])[:3] if not has_wallet_ui_context else [],
+            "control_matches": _records(site_search.get("control_matches"), 2, ("id", "label", "where", "purpose", "effect"), 115) if not has_wallet_ui_context else [],
+        }
+
+    if screenshot_requested:
+        if screenshot_delivery:
+            result["site_screenshot_delivery"] = {
+                key: screenshot_delivery[key]
+                for key in (
+                    "requested", "available", "plan", "screen_id", "screen_title", "asset_id",
+                    "mime_type", "resolution", "route", "annotation_allowed", "screenshot_use",
+                    "verified_controls", "selected_screen_ids", "caption",
+                ) if key in screenshot_delivery and screenshot_delivery[key] not in (None, "", [], {})
+            }
+        screenshot_evidence = room_value.get("site_ui_screenshot_evidence")
+        result["site_ui_screenshot_evidence"] = _records(screenshot_evidence, 1, (
+            "id", "route", "title", "position", "visible_labels", "screenshot_asset_ref", "annotation_allowed",
+        ), 160)
+
+    video_guide = room_value.get("video_usage_guide")
+    if isinstance(video_guide, dict) and (has_video_target or not room_value.get("site_help_requested")):
+        video: dict[str, Any] = {}
+        wallet = video_guide.get("video_wallet") if isinstance(video_guide.get("video_wallet"), dict) else {}
+        if has_wallet_target:
+            # A connect/pay question needs the wallet contract, not every video
+            # parameter or the main chat attachment guide. Keep only the verified
+            # wallet facts and the production/test-mode limitation.
+            video["entry_point"] = "Кнопка профиля → Your profile (/settings) → отдельная карточка APRIL · C_VIDEO WALLET."
+            if wallet.get("available_for"):
+                video.setdefault("video_wallet", {})["available_for"] = "Free и Premium; отдельный кошелёк, не часть Premium-подписки."
+            if wallet.get("purchase_currency"):
+                video.setdefault("video_wallet", {})["purchase_currency"] = "USD; пакеты $5, $10, $20 и $50."
+            if wallet.get("wallet_unit"):
+                video.setdefault("video_wallet", {})["wallet_unit"] = "April Video Credits — внутренние кредиты для генерации и AI-редактирования видео."
+            if wallet.get("payment_mode"):
+                video.setdefault("video_wallet", {})["payment_mode"] = (
+                    "Тестовый или не настроенный платёжный шлюз, а также отсутствующая ставка кредитов, "
+                    "не подтверждают production. Не обещай реальную оплату или зачисление, пока текущая "
+                    "конфигурация сервера и шлюза этого не подтверждает."
+                )
+        else:
+            video = {
+                key: video_guide[key]
+                for key in (
+                    "entry_point", "default_duration_seconds", "minimum_duration_seconds",
+                    "maximum_duration_seconds", "model", "resolution", "provider_supported", "duration_rule",
+                ) if key in video_guide and video_guide[key] not in (None, "", [], {})
+            }
+            if wallet:
+                video["video_wallet"] = {
+                    "available_for": "Отдельный Video Wallet доступен Free и Premium; он не входит в Premium-подписку.",
+                    "payment_mode": (
+                        "Тестовый или не настроенный платёжный шлюз, а также отсутствующая ставка кредитов, "
+                        "не подтверждают production. Не обещай реальную оплату или зачисление, пока текущая "
+                        "конфигурация сервера и шлюза этого не подтверждает."
+                    ),
+                }
+            workflows = video_guide.get("workflows") if isinstance(video_guide.get("workflows"), dict) else {}
+            if has_video_target:
+                workflow_key = "image_to_video" if re.search(r"(?:оживи|из\s+фото|image.?to.?video)", query_text, re.I) else "text_to_video"
+                if workflows.get(workflow_key):
+                    if workflow_key == "text_to_video":
+                        video["workflow"] = (
+                            "Опиши объект, действие, окружение, движение камеры, стиль, формат кадра, звук и длительность. "
+                            "Без указанной длительности April создаёт реальный ролик на 3 секунды; это не бесплатная проба."
+                        )
+                    else:
+                        video["workflow"] = _clip(workflows.get(workflow_key), 220)
+        result["video_usage_guide"] = video
+
+    return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
 def _build_input(req: MachineRequest, diagnostics_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
