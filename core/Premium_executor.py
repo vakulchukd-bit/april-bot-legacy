@@ -272,6 +272,176 @@ def _resolve_premium_it_room_screenshot_variant(resolved_asset: Any) -> dict[str
     return result
 
 
+def _premium_active_branch_has_ui_screenshot_context(dialogue_context: Any) -> bool:
+    """Return True only when the State Manager selected an active April-UI branch.
+
+    This is intentionally Premium-local. A short screenshot follow-up such as
+    “А на скриншоте покажи” has no noun to classify by itself; its referent must
+    come from the authenticated, same-dialog selected branch, not a global scan
+    or a keyword guess.
+    """
+    if not isinstance(dialogue_context, dict):
+        return False
+    relation = _text(dialogue_context.get("relation")).upper()
+    latest_answer_relation = dialogue_context.get("latest_answer_relation") if isinstance(dialogue_context.get("latest_answer_relation"), dict) else {}
+    latest_exchange_analysis = dialogue_context.get("latest_exchange_analysis") if isinstance(dialogue_context.get("latest_exchange_analysis"), dict) else {}
+    recent_branch_anchor = dialogue_context.get("recent_branch_anchor") if isinstance(dialogue_context.get("recent_branch_anchor"), dict) else {}
+    # Prefer the explicit route, but accept an equivalent authoritative link when
+    # a legacy State Manager build leaves the outer relation as NEW while still
+    # returning the matched same-dialog answer/branch. A selected UI pair is still
+    # required below, so this cannot turn a coincidental word match into a route.
+    confirmed_branch_link = bool(
+        relation in {"CONTINUE", "FOLLOWUP", "CONTINUATION"}
+        or latest_answer_relation.get("matched")
+        or latest_exchange_analysis.get("linked")
+        or dialogue_context.get("previous_answer_reference")
+        or dialogue_context.get("hot_work_followup")
+        or dialogue_context.get("implicit_latest_branch_resume")
+        or (recent_branch_anchor.get("message_id") and recent_branch_anchor.get("same_dialog", True)
+            and dialogue_context.get("previous_answer_reference"))
+    )
+    if not confirmed_branch_link:
+        return False
+    if dialogue_context.get("explicit_topic_switch") or dialogue_context.get("explicit_topic_introduction"):
+        return False
+    selected = dialogue_context.get("selected_pairs")
+    if not isinstance(selected, list):
+        selected = []
+    candidates = [row for row in selected[:6] if isinstance(row, dict)]
+    if not candidates:
+        for key in ("recent_branch_anchor", "latest_assistant_anchor", "anchor"):
+            row = dialogue_context.get(key)
+            if isinstance(row, dict):
+                candidates.append(row)
+    try:
+        from blocks.C_IT_ROOM import is_site_help_query as _is_site_help_query
+        from blocks.C_IT_ROOM import _referenced_site_area_ids as _referenced_site_area_ids
+    except Exception:
+        return False
+    for row in candidates:
+        user_text = _text(
+            row.get("source_user_text") or row.get("user") or
+            row.get("user_request") or row.get("user_text")
+        )
+        if not user_text or not _is_site_help_query(user_text):
+            continue
+        # A relevant route/control must be present in this selected pair. A prior
+        # generic discussion of April is not enough to inherit a screenshot target.
+        area_ids = _referenced_site_area_ids({"selected_pairs": [row]})
+        if area_ids:
+            return True
+    return False
+
+
+def _premium_is_existing_ui_screenshot_followup(text: Any, dialogue_context: Any) -> bool:
+    """Detect an explicit screenshot-show action whose subject is the active UI branch."""
+    low = _text(text).lower().replace("ё", "е")
+    screenshot_reference = bool(re.search(
+        r"(?:скриншот\w*|скрин\w*|снимок\s+экрана|screenshot\w*|screen\s*capture)",
+        low, re.I,
+    ))
+    show_action = bool(re.search(
+        r"(?:покаж\w*|показ\w*|укаж\w*|отмет\w*|обвед\w*|подсвет\w*|show|point\s+out|mark|highlight)",
+        low, re.I,
+    ))
+    if not (screenshot_reference and show_action):
+        return False
+    # An explicit new-topic marker wins over a contextual screenshot reference.
+    if re.search(r"(?:другая\s+тема|перейдем\s+к|теперь\s+о|отдельный\s+вопрос|сменим\s+тему|new\s+topic|different\s+question)", low, re.I):
+        return False
+    return _premium_active_branch_has_ui_screenshot_context(dialogue_context)
+
+
+def _premium_is_ui_location_visual_request(text: Any) -> bool:
+    """A direct 'show me where' April-UI request can use an existing screen capture."""
+    low = _text(text).lower().replace("ё", "е")
+    return bool(re.search(
+        r"(?:покаж\w*|укаж\w*|show|point\s+out).{0,70}(?:где|куда|в\s+каком\s+месте|расположен\w*|where|which\s+place)",
+        low, re.I | re.S,
+    ))
+
+
+def _suppress_generated_visuals_for_it_screenshot(
+    interpretation: dict[str, Any], question_sequence: list[dict[str, Any]], *, keep_diagram: bool = False
+) -> None:
+    """Route an IT screenshot request to the authentic room asset, never a mockup."""
+    intent = interpretation.setdefault("intent", {})
+    if not isinstance(intent, dict):
+        intent = {}
+        interpretation["intent"] = intent
+    blocked_kinds = {"image", "gallery", "generated_image", "image_gallery"}
+    if not keep_diagram:
+        blocked_kinds.update({
+            "diagram", "diagramrenderer", "diagram_renderer", "svg", "svgblock",
+            "flowchart", "schematic", "geometry",
+        })
+    outputs = intent.get("requested_outputs")
+    outputs = list(outputs) if isinstance(outputs, (list, tuple, set)) else []
+    outputs = [str(value).strip().lower() for value in outputs if str(value).strip() and str(value).strip().lower() not in blocked_kinds]
+    if "text" not in outputs:
+        outputs.insert(0, "text")
+    intent["requested_outputs"] = list(dict.fromkeys(outputs))
+    intent["wants_image"] = False
+    intent["image_operation"] = "none"
+    intent["image_generation_blocked"] = True
+    intent["image_output_permission"] = False
+    intent["explicit_generation_request"] = False
+    intent["image_edit_requested"] = False
+    intent["reuse_saved_image"] = False
+    if _text(intent.get("task")).lower() in {"generate_image", "create_image", "image_generation", "generate_picture"}:
+        intent["task"] = "answer_request"
+    intent["site_screenshot_request"] = True
+    intent["site_screenshot_source"] = "C_IT_ROOM_AUTHENTIC_ASSET"
+    if not keep_diagram:
+        intent["wants_diagram"] = False
+        intent["site_navigation_diagram_required"] = False
+    visual = interpretation.get("visual")
+    if not isinstance(visual, dict):
+        visual = {}
+        interpretation["visual"] = visual
+    visual["generation_required"] = False
+    visual["operation"] = "display_existing_it_room_screenshot"
+    visual["source"] = "C_IT_ROOM"
+    visual["generated_image_forbidden"] = True
+
+    for item in question_sequence:
+        if not isinstance(item, dict):
+            continue
+        item_outputs = item.get("output_types")
+        item_outputs = list(item_outputs) if isinstance(item_outputs, (list, tuple, set)) else []
+        item["output_types"] = [
+            str(value).strip().lower() for value in item_outputs
+            if str(value).strip() and str(value).strip().lower() not in blocked_kinds
+        ] or ["text"]
+        contract = item.get("action_contract")
+        if isinstance(contract, dict):
+            contract["output_types"] = list(item["output_types"])
+            if _text(contract.get("action")).upper() == "GENERATE_NEW_IMAGE":
+                contract["action"] = "ANSWER_DIRECTLY"
+                contract["domain"] = "april_ui"
+                contract["target"] = _text(contract.get("target") or "selected_ui_screen")
+
+    structure = interpretation.get("request_structure")
+    if isinstance(structure, dict):
+        structure["site_screenshot_request"] = True
+        structure["site_screenshot_source"] = "C_IT_ROOM_AUTHENTIC_ASSET"
+        structure["question_sequence"] = question_sequence
+        structure["output_plan"] = list(intent["requested_outputs"])
+        presentation = structure.get("presentation_sequence")
+        if isinstance(presentation, list):
+            for item in presentation:
+                if not isinstance(item, dict):
+                    continue
+                values = item.get("output_types")
+                values = list(values) if isinstance(values, (list, tuple, set)) else []
+                item["output_types"] = [
+                    str(value).strip().lower() for value in values
+                    if str(value).strip() and str(value).strip().lower() not in blocked_kinds
+                ] or ["text"]
+    if isinstance(interpretation.get("requested_outputs"), list):
+        interpretation["requested_outputs"] = list(intent["requested_outputs"])
+
+
 def _apply_reconciled_semantics_to_sequence_item(item: dict[str, Any], semantics: dict[str, Any], relation: str) -> None:
     """Keep ordered task metadata in agreement without changing render outputs."""
     if not isinstance(item, dict) or not isinstance(semantics, dict):
@@ -6690,12 +6860,55 @@ async def execute(
     # request-scoped, and independent of a second model call.
     try:
         from blocks.C_IT_ROOM import prepare_site_help_interpretation as _prepare_site_help_interpretation
+        _site_screenshot_followup = _premium_is_existing_ui_screenshot_followup(
+            original or current_text, dialogue_context
+        )
+        # A short follow-up does not repeat the UI noun (“А на скриншоте покажи”).
+        # Resolve its “it” against the already selected UI branch, but only after the
+        # same-dialog State Manager supplied a confirmed CONTINUE/FOLLOWUP pair.
+        _site_help_query_for_prepare = (
+            "Покажи на скриншоте где это" if _site_screenshot_followup else (original or current_text)
+        )
         _site_help_prepared = _prepare_site_help_interpretation(
             interpretation,
-            original or current_text,
+            _site_help_query_for_prepare,
             question_sequence=question_sequence,
             recent_context=dialogue_context,
         )
+        _site_direct_location_visual = bool(
+            _site_help_prepared and _premium_is_ui_location_visual_request(original or current_text)
+        )
+        _site_explicit_screenshot_display = bool(
+            _site_help_prepared and re.search(
+                r"(?:скриншот\w*|скрин\w*|снимок\s+экрана|screenshot\w*)",
+                _text(original or current_text), re.I,
+            ) and re.search(
+                r"(?:покаж\w*|показ\w*|укаж\w*|отмет\w*|обвед\w*|подсвет\w*|show|point\s+out|mark|highlight)",
+                _text(original or current_text), re.I,
+            )
+        )
+        _site_use_authentic_screenshot = bool(
+            _site_help_prepared and (
+                _site_screenshot_followup or _site_explicit_screenshot_display or _site_direct_location_visual
+            )
+        )
+        if _site_use_authentic_screenshot:
+            _current_ui_request = _text(original or current_text).lower()
+            _keep_explicit_diagram = bool(re.search(
+                r"(?:схем\w*|диаграмм\w*|блок[- ]?схем\w*|flowchart|\bdiagram\b|\bschematic\b)",
+                _current_ui_request, re.I,
+            ))
+            _suppress_generated_visuals_for_it_screenshot(
+                interpretation, question_sequence, keep_diagram=_keep_explicit_diagram
+            )
+            _apr_timing_log(
+                "premium_it_screenshot_intent_selected", None,
+                reason=("active_ui_branch_screenshot_followup" if _site_screenshot_followup else ("explicit_screenshot_display" if _site_explicit_screenshot_display else "direct_ui_location_request")),
+                site_help_prepared=bool(_site_help_prepared),
+                generated_image_blocked=True,
+                diagram_preserved=_keep_explicit_diagram,
+                selected_pair_count=len(dialogue_context.get("selected_pairs") or []) if isinstance(dialogue_context, dict) else 0,
+            )
     except Exception as _site_help_prepare_error:
         _site_help_prepared = False
         _apr_timing_log(
